@@ -1,0 +1,482 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
+		38F9323D86738CE0C434CE47 /* BuildsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 606AB743F8DB9FB83CE17AE4 /* BuildsView.swift */; };
+		45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
+		620E4C262D84FC8B33BC6E79 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97155A906B644F4084E02679 /* ChatView.swift */; };
+		AB0BD657A5B47630E2FD14E9 /* HermesClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FC692C762B7D87D9DF84878 /* HermesClient.swift */; };
+		B01389D86B5540237E36C1A7 /* HermesClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */; };
+		B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613DF9097AAA330CB0F89A33 /* SquircleApp.swift */; };
+		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
+		F0BE63E0FEF3CB93E915E011 /* SquircleStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 022EF2FD97FC529678041319 /* SquircleStyle.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A0DFCEE923C52BE989C818D1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B99870D716447DE6FD076F00 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 48CB356BF6191F55960F572B;
+			remoteInfo = Squircle;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		022EF2FD97FC529678041319 /* SquircleStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleStyle.swift; sourceTree = "<group>"; };
+		0FC692C762B7D87D9DF84878 /* HermesClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesClient.swift; sourceTree = "<group>"; };
+		4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesClientTests.swift; sourceTree = "<group>"; };
+		606AB743F8DB9FB83CE17AE4 /* BuildsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildsView.swift; sourceTree = "<group>"; };
+		613DF9097AAA330CB0F89A33 /* SquircleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleApp.swift; sourceTree = "<group>"; };
+		6D09120CE693437EA02625DD /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
+		7A74125807E9A3E968F73119 /* SquircleTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		7CA4496328C7FF8D8B604A0A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		97155A906B644F4084E02679 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		1A20A1D58C7BB1C09D18E702 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		1A6973C5AA1921BACE200F68 = {
+			isa = PBXGroup;
+			children = (
+				6D3DA7CA0BBB806DCB782EA9 /* Resources */,
+				8A958A1FE5BAB76B766844F3 /* Sources */,
+				1A20A1D58C7BB1C09D18E702 /* Tests */,
+				F2356134AEAD3EDC720007DE /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		6D3DA7CA0BBB806DCB782EA9 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				7CA4496328C7FF8D8B604A0A /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		822945AB51D711B3C4EB992C /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				606AB743F8DB9FB83CE17AE4 /* BuildsView.swift */,
+				97155A906B644F4084E02679 /* ChatView.swift */,
+				022EF2FD97FC529678041319 /* SquircleStyle.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		8A958A1FE5BAB76B766844F3 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				6D09120CE693437EA02625DD /* AppConfiguration.swift */,
+				0FC692C762B7D87D9DF84878 /* HermesClient.swift */,
+				613DF9097AAA330CB0F89A33 /* SquircleApp.swift */,
+				EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */,
+				822945AB51D711B3C4EB992C /* Views */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		F2356134AEAD3EDC720007DE /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */,
+				7A74125807E9A3E968F73119 /* SquircleTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		48CB356BF6191F55960F572B /* Squircle */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8BE83FE460EEE1FC4F4C69A4 /* Build configuration list for PBXNativeTarget "Squircle" */;
+			buildPhases = (
+				2B02C2EDDCC2CC2BD51A06F6 /* Bundle private Mac connection */,
+				134999952B6C50207950C0F0 /* Sources */,
+				B126382FE9DBCDE2575964E4 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Squircle;
+			packageProductDependencies = (
+			);
+			productName = Squircle;
+			productReference = D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */;
+			productType = "com.apple.product-type.application";
+		};
+		90E1BAD7755E3E809A136B1C /* SquircleTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D496ED0B52AEF96396927FC3 /* Build configuration list for PBXNativeTarget "SquircleTests" */;
+			buildPhases = (
+				1A0DE9F74635B5B16E9E2732 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				8F66BBAFFA4E2E16B048A81F /* PBXTargetDependency */,
+			);
+			name = SquircleTests;
+			packageProductDependencies = (
+			);
+			productName = SquircleTests;
+			productReference = 7A74125807E9A3E968F73119 /* SquircleTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B99870D716447DE6FD076F00 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					48CB356BF6191F55960F572B = {
+						DevelopmentTeam = 2F26US4NAU;
+						ProvisioningStyle = Automatic;
+					};
+					90E1BAD7755E3E809A136B1C = {
+						DevelopmentTeam = 2F26US4NAU;
+					};
+				};
+			};
+			buildConfigurationList = 11D5FAD8C3110C77209D4AD1 /* Build configuration list for PBXProject "Squircle" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 1A6973C5AA1921BACE200F68;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = F2356134AEAD3EDC720007DE /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				48CB356BF6191F55960F572B /* Squircle */,
+				90E1BAD7755E3E809A136B1C /* SquircleTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B126382FE9DBCDE2575964E4 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		2B02C2EDDCC2CC2BD51A06F6 /* Bundle private Mac connection */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Bundle private Mac connection";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\ndestination=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/client.json\"\nmkdir -p \"$(dirname \"$destination\")\"\nif [ -f \"${SQUIRCLE_CLIENT_CONFIG}\" ]; then\n  cp \"${SQUIRCLE_CLIENT_CONFIG}\" \"$destination\"\n  chmod 644 \"$destination\"\nelse\n  rm -f \"$destination\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		134999952B6C50207950C0F0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */,
+				38F9323D86738CE0C434CE47 /* BuildsView.swift in Sources */,
+				620E4C262D84FC8B33BC6E79 /* ChatView.swift in Sources */,
+				AB0BD657A5B47630E2FD14E9 /* HermesClient.swift in Sources */,
+				B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */,
+				38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */,
+				F0BE63E0FEF3CB93E915E011 /* SquircleStyle.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		1A0DE9F74635B5B16E9E2732 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B01389D86B5540237E36C1A7 /* HermesClientTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		8F66BBAFFA4E2E16B048A81F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 48CB356BF6191F55960F572B /* Squircle */;
+			targetProxy = A0DFCEE923C52BE989C818D1 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		30C260CF3B14EC876154EA87 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				INFOPLIST_FILE = Generated/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		7A0EE604B9984F30375FDA9E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 2F26US4NAU;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SQUIRCLE_BUILD_ID = "";
+				SQUIRCLE_CLIENT_CONFIG = "$(SRCROOT)/../../.squircle/client.json";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		D7003991B4A7D1248731EBF3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Squircle.app/Squircle";
+			};
+			name = Debug;
+		};
+		D7F01227085CD5DED1734155 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 2F26US4NAU;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SQUIRCLE_BUILD_ID = "";
+				SQUIRCLE_CLIENT_CONFIG = "$(SRCROOT)/../../.squircle/client.json";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		E663E9A22B10ACD379ECD3C1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				INFOPLIST_FILE = Generated/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		EFBCCA1C871C0F82207E92A2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Squircle.app/Squircle";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		11D5FAD8C3110C77209D4AD1 /* Build configuration list for PBXProject "Squircle" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D7F01227085CD5DED1734155 /* Debug */,
+				7A0EE604B9984F30375FDA9E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8BE83FE460EEE1FC4F4C69A4 /* Build configuration list for PBXNativeTarget "Squircle" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E663E9A22B10ACD379ECD3C1 /* Debug */,
+				30C260CF3B14EC876154EA87 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D496ED0B52AEF96396927FC3 /* Build configuration list for PBXNativeTarget "SquircleTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D7003991B4A7D1248731EBF3 /* Debug */,
+				EFBCCA1C871C0F82207E92A2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = B99870D716447DE6FD076F00 /* Project object */;
+}

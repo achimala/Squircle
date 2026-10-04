@@ -1,0 +1,71 @@
+name: Squircle
+options:
+  bundleIdPrefix: ai.dreamslate
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    DEVELOPMENT_TEAM: 2F26US4NAU
+    SWIFT_VERSION: "5.0"
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 0.1.0
+    SQUIRCLE_BUILD_ID: ""
+    SQUIRCLE_CLIENT_CONFIG: $(SRCROOT)/../../.squircle/client.json
+targets:
+  Squircle:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources/Assets.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.dreamslate.Squircle
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    preBuildScripts:
+      - name: Bundle private Mac connection
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          destination="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/client.json"
+          mkdir -p "$(dirname "$destination")"
+          if [ -f "${SQUIRCLE_CLIENT_CONFIG}" ]; then
+            cp "${SQUIRCLE_CLIENT_CONFIG}" "$destination"
+            chmod 644 "$destination"
+          else
+            rm -f "$destination"
+          fi
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: Squircle
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        SquircleBuildID: $(SQUIRCLE_BUILD_ID)
+        NSLocalNetworkUsageDescription: Connect to your Mac for agent conversations and app builds.
+  SquircleTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests]
+    dependencies:
+      - target: Squircle
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Squircle:
+    build:
+      targets:
+        Squircle: all
+        SquircleTests: [test]
+    test:
+      targets: [SquircleTests]
+    archive:
+      config: Release
