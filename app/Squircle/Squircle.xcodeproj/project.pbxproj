@@ -7,15 +7,21 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
+		3201C0CC9D1EB1736ED26D0F /* WorkspaceTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1443BECEC1DF2C09B0EE637A /* WorkspaceTransition.swift */; };
 		38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
-		38F9323D86738CE0C434CE47 /* BuildsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 606AB743F8DB9FB83CE17AE4 /* BuildsView.swift */; };
 		45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
-		620E4C262D84FC8B33BC6E79 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97155A906B644F4084E02679 /* ChatView.swift */; };
+		5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9685CE2D9A277E148073C169 /* MotionAudit.swift */; };
+		69A1E4E034A3A9C310663B31 /* AppProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0882163016B1D5C885051FAD /* AppProject.swift */; };
+		80270B9E181CD54B226002C1 /* StudioComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9672A31D1485CE1FEFFBBD00 /* StudioComponents.swift */; };
+		AA83956C51857C3A127A8AB9 /* StudioViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */; };
 		AB0BD657A5B47630E2FD14E9 /* HermesClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FC692C762B7D87D9DF84878 /* HermesClient.swift */; };
 		B01389D86B5540237E36C1A7 /* HermesClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */; };
 		B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613DF9097AAA330CB0F89A33 /* SquircleApp.swift */; };
 		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
-		F0BE63E0FEF3CB93E915E011 /* SquircleStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 022EF2FD97FC529678041319 /* SquircleStyle.swift */; };
+		CF07B49F3ABB5DE847A7FEBC /* DevicePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 157267B086D7FA131DA81ED8 /* DevicePreview.swift */; };
+		EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */; };
+		FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -26,19 +32,33 @@
 			remoteGlobalIDString = 48CB356BF6191F55960F572B;
 			remoteInfo = Squircle;
 		};
+		F3089C8AD119D77F5E43B706 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B99870D716447DE6FD076F00 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 48CB356BF6191F55960F572B;
+			remoteInfo = Squircle;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		022EF2FD97FC529678041319 /* SquircleStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleStyle.swift; sourceTree = "<group>"; };
+		00483E8542F562C568728AB7 /* SquircleUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0882163016B1D5C885051FAD /* AppProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProject.swift; sourceTree = "<group>"; };
 		0FC692C762B7D87D9DF84878 /* HermesClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesClient.swift; sourceTree = "<group>"; };
+		1443BECEC1DF2C09B0EE637A /* WorkspaceTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceTransition.swift; sourceTree = "<group>"; };
+		157267B086D7FA131DA81ED8 /* DevicePreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicePreview.swift; sourceTree = "<group>"; };
+		2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViewController.swift; sourceTree = "<group>"; };
+		2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioViewController.swift; sourceTree = "<group>"; };
 		4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesClientTests.swift; sourceTree = "<group>"; };
-		606AB743F8DB9FB83CE17AE4 /* BuildsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildsView.swift; sourceTree = "<group>"; };
+		5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioUITests.swift; sourceTree = "<group>"; };
 		613DF9097AAA330CB0F89A33 /* SquircleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleApp.swift; sourceTree = "<group>"; };
 		6D09120CE693437EA02625DD /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
 		7A74125807E9A3E968F73119 /* SquircleTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7CA4496328C7FF8D8B604A0A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		97155A906B644F4084E02679 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		9672A31D1485CE1FEFFBBD00 /* StudioComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioComponents.swift; sourceTree = "<group>"; };
+		9685CE2D9A277E148073C169 /* MotionAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionAudit.swift; sourceTree = "<group>"; };
 		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DB495D800CF688C469BFF725 /* AppProjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProjectTests.swift; sourceTree = "<group>"; };
 		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -46,6 +66,7 @@
 		1A20A1D58C7BB1C09D18E702 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
+				DB495D800CF688C469BFF725 /* AppProjectTests.swift */,
 				4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */,
 			);
 			path = Tests;
@@ -57,6 +78,7 @@
 				6D3DA7CA0BBB806DCB782EA9 /* Resources */,
 				8A958A1FE5BAB76B766844F3 /* Sources */,
 				1A20A1D58C7BB1C09D18E702 /* Tests */,
+				D24FA892C1C78AF558D73097 /* UITests */,
 				F2356134AEAD3EDC720007DE /* Products */,
 			);
 			sourceTree = "<group>";
@@ -69,26 +91,38 @@
 			path = Resources;
 			sourceTree = "<group>";
 		};
-		822945AB51D711B3C4EB992C /* Views */ = {
+		80D91E9DBE83CF2C0802769A /* UI */ = {
 			isa = PBXGroup;
 			children = (
-				606AB743F8DB9FB83CE17AE4 /* BuildsView.swift */,
-				97155A906B644F4084E02679 /* ChatView.swift */,
-				022EF2FD97FC529678041319 /* SquircleStyle.swift */,
+				157267B086D7FA131DA81ED8 /* DevicePreview.swift */,
+				9685CE2D9A277E148073C169 /* MotionAudit.swift */,
+				9672A31D1485CE1FEFFBBD00 /* StudioComponents.swift */,
+				2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */,
+				2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */,
+				1443BECEC1DF2C09B0EE637A /* WorkspaceTransition.swift */,
 			);
-			path = Views;
+			path = UI;
 			sourceTree = "<group>";
 		};
 		8A958A1FE5BAB76B766844F3 /* Sources */ = {
 			isa = PBXGroup;
 			children = (
 				6D09120CE693437EA02625DD /* AppConfiguration.swift */,
+				0882163016B1D5C885051FAD /* AppProject.swift */,
 				0FC692C762B7D87D9DF84878 /* HermesClient.swift */,
 				613DF9097AAA330CB0F89A33 /* SquircleApp.swift */,
 				EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */,
-				822945AB51D711B3C4EB992C /* Views */,
+				80D91E9DBE83CF2C0802769A /* UI */,
 			);
 			path = Sources;
+			sourceTree = "<group>";
+		};
+		D24FA892C1C78AF558D73097 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */,
+			);
+			path = UITests;
 			sourceTree = "<group>";
 		};
 		F2356134AEAD3EDC720007DE /* Products */ = {
@@ -96,6 +130,7 @@
 			children = (
 				D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */,
 				7A74125807E9A3E968F73119 /* SquircleTests.xctest */,
+				00483E8542F562C568728AB7 /* SquircleUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -121,6 +156,24 @@
 			productName = Squircle;
 			productReference = D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */;
 			productType = "com.apple.product-type.application";
+		};
+		6EA94D8A1D3A60194650716C /* SquircleUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2C25B087647067DCA92909C8 /* Build configuration list for PBXNativeTarget "SquircleUITests" */;
+			buildPhases = (
+				0E48F1EC89DFBAAF9BEE7B72 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AB8233B5EA37DCE287C296C4 /* PBXTargetDependency */,
+			);
+			name = SquircleUITests;
+			packageProductDependencies = (
+			);
+			productName = SquircleUITests;
+			productReference = 00483E8542F562C568728AB7 /* SquircleUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 		90E1BAD7755E3E809A136B1C /* SquircleTests */ = {
 			isa = PBXNativeTarget;
@@ -153,6 +206,10 @@
 						DevelopmentTeam = 2F26US4NAU;
 						ProvisioningStyle = Automatic;
 					};
+					6EA94D8A1D3A60194650716C = {
+						DevelopmentTeam = 2F26US4NAU;
+						TestTargetID = 48CB356BF6191F55960F572B;
+					};
 					90E1BAD7755E3E809A136B1C = {
 						DevelopmentTeam = 2F26US4NAU;
 					};
@@ -174,6 +231,7 @@
 			targets = (
 				48CB356BF6191F55960F572B /* Squircle */,
 				90E1BAD7755E3E809A136B1C /* SquircleTests */,
+				6EA94D8A1D3A60194650716C /* SquircleUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -212,17 +270,29 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		0E48F1EC89DFBAAF9BEE7B72 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		134999952B6C50207950C0F0 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */,
-				38F9323D86738CE0C434CE47 /* BuildsView.swift in Sources */,
-				620E4C262D84FC8B33BC6E79 /* ChatView.swift in Sources */,
+				69A1E4E034A3A9C310663B31 /* AppProject.swift in Sources */,
+				CF07B49F3ABB5DE847A7FEBC /* DevicePreview.swift in Sources */,
 				AB0BD657A5B47630E2FD14E9 /* HermesClient.swift in Sources */,
+				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
 				B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */,
 				38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */,
-				F0BE63E0FEF3CB93E915E011 /* SquircleStyle.swift in Sources */,
+				80270B9E181CD54B226002C1 /* StudioComponents.swift in Sources */,
+				AA83956C51857C3A127A8AB9 /* StudioViewController.swift in Sources */,
+				FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */,
+				3201C0CC9D1EB1736ED26D0F /* WorkspaceTransition.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -230,6 +300,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */,
 				B01389D86B5540237E36C1A7 /* HermesClientTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -242,9 +313,31 @@
 			target = 48CB356BF6191F55960F572B /* Squircle */;
 			targetProxy = A0DFCEE923C52BE989C818D1 /* PBXContainerItemProxy */;
 		};
+		AB8233B5EA37DCE287C296C4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 48CB356BF6191F55960F572B /* Squircle */;
+			targetProxy = F3089C8AD119D77F5E43B706 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		1EB8865B7CB9C8C4F570B6CB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleUITests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Squircle;
+			};
+			name = Debug;
+		};
 		30C260CF3B14EC876154EA87 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -261,6 +354,23 @@
 				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		6F3AC088A124E24BF72604ED /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleUITests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Squircle;
 			};
 			name = Release;
 		};
@@ -298,7 +408,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -376,7 +486,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -454,6 +564,15 @@
 			buildConfigurations = (
 				D7F01227085CD5DED1734155 /* Debug */,
 				7A0EE604B9984F30375FDA9E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		2C25B087647067DCA92909C8 /* Build configuration list for PBXNativeTarget "SquircleUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1EB8865B7CB9C8C4F570B6CB /* Debug */,
+				6F3AC088A124E24BF72604ED /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

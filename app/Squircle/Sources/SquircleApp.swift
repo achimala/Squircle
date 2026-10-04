@@ -1,35 +1,30 @@
-import SwiftUI
+import UIKit
 
 @main
-struct SquircleApp: App {
-    @StateObject private var model = SquircleModel()
-    @Environment(\.scenePhase) private var scenePhase
-
-    var body: some Scene {
-        WindowGroup {
-            SquircleRootView(model: model)
-                .preferredColorScheme(.dark)
-                .tint(SquircleStyle.accent)
-                .task { await model.refresh() }
-                .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { Task { await model.refresh() } }
-                }
-        }
+final class SquircleApp: UIResponder, UIApplicationDelegate {
+    func application(_ application: UIApplication, configurationForConnecting session: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(name: "Studio", sessionRole: session.role)
+        configuration.delegateClass = StudioScene.self
+        return configuration
     }
 }
 
-struct SquircleRootView: View {
-    @ObservedObject var model: SquircleModel
+final class StudioScene: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+    private let model = SquircleModel()
 
-    var body: some View {
-        TabView {
-            ChatView(model: model)
-                .tabItem { Label("Hermes", systemImage: "bubble.left.and.text.bubble.right") }
-            BuildsView(model: model)
-                .tabItem { Label("Builds", systemImage: "square.stack.3d.up") }
-        }
-        .toolbarBackground(SquircleStyle.background, for: .tabBar)
-        .toolbarBackground(.visible, for: .tabBar)
-        .foregroundStyle(SquircleStyle.foreground)
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
+        guard let scene = scene as? UIWindowScene else { return }
+        let window = UIWindow(windowScene: scene)
+        window.overrideUserInterfaceStyle = .light
+        window.backgroundColor = Studio.canvas
+        window.rootViewController = StudioViewController(model: model)
+        window.makeKeyAndVisible()
+        self.window = window
+        Task { await model.refresh() }
+    }
+
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        Task { await model.refresh() }
     }
 }

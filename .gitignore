@@ -2,6 +2,7 @@
 /.tools/
 /.squircle/
 /.verification/
+/.dream-loop/
 .DS_Store
 *.xcuserstate
 xcuserdata/

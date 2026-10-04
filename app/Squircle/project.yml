@@ -7,7 +7,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: 2F26US4NAU
     SWIFT_VERSION: "5.0"
-    CURRENT_PROJECT_VERSION: 1
+    CURRENT_PROJECT_VERSION: 2
     MARKETING_VERSION: 0.1.0
     SQUIRCLE_BUILD_ID: ""
     SQUIRCLE_CLIENT_CONFIG: $(SRCROOT)/../../.squircle/client.json
@@ -46,7 +46,10 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
-        UIUserInterfaceStyle: Dark
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UIUserInterfaceStyle: Light
+        CADisableMinimumFrameDurationOnPhone: YES
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         SquircleBuildID: $(SQUIRCLE_BUILD_ID)
         NSLocalNetworkUsageDescription: Connect to your Mac for agent conversations and app builds.
@@ -59,13 +62,23 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+  SquircleUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: Squircle
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   Squircle:
     build:
       targets:
         Squircle: all
         SquircleTests: [test]
+        SquircleUITests: [test]
     test:
-      targets: [SquircleTests]
+      targets: [SquircleTests, SquircleUITests]
     archive:
       config: Release
