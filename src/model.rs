@@ -20,11 +20,24 @@ pub struct BuildRequest {
     pub export_options: Option<PathBuf>,
     #[serde(default)]
     pub allow_provisioning_updates: bool,
+    #[serde(default)]
+    pub capture_preview: bool,
     pub request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildOutput {
+    #[serde(default)]
+    pub preview_path: Option<PathBuf>,
+    #[serde(default)]
+    pub preview_state: Option<String>,
+    #[serde(default)]
+    pub preview_error: Option<String>,
+    #[serde(default)]
+    pub preview_captured_at: Option<u64>,
+    /// A simulator product from this job, or a rebuild of the current working tree.
+    #[serde(default)]
+    pub preview_source: Option<String>,
     pub archive_path: Option<PathBuf>,
     pub ipa_path: Option<PathBuf>,
     pub app_path: Option<PathBuf>,

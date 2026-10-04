@@ -38,6 +38,9 @@ enum Commands {
     /// Initialize local state and separate control/diagnostic credentials.
     Init,
     /// Run the local HTTP service in the foreground. Does not configure Tailscale.
+    #[command(
+        after_help = "Set SQUIRCLE_SIMULATOR_ID to the UUID of a dedicated existing iPhone simulator to enable build previews. Captures install and freshly launch only the target app on that simulator."
+    )]
     Serve {
         #[arg(long, default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
@@ -62,6 +65,16 @@ enum Commands {
     Build {
         #[command(subcommand)]
         command: BuildCommand,
+    },
+    /// Capture actual pixels from an app on a dedicated iOS simulator.
+    Preview {
+        #[command(subcommand)]
+        command: PreviewCommand,
+    },
+    /// Register apps, update their summary, and publish real screenshots after UI work.
+    App {
+        #[command(subcommand)]
+        command: AppCommand,
     },
     /// Create an expiring installation link. This does not install or launch the app.
     InstallLink {
@@ -134,6 +147,11 @@ enum BuildCommand {
             help = "Explicitly allow Xcode to create/update signing assets through your configured Apple account"
         )]
         allow_provisioning_updates: bool,
+        #[arg(
+            long,
+            help = "Capture simulator pixels after building; service needs SQUIRCLE_SIMULATOR_ID. Preview failure preserves the IPA."
+        )]
+        preview: bool,
     },
     /// List persisted build records, newest first.
     List,
@@ -171,6 +189,66 @@ enum DiagnosticCommand {
     Send {
         #[arg(long, help = "Path to one diagnostic event JSON file")]
         file: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum PreviewCommand {
+    /// Reuse this job's simulator app, or rebuild its current project source for an archive. Installs and launches only that app on the selected simulator.
+    Capture {
+        build_id: String,
+        #[arg(
+            long,
+            help = "Dedicated simulator UUID; defaults to service SQUIRCLE_SIMULATOR_ID. Never selects 'booted'."
+        )]
+        simulator: Option<String>,
+        #[arg(
+            long,
+            default_value_t = 1900,
+            help = "Seconds to wait; timeout does not cancel capture"
+        )]
+        timeout: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum AppCommand {
+    /// Register an Xcode project/scheme identity. Repeated registration preserves edited name and summary.
+    Register {
+        #[arg(long)]
+        project: PathBuf,
+        #[arg(long)]
+        scheme: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        bundle_id: Option<String>,
+        #[arg(long, default_value = "")]
+        summary: String,
+    },
+    /// List persistent app metadata and current preview versions.
+    List,
+    /// Read one app's metadata. Hermes still owns conversations.
+    Show { app_id: String },
+    /// Update app-facing metadata after implementation work.
+    Update {
+        app_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
+    },
+    /// Publish a real PNG screenshot from a path on the service's Mac. The service retains a private copy; no build is required.
+    Preview {
+        app_id: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, default_value = "")]
+        caption: String,
+        #[arg(long, alias = "build-id")]
+        build: Option<String>,
+        #[arg(long)]
+        source_revision: Option<String>,
     },
 }
 
@@ -313,8 +391,18 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","install-link","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false}),
         ),
+        Commands::App { command } => match command {
+            AppCommand::List => get(cli,"/v1/apps").await?,
+            AppCommand::Show { app_id } => get(cli,&format!("/v1/apps/{}",valid_id(app_id)?)).await?,
+            AppCommand::Register { project, scheme, name, bundle_id, summary } => post(cli,"/v1/apps",json!({"project":std::path::absolute(project)?,"scheme":scheme,"name":name,"bundle_id":bundle_id,"summary":summary})).await?,
+            AppCommand::Update { app_id, name, summary } => request(cli,reqwest::Method::PATCH,&format!("/v1/apps/{}",valid_id(app_id)?),Some(json!({"name":name,"summary":summary})),false).await?,
+            AppCommand::Preview { app_id, file, caption, build, source_revision } => {
+                if let Some(build) = build { valid_id(build)?; }
+                post(cli,&format!("/v1/apps/{}/preview",valid_id(app_id)?),json!({"file":std::path::absolute(file)?,"caption":caption,"build_id":build,"source_revision":source_revision})).await?
+            }
+        },
         Commands::Doctor => doctor(cli),
         Commands::Help { topic } => {
             if topic.as_deref() == Some("workflow") {
@@ -354,6 +442,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 export_options,
                 request_id,
                 allow_provisioning_updates,
+                preview,
             } => {
                 let request = BuildRequest {
                     project: project.canonicalize()?,
@@ -369,6 +458,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                         .transpose()?,
                     request_id: request_id.clone(),
                     allow_provisioning_updates: *allow_provisioning_updates,
+                    capture_preview: *preview,
                 };
                 post(cli, "/v1/builds", serde_json::to_value(request)?).await?
             }
@@ -396,7 +486,11 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                         break response;
                     }
                     let state = response["data"]["job"]["state"].as_str().unwrap_or("");
-                    if state == "succeeded" {
+                    let preview_busy = matches!(
+                        response["data"]["job"]["output"]["preview_state"].as_str(),
+                        Some("pending" | "running")
+                    );
+                    if state == "succeeded" && !preview_busy {
                         break response;
                     }
                     if ["failed", "cancelled", "interrupted"].contains(&state) {
@@ -453,6 +547,70 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 json!({"ttl_seconds":ttl_seconds}),
             )
             .await?
+        }
+        Commands::Preview {
+            command:
+                PreviewCommand::Capture {
+                    build_id,
+                    simulator,
+                    timeout,
+                },
+        } => {
+            valid_id(build_id)?;
+            if *timeout > 86400 {
+                bail!("Timeout cannot exceed 86400 seconds");
+            }
+            if let Some(simulator) = simulator {
+                uuid::Uuid::parse_str(simulator).context("Simulator ID must be a UUID")?;
+            }
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(*timeout);
+            let submitted = tokio::time::timeout_at(
+                deadline,
+                post(
+                    cli,
+                    &format!("/v1/builds/{build_id}/preview"),
+                    json!({"simulator":simulator}),
+                ),
+            )
+            .await;
+            match submitted {
+                Err(_) => preview_wait_timeout(),
+                Ok(Err(error)) => return Err(error),
+                Ok(Ok(value)) if value["ok"] == false => value,
+                Ok(Ok(_)) => loop {
+                    let response = match tokio::time::timeout_at(
+                        deadline,
+                        get(cli, &format!("/v1/builds/{build_id}")),
+                    )
+                    .await
+                    {
+                        Ok(value) => value?,
+                        Err(_) => break preview_wait_timeout(),
+                    };
+                    if response["ok"] == false {
+                        break response;
+                    }
+                    match response["data"]["job"]["output"]["preview_state"].as_str() {
+                        Some("succeeded") => break response,
+                        Some("failed") => {
+                            let mut failure = failure(
+                                "preview_failed",
+                                response["data"]["job"]["output"]["preview_error"]
+                                    .as_str()
+                                    .unwrap_or("Preview failed"),
+                                "Inspect build log and simulator; the signed IPA is unchanged.",
+                            );
+                            failure["data"] = response["data"].clone();
+                            break failure;
+                        }
+                        _ => {}
+                    }
+                    tokio::time::sleep_until(
+                        (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline),
+                    )
+                    .await;
+                },
+            }
         }
         Commands::Logs {
             build_id,
@@ -513,6 +671,13 @@ fn wait_timeout() -> Value {
         "wait_timeout",
         "Wait timed out; the build was not cancelled",
         "Call build status or wait again with the same build ID.",
+    )
+}
+fn preview_wait_timeout() -> Value {
+    failure(
+        "wait_timeout",
+        "Preview wait timed out; accepted capture was not cancelled",
+        "Call build status or build cancel with the same build ID; do not resubmit blindly.",
     )
 }
 

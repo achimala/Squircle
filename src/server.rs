@@ -1,4 +1,4 @@
-use crate::{artifact, model::*, store::Store, xcode};
+use crate::{apps, artifact, model::*, preview, store::Store, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -140,9 +140,13 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route("/v1/builds", get(list).post(start))
+        .route("/v1/apps", get(list_apps).post(register_app))
+        .route("/v1/apps/{id}", get(get_app).patch(update_app))
+        .route("/v1/apps/{id}/preview", get(app_preview).post(publish_app_preview))
         .route("/v1/builds/{id}", get(status))
         .route("/v1/builds/{id}/cancel", post(cancel))
         .route("/v1/builds/{id}/log", get(build_log))
+        .route("/v1/builds/{id}/preview", get(download_preview).post(capture_preview))
         .route("/v1/builds/{id}/install-link", post(create_link))
         .route("/v1/builds/{id}/diagnostics", get(diagnostics))
         .route("/v1/import", post(import))
@@ -170,10 +174,23 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         .transpose()?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
     for mut job in store.list_jobs()? {
+        let mut changed = false;
+        if let Some(output) = job.output.as_mut()
+            && matches!(output.preview_state.as_deref(), Some("pending" | "running"))
+        {
+            output.preview_state = Some("failed".into());
+            output.preview_error =
+                Some("Service stopped during preview capture; no automatic retry was made".into());
+            changed = true;
+        }
         if !job.state.terminal() {
             job.state = BuildState::Interrupted;
             job.updated_at = now();
             job.error = Some("Service stopped during this job. Inspect artifacts/processes before submitting new work; no automatic retry was made.".into());
+            changed = true;
+        }
+        if changed {
+            job.updated_at = now();
             store.save_job(&job)?;
         }
     }
@@ -310,9 +327,9 @@ async fn start(
             }
             return Ok(Json(success(json!({"job":prior,"replayed":true}))));
         }
-        if jobs.iter().filter(|j| !j.state.terminal()).count() >= 16 {
+        if state.cancellations.lock().unwrap().len() >= 16 {
             return Err(ApiError::bad(
-                "Build queue is full (16 jobs); wait or cancel a job",
+                "Build/preview queue is full (16 jobs); wait or cancel a job",
             ));
         }
         let job = Job {
@@ -357,18 +374,36 @@ async fn start(
                     Err(error.context("Could not persist Running state; Xcode was not started"))
                 }
             };
-            if *receiver.borrow() {
-                job.state = BuildState::Cancelled;
-            } else {
-                match result {
-                    Ok(output) => {
-                        job.state = BuildState::Succeeded;
-                        job.output = Some(output);
+            match result {
+                Ok(output) => {
+                    job.state = BuildState::Succeeded;
+                    job.output = Some(output);
+                    if request.capture_preview {
+                        job.output.as_mut().unwrap().preview_state = Some("running".into());
+                        job.updated_at = now();
+                        let persisted = state.store.lock().unwrap().save_job(&job);
+                        let capture = match persisted {
+                            Ok(()) => match preview::simulator_id(None) {
+                                Ok(simulator) => {
+                                    preview::capture(&job, &dir, &simulator, receiver.clone()).await
+                                }
+                                Err(error) => Err(error),
+                            },
+                            Err(error) => {
+                                state.draining.store(true, Ordering::Release);
+                                Err(error.context("Could not persist preview state"))
+                            }
+                        };
+                        preview::apply_result(job.output.as_mut().unwrap(), capture);
                     }
-                    Err(error) => {
-                        job.state = BuildState::Failed;
-                        job.error = Some(format!("{error:#}"));
-                    }
+                }
+                Err(error) => {
+                    job.state = if *receiver.borrow() {
+                        BuildState::Cancelled
+                    } else {
+                        BuildState::Failed
+                    };
+                    job.error = Some(format!("{error:#}"));
                 }
             }
         }
@@ -386,11 +421,291 @@ async fn start(
                 .lock()
                 .unwrap()
                 .insert(job.id.clone(), job.clone());
+        } else if job.state == BuildState::Succeeded {
+            sync_job_app(&state, &job);
         }
         state.cancellations.lock().unwrap().remove(&job.id);
         drop(permit);
     });
     Ok(Json(success(json!({"job":response,"replayed":false}))))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewRequest {
+    simulator: Option<String>,
+}
+
+async fn capture_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    input: std::result::Result<Json<PreviewRequest>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    auth(&state, &headers, false)?;
+    let input = body(input)?;
+    let simulator = preview::simulator_id(input.simulator.as_deref()).map_err(ApiError::bad)?;
+    let (sender, mut receiver) = watch::channel(false);
+    let (mut job, directory) = {
+        let store = state.store.lock().unwrap();
+        if state.draining.load(Ordering::Acquire) {
+            return Err(ApiError::unavailable());
+        }
+        let mut job = store.load_job(&id).map_err(ApiError::missing)?;
+        if job.state != BuildState::Succeeded || job.request.is_none() || job.output.is_none() {
+            return Err(ApiError::bad(
+                "Preview requires a succeeded project build with a simulator build recipe",
+            ));
+        }
+        let mut cancellations = state.cancellations.lock().unwrap();
+        if cancellations.contains_key(&id) {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "preview_in_progress",
+                message: "This build already has work in progress".into(),
+                next: "Poll build status before recapturing.",
+            });
+        }
+        if cancellations.len() >= 16 {
+            return Err(ApiError::bad("Build/preview queue is full (16 jobs)"));
+        }
+        let output = job.output.as_mut().unwrap();
+        output.preview_state = Some("pending".into());
+        output.preview_error = None;
+        job.updated_at = now();
+        store.save_job(&job).map_err(ApiError::internal)?;
+        cancellations.insert(id.clone(), sender);
+        let directory = store.job_dir(&id).map_err(ApiError::internal)?;
+        (job, directory)
+    };
+    let response = job.clone();
+    tokio::spawn(async move {
+        let permit = tokio::select! {
+            result = state.slots.clone().acquire_owned() => result.ok(),
+            _ = receiver.changed() => None,
+        };
+        let result = if permit.is_none() || *receiver.borrow() {
+            Err(anyhow::anyhow!("Preview cancelled before capture"))
+        } else {
+            job.output.as_mut().unwrap().preview_state = Some("running".into());
+            job.updated_at = now();
+            let persisted = state.store.lock().unwrap().save_job(&job);
+            match persisted {
+                Ok(()) => preview::capture(&job, &directory, &simulator, receiver).await,
+                Err(error) => {
+                    state.draining.store(true, Ordering::Release);
+                    Err(error.context("Could not persist preview Running state"))
+                }
+            }
+        };
+        preview::apply_result(job.output.as_mut().unwrap(), result);
+        job.updated_at = now();
+        let persisted = state.store.lock().unwrap().save_job(&job);
+        if let Err(error) = persisted {
+            state.draining.store(true, Ordering::Release);
+            job.output.as_mut().unwrap().preview_error =
+                Some(format!("Preview result could not be persisted: {error}"));
+            state.recovery_jobs.lock().unwrap().insert(id.clone(), job);
+        } else {
+            sync_job_app(&state, &job);
+        }
+        state.cancellations.lock().unwrap().remove(&id);
+        drop(permit);
+    });
+    Ok((StatusCode::ACCEPTED, Json(success(json!({"job":response})))))
+}
+
+fn sync_job_app(state: &AppState, job: &Job) {
+    if let Err(error) = apps::sync_build_preview(&state.store.lock().unwrap(), job) {
+        // Catalog publication is ancillary: never invalidate an exported IPA.
+        eprintln!(
+            "Could not sync app metadata for build {}: {error:#}",
+            job.id
+        );
+    }
+}
+
+fn public_app(app: apps::AppRecord) -> Value {
+    let mut value = serde_json::to_value(app).expect("app metadata serializes");
+    if let Some(preview) = value["preview"].as_object_mut() {
+        preview.remove("path");
+    }
+    value
+}
+
+async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let apps = apps::list(&state.store.lock().unwrap()).map_err(ApiError::internal)?;
+    Ok(Json(success(
+        apps.into_iter().map(public_app).collect::<Vec<_>>(),
+    )))
+}
+
+async fn get_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let app = apps::get(&state.store.lock().unwrap(), &id).map_err(ApiError::missing)?;
+    Ok(Json(success(public_app(app))))
+}
+
+async fn register_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    input: std::result::Result<Json<apps::AppRegistration>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let input = body(input)?;
+    let app = tokio::task::spawn_blocking(move || {
+        let store = state.store.lock().unwrap();
+        if state.draining.load(Ordering::Acquire) {
+            return Err(ApiError::unavailable());
+        }
+        apps::register(&store, input).map_err(ApiError::bad)
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    Ok(Json(success(public_app(app))))
+}
+
+async fn update_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    input: std::result::Result<Json<apps::AppUpdate>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let input = body(input)?;
+    let app = tokio::task::spawn_blocking(move || {
+        let store = state.store.lock().unwrap();
+        if state.draining.load(Ordering::Acquire) {
+            return Err(ApiError::unavailable());
+        }
+        apps::get(&store, &id).map_err(ApiError::missing)?;
+        apps::update(&store, &id, input).map_err(ApiError::bad)
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    Ok(Json(success(public_app(app))))
+}
+
+async fn publish_app_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    input: std::result::Result<Json<apps::PreviewPublication>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let input = body(input)?;
+    let app = tokio::task::spawn_blocking(move || {
+        let store = state.store.lock().unwrap();
+        if state.draining.load(Ordering::Acquire) {
+            return Err(ApiError::unavailable());
+        }
+        apps::get(&store, &id).map_err(ApiError::missing)?;
+        apps::publish_preview(&store, &id, input).map_err(ApiError::bad)
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    Ok(Json(success(public_app(app))))
+}
+
+#[derive(Deserialize)]
+struct PreviewVersion {
+    version: Option<String>,
+}
+
+async fn app_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<PreviewVersion>,
+) -> ApiResult<Response> {
+    auth(&state, &headers, false)?;
+    let (file, preview_id) = {
+        let store = state.store.lock().unwrap();
+        let app = apps::get(&store, &id).map_err(ApiError::missing)?;
+        let preview = app
+            .preview
+            .ok_or_else(|| ApiError::missing("App has no published preview"))?;
+        if query
+            .version
+            .as_ref()
+            .is_some_and(|version| version != &preview.id)
+        {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "preview_changed",
+                message: "App preview has changed since metadata was read".into(),
+                next: "Refresh app metadata and request its current preview version.",
+            });
+        }
+        let file = crate::store::open_private_read(&preview.path).map_err(ApiError::missing)?;
+        (file, preview.id)
+    };
+    let size = file.metadata().map_err(ApiError::internal)?.len();
+    let file = tokio::fs::File::from_std(file);
+    let mut response = (
+        private_headers(),
+        [(header::CONTENT_TYPE, "image/png")],
+        Body::from_stream(ReaderStream::new(file)),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, size.to_string().parse().unwrap());
+    response
+        .headers_mut()
+        .insert(header::ETAG, format!("\"{preview_id}\"").parse().unwrap());
+    Ok(response)
+}
+
+async fn download_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    auth(&state, &headers, false)?;
+    let path = {
+        let store = state.store.lock().unwrap();
+        let job = store.load_job(&id).map_err(ApiError::missing)?;
+        let path = job
+            .output
+            .and_then(|output| output.preview_path)
+            .ok_or_else(|| ApiError::missing("This build has no captured preview"))?;
+        let expected = store
+            .job_dir(&id)
+            .map_err(ApiError::missing)?
+            .join("preview.png");
+        if path != expected {
+            return Err(ApiError::internal(
+                "Preview artifact is outside its build directory",
+            ));
+        }
+        path
+    };
+    // Do not serve symlink substitutions or arbitrary paths from edited records.
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .await
+        .map_err(ApiError::missing)?;
+    let metadata = file.metadata().await.map_err(ApiError::internal)?;
+    if !metadata.is_file() || metadata.len() > 32 * 1024 * 1024 {
+        return Err(ApiError::internal("Invalid preview artifact"));
+    }
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        Body::from_stream(ReaderStream::new(file)),
+    )
+        .into_response())
 }
 
 /// Best-effort submission-time observations. Builds still use the working tree;
@@ -849,6 +1164,7 @@ mod tests {
             export_options: None,
             request_id: Some("same-request".into()),
             allow_provisioning_updates: false,
+            capture_preview: false,
         }
     }
     fn headers(state: &AppState) -> HeaderMap {

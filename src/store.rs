@@ -258,7 +258,7 @@ fn validate_token(token: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_dir(path: &Path) -> Result<()> {
+pub(crate) fn check_dir(path: &Path) -> Result<()> {
     ensure!(
         fs::symlink_metadata(path)?.file_type().is_dir(),
         "storage directory must be a real directory: {}",
@@ -267,7 +267,7 @@ fn check_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     if !path.try_exists()? {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
@@ -310,7 +310,7 @@ fn check_private_file(file: &File) -> Result<()> {
     Ok(())
 }
 
-fn open_private_read(path: &Path) -> Result<File> {
+pub(crate) fn open_private_read(path: &Path) -> Result<File> {
     let file = private_options()
         .read(true)
         .open(path)
@@ -329,12 +329,12 @@ fn open_private_append(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_reader(BufReader::new(open_private_read(path)?))
         .with_context(|| format!("invalid JSON in {}", path.display()))
 }
 
-fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
+pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     persist_json(path, value, true).map(|_| ())
 }
 
@@ -399,6 +399,11 @@ mod tests {
             source_revision: None,
             source_dirty: None,
             output: Some(BuildOutput {
+                preview_path: None,
+                preview_state: None,
+                preview_error: None,
+                preview_captured_at: None,
+                preview_source: None,
                 archive_path: None,
                 ipa_path: None,
                 app_path: None,

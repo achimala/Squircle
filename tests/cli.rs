@@ -54,6 +54,43 @@ fn capabilities_work_without_agents_service_or_initialized_state() {
             .any(|operation| operation == "build.start")
     );
     assert!(!state.exists(), "capability discovery created local state");
+    for operation in [
+        "app.register",
+        "app.list",
+        "app.show",
+        "app.update",
+        "app.preview",
+        "preview.capture",
+    ] {
+        assert!(
+            result["data"]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == operation),
+            "missing {operation}"
+        );
+    }
+}
+
+#[test]
+fn app_preview_help_explains_publication_without_a_build() {
+    let output = command()
+        .args(["app", "preview", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "real PNG",
+        "--file",
+        "--caption",
+        "--build",
+        "--source-revision",
+        "no build is required",
+    ] {
+        assert!(help.contains(expected), "missing help: {expected}");
+    }
 }
 
 #[test]
@@ -159,6 +196,9 @@ impl Drop for TestServer {
 
 fn wait_for(server: &TestServer, timeout: &str) -> Output {
     let directory = tempfile::tempdir().unwrap();
+    // Exercise the HTTP deadline, not first-use credential fsync under concurrent
+    // test/build disk load. Initialize before the CLI's own deadline begins.
+    squircle::store::Store::open(directory.path().to_owned()).unwrap();
     command()
         .arg("--data-dir")
         .arg(directory.path())
@@ -210,4 +250,46 @@ fn wait_reports_failed_and_successful_builds_with_distinct_exit_statuses() {
     let output = wait_for(&succeeded, "2");
     assert!(output.status.success());
     assert_eq!(json_result(&output)["data"]["job"]["state"], "succeeded");
+}
+
+#[test]
+fn preview_submission_timeout_is_bounded_and_does_not_resubmit() {
+    let server = TestServer::new(None);
+    let directory = tempfile::tempdir().unwrap();
+    squircle::store::Store::open(directory.path().to_owned()).unwrap();
+    let started = Instant::now();
+    let output = command()
+        .arg("--data-dir")
+        .arg(directory.path())
+        .args([
+            "--server",
+            &server.url,
+            "--json",
+            "preview",
+            "capture",
+            "ed8c7cf6-45ac-4a0f-90ef-67e4901e9386",
+            "--simulator",
+            "4f3d9038-3aef-4a1f-8684-004893e1da63",
+            "--timeout",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_result(&output)["error"]["code"], "wait_timeout");
+    assert_eq!(
+        server.paths.lock().unwrap().as_slice(),
+        ["/v1/builds/ed8c7cf6-45ac-4a0f-90ef-67e4901e9386/preview"]
+    );
+}
+
+#[test]
+fn build_wait_does_not_claim_preview_complete_while_capture_is_running() {
+    let server = TestServer::new(Some(
+        r#"{"schema_version":1,"ok":true,"data":{"job":{"state":"succeeded","output":{"preview_state":"running"}}}}"#,
+    ));
+    let output = wait_for(&server, "1");
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_result(&output)["error"]["code"], "wait_timeout");
 }

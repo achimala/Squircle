@@ -117,6 +117,7 @@ fn fixture_job(root: &Path, state: BuildState) -> Job {
             mode: BuildMode::Simulator,
             export_options: None,
             allow_provisioning_updates: false,
+            capture_preview: false,
             request_id: None,
         }),
         output: None,
@@ -240,4 +241,44 @@ async fn only_one_service_owns_a_store_and_shutdown_releases_ownership() {
         serde_json::json!([])
     );
     successor.stop().await;
+}
+
+#[tokio::test]
+async fn restart_fails_unfinished_preview_without_invalidating_signed_build() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().to_owned()).unwrap();
+    let mut job = fixture_job(directory.path(), BuildState::Succeeded);
+    job.output = Some(serde_json::from_value(serde_json::json!({
+        "archive_path":null,"ipa_path":"/retained/app.ipa","app_path":null,"dsym_paths":[],
+        "bundle_id":"test.app","version":"1","build_number":"2","title":"App",
+        "preview_state":"running","preview_path":"/retained/preview.png","preview_captured_at":10
+    })).unwrap());
+    store.save_job(&job).unwrap();
+    let service = Service::start(directory.path()).await;
+    let observed = service.get(&format!("/v1/builds/{}", job.id)).await;
+    assert_eq!(observed["data"]["job"]["state"], "succeeded");
+    assert_eq!(
+        observed["data"]["job"]["output"]["ipa_path"],
+        "/retained/app.ipa"
+    );
+    assert_eq!(observed["data"]["job"]["output"]["preview_state"], "failed");
+    assert_eq!(observed["data"]["job"]["output"]["preview_captured_at"], 10);
+    assert!(
+        observed["data"]["job"]["output"]["preview_error"]
+            .as_str()
+            .unwrap()
+            .contains("no automatic retry")
+    );
+    assert_eq!(
+        store
+            .load_job(&job.id)
+            .unwrap()
+            .output
+            .unwrap()
+            .preview_state
+            .as_deref(),
+        Some("failed")
+    );
+    assert!(!store.job_dir(&job.id).unwrap().join("build.log").exists());
+    service.stop().await;
 }

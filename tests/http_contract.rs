@@ -181,6 +181,7 @@ async fn bearer_permissions_separate_control_from_diagnostic_uploads() {
             format!("/v1/builds/{id}"),
             format!("/v1/builds/{id}/diagnostics"),
             format!("/v1/builds/{id}/log"),
+            format!("/v1/builds/{id}/preview"),
         ] {
             let (status, value) = fixture.json("GET", &path, bearer, None).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}: {value}");
@@ -194,7 +195,7 @@ async fn bearer_permissions_separate_control_from_diagnostic_uploads() {
             .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
-    for suffix in ["cancel", "install-link"] {
+    for suffix in ["cancel", "install-link", "preview"] {
         let (status, _) = fixture
             .json(
                 "POST",
@@ -216,6 +217,306 @@ async fn bearer_permissions_separate_control_from_diagnostic_uploads() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["data"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn preview_download_is_bound_to_its_job_and_control_token() {
+    let fixture = Fixture::new();
+    let id = fixture.import().await;
+    let other = fixture.import().await;
+    let path = format!("/v1/builds/{id}/preview");
+    assert_eq!(
+        fixture
+            .request("GET", &path, Some(&fixture.control), None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    // Artifact transport fixture only; this is not a claimed simulator capture.
+    let png = b"\x89PNG\r\n\x1a\npreview transport fixture";
+    {
+        let store = fixture.state.store.lock().unwrap();
+        let mut job = store.load_job(&id).unwrap();
+        let artifact = store.job_dir(&id).unwrap().join("preview.png");
+        fs::write(&artifact, png).unwrap();
+        job.output.as_mut().unwrap().preview_path = Some(artifact);
+        job.output.as_mut().unwrap().preview_state = Some("succeeded".into());
+        store.save_job(&job).unwrap();
+    }
+    let response = fixture
+        .request("GET", &path, Some(&fixture.control), None)
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        png
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "GET",
+                &format!("/v1/builds/{other}/preview"),
+                Some(&fixture.control),
+                None
+            )
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    {
+        let store = fixture.state.store.lock().unwrap();
+        let mut job = store.load_job(&other).unwrap();
+        job.output.as_mut().unwrap().preview_path =
+            Some(store.job_dir(&id).unwrap().join("preview.png"));
+        store.save_job(&job).unwrap();
+    }
+    assert_eq!(
+        fixture
+            .request(
+                "GET",
+                &format!("/v1/builds/{other}/preview"),
+                Some(&fixture.control),
+                None
+            )
+            .await
+            .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    {
+        let store = fixture.state.store.lock().unwrap();
+        let artifact = store.job_dir(&id).unwrap().join("preview.png");
+        fs::remove_file(&artifact).unwrap();
+        std::os::unix::fs::symlink(&fixture.ipa, artifact).unwrap();
+    }
+    assert_ne!(
+        fixture
+            .request("GET", &path, Some(&fixture.control), None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn preview_submission_rejects_imports_and_ambiguous_devices_without_running_tools() {
+    let fixture = Fixture::new();
+    let id = fixture.import().await;
+    for simulator in ["booted", "00000000-0000-0000-0000-000000000000"] {
+        let (status, value) = fixture
+            .json(
+                "POST",
+                &format!("/v1/builds/{id}/preview"),
+                Some(&fixture.control),
+                Some(json!({"simulator":simulator})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    }
+    let status = fixture.status(&id).await;
+    assert_eq!(status["job"]["state"], "succeeded");
+    assert!(status["job"]["output"]["ipa_path"].is_string());
+    assert!(status["job"]["output"]["preview_state"].is_null());
+}
+
+const SCREENSHOT_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0,
+    0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5, 1, 1,
+    39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+#[tokio::test]
+async fn app_metadata_and_versioned_preview_survive_refresh_and_restart() {
+    let fixture = Fixture::new();
+    let project = fixture.ipa.parent().unwrap().join("Example.xcodeproj");
+    fs::create_dir(&project).unwrap();
+    let registration = json!({"name":"Example","project":project,"scheme":"Example","bundle_id":"test.example","summary":"Initial"});
+    let (status, record) = fixture
+        .json(
+            "POST",
+            "/v1/apps",
+            Some(&fixture.control),
+            Some(registration.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    let id = record["data"]["id"].as_str().unwrap();
+    let route = format!("/v1/apps/{id}");
+    let preview_route = format!("{route}/preview");
+    assert_eq!(
+        fixture
+            .request("GET", &preview_route, Some(&fixture.control), None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let (_, record) = fixture
+        .json(
+            "PATCH",
+            &route,
+            Some(&fixture.control),
+            Some(json!({"name":"Updated","summary":"Latest working interface"})),
+        )
+        .await;
+    assert_eq!(record["data"]["name"], "Updated");
+    let (_, reregistered) = fixture
+        .json(
+            "POST",
+            "/v1/apps",
+            Some(&fixture.control),
+            Some(registration),
+        )
+        .await;
+    assert_eq!(reregistered["data"], record["data"]);
+    let source = fixture.ipa.parent().unwrap().join("actual.png");
+    fs::write(&source, SCREENSHOT_PNG).unwrap();
+    let publication = json!({"file":source,"caption":"Main screen","source_revision":"abc123"});
+    let (status, published) = fixture
+        .json(
+            "POST",
+            &preview_route,
+            Some(&fixture.control),
+            Some(publication.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    assert!(published["data"]["preview"].get("path").is_none());
+    assert_eq!(published["data"]["preview"]["source"], "agent");
+    let first_version = published["data"]["preview"]["id"].as_str().unwrap();
+    let response = fixture
+        .request(
+            "GET",
+            &format!("{preview_route}?version={first_version}"),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(
+        response.headers()[header::ETAG],
+        format!("\"{first_version}\"")
+    );
+    assert_eq!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .as_ref(),
+        SCREENSHOT_PNG
+    );
+    let (_, updated) = fixture
+        .json(
+            "POST",
+            &preview_route,
+            Some(&fixture.control),
+            Some(publication),
+        )
+        .await;
+    assert_ne!(updated["data"]["preview"]["id"], first_version);
+    let (status, error) = fixture
+        .json(
+            "GET",
+            &format!("{preview_route}?version={first_version}"),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"]["code"], "preview_changed");
+    fs::remove_file(&source).unwrap();
+    let root = fixture.state.store.lock().unwrap().root.clone();
+    let reopened = router(AppState::new(Store::open(root).unwrap(), None));
+    let response = reopened
+        .oneshot(
+            Request::builder()
+                .uri("/v1/apps")
+                .header(header::AUTHORIZATION, format!("Bearer {}", fixture.control))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let records: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(records["data"], json!([updated["data"]]));
+    assert_eq!(
+        fixture
+            .request("GET", &preview_route, Some(&fixture.control), None)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let (status, _) = fixture
+        .json(
+            "POST",
+            &preview_route,
+            Some(&fixture.control),
+            Some(json!({"file":source})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, unchanged) = fixture
+        .json("GET", &route, Some(&fixture.control), None)
+        .await;
+    assert_eq!(unchanged["data"], updated["data"]);
+}
+
+#[tokio::test]
+async fn app_catalog_requires_control_and_missing_artifacts_return_not_found() {
+    let fixture = Fixture::new();
+    let missing = Uuid::new_v4().to_string();
+    for bearer in [None, Some("wrong"), Some(fixture.diagnostic.as_str())] {
+        for (method, path) in [
+            ("GET", "/v1/apps".to_owned()),
+            ("POST", "/v1/apps".to_owned()),
+            ("GET", format!("/v1/apps/{missing}")),
+            ("PATCH", format!("/v1/apps/{missing}")),
+            ("GET", format!("/v1/apps/{missing}/preview")),
+            ("POST", format!("/v1/apps/{missing}/preview")),
+        ] {
+            assert_eq!(
+                fixture
+                    .request(method, &path, bearer, Some(json!({})))
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+    assert_eq!(
+        fixture
+            .request(
+                "GET",
+                &format!("/v1/apps/{missing}"),
+                Some(&fixture.control),
+                None
+            )
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        fixture
+            .request(
+                "GET",
+                &format!("/v1/apps/{missing}/preview"),
+                Some(&fixture.control),
+                None
+            )
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]

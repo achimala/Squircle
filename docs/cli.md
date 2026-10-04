@@ -31,6 +31,10 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `build cancel ID` | Cancel that queued/running job |
 | `build log ID --offset N --limit N` | Bounded compiler log, byte cursor |
 | `build import --ipa PATH` | Private copy of an existing IPA; no signature certification |
+| `app list`, `app show ID`, `app register` | Persistent app catalog; identity is canonical project path plus scheme |
+| `app update ID --name NAME --summary TEXT` | Edit app metadata without replacing its identity or preview |
+| `app preview ID --file PATH` | Publish a real PNG as the app's latest immutable preview artifact |
+| `preview capture BUILD_ID --simulator UUID` | Build-associated capture on an explicitly selected simulator |
 | `install-link ID --ttl-seconds 3600` | Expiring HTML page, manifest and IPA URLs |
 | `logs ID --since N --limit N` | Persisted diagnostic events, record cursor |
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
@@ -40,6 +44,41 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 `install-link` does not install or remotely launch an app. A `launch_observed`
 flag reflects an authenticated diagnostic event, not independent OS attestation.
 The service does not currently track installation/download completion.
+
+## App metadata and previews
+
+The Mac catalog is the source of truth for app names, summaries and screenshots.
+Discover an app with `app list`; register its Xcode project and scheme once with
+`app register --project PATH --scheme SCHEME --name NAME`. Re-registration is
+idempotent and preserves edited text. Use
+`app update ID --summary TEXT` after meaningful changes; `--name` is optional.
+
+After UI work, capture the running app's actual simulator screen, inspect it,
+then publish `app preview ID --file PATH --caption TEXT`. This publication needs
+no new build. The ID is the persistent **app ID**, not a build or preview ID.
+Optional `--build BUILD_ID` and `--source-revision REV` provenance must describe
+the supplied pixels accurately. A source label is recorded provenance, not independent proof
+of what the screenshot contains. Read each command's `--help` for current flags.
+
+Each publication validates a regular PNG file (signature, bounded chunks and
+nonzero dimensions; maximum 20 MiB), makes a private copy and assigns a new preview
+UUID. Existing image files are immutable. The app record points to the latest
+preview and retains timestamp, caption and optional build/revision association.
+`captured_at` is simulator capture-completion time for built-in captures; for
+agent-supplied files it is server publication time, not an inferred file-creation
+time. `updated_at` records app metadata changes. Published files use source
+`agent`; built-in captures use `simulator`. Supplying a build ID checks the app
+association but does not establish that the pixels came from that exact binary.
+The client fetches the image through authenticated HTTP. It displays an empty or
+unavailable state when there is no capture; it must not substitute generated UI.
+
+Build capture is optional (`build start --preview`), runs in the same worker lane
+as Xcode, and requires a dedicated simulator configured by UUID. Capture failure
+preserves the IPA and any previous image. Simulator builds reuse their product;
+archive previews rebuild the current working tree, so they must not claim to be
+pixels from a frozen archived revision. App synchronization accepts only newer
+captures and does not overwrite edited names/summaries. End-to-end validation of
+the new catalog/client flow is tracked in [validation evidence](validation.md).
 
 ## Output and persistence contract
 

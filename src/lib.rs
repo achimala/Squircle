@@ -1,5 +1,7 @@
+pub mod apps;
 pub mod artifact;
 pub mod model;
+pub mod preview;
 pub mod server;
 pub mod store;
 pub mod symbolicate;

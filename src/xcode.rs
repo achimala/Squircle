@@ -451,6 +451,11 @@ fn read_app_metadata(app: &Path, fallback_title: &str) -> Result<BuildOutput> {
         .unwrap_or(fallback_title)
         .to_owned();
     Ok(BuildOutput {
+        preview_path: None,
+        preview_state: None,
+        preview_error: None,
+        preview_captured_at: None,
+        preview_source: None,
         archive_path: None,
         ipa_path: None,
         app_path: None,
@@ -474,6 +479,7 @@ mod tests {
             mode,
             export_options: None,
             allow_provisioning_updates: false,
+            capture_preview: false,
             request_id: None,
         }
     }
