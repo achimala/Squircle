@@ -1,0 +1,7 @@
+/target/
+/.tools/
+/.squircle/
+/.verification/
+.DS_Store
+*.xcuserstate
+xcuserdata/
