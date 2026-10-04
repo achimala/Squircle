@@ -1,6 +1,6 @@
 # Remote iOS build, install and diagnostics
 
-Status: agreed direction; end-to-end feasibility remains unproven. Sources checked 2026-10-04. Read this when implementing builds, distribution or device diagnostics.
+Status on 2026-10-04: Squircle builds and exports the signed probe; the cellular installation and device feedback loop remains unproven. Read this for distribution and diagnostics. See [validation evidence](validation.md) for exact jobs, versions and artifacts.
 
 ## Accepted scope
 
@@ -8,40 +8,33 @@ The Mac builds apps. The iPhone must install over **cellular**, with Wi-Fi disab
 
 Tailscale is installed and managed externally by users. The product consumes the resulting connectivity; it does not provision a VPN. Keep the Mac awake and reachable during builds/downloads.
 
-## Proposed flow
+## Implemented prototype
 
-1. Build and archive a chosen revision on the Mac; export a signed ad hoc IPA for the registered iPhone.
-2. Preserve the archive, IPA, dSYMs, build logs and metadata: project, commit, bundle ID, version, build number and artifact checksums.
-3. Serve an installation page, XML manifest and IPA from the Mac through trusted HTTPS, reachable over the user's Tailscale connection. The installation link uses `itms-services://?action=download-manifest&url=<encoded HTTPS manifest URL>`.
-4. The user installs and launches. The app reports its build identifier to the hub. Until that acknowledgement, show “installation requested”, not “installed”.
-5. App instrumentation sends logs while running, buffers during disconnection, and uploads persisted crash reports after relaunch. The Mac associates reports with the exact build and symbols.
+Squircle's Rust CLI and Axum service manage Xcode build jobs, retained artifacts/logs, expiring installation URLs and diagnostics. Control and diagnostic uploads use separate bearer tokens. The service generates the installation page, XML manifest and IPA download routes; **a configured public URL does not enable TLS**. Trusted HTTPS must be supplied separately through the user's network setup.
 
-**Critical proof:** Safari reaching the page does not prove the iOS installer can fetch the manifest and IPA over the VPN. Test system-installer routing, DNS, TLS trust and download authorization on the actual phone. Do not assume it forwards app bearer headers or browser cookies. Use installer-compatible authorization, such as scoped expiring download URLs within the tailnet; validate retries and expiry.
+The intended device sequence is: open the expiring page → confirm installation → manually launch → report the build ID → send logs → crash → relaunch and upload the report. Install URLs use `itms-services` and scoped tickets, without requiring installer bearer headers or browser cookies. Creating a link or downloading an IPA does not confirm installation; `launch_observed` records an app-reported launch only.
 
-## Prerequisites and evidence
+HTTP contract tests cover token separation, imported IPA byte preservation, manifest metadata, expired/invalid tickets, diagnostic retries/conflicts and launch observation. These are local API tests, not a physical installation test. Imported IPAs are explicitly marked as having unverified signatures.
 
-Require Apple Developer Program membership, registered device UDID, matching App ID/entitlements, distribution certificate/private key and valid provisioning profile. Signing must work noninteractively in the Mac's actual service context, including Keychain access. Record device settings and prompts required by the tested iOS version.
+## Signing and build evidence
 
-[Apple's ad hoc guide](https://developer.apple.com/help/account/provisioning-profiles/create-an-ad-hoc-provisioning-profile/) supports installation on registered devices without Xcode. [Apple's wireless installation guide](https://support.apple.com/en-euro/guide/deployment/depce7cefc4d/1/web/1.0) documents HTTPS, trusted certificates and manifest mechanics **in an enterprise context**; it is not evidence that this exact ad hoc/cellular/Tailscale combination works. TestFlight is the fallback, with Apple's upload/processing workflow replacing private OTA delivery.
+The probe's signed archive and `release-testing` export succeeded under Xcode 27.1. The exported app passed `codesign --verify --deep --strict`; its arm64 binary and dSYM UUIDs match. The profile belongs to Dreamslate Inc. (`2F26US4NAU`), includes one device, expires 2027-07-25 and has `get-task-allow=false`. This validates the generated artifacts, not installation on the user's phone. [Exact evidence](validation.md)
 
-## Reuse before custom code
+Other apps still need program membership, registered devices, matching identifiers/entitlements, certificates/private keys and profiles. Verify signing access in the actual service context. Provisioning changes require an explicit opt-in; successful setup for this probe is not universal signing readiness.
 
-- **Build/export candidate:** [fastlane `build_app`/gym](https://docs.fastlane.tools/actions/build_app/) wraps Xcode and produces signed IPA/dSYM artifacts; export options support a manifest. Adds Ruby tooling. Pin versions and verify export options against installed Xcode. Signing setup remains necessary; `match` is optional.
-- **Agent development candidate:** [MobileBuildMCP](https://github.com/getsentry/MobileBuildMCP), formerly XcodeBuildMCP, supplies CLI/MCP simulator build/test/run tooling. Its device commands require reachable devices; they do not solve cellular OTA.
-- **Integration still required:** artifact catalog, HTTPS/authentication, job status/cancellation, retries and diagnostic ingestion. Neither package supplies the complete remote product.
+The prototype invokes `xcodebuild` directly. [fastlane](https://docs.fastlane.tools/actions/build_app/) and [MobileBuildMCP](https://github.com/getsentry/MobileBuildMCP) remain optional integrations, not dependencies or solutions to cellular reachability.
 
-## Diagnostics: selection pending
+## Probe diagnostics
 
-Use app-owned structured logging with upload/buffering; OSLog alone does not expose a remote stream. [KSCrash](https://github.com/kstenerud/KSCrash) or [PLCrashReporter](https://github.com/microsoft/plcrashreporter) supplies crash capture but leaves ingestion and presentation work. [Sentry Cocoa](https://github.com/getsentry/sentry-cocoa) offers a broader stack, adding a hosted service or self-hosted operations. Select after a small prototype.
+[Squircle Probe](../examples/SquircleProbe/README.md) uses PLCrashReporter 1.12.2, Keychain credentials and an atomic bounded upload queue. It emits launch and selected log events, recovers crash reports after relaunch, and retries manually or on foreground entry. Five simulator unit tests passed; actual crash capture/recovery and phone-to-Mac delivery are pending. This is app instrumentation, not remote OSLog access or uninterrupted background streaming.
 
-Retain symbols by binary UUID: [Apple requires matching dSYM and binary UUIDs](https://developer.apple.com/documentation/xcode/locating-a-missing-debug-symbol-file). Never promise immediate crash upload or uninterrupted background logging.
+Keep the original build attribution and [matching dSYM UUIDs](https://developer.apple.com/documentation/xcode/locating-a-missing-debug-symbol-file). Server ingestion is implemented; end-to-end symbolication remains a separate proof.
 
-## Acceptance gate — all pending
+## Remaining acceptance gate
 
-- Build/export without interactive Mac prompts; preserve matching symbols.
-- Install and update over cellular with Wi-Fi disabled; manually launch and verify build acknowledgement.
-- Receive identifiable live logs; disconnect/reconnect and recover buffered events.
-- Trigger a controlled test crash; relaunch, upload and symbolicate its stack.
-- Report failed downloads/signing accurately and retry safely.
+- Obtain the user-managed HTTPS origin; Tailscale was stopped at the latest check.
+- Prove the system installer can fetch the manifest/IPA over cellular with Wi-Fi disabled. Safari access alone is insufficient evidence of installer VPN routing, DNS, TLS or download authorization.
+- Install, manually launch and receive the correct build acknowledgement; repeat with a visible update.
+- Receive logs, recover buffered events after reconnection, then crash/relaunch/upload and symbolicate the report.
 
-Complete this proof **before UI or finished CLI/adapter packaging**. The CLI-first architecture changes the integration boundary, not the device/signing proof. Record tested versions, commands and outcomes here.
+[Apple documents registered-device distribution](https://developer.apple.com/help/account/provisioning-profiles/create-an-ad-hoc-provisioning-profile/) and [wireless manifest mechanics in an enterprise context](https://support.apple.com/en-euro/guide/deployment/depce7cefc4d/1/web/1.0); neither proves this exact cellular/Tailscale combination. TestFlight remains a fallback. Complete the device proof before polished UI or adapter packaging.

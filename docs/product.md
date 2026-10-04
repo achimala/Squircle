@@ -14,12 +14,13 @@ The Mac is both the agent host and the Xcode build environment. Remote use must 
 | --- | --- |
 | Coordinator | Use off-the-shelf Hermes as the primary runtime, independently installed and maintained. |
 | Product shape | An agent-neutral iOS development CLI plus a native SwiftUI client. Hermes integration is a thin, optional adapter. Avoid owning a second orchestration backend. |
+| Name and implementation | Squircle for the CLI and future client. Rust is preferred for tooling; SwiftUI for iOS. |
 | Portability | The same development tools should be usable by OpenClaw, Hermes, and other agents with appropriate access to the Mac. |
 | Persistent identity | Let Hermes own persona, memory, conversations, and coordination. Start with native memory. |
 | Coding workers | Reuse the user's Codex and Claude CLIs. No custom worker abstraction is planned initially. |
 | Connectivity | User-managed Tailscale is acceptable. Do not bundle it. |
 | Device feedback | Installing builds, opening them manually, and returning live app logs/crashes are sufficient. |
-| Maintenance | Prefer maintained components, native Mac execution, and minimal services/setup. Rust is not a requirement. |
+| Maintenance | Prefer maintained components, native Mac execution, and minimal services/setup. |
 | Interface | Our own polished iOS app is a core goal; existing interfaces may help validate the workflow first. |
 
 ## Scope boundaries
@@ -32,9 +33,9 @@ Avoid requiring Firebase or another hosted distribution account when the Mac can
 
 ## Still open
 
-- Apple Developer membership, signing ownership, registered phone, and usable provisioning profiles.
-- Which build tools and diagnostics components pass the real-device proof.
+- Cellular HTTPS delivery and real-device diagnostic recovery. The user confirmed signing/device readiness and selected Dreamslate Inc. (`2F26US4NAU`); signed export now passes. See [evidence](validation.md).
+- Whether the selected diagnostics components pass the complete real-device proof.
 - How much independent worker-session control the client needs; this determines whether Paseo adds value.
 - Notification delivery while the iOS client is suspended, onboarding polish, and future support for other users/multiple hosts.
 
-The user is setting up Hermes. No request has yet authorized installing the rest of this stack. See [the implementation plan](plan.md) for the proposed order.
+The user is setting up Hermes and authorized implementing this prototype, initializing Git, and making small commits. That does not authorize unrelated setup changes or configuring Tailscale. See [the implementation plan](plan.md) for the remaining work.

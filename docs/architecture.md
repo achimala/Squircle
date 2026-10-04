@@ -1,6 +1,6 @@
 # Architecture
 
-Status: proposed implementation of the accepted direction, updated 2026-10-04. No end-to-end validation yet. The agent-neutral CLI supersedes putting the development logic directly in a Hermes plugin.
+Status: Rust build/diagnostic core implemented, updated 2026-10-04. Hermes integration and the controller client remain proposed; no cellular end-to-end validation yet. See [evidence](validation.md).
 
 ## Ownership
 
@@ -22,9 +22,11 @@ Hermes owns identity, memory, sessions, model configuration, and agent task coor
 
 ## Core tools and service
 
-Make the CLI the primary agent interface, with progressive help and structured output. See [CLI design](cli.md). Reuse existing Xcode/fastlane/MCP tools where useful; write the missing integration. No Hermes imports, model credentials, or LLM dependency belong in the development core.
+The Rust `squircle` CLI is the primary agent interface, with progressive help and structured output. See [CLI design](cli.md). It invokes Xcode's own command-line tools with literal arguments and retains their artifacts. No Hermes imports, model credentials, or LLM dependency belong in the development core.
 
-A CLI alone cannot continuously receive phone logs or serve installation assets. Package a small local service with it, potentially as a `serve` mode of the same executable. That service can own asynchronous builds, persist job records, and expose build/artifact/diagnostic endpoints. Exact launch and supervision mechanics remain to be chosen. This is a bounded local utility, not a new agent backend.
+`squircle serve` runs an Axum HTTP service in the foreground, bound to loopback by default. It owns asynchronous builds and private disk-backed records, artifacts, tickets and diagnostics. An exclusive store lock prevents duplicate services. One Xcode job runs at a time; request IDs deduplicate retries. A disconnected caller leaves its job running. Graceful shutdown cancels jobs; restart marks unfinished records interrupted, without automatic reruns. Login-service supervision is deferred.
+
+Control and diagnostic bearer tokens are separate. Expiring URL tickets authorize installer-compatible manifest/IPA downloads. The service terminates no TLS itself: users provide trusted HTTPS routing. Probe persists unsent diagnostics and retries while active. PLCrashReporter supplies crash capture; Squircle offers a local Xcode symbolication command. [Limits and lifecycle](verification.md#limits-and-lifecycle) describe the prototype's boundaries.
 
 ## Existing integration surfaces
 

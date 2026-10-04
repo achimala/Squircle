@@ -1,47 +1,72 @@
-# Agent friendly CLI
+# Agent-friendly CLI
 
-Status: accepted CLI-first direction; the interface below is a proposal, not implemented commands. `iosdev` is a placeholder name. Language and packaging are undecided; Rust is optional.
+Status: implemented Rust prototype, 2026-10-04. Executable name: `squircle`.
+See [workflow](verification.md) for runnable examples and [evidence](validation.md)
+for the distinction between implemented and physically verified behavior.
 
-## Purpose and boundary
+## Boundary and discovery
 
-Provide the same build, distribution, and diagnostics operations to Hermes, OpenClaw, coding agents, CI, and a human terminal. Callers need execution access to the Mac and the relevant permissions. The CLI supplies deterministic operations; the coordinator supplies planning, identity, and memory.
+The same deterministic build/install/diagnostic operations serve Hermes, OpenClaw,
+coding agents, CI, and a human terminal. Callers need access to this Mac and its
+signing environment. The coordinator supplies planning, identity, and memory.
 
-Reuse existing tools underneath. Begin by proving the real-device workflow, then package it. Do not build a generic agent framework or a new Xcode wrapper for its own sake.
+1. `squircle --help`: purpose, command groups, next help command.
+2. `squircle build start --help`: arguments and side effects.
+3. `squircle help workflow`: build → installation → diagnostics walkthrough.
+4. `squircle capabilities --json`: implemented operations and limits.
+5. `squircle doctor --json`: read-only Xcode and signing inventory.
 
-## Progressive discovery
+A future short skill can point agents at this live help. MCP and coordinator
+plugins are optional adapters; neither belongs in the core dependency graph.
 
-1. `iosdev --help`: concise purpose, command groups, and the next help command.
-2. `iosdev build --help`: prerequisites, arguments, side effects, concrete examples, and how to inspect the result.
-3. `iosdev help workflow`: one build → install → diagnostics example with links to deeper help.
-4. `iosdev capabilities --json`: versioned supported operations and output-contract version. `doctor --json` checks configured prerequisites without changing them.
+## Implemented commands
 
-A small optional skill should point at this live help and describe when to use the tool. Do not duplicate the entire command reference in every agent's context. A full schema-discovery framework and MCP wrapper can wait for demonstrated demand.
+| Command | Result |
+| --- | --- |
+| `init`, `serve` | Private state/credentials; foreground HTTP service |
+| `auth show --scope diagnostics` | Explicitly reveal the phone upload credential |
+| `build start` | Durable job ID; archive/export or unsigned simulator mode |
+| `build list`, `build status ID` | Persisted job records and launch acknowledgement |
+| `build wait ID --timeout 60` | Completion or bounded timeout; no implicit cancellation |
+| `build cancel ID` | Cancel that queued/running job |
+| `build log ID --offset N --limit N` | Bounded compiler log, byte cursor |
+| `build import --ipa PATH` | Private copy of an existing IPA; no signature certification |
+| `install-link ID --ttl-seconds 3600` | Expiring HTML page, manifest and IPA URLs |
+| `logs ID --since N --limit N` | Persisted diagnostic events, record cursor |
+| `crashes ID --since N --limit N` | Crash events only, same record cursor |
+| `symbolicate --report PATH --dsym PATH` | Local Xcode symbolication attempt for Apple-text reports |
+| `diagnostics send --file PATH` | Upload one diagnostic JSON fixture |
 
-## Proposed command shape
+`install-link` does not install or remotely launch an app. A `launch_observed`
+flag reflects an authenticated diagnostic event, not independent OS attestation.
+The service does not currently track installation/download completion.
 
-```sh
-iosdev doctor --json
-iosdev build start --project APP --request-id REQUEST_ID --json
-iosdev build status BUILD_ID --json
-iosdev build wait BUILD_ID --timeout 60 --json
-iosdev build cancel BUILD_ID --json
-iosdev install-link BUILD_ID --json
-iosdev logs BUILD_ID --since CURSOR --json
-iosdev crashes BUILD_ID --json
-```
+## Output and persistence contract
 
-`install-link` prepares a link; it does not silently install or remotely launch an app. Keep “requested”, “downloaded” where observable, and “app launched and acknowledged build” distinct.
+- `--json` emits one versioned result on stdout: `schema_version: 1`, `ok`, and
+  `data` or `error`. Default output is pretty JSON. Help is human-readable text.
+- Exit 0 means command success; exit 2 means invalid input, failed operation, or
+  unsuccessful/timed-out wait. Successful submission is not build completion.
+- Errors contain `code`, `message`, `retryable`, and `next_step`. Build logs live
+  in files rather than expanding tool-result context.
+- Stable request IDs deduplicate identical build submissions; changed arguments
+  with an existing ID are rejected. Records and artifacts survive agent sessions.
+- Git revision/dirty state are best-effort submission-time observations. The
+  working tree is not snapshotted; queued builds may see later edits.
+- Jobs retain app identity, archive/IPA/app paths and associated dSYMs. The service
+  reports unfinished jobs as interrupted after restart; it does not resume Xcode.
+- Log/diagnostic reads are bounded and paginated. `build list` currently returns
+  all records. There is no streaming CLI mode, retention deletion or log rotation.
 
-## Output and execution contract
-
-- Human-readable defaults; explicit `--json` emits one structured result on stdout. Send progress to stderr. Reserve a separate documented JSONL/event mode for streaming.
-- Stable IDs, documented exit codes, bounded output, cursors for logs, and artifact references instead of dumping entire build logs into context.
-- Structured errors with a code, explanation, retryability, and suggested next step. Machine mode must not hang on hidden prompts; report required user action.
-- `start` returns a durable job ID; successful submission is distinct from successful build completion. `wait` has a timeout, and `cancel` targets the specific job.
-- Deduplicate submission retries using request IDs; retain records across agent sessions. Record source revision/dirty state, build identity, artifacts and symbol association.
-
-An available HTTP service remains necessary for installation assets and incoming diagnostics. Async jobs need a supervisor independent of a transient agent shell. The same package can provide that service; startup/restart behavior must be explicit and tested. Offline crash/log buffering still belongs in the app instrumentation.
+`SQUIRCLE_DATA_DIR`/`--data-dir` select the private store. `SQUIRCLE_SERVER`/
+`--server` select the API address. Credentials come from the local store; they are
+not placed in command-line arguments. Control requests use a different token from
+phone uploads. The service defaults to loopback and requires user-provided HTTPS
+for phone access. See [lifecycle limits](verification.md#limits-and-lifecycle).
 
 ## Compatibility acceptance
 
-Run the core commands directly without Hermes installed. Verify Hermes can discover and operate them, then verify the same workflow from OpenClaw when that environment is available. No OpenClaw installation is required merely to design the interface. Test JSON parsing, failure reporting, retries, cancellation, and disconnected-client behavior using the same core implementation.
+Automated CLI tests run with an empty `PATH`, without an agent executable or
+running service for discovery. HTTP tests exercise the same core implementation
+used by the phone. Actual invocation from Hermes and OpenClaw remains pending;
+no installation of either is required to use Squircle directly.

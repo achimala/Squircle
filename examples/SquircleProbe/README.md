@@ -45,4 +45,4 @@ Integration into another app: reuse the event schema, queue, transport and Keych
 
 Validated 2026-10-04 with Xcode **27.1 (27A9269)**: unsigned simulator build succeeded; **5 unit tests passed** on an isolated iPhone 18 Pro / iOS 27.0 simulator. They cover durable replay and deduplication, capacity retention, event limits, explicit acknowledgement, and HTTPS endpoint validation. Test results: `.build/Tests.xcresult` (local, ignored).
 
-Physical signing/export, installation, cellular HTTPS routing, crash capture/relaunch and Mac symbolication remain **pending**. The crash code compiled against the pinned library; the unit tests do not prove the actual crash/recovery loop.
+Signed archive/export now succeeds for Dreamslate; the exported signature verifies and its dSYM UUID matches. See [validation evidence](../../docs/validation.md). Physical installation, cellular HTTPS routing, crash capture/relaunch and actual Mac symbolication remain **pending**. The crash code compiled against the pinned library; the unit tests do not prove the actual crash/recovery loop.

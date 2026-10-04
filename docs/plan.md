@@ -1,43 +1,44 @@
 # Implementation plan
 
-Status on 2026-10-04: documentation only. The user is installing Hermes. Every validation step below is pending.
+Status on 2026-10-04: the Squircle prototype is implemented. A signed probe archive/export, unsigned simulator build and local tests have passed. Cellular installation, physical-device feedback and real coordinator invocation remain pending. Exact evidence belongs in [validation](validation.md).
 
-## 1 Verify existing agent delegation
+## Completed foundation
 
-Have Hermes perform one small coding task in a disposable project through each CLI the user wants to use. Confirm the executable and login are available to the gateway process, the correct working directory is used, required approvals work, and completion/errors return to Hermes. Check resume only if the intended workflow needs it.
+- Rust CLI with progressive help/JSON output and an Axum service for authenticated build control, expiring OTA links and diagnostic ingestion.
+- SwiftUI Squircle Probe with Keychain credentials, persistent retries and PLCrashReporter integration; five unit tests passed on iPhone 18 Pro / iOS 27.0 simulator.
+- Unsigned simulator build: `d5d1f0f7-8913-4085-85ce-ae44a9402927`.
+- Signed archive and `release-testing` export: `61cf5aa9-770d-4ba2-a1cb-1a85f56eb78d`. Exported signature verification passed; binary/dSYM UUIDs match. Profile covers one registered device.
+- Local HTTP contract tests cover token roles, artifact/manifest delivery, expired links and diagnostic replay/launch observation.
 
-Also disconnect/reconnect during a background task and exercise cancellation. Record Hermes/CLI versions and API capabilities. Client disconnection and gateway restart are different cases; neither should cause a completed side effect to be blindly retried.
+These results establish a working local foundation. They do not establish physical installation, cellular reachability or runtime crash capture.
 
-**Exit condition:** useful delegated work reaches a clear result without building a custom coding-agent integration. Add Paseo only if an observed session-management requirement warrants it.
+## 1 Finish the cellular development proof
 
-## 2 Prove the cellular development loop
+Next input: the user's HTTPS origin and working user-managed Tailscale connectivity. Tailscale was stopped at the latest check. Squircle's public-URL setting generates links; it does not provision HTTPS or configure the VPN.
 
-Use a minimal iOS test app and existing command-line tools. Do not wait for the SwiftUI controller or a finished Hermes plugin.
+1. Expose the existing service through trusted HTTPS. Verify control requests and installer-compatible capability URLs without adding bearer headers to installation downloads.
+2. Generate a link for the signed probe. With Wi-Fi disabled, install over cellular and open manually. Record actual device/iOS version and required prompts/settings.
+3. Configure the diagnostic token and exact build ID. Observe the launch event and a recognizable app log on the Mac.
+4. Interrupt connectivity, enqueue a log, reconnect and verify recovery without duplicates.
+5. Trigger a controlled probe crash with no debugger attached; relaunch, upload and symbolicate it using the retained dSYM.
+6. Make a visible change, build/export a new version, install the update and correlate subsequent diagnostics with its build ID.
 
-1. Establish signing prerequisites and produce a device-specific, correctly signed exported IPA.
-2. Serve the manifest and IPA from the Mac over trusted HTTPS reachable through the user's Tailscale connection.
-3. With the phone on cellular and Wi-Fi disabled, initiate installation, install, and open the app manually.
-4. Produce an app log and a test crash. Deliver logs to the Mac; after relaunch, deliver and symbolicate the crash using the matching dSYM.
-5. Make a visible code change, build a new version, install the update, and correlate subsequent diagnostics with that build.
+**Exit condition:** an observed edit → build → cellular install → feedback cycle. Add commands, timings, failures and evidence to [validation](validation.md). Follow [the remote workflow](remote-ios.md); private HTTPS installer reachability remains a hypothesis until tested.
 
-**Exit condition:** an observed edit → build → cellular install → feedback cycle. Record signing/export settings, tool/device versions, URL behavior, timings, failures, and retained evidence in [the workflow document](remote-ios.md). Private HTTPS installer reachability is a hypothesis until this succeeds.
+## 2 Exercise the existing coordinator and coding CLIs
 
-## 3 Package the proven workflow as a neutral CLI
+Have the independently installed Hermes perform a small coding task in a disposable project through each desired CLI, then discover and invoke Squircle through its live help. Check executable/login availability in Hermes' process context, working directories, approvals, completion/errors and cancellation. Test resume only where the workflow requires it.
 
-Expose the working operations through an agent-neutral CLI and reuse existing tools. Add the small local service needed for asynchronous jobs, artifacts, and diagnostic ingestion. Define progressive help, structured output, durable build metadata and bounded logs as described in [CLI design](cli.md). Teach Hermes the workflow with a short skill; add a plugin only for a concrete integration need.
+Disconnect/reconnect during background work. Separately test gateway/service restart: do not blindly repeat completed side effects. Neither Hermes nor OpenClaw invocation has been validated yet.
 
-**Exit condition:** direct CLI use and a Hermes request both produce identifiable installable builds, and returned diagnostics can support a fix. Verify CLI independence from Hermes and record OpenClaw compatibility as pending until exercised. Report interruption/failure honestly; avoid duplicating agent state.
+**Exit condition:** a Hermes request delegates useful work, obtains an identifiable installable build and retrieves diagnostics through the same neutral CLI. Add a short skill if useful; add Paseo or an adapter only for an observed integration need. Keep OpenClaw compatibility marked pending until exercised.
 
-## 4 Build the native client
+## 3 Build the native controller
 
-First build a thin vertical slice: connect/authenticate, open a persistent conversation, send a task, show progress, handle approvals, display a build, and open its install link. Then add polished project navigation, worker visibility, diagnostic views, and reconnect behavior.
+After the device proof, implement connect/authenticate → persistent conversation → task/progress/approval → build → install link. Squircle Probe is test instrumentation, not this controller. Then add project navigation, worker visibility, diagnostic views and reconnect behavior.
 
-**Exit condition:** the complete validated loop works from the iPhone interface. Handle foreground streaming first; choose background notifications deliberately rather than assuming a persistent iOS socket.
+**Exit condition:** the validated loop works from the iPhone interface. Start with foreground streaming; choose background notifications deliberately rather than assuming a persistent iOS socket.
 
-## 5 Harden and simplify setup
+## 4 Harden and package
 
-Test upgrades, Mac restarts, interrupted builds/uploads, expired installation links, and signing failures. Record compatible CLI, coordinator, and optional adapter versions. Add a small Mac setup/launcher helper only if useful. Keep Tailscale user-managed.
-
-## Current evidence
-
-Earlier read-only checks found an Apple Silicon Mac with Xcode 27.1 and Codex/Claude executables. They did not establish device connectivity, signing readiness, gateway CLI access, or successful remote installation. Recheck relevant facts when implementation begins.
+Exercise upgrades, Mac restarts, interrupted builds/uploads, credential expiry and signing failures beyond existing unit tests. Record compatible CLI/coordinator versions. Finish distribution and optional startup/launcher integration after the workflow is proven. Keep Tailscale user-managed and durable task state in the appropriate component; avoid creating another agent backend.
