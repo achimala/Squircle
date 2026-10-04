@@ -4,7 +4,7 @@ Research snapshot: **2026-10-04**. These are architectural judgments from primar
 
 ## Accepted direction
 
-Use **stock Hermes, an agent-neutral iOS development CLI, and our own SwiftUI client**. Hermes supplies identity, native memory, sessions and orchestration. The user refined the earlier plugin-first design to make the development tooling reusable by other agents. Hermes plugins are optional adapters. [CLI design](cli.md), [Hermes client API](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server).
+Use **stock Hermes, an agent-neutral iOS development CLI, and our own native client**. UIKit/Core Animation supersedes the first SwiftUI presentation. Hermes supplies identity, native memory, sessions and orchestration. The user refined the earlier plugin-first design to make the development tooling reusable by other agents. Hermes plugins are optional adapters. [CLI design](cli.md), [Hermes client API](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server).
 
 ## Other agent hosts
 
@@ -20,8 +20,8 @@ Start with Hermes's identity files, curated memory, searchable session history a
 
 ## Distribution and diagnostics
 
-**Firebase is unnecessary** for the intended Mac-hosted artifact flow over user-managed Tailscale. Valid signing, provisioning and an installer-readable HTTPS endpoint still need verification; transferring an IPA into our app does not itself install it.
+**Firebase is unnecessary** for the verified Mac-hosted artifact flow over user-managed Tailscale. Other apps still need valid signing and provisioning; transferring an IPA into our app does not itself install it.
 
 **TestFlight remains an alternative** when its distribution convenience outweighs App Store Connect setup and processing delay. Direct remote device debugging is a separate capability from distributing a build.
 
-Diagnostics selection remains open. [Pulse](https://github.com/kean/Pulse) was considered for local inspection; a fixed remote upload path needs additional integration. [SwiftLoggerServer](https://github.com/krugazor/SwiftLoggerServer) is a possible small prototype, with reliability/authentication still to validate. [GlitchTip](https://glitchtip.com/documentation/install/) with Sentry Cocoa offers a fuller self-hosted option with database/service overhead. None is selected. The required phone instrumentation and acceptance tests are in [the remote workflow](remote-ios.md).
+Probe uses PLCrashReporter and a bounded upload queue; the simulator crash path is verified. [Pulse](https://github.com/kean/Pulse), [SwiftLoggerServer](https://github.com/krugazor/SwiftLoggerServer) and [GlitchTip](https://glitchtip.com/documentation/install/) remain optional alternatives for broader inspection or diagnostics. None is an additional dependency. Remaining phone checks are in [the remote workflow](remote-ios.md).

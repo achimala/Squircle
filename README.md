@@ -1,14 +1,16 @@
 # Squircle
 
-Build and iterate on iOS apps from an iPhone, using a Mac as the build machine and agent host. The chosen direction is **a standard Hermes installation, an agent-neutral iOS development CLI, and a native SwiftUI client**. Hermes is the first coordinator; the development tooling should also work from OpenClaw and other agents with Mac shell access.
+Build and iterate on iOS apps from your iPhone. **The native app talks to stock Hermes over Tailscale; the Mac runs Xcode and coding agents.** The Rust `squircle` tool supplies builds, installation links and diagnostics. Hermes owns identity, memory and conversations.
 
 ## Current state
 
-As of 2026-10-04, a Rust CLI and local service implement asynchronous Xcode builds, expiring installation links, and authenticated diagnostic collection. A minimal SwiftUI **Squircle Probe** exercises app logs, offline buffering, and crash capture using PLCrashReporter.
+The first [native app](app/Squircle/README.md) is installed and its Hermes chat works on the phone. It has persistent conversations, streamed responses/tool progress, approvals, stop, and installable builds. This personal build includes its Mac connection settings: **no token form, pairing flow or additional agent backend**.
 
-**Verified:** real simulator build, signed Dreamslate device archive/export, valid exported signature and matching dSYM; Rust contract tests and Probe simulator tests. **Pending:** physical cellular installation and phone-to-Mac feedback, actual Hermes/OpenClaw invocation, and the polished client. See [validation evidence](docs/validation.md).
+The next interface uses **UIKit and Core Animation**, replacing the first SwiftUI presentation: app-centric project home → threads → installable builds, with an ivory canvas, floating device and flat rows. The redesign and frame-by-frame visual verification are in progress, not yet validated. [Design decisions](docs/product.md).
 
-## Run the prototype
+**Verified on 2026-10-04:** cellular installation, automatic native-app launch acknowledgement on the Mac, live Hermes API interaction, signed builds and matching symbols, and real simulator crash recovery/symbolication. [Evidence and remaining checks](docs/validation.md). The Probe remains a diagnostic test fixture, separate from the app.
+
+## For development
 
 Requires macOS, Xcode, and Rust. The helper uses the repository-local Rust toolchain if present, otherwise your installed Cargo. It does not install dependencies.
 
@@ -20,7 +22,7 @@ export SQUIRCLE_DATA_DIR="$PWD/.squircle"
 ./target/release/squircle help workflow
 ```
 
-Follow the [verification walkthrough](docs/verification.md) to start the service, build, and connect the phone. Tailscale and HTTPS remain user-managed. The service runs in the foreground; no login daemon is installed.
+See the [app guide](app/Squircle/README.md) to rebuild the client and the [CLI walkthrough](docs/verification.md) for build/diagnostic commands. Tailscale remains an external dependency; setup on this Mac was performed at the user's explicit request. Mac startup supervision is not packaged yet.
 
 ## Read only what you need
 
@@ -34,4 +36,4 @@ Follow the [verification walkthrough](docs/verification.md) to start the service
 | What should happen next and what proves success? | [Implementation plan](docs/plan.md) |
 | Why were other products and approaches deferred? | [Alternatives](docs/alternatives.md) |
 
-Agents should start with [AGENTS.md](AGENTS.md). These documents distinguish accepted decisions, proposed implementation, and unverified assumptions. They are not a claim that the proposed stack already works together.
+Agents should start with [AGENTS.md](AGENTS.md). The linked evidence separates the working path from remaining checks.

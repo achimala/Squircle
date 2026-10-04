@@ -68,5 +68,6 @@ for phone access. See [lifecycle limits](verification.md#limits-and-lifecycle).
 
 Automated CLI tests run with an empty `PATH`, without an agent executable or
 running service for discovery. HTTP tests exercise the same core implementation
-used by the phone. Actual invocation from Hermes and OpenClaw remains pending;
-no installation of either is required to use Squircle directly.
+used by the phone. Actual stock Hermes CLI and API runs have invoked Squircle
+successfully; OpenClaw invocation remains pending. No agent installation is
+required to use Squircle directly. See [validation](validation.md).

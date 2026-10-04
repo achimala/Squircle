@@ -1,9 +1,14 @@
 # Squircle iPhone app
 
-A native SwiftUI client for the user's independently installed Hermes. Open the
-app, talk to the agent, and install ready apps from Builds. Hermes retains the
-conversation history; the client stores only selected-session/active-run pointers
-for reconnecting. No coordinator, memory service or pairing backend is embedded.
+A native client for the user's independently installed Hermes. The first SwiftUI
+build is installed and phone chat works. The selected redesign uses UIKit and
+Core Animation: project home → threads → installable builds, on a continuous
+ivory canvas with a floating device, flat rows and glass controls. Rounded-card
+layouts were rejected. Visual and transition acceptance is still pending.
+
+Hermes retains conversation history; local client state holds navigation,
+project associations and active-run pointers for reconnecting. No coordinator,
+memory service or pairing backend is embedded.
 
 ## Build
 
@@ -28,9 +33,12 @@ own configuration. Hermes's normal required API authentication stays intact.
 
 - `Sources/HermesClient.swift`: stock Sessions/Runs REST and SSE, Squircle builds.
 - `Sources/SquircleModel.swift`: current screen state, reconnect and launch report.
-- `Sources/Views/`: chat, conversations, approvals and build installation UI.
+- Presentation: the initial SwiftUI screens are being replaced with UIKit/Core
+  Animation. Verify rendered screens and transitions frame by frame before
+  claiming the redesign complete.
 - `Tests/`: seven protocol/request tests; live HTTPS and full-model tests also
   passed against this Mac. See [validation](../../docs/validation.md).
 
-The current build was signed, exported and installed; its automatic launch
-event reached the Mac. Keep the Mac and external Tailscale connection available.
+The installed baseline was signed, exported and installed; its automatic launch
+event reached the Mac. Live model send/stream/history reconciliation also passed
+in seven seconds. Keep the Mac and external Tailscale connection available.

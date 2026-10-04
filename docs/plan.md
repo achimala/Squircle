@@ -1,44 +1,54 @@
 # Implementation plan
 
-Status on 2026-10-04: the Squircle prototype is implemented. A signed probe archive/export, unsigned simulator build and local tests have passed. Cellular installation, physical-device feedback and real coordinator invocation remain pending. Exact evidence belongs in [validation](validation.md).
+Status on 2026-10-04: the Mac build service, stock Hermes API and first native
+client work together. The user installed the client and confirmed phone chat;
+its launch acknowledgement reached the Mac. Exact evidence is in
+[validation](validation.md).
 
 ## Completed foundation
 
-- Rust CLI with progressive help/JSON output and an Axum service for authenticated build control, expiring OTA links and diagnostic ingestion.
-- SwiftUI Squircle Probe with Keychain credentials, persistent retries and PLCrashReporter integration; five unit tests passed on iPhone 18 Pro / iOS 27.0 simulator.
-- Unsigned simulator build: `d5d1f0f7-8913-4085-85ce-ae44a9402927`.
-- Signed archive and `release-testing` export: `61cf5aa9-770d-4ba2-a1cb-1a85f56eb78d`. Exported signature verification passed; binary/dSYM UUIDs match. Profile covers one registered device.
-- Local HTTP contract tests cover token roles, artifact/manifest delivery, expired links and diagnostic replay/launch observation.
+- Rust CLI/service for Xcode jobs, signed artifacts, installation links and
+  diagnostic collection; 45 Rust tests passed.
+- Signed cellular installs of Probe and the native client, with automatic launch
+  acknowledgement from client job `05d980f6-be8c-4e21-acb5-f82971f7db37`.
+- Stock Hermes CLI/API invocation, persistent sessions, streamed runs and
+  idempotent run retries over the existing Tailscale HTTPS connection.
+- First SwiftUI client with chat, tool progress, approvals, stop and builds;
+  seven client tests plus live Swift transport/model checks passed.
+- Probe instrumentation with nine tests, real simulator crash recovery,
+  matching symbols and successful symbolication. Physical-phone crash recovery
+  remains unverified.
 
-These results establish a working local foundation. They do not establish physical installation, cellular reachability or runtime crash capture.
+## 1 Refine the native app
 
-## 1 Finish the cellular development proof
+Replace the initial SwiftUI presentation with UIKit and Core Animation. Start
+from an app-centric project home, then threads and installable builds. Use a
+continuous ivory canvas, floating dimensional device, typography and flat rows;
+reserve glass for controls. The user rejected the initial rounded-card target.
+Keep fluid transitions and direct access to the working Hermes conversation.
 
-Next input: the user's HTTPS origin and working user-managed Tailscale connectivity. Tailscale was stopped at the latest check. Squircle's public-URL setting generates links; it does not provision HTTPS or configure the VPN.
+**Acceptance:** inspect rendered screens and transitions frame by frame, fix
+visible discontinuities, and preserve sending, streaming, reconnecting and
+installation access. This redesign and visual acceptance are currently pending;
+the working first client is the baseline, not proof of the redesign.
 
-1. Expose the existing service through trusted HTTPS. Verify control requests and installer-compatible capability URLs without adding bearer headers to installation downloads.
-2. Generate a link for the signed probe. With Wi-Fi disabled, install over cellular and open manually. Record actual device/iOS version and required prompts/settings.
-3. Configure the diagnostic token and exact build ID. Observe the launch event and a recognizable app log on the Mac.
-4. Interrupt connectivity, enqueue a log, reconnect and verify recovery without duplicates.
-5. Trigger a controlled probe crash with no debugger attached; relaunch, upload and symbolicate it using the retained dSYM.
-6. Make a visible change, build/export a new version, install the update and correlate subsequent diagnostics with its build ID.
+## 2 Complete phone feedback and worker verification
 
-**Exit condition:** an observed edit → build → cellular install → feedback cycle. Add commands, timings, failures and evidence to [validation](validation.md). Follow [the remote workflow](remote-ios.md); private HTTPS installer reachability remains a hypothesis until tested.
+Exercise phone logs, offline queue recovery, controlled crash/relaunch/upload
+and matching-dSYM symbolication. Install a visible update and distinguish its
+feedback from the previous build. The private HTTPS installer path is already
+proven for this phone; no new distribution backend is needed.
 
-## 2 Exercise the existing coordinator and coding CLIs
+Have stock Hermes delegate a small coding task through the desired Codex/Claude
+CLIs, obtain an identifiable build and retrieve diagnostics through Squircle.
+Check working directory, login, approvals, completion and cancellation in the
+actual process. Resume/restart behavior and OpenClaw invocation remain separate
+tests; add Paseo or a skill only for an observed need.
 
-Have the independently installed Hermes perform a small coding task in a disposable project through each desired CLI, then discover and invoke Squircle through its live help. Check executable/login availability in Hermes' process context, working directories, approvals, completion/errors and cancellation. Test resume only where the workflow requires it.
+## 3 Harden the working flow
 
-Disconnect/reconnect during background work. Separately test gateway/service restart: do not blindly repeat completed side effects. Neither Hermes nor OpenClaw invocation has been validated yet.
-
-**Exit condition:** a Hermes request delegates useful work, obtains an identifiable installable build and retrieves diagnostics through the same neutral CLI. Add a short skill if useful; add Paseo or an adapter only for an observed integration need. Keep OpenClaw compatibility marked pending until exercised.
-
-## 3 Build the native controller
-
-After the device proof, implement connect/authenticate → persistent conversation → task/progress/approval → build → install link. Squircle Probe is test instrumentation, not this controller. Then add project navigation, worker visibility, diagnostic views and reconnect behavior.
-
-**Exit condition:** the validated loop works from the iPhone interface. Start with foreground streaming; choose background notifications deliberately rather than assuming a persistent iOS socket.
-
-## 4 Harden and package
-
-Exercise upgrades, Mac restarts, interrupted builds/uploads, credential expiry and signing failures beyond existing unit tests. Record compatible CLI/coordinator versions. Finish distribution and optional startup/launcher integration after the workflow is proven. Keep Tailscale user-managed and durable task state in the appropriate component; avoid creating another agent backend.
+Exercise service/gateway restarts, interrupted uploads/builds, signing failures
+and upgrades. Package Mac startup supervision and notification delivery only
+when their intended behavior is clear. Foreground SSE does not provide suspended
+iOS background notifications. Keep Tailscale external and avoid a second agent
+backend.

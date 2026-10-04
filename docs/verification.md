@@ -4,6 +4,11 @@ Squircle is a Rust CLI and local service. The commands below operate on this Mac
 Keep the service running in a separate terminal. This prototype does not install
 itself as a login service or change Tailscale.
 
+The personal native client already embeds this Mac's connection settings and
+needs no token entry. Its installation/chat path is verified; the commands here
+are for rebuilding and exercising the development tools. See the
+[app guide](../app/Squircle/README.md) and [current evidence](validation.md).
+
 ## Build and inspect
 
 ```sh
@@ -67,7 +72,7 @@ installation, then open Squircle Probe manually. Treat the expiring link as a
 credential. The installer must reach the manifest and IPA independently of the
 browser. A fetched page or link is not proof of installation.
 
-## Return diagnostics
+## Probe diagnostic test setup
 
 Configure Squircle Probe with the same HTTPS origin and the diagnostic upload
 token, revealed deliberately with:
@@ -76,7 +81,7 @@ token, revealed deliberately with:
 ./target/debug/squircle auth show --scope diagnostics --json
 ```
 
-Do not give the app the control token. Squircle-built Probe apps embed their build
+Use the upload token for the diagnostic-only Probe. Squircle-built Probe apps embed their build
 ID. Send a log, test offline buffering/retry, then deliberately crash and relaunch.
 
 ```sh
