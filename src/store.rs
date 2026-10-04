@@ -22,6 +22,10 @@ pub struct Store {
 impl Store {
     pub fn open(root: PathBuf) -> Result<Self> {
         private_dir(&root)?;
+        // Persisted artifact paths must survive a restart from a different cwd.
+        let root = root
+            .canonicalize()
+            .context("could not resolve storage directory")?;
         private_dir(&root.join("jobs"))?;
         private_dir(&root.join("tickets"))?;
         let path = root.join("config.json");
@@ -392,6 +396,8 @@ mod tests {
             request: None,
             error: None,
             source: "test".into(),
+            source_revision: None,
+            source_dirty: None,
             output: Some(BuildOutput {
                 archive_path: None,
                 ipa_path: None,
@@ -443,6 +449,40 @@ mod tests {
         );
         assert_eq!(store.list_jobs()?.len(), 1);
         assert_eq!(store.load_ticket(&ticket.token)?.build_id, job.id);
+        Ok(())
+    }
+
+    #[test]
+    fn relative_root_persists_artifact_paths_independent_of_working_directory() -> Result<()> {
+        let temporary = tempfile::tempdir_in(std::env::current_dir()?)?;
+        let relative_root = PathBuf::from(temporary.path().file_name().unwrap()).join("store");
+        assert!(relative_root.is_relative());
+        let store = Store::open(relative_root)?;
+        assert!(store.root.is_absolute());
+        let root = store.root.clone();
+        let mut job = job();
+        store.save_job(&job)?;
+        let artifact_path = store.job_dir(&job.id)?.join("app.ipa");
+        fs::write(&artifact_path, b"artifact bytes")?;
+        job.output.as_mut().unwrap().ipa_path = Some(artifact_path);
+        store.save_job(&job)?;
+        drop(store);
+
+        let restarted = Store::open(root)?;
+        let stored_path = restarted
+            .load_job(&job.id)?
+            .output
+            .unwrap()
+            .ipa_path
+            .unwrap();
+        assert!(stored_path.is_absolute());
+        // Joining an unrelated cwd has no effect on an absolute persisted path;
+        // avoid changing the process-wide cwd while other tests run in parallel.
+        let unrelated_directory = tempfile::tempdir()?;
+        assert_eq!(
+            fs::read(unrelated_directory.path().join(stored_path))?,
+            b"artifact bytes"
+        );
         Ok(())
     }
 

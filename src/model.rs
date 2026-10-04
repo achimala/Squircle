@@ -62,6 +62,12 @@ pub struct Job {
     pub output: Option<BuildOutput>,
     pub error: Option<String>,
     pub source: String,
+    /// Git HEAD observed at submission, not a source snapshot.
+    #[serde(default)]
+    pub source_revision: Option<String>,
+    /// Working-tree status observed at submission; None means unavailable.
+    #[serde(default)]
+    pub source_dirty: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -122,4 +128,21 @@ pub fn failure(code: &str, message: impl AsRef<str>, next_step: &str) -> serde_j
     serde_json::json!({"schema_version": SCHEMA_VERSION, "ok": false, "error": {
         "code": code, "message": message.as_ref(), "retryable": false, "next_step": next_step
     }})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_job_records_load_without_source_provenance() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "id": "ed8c7cf6-45ac-4a0f-90ef-67e4901e9386",
+            "created_at": 1, "updated_at": 1, "state": "succeeded",
+            "request": null, "output": null, "error": null, "source": "xcodebuild"
+        }))
+        .unwrap();
+        assert_eq!(job.source_revision, None);
+        assert_eq!(job.source_dirty, None);
+    }
 }

@@ -287,6 +287,7 @@ async fn start(
             "Request ID must contain 1–128 letters, digits, underscores or hyphens",
         ));
     }
+    let (source_revision, source_dirty) = source_provenance(&request.project).await;
     let (sender, receiver) = watch::channel(false);
     let (job, dir) = {
         let store = state.store.lock().unwrap();
@@ -323,6 +324,8 @@ async fn start(
             output: None,
             error: None,
             source: "xcodebuild".into(),
+            source_revision,
+            source_dirty,
         };
         let dir = store.job_dir(&job.id).map_err(ApiError::internal)?;
         store.save_job(&job).map_err(ApiError::internal)?;
@@ -389,6 +392,95 @@ async fn start(
     });
     Ok(Json(success(json!({"job":response,"replayed":false}))))
 }
+
+/// Best-effort submission-time observations. Builds still use the working tree;
+/// these fields deliberately do not claim that queued work uses a Git snapshot.
+async fn source_provenance(project: &std::path::Path) -> (Option<String>, Option<bool>) {
+    let Some(directory) = project.parent() else {
+        return (None, None);
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let Some(revision) = git_output(
+        directory,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        128,
+        deadline,
+    )
+    .await
+    else {
+        return (None, None);
+    };
+    let Ok(revision) = String::from_utf8(revision) else {
+        return (None, None);
+    };
+    let revision = revision.trim();
+    if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return (None, None);
+    }
+    let dirty = git_output(
+        directory,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ],
+        1024 * 1024,
+        deadline,
+    )
+    .await
+    .map(|output| !output.is_empty());
+    (Some(revision.to_owned()), dirty)
+}
+
+async fn git_output(
+    directory: &std::path::Path,
+    arguments: &[&str],
+    max_bytes: u64,
+    deadline: tokio::time::Instant,
+) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout_at(deadline, async {
+        let mut command = tokio::process::Command::new("/usr/bin/git");
+        command
+            .args(["-c", "core.fsmonitor=false"])
+            .arg("-C")
+            .arg(directory)
+            .args(arguments)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_COMMON_DIR")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn().ok()?;
+        let mut bytes = Vec::new();
+        child
+            .stdout
+            .take()?
+            .take(max_bytes + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .ok()?;
+        if bytes.len() as u64 > max_bytes {
+            let _ = child.kill().await;
+            return None;
+        }
+        if child.wait().await.ok()?.success() {
+            Some(bytes)
+        } else {
+            None
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 async fn cancel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -422,42 +514,80 @@ async fn import(
 ) -> ApiResult<Json<Value>> {
     auth(&state, &headers, false)?;
     let input = body(input)?;
-    // Large IPA I/O stays off the async HTTP worker.
-    let store = state.store.clone();
-    let draining = state.draining.clone();
-    let job = tokio::task::spawn_blocking(move || -> Result<Job> {
-        let source = input.ipa.canonicalize()?;
-        if std::fs::metadata(&source)?.len() > 4 * 1024 * 1024 * 1024u64 {
-            anyhow::bail!("IPA exceeds 4 GiB");
-        }
-        let store = store.lock().unwrap();
-        if draining.load(Ordering::Acquire) {
-            anyhow::bail!("Service is shutting down or paused");
-        }
-        let id = uuid::Uuid::new_v4().to_string();
-        let dir = store.job_dir(&id)?;
-        std::fs::create_dir_all(&dir)?;
-        let dest = dir.join("app.ipa");
-        std::fs::copy(&source, &dest)?;
-        std::fs::File::open(&dest)?.sync_all()?;
-        let output = artifact::inspect_ipa(&dest)?;
-        let job = Job {
-            id,
-            created_at: now(),
-            updated_at: now(),
-            state: BuildState::Succeeded,
-            request: None,
-            output: Some(output),
-            error: None,
-            source: "imported_ipa_signature_not_verified".into(),
-        };
-        store.save_job(&job)?;
-        Ok(job)
-    })
-    .await
-    .map_err(ApiError::internal)?
-    .map_err(ApiError::bad)?;
+    // Copying, ZIP inspection and fsync stay off both the HTTP worker and the
+    // global store lock, so an import cannot block authentication/cancellation.
+    let job =
+        tokio::task::spawn_blocking(move || import_ipa(&state, &input.ipa, copy_and_inspect_ipa))
+            .await
+            .map_err(ApiError::internal)?
+            .map_err(ApiError::bad)?;
     Ok(Json(success(job)))
+}
+
+fn copy_and_inspect_ipa(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<BuildOutput> {
+    std::fs::copy(source, destination)?;
+    std::fs::File::open(destination)?.sync_all()?;
+    artifact::inspect_ipa(destination)
+}
+
+fn import_ipa(
+    state: &AppState,
+    source: &std::path::Path,
+    prepare: impl FnOnce(&std::path::Path, &std::path::Path) -> Result<BuildOutput>,
+) -> Result<Job> {
+    let source = source.canonicalize()?;
+    let metadata = std::fs::metadata(&source)?;
+    anyhow::ensure!(metadata.is_file(), "IPA must be a regular file");
+    anyhow::ensure!(
+        metadata.len() <= 4 * 1024 * 1024 * 1024u64,
+        "IPA exceeds 4 GiB"
+    );
+    let id = uuid::Uuid::new_v4().to_string();
+    let dir = {
+        let store = state.store.lock().unwrap();
+        anyhow::ensure!(
+            !state.draining.load(Ordering::Acquire),
+            "Service is shutting down or paused"
+        );
+        store.job_dir(&id)?
+    };
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&dir)?;
+    let output = match prepare(&source, &dir.join("app.ipa")) {
+        Ok(output) => output,
+        Err(error) => {
+            // No job record exists yet. Clean up only this import's staging
+            // directory; never erase evidence after attempting publication.
+            // Serialize directory removal with list_jobs directory traversal.
+            let _store = state.store.lock().unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(error);
+        }
+    };
+    let job = Job {
+        id,
+        created_at: now(),
+        updated_at: now(),
+        state: BuildState::Succeeded,
+        request: None,
+        output: Some(output),
+        error: None,
+        source: "imported_ipa_signature_not_verified".into(),
+        source_revision: None,
+        source_dirty: None,
+    };
+    // Work admitted before shutdown may finish. Publication occurs only after
+    // the copied IPA has been synced and its metadata validated.
+    state.store.lock().unwrap().save_job(&job)?;
+    Ok(job)
 }
 
 #[derive(Deserialize)]
@@ -690,6 +820,14 @@ async fn build_log(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn non_repository_source_has_no_invented_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("Probe.xcodeproj");
+        std::fs::create_dir(&project).unwrap();
+        assert_eq!(source_provenance(&project).await, (None, None));
+    }
+
     fn request(root: &std::path::Path) -> BuildRequest {
         let project = root.join("Probe.xcodeproj");
         std::fs::create_dir_all(&project).unwrap();
@@ -712,6 +850,83 @@ mod tests {
         );
         headers
     }
+
+    fn test_ipa(path: &std::path::Path) -> Result<()> {
+        use std::io::Write;
+        let mut metadata = plist::Dictionary::new();
+        metadata.insert("CFBundleIdentifier".into(), "dev.example.probe".into());
+        metadata.insert("CFBundleVersion".into(), "1".into());
+        let mut bytes = Vec::new();
+        plist::Value::Dictionary(metadata).to_writer_xml(&mut bytes)?;
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path)?);
+        zip.start_file(
+            "Payload/Probe.app/Info.plist",
+            zip::write::SimpleFileOptions::default(),
+        )?;
+        zip.write_all(&bytes)?;
+        zip.finish()?;
+        Ok(())
+    }
+
+    #[test]
+    fn import_leaves_store_available_and_publishes_only_after_validation() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("input.ipa");
+        test_ipa(&source)?;
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let authorization = headers(&state);
+        let job = import_ipa(&state, &source, |source, destination| {
+            // A nonblocking acquisition makes a regression fail immediately,
+            // instead of hanging the test on the old global-lock behavior.
+            let store = state
+                .store
+                .try_lock()
+                .expect("copy must not hold store lock");
+            assert!(store.list_jobs()?.is_empty());
+            drop(store);
+            auth(&state, &authorization, false).unwrap();
+            let output = copy_and_inspect_ipa(source, destination)?;
+            assert!(state.store.lock().unwrap().list_jobs()?.is_empty());
+            Ok(output)
+        })?;
+        let stored = state.store.lock().unwrap().load_job(&job.id)?;
+        assert_eq!(stored.state, BuildState::Succeeded);
+        assert_eq!(stored.source, "imported_ipa_signature_not_verified");
+        let output = stored.output.unwrap();
+        assert_eq!(output.bundle_id, "dev.example.probe");
+        assert_eq!(
+            std::fs::read(output.ipa_path.unwrap())?,
+            std::fs::read(source)?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthorized_or_invalid_imports_publish_no_record() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("input.ipa");
+        test_ipa(&source)?;
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let error = import(
+            State(state.clone()),
+            HeaderMap::new(),
+            Ok(Json(ImportRequest {
+                ipa: source.clone(),
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        let jobs_directory = state.store.lock().unwrap().root.join("jobs");
+        assert_eq!(std::fs::read_dir(&jobs_directory)?.count(), 0);
+
+        std::fs::write(&source, b"not an IPA")?;
+        assert!(import_ipa(&state, &source, copy_and_inspect_ipa).is_err());
+        assert!(state.store.lock().unwrap().list_jobs()?.is_empty());
+        assert_eq!(std::fs::read_dir(jobs_directory)?.count(), 0);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_deduplicate() {
         let dir = tempfile::tempdir().unwrap();

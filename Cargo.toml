@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "Agent-friendly iOS builds, installation links, and diagnostics on your Mac"
 
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"
