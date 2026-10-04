@@ -61,6 +61,9 @@ fn capabilities_work_without_agents_service_or_initialized_state() {
         "app.update",
         "app.preview",
         "preview.capture",
+        "app.browse",
+        "app.inspect",
+        "app.import",
     ] {
         assert!(
             result["data"]["operations"]
@@ -91,6 +94,31 @@ fn app_preview_help_explains_publication_without_a_build() {
     ] {
         assert!(help.contains(expected), "missing help: {expected}");
     }
+}
+
+#[test]
+fn app_import_discovery_explains_no_build_and_xcode_project_preservation() {
+    let output = command()
+        .args(["app", "import", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    for item in [
+        "without starting a build",
+        "--project",
+        "--scheme",
+        "--name",
+        "--configuration",
+    ] {
+        assert!(text.contains(item), "missing {item}");
+    }
+    let output = command()
+        .args(["app", "browse", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8(output.stdout).unwrap().contains("--path"));
 }
 
 #[test]

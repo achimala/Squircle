@@ -1,9 +1,12 @@
-use crate::{apps, artifact, model::*, preview, store::Store, xcode};
+use crate::{apps, artifact, model::*, preview, projects, store::Store, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Path, Query, State, rejection::JsonRejection},
+    extract::{
+        DefaultBodyLimit, Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -29,6 +32,7 @@ pub struct AppState {
     pub store: Arc<Mutex<Store>>,
     cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     slots: Arc<Semaphore>,
+    inspection_slots: Arc<Semaphore>,
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
     recovery_jobs: Arc<Mutex<HashMap<String, Job>>>,
@@ -40,6 +44,7 @@ impl AppState {
             store: Arc::new(Mutex::new(store)),
             cancellations: Arc::default(),
             slots: Arc::new(Semaphore::new(1)),
+            inspection_slots: Arc::new(Semaphore::new(2)),
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
             recovery_jobs: Arc::default(),
@@ -141,6 +146,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/builds", get(list).post(start))
         .route("/v1/apps", get(list_apps).post(register_app))
+        .route("/v1/apps/import", post(import_app))
+        .route("/v1/projects", get(browse_projects))
+        .route("/v1/projects/inspect", get(inspect_project))
         .route("/v1/apps/{id}", get(get_app).patch(update_app))
         .route("/v1/apps/{id}/preview", get(app_preview).post(publish_app_preview))
         .route("/v1/builds/{id}", get(status))
@@ -531,6 +539,96 @@ fn public_app(app: apps::AppRecord) -> Value {
         preview.remove("path");
     }
     value
+}
+
+#[derive(Deserialize)]
+struct BrowseQuery {
+    path: Option<String>,
+}
+#[derive(Deserialize)]
+struct InspectQuery {
+    project: String,
+    scheme: Option<String>,
+    configuration: Option<String>,
+}
+
+async fn browse_projects(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    query: std::result::Result<Query<BrowseQuery>, QueryRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let Query(query) = query.map_err(|error| ApiError::bad(error.body_text()))?;
+    let directory = tokio::task::spawn_blocking(move || projects::browse(query.path.as_deref()))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::bad)?;
+    Ok(Json(success(directory)))
+}
+fn inspection_busy() -> ApiError {
+    ApiError {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        code: "inspection_busy",
+        message: "Two Xcode inspections are already running".into(),
+        next: "Wait for an existing inspection to finish, then retry.",
+    }
+}
+async fn inspect_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    query: std::result::Result<Query<InspectQuery>, QueryRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let Query(query) = query.map_err(|error| ApiError::bad(error.body_text()))?;
+    let _permit = state
+        .inspection_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| inspection_busy())?;
+    let result = projects::inspect(
+        &query.project,
+        query.scheme.as_deref(),
+        query.configuration.as_deref(),
+    )
+    .await
+    .map_err(ApiError::bad)?;
+    Ok(Json(success(result)))
+}
+async fn import_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    input: std::result::Result<Json<projects::ImportRequest>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let input = body(input)?;
+    if input.name.trim().is_empty() || input.name.len() > 200 || input.name.contains('\0') {
+        return Err(ApiError::bad("App name must contain 1–200 characters"));
+    }
+    if state.draining.load(Ordering::Acquire) {
+        return Err(ApiError::unavailable());
+    }
+    let _permit = state
+        .inspection_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| inspection_busy())?;
+    let inspected = projects::inspect(
+        &input.project,
+        Some(&input.scheme),
+        Some(&input.configuration),
+    )
+    .await
+    .map_err(ApiError::bad)?;
+    let app = tokio::task::spawn_blocking(move || {
+        let store = state.store.lock().unwrap();
+        if state.draining.load(Ordering::Acquire) {
+            return Err(ApiError::unavailable());
+        }
+        projects::import_inspected(&store, &inspected, &input.name).map_err(ApiError::bad)
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    Ok(Json(success(public_app(app))))
 }
 
 async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {

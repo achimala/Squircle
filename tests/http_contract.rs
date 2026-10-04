@@ -333,6 +333,106 @@ const SCREENSHOT_PNG: &[u8] = &[
 ];
 
 #[tokio::test]
+async fn remote_project_routes_require_control_before_inspecting_paths_or_query_fields() {
+    let fixture = Fixture::new();
+    for token in [None, Some("wrong"), Some(fixture.diagnostic.as_str())] {
+        for (method, path) in [
+            ("GET", "/v1/projects"),
+            ("GET", "/v1/projects/inspect"),
+            ("POST", "/v1/apps/import"),
+        ] {
+            let (status, value) = fixture.json(method, path, token, Some(json!({}))).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{value}");
+        }
+    }
+    let (status, value) = fixture
+        .json("GET", "/v1/projects/inspect", Some(&fixture.control), None)
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["ok"], false);
+    let (status, value) = fixture
+        .json(
+            "POST",
+            "/v1/apps/import",
+            Some(&fixture.control),
+            Some(json!({"project":"/does/not/exist.xcodeproj","scheme":"App","name":"App"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(value["ok"], false);
+    assert!(
+        fixture
+            .state
+            .store
+            .lock()
+            .unwrap()
+            .list_jobs()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        squircle::apps::list(&fixture.state.store.lock().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn remote_directory_listing_returns_only_shallow_visible_folders_and_xcode_packages() {
+    let fixture = Fixture::new();
+    let directory = fixture.ipa.parent().unwrap().join("Work & Apps");
+    fs::create_dir(&directory).unwrap();
+    for name in [
+        "Beta.xcworkspace",
+        "Alpha.xcodeproj",
+        "Sources",
+        ".hidden",
+        "Tool.app",
+    ] {
+        fs::create_dir(directory.join(name)).unwrap();
+    }
+    fs::create_dir(directory.join("Alpha.xcodeproj/Nested")).unwrap();
+    fs::write(directory.join("notes.txt"), "text").unwrap();
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("path", directory.to_str().unwrap())
+        .finish();
+    let (status, value) = fixture
+        .json(
+            "GET",
+            &format!("/v1/projects?{query}"),
+            Some(&fixture.control),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(
+        value["data"]["path"],
+        directory.canonicalize().unwrap().to_str().unwrap()
+    );
+    let entries = value["data"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["name"], "Alpha.xcodeproj");
+    assert_eq!(entries[0]["kind"], "project");
+    assert_eq!(entries[1]["kind"], "workspace");
+    assert_eq!(entries[2]["kind"], "directory");
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("path", directory.join("Alpha.xcodeproj").to_str().unwrap())
+        .finish();
+    assert_eq!(
+        fixture
+            .json(
+                "GET",
+                &format!("/v1/projects?{query}"),
+                Some(&fixture.control),
+                None
+            )
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn app_metadata_and_versioned_preview_survive_refresh_and_restart() {
     let fixture = Fixture::new();
     let project = fixture.ipa.parent().unwrap().join("Example.xcodeproj");

@@ -1,7 +1,7 @@
 //! Persistent app identity and agent-published, immutable screenshot artifacts.
 //! Callers hold the Store's outer mutex across these read/modify/write operations.
 use crate::{
-    model::{Job, now},
+    model::{BuildRequest, Job, now},
     store::{Store, atomic_json, check_dir, open_private_read, private_dir, read_json},
 };
 use anyhow::{Context, Result, ensure};
@@ -25,6 +25,8 @@ pub struct AppRecord {
     pub summary: String,
     pub updated_at: u64,
     pub preview: Option<AppPreview>,
+    #[serde(default)]
+    pub build_request: Option<BuildRequest>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +171,7 @@ pub fn register(store: &Store, registration: AppRegistration) -> Result<AppRecor
         summary: registration.summary,
         updated_at: now(),
         preview: None,
+        build_request: None,
     };
     save(store, &app)?;
     Ok(app)
@@ -183,6 +186,18 @@ pub fn update(store: &Store, id: &str, update: AppUpdate) -> Result<AppRecord> {
         text_limit(&summary, "summary", 16 * 1024)?;
         app.summary = summary;
     }
+    app.updated_at = now();
+    save(store, &app)?;
+    Ok(app)
+}
+
+pub fn set_build_request(store: &Store, id: &str, request: BuildRequest) -> Result<AppRecord> {
+    let mut app = get(store, id)?;
+    ensure!(
+        request.project == app.project && request.scheme == app.scheme,
+        "Build recipe must match the registered project and scheme"
+    );
+    app.build_request = Some(request);
     app.updated_at = now();
     save(store, &app)?;
     Ok(app)

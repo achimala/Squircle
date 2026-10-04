@@ -213,6 +213,34 @@ enum PreviewCommand {
 
 #[derive(Subcommand)]
 enum AppCommand {
+    /// Browse one Mac directory (default: service user's home). Xcode packages are selectable, not traversed.
+    Browse {
+        #[arg(
+            long,
+            help = "Absolute Mac directory or ~/path; resolved by the service"
+        )]
+        path: Option<String>,
+    },
+    /// Read Xcode schemes and iPhoneOS signing settings without building. Package/setup issues remain actionable results.
+    Inspect {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        scheme: Option<String>,
+        #[arg(long)]
+        configuration: Option<String>,
+    },
+    /// Add an existing iOS app and save its archive recipe, without starting a build or changing its Xcode project. Later builds allow Xcode provisioning updates through the configured account, but do not register devices. Signing may still need setup.
+    Import {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        scheme: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value = "Release")]
+        configuration: String,
+    },
     /// Register an Xcode project/scheme identity. Repeated registration preserves edited name and summary.
     Register {
         #[arg(long)]
@@ -391,9 +419,21 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false}),
         ),
         Commands::App { command } => match command {
+            AppCommand::Browse { path } => {
+                let query=url::form_urlencoded::Serializer::new(String::new()).extend_pairs(path.as_ref().map(|path|("path",path))).finish();
+                get(cli,&format!("/v1/projects?{query}")).await?
+            }
+            AppCommand::Inspect { project, scheme, configuration } => {
+                let mut query=url::form_urlencoded::Serializer::new(String::new());
+                query.append_pair("project",project);
+                if let Some(scheme)=scheme {query.append_pair("scheme",scheme);}
+                if let Some(configuration)=configuration {query.append_pair("configuration",configuration);}
+                get(cli,&format!("/v1/projects/inspect?{}",query.finish())).await?
+            }
+            AppCommand::Import { project, scheme, name, configuration } => post(cli,"/v1/apps/import",json!({"project":project,"scheme":scheme,"name":name,"configuration":configuration})).await?,
             AppCommand::List => get(cli,"/v1/apps").await?,
             AppCommand::Show { app_id } => get(cli,&format!("/v1/apps/{}",valid_id(app_id)?)).await?,
             AppCommand::Register { project, scheme, name, bundle_id, summary } => post(cli,"/v1/apps",json!({"project":std::path::absolute(project)?,"scheme":scheme,"name":name,"bundle_id":bundle_id,"summary":summary})).await?,
