@@ -125,6 +125,7 @@ final class ProjectHero: UIControl {
     func update(project: AppProject) {
         self.project = project
         titleLabel.text = project.name; accessibilityLabel = project.name
+        accessibilityValue = project.id
         previewBinding.update(model: model, project: project)
         setNeedsLayout()
     }

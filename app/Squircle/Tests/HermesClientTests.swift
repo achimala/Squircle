@@ -525,6 +525,155 @@ final class HermesClientTests: XCTestCase {
         XCTAssertEqual(requests, 2, "A recapture of the same build should replace its cached image")
     }
 
+    func testMacProjectBrowsingAndInspectionPreservePathsAndSigningWarnings() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        let path = "/Users/Developer/My App & Notes/Atlas.xcworkspace"
+        FixtureProtocol.handler = { request in
+            XCTAssertEqual(request.url?.port, 8443)
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-control-key")
+            XCTAssertEqual(request.httpMethod, "GET")
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            if request.url?.path == "/v1/projects" {
+                XCTAssertEqual(query.first { $0.name == "path" }?.value, path)
+                return (200, #"{"ok":true,"data":{"path":"/src","parent_path":"/","entries":[{"name":"Apps","path":"/src/Apps","kind":"directory"},{"name":"Atlas.xcodeproj","path":"/src/Atlas.xcodeproj","kind":"project"},{"name":"Atlas.xcworkspace","path":"/src/Atlas.xcworkspace","kind":"workspace"}]}}"#)
+            }
+            XCTAssertEqual(request.url?.path, "/v1/projects/inspect")
+            XCTAssertEqual(query.first { $0.name == "project" }?.value, path)
+            XCTAssertEqual(query.first { $0.name == "scheme" }?.value, "Atlas & Beta")
+            XCTAssertEqual(query.first { $0.name == "configuration" }?.value, "Ad Hoc")
+            return (200, #"{"ok":true,"data":{"project":"/src/Atlas.xcworkspace","name":"Atlas","schemes":["Atlas","Atlas & Beta"],"scheme":"Atlas & Beta","configuration":"Ad Hoc","bundle_id":"test.atlas","team_id":null,"export_options":null,"issue":"No signing team is configured.","can_import":true}}"#)
+        }
+        defer { Self.resetFixture() }
+        let client = HermesClient(configuration: try configuration(), sessionConfiguration: config)
+        let directory = try await client.browseMacProjects(path: path)
+        XCTAssertEqual(directory.parentPath, "/")
+        XCTAssertEqual(directory.entries.map(\.kind), [.directory, .project, .workspace])
+        let inspected = try await client.inspectMacProject(project: path, scheme: "Atlas & Beta", configuration: "Ad Hoc")
+        XCTAssertTrue(inspected.canImport, "A signing warning does not prevent registering the app")
+        XCTAssertNil(inspected.teamID)
+        XCTAssertEqual(inspected.issue, "No signing team is configured.")
+        XCTAssertEqual(inspected.bundleID, "test.atlas")
+    }
+
+    func testProjectImportReportsBackendReasonWithoutConnectionCredentials() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.handler = { _ in
+            (400, #"{"ok":false,"error":{"code":"invalid_request","message":"Scheme has no iOS application. test-control-key test-hermes-key test-diagnostic-key"}}"#)
+        }
+        defer { Self.resetFixture() }
+        let client = HermesClient(configuration: try configuration(), sessionConfiguration: config)
+        do {
+            _ = try await client.importMacProject(project: "/src/Atlas.xcodeproj", scheme: "Tests", name: "Atlas")
+            XCTFail("Expected the backend's import error")
+        } catch let error as ClientError {
+            XCTAssertTrue(error.localizedDescription.contains("Scheme has no iOS application."))
+            for credential in ["test-control-key", "test-hermes-key", "test-diagnostic-key"] {
+                XCTAssertFalse(error.localizedDescription.contains(credential))
+            }
+        }
+    }
+
+    @MainActor
+    func testImportCreatesBuildableAppWithoutJobsAndDuplicateKeepsThreadIdentity() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        let record = #"{"id":"app-atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"","updated_at":1720000000,"build_request":{"project":"/src/Atlas.xcodeproj","scheme":"Atlas","configuration":"Beta","mode":"archive","export_options":"/store/export.plist"}}"#
+        FixtureProtocol.handler = { request in
+            switch (request.httpMethod ?? "GET", request.url?.path ?? "") {
+            case ("POST", "/v1/apps/import"):
+                XCTAssertEqual(request.url?.port, 8443)
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-control-key")
+                let body = try Self.body(request)
+                XCTAssertEqual(body["project"] as? String, "/src/Atlas.xcodeproj")
+                XCTAssertEqual(body["scheme"] as? String, "Atlas")
+                XCTAssertEqual(body["name"] as? String, "Atlas")
+                XCTAssertEqual(body["configuration"] as? String, "Beta")
+                return (200, "{\"ok\":true,\"data\":\(record)}")
+            case ("POST", "/api/sessions"):
+                return (201, #"{"session":{"id":"atlas-thread","title":"Atlas · 1","message_count":0}}"#)
+            case ("GET", "/api/sessions/atlas-thread/messages"):
+                return (200, #"{"session_id":"atlas-thread","data":[]}"#)
+            default: XCTFail("Unexpected request; import must not start a build"); return (404, "{}")
+            }
+        }
+        let suite = "SquircleImport.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        let imported = try await model.importMacProject(project: "/src/Atlas.xcodeproj", scheme: "Atlas", name: "Atlas", configuration: "Beta")
+        XCTAssertTrue(imported.canBuild)
+        XCTAssertEqual(model.selectedProjectID, imported.id)
+        XCTAssertTrue(model.builds.isEmpty)
+        await model.createSession(in: imported)
+        let duplicate = try await model.importMacProject(project: "/src/Atlas.xcodeproj", scheme: "Atlas", name: "Atlas", configuration: "Beta")
+        XCTAssertEqual(duplicate.id, imported.id)
+        XCTAssertEqual(model.projects.filter { $0.metadataID == "app-atlas" }.count, 1)
+        XCTAssertEqual(model.sessions(for: duplicate).map(\.id), ["atlas-thread"])
+        XCTAssertEqual(model.selectedSessionID, "atlas-thread")
+        XCTAssertFalse(model.isLoading)
+    }
+
+    @MainActor
+    func testOlderMetadataListCannotEraseAcknowledgedImport() async throws {
+        let held = expectation(description: "metadata list held")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.holdRequest = { $0.httpMethod == "GET" && $0.url?.path == "/v1/apps" }
+        FixtureProtocol.onHold = { held.fulfill() }
+        FixtureProtocol.handler = { request in
+            if request.httpMethod == "POST" {
+                return (200, #"{"ok":true,"data":{"id":"app-atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"","updated_at":1720000000}}"#)
+            }
+            return (200, #"{"ok":true,"data":[]}"#)
+        }
+        let suite = "SquircleImportRefresh.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        let refresh = Task { await model.refreshMetadata() }
+        await fulfillment(of: [held], timeout: 2)
+        let imported = try await model.importMacProject(project: "/src/Atlas.xcodeproj", scheme: "Atlas", name: "Atlas")
+        let release = FixtureProtocol.heldDelivery
+        FixtureProtocol.heldDelivery = nil
+        release?()
+        await refresh.value
+        XCTAssertEqual(model.metadata(for: imported)?.id, "app-atlas")
+        XCTAssertEqual(model.selectedProjectID, imported.id)
+    }
+
+    @MainActor
+    func testImportDoesNotOverrideProjectSelectedWhileItWasPending() async throws {
+        let held = expectation(description: "import held")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.holdRequest = { $0.url?.path == "/v1/apps/import" }
+        FixtureProtocol.onHold = { held.fulfill() }
+        FixtureProtocol.handler = { _ in (200, #"{"ok":true,"data":{"id":"app-atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"","updated_at":1720000000}}"#) }
+        let suite = "SquircleImportSelection.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        let pending = Task { try await model.importMacProject(project: "/src/Atlas.xcodeproj", scheme: "Atlas", name: "Atlas") }
+        await fulfillment(of: [held], timeout: 2)
+        let other = model.createProject(name: "Other")
+        let release = FixtureProtocol.heldDelivery
+        FixtureProtocol.heldDelivery = nil
+        release?()
+        let imported = try await pending.value
+        XCTAssertEqual(model.selectedProjectID, other.id)
+        XCTAssertNotEqual(imported.id, other.id)
+        XCTAssertEqual(model.metadata(for: imported)?.id, "app-atlas")
+        XCTAssertFalse(model.isLoading)
+    }
+
     private static func resetFixture() {
         FixtureProtocol.heldDelivery?()
         FixtureProtocol.heldDelivery = nil

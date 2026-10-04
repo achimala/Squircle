@@ -142,5 +142,33 @@ final class AppProjectTests: XCTestCase {
         XCTAssertFalse(app.canBuild)
         XCTAssertNil(app.buildRequest)
         XCTAssertNil(app.metadataPreview)
+        XCTAssertNil(record.buildRequest, "Existing app records remain decodable without a recipe")
+    }
+
+    func testImportedMetadataRecipeEnablesFirstArchiveAndSurvivesRoundTrip() throws {
+        let record = try JSONDecoder().decode(AppMetadata.self, from: Data(#"{"id":"app-atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"","updated_at":1720000000,"build_request":{"project":"/src/Atlas.xcodeproj","scheme":"Atlas","configuration":"Release","mode":"archive","export_options":"/store/apps/atlas/ExportOptions.plist"}}"#.utf8))
+        XCTAssertEqual(try JSONDecoder().decode(AppMetadata.self, from: JSONEncoder().encode(record)), record)
+        var catalog = AppProjectCatalog()
+        let app = try XCTUnwrap(catalog.reconcile(builds: [], sessions: [], metadata: [record]).first { $0.metadataID == record.id })
+        XCTAssertTrue(app.canBuild)
+        XCTAssertEqual(app.buildRequest?.mode, "archive")
+        XCTAssertEqual(app.buildRequest?.exportOptions, "/store/apps/atlas/ExportOptions.plist")
+        XCTAssertTrue(app.agentContext.contains("Known Xcode build configuration"))
+        XCTAssertTrue(app.agentContext.contains("ExportOptions.plist"))
+        XCTAssertFalse(app.agentContext.contains("No Xcode build configuration"))
+    }
+
+    func testMacRecipeOverridesNewerHistoricalSettingsAndKeepsThreadIdentity() throws {
+        var catalog = AppProjectCatalog()
+        let old = try build(id: "old", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcodeproj", date: 200)
+        let original = try XCTUnwrap(catalog.reconcile(builds: [old], sessions: []).first { $0.name == "Atlas" })
+        catalog.assign(sessionID: "thread", to: original.id)
+        let record = try JSONDecoder().decode(AppMetadata.self, from: Data(#"{"id":"app-atlas","name":"Atlas Renamed","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"","updated_at":100,"build_request":{"project":"/src/Atlas.xcodeproj","scheme":"Atlas","configuration":"Beta","mode":"archive","export_options":"/store/current.plist"}}"#.utf8))
+        let app = try XCTUnwrap(catalog.reconcile(builds: [old], sessions: [], metadata: [record]).first { $0.metadataID == record.id })
+        XCTAssertEqual(app.id, original.id)
+        XCTAssertEqual(catalog.sessionProjects["thread"], original.id)
+        XCTAssertEqual(app.buildRequest?.configuration, "Beta")
+        XCTAssertEqual(app.buildRequest?.exportOptions, "/store/current.plist")
+        XCTAssertTrue(app.canBuild)
     }
 }

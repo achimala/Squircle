@@ -235,17 +235,16 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
     }
 
     private func createProject() {
-        let alert = UIAlertController(title: "New app", message: nil, preferredStyle: .alert)
-        alert.addTextField { $0.placeholder = "Name"; $0.autocapitalizationType = .words; $0.accessibilityIdentifier = "project.name" }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Create", style: .default) { [weak self, weak alert] _ in
-            guard let self, let name = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return }
-            let project = self.model.createProject(name: name); self.selectedID = project.id
-            alert?.dismiss(animated: true) { [weak self] in
-                self?.render(); self?.open(project.id)
+        let importer = AppImportNavigationController(model: model)
+        importer.onImport = { [weak self, weak importer] project in
+            importer?.dismiss(animated: true) {
+                guard let self else { return }
+                self.selectedID = project.id
+                self.render()
+                self.choose(project.id)
             }
-        })
-        present(alert, animated: true)
+        }
+        present(importer, animated: true)
     }
     private func showConnection() {
         let alert = UIAlertController(title: model.connected ? "Connected" : "Mac offline", message: model.error, preferredStyle: .alert)

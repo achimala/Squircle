@@ -11,6 +11,95 @@ final class StudioUITests: XCTestCase {
     }
 
     @MainActor
+    func testBrowseMacProjects() throws {
+        let folder = "/Users/anshu/Documents/ChatGPT/RemoteAppDev/examples/SquircleProbe"
+        app.launch()
+        requireHittable(element("project.add"), timeout: 35)
+        element("project.add").tap()
+        enterMacPath(folder)
+        let project = app.cells.matching(identifier: "import.entry")
+            .matching(NSPredicate(format: "value == %@", folder + "/SquircleProbe.xcodeproj")).firstMatch
+        requireHittable(project, timeout: 30)
+        capture("18 — Mac project folder")
+        project.tap()
+        requireHittable(app.textFields["import.name"], timeout: 45)
+        requireHittable(element("import.scheme"))
+        requireEnabled(element("import.add"))
+
+        element("import.scheme").tap()
+        let scheme = app.cells.containing(.staticText, identifier: "SquircleProbe").firstMatch
+        requireHittable(scheme)
+        XCTAssertTrue(scheme.isSelected, "The inspected Xcode scheme should be checkmarked.")
+        capture("19 — Actual Xcode schemes")
+        scheme.tap()
+        requireHittable(app.textFields["import.name"], timeout: 45)
+        requireEnabled(element("import.add"))
+        XCTAssertEqual(element("import.scheme").label, "SquircleProbe")
+        // Scheme selection is read-only; deliberately leave Add untouched.
+        app.terminate()
+    }
+
+    @MainActor
+    func testImportExistingMacAppAndPersistRecipe() throws {
+        let name = "Squircle Probe"
+        let projectPath = "/Users/anshu/Documents/ChatGPT/RemoteAppDev/examples/SquircleProbe/SquircleProbe.xcodeproj"
+        app.launch()
+        selectProject(named: name)
+        let originalID = try XCTUnwrap(element("project.hero").value as? String)
+        XCTAssertNotNil(UUID(uuidString: originalID), "The picker exposes the persistent app identity.")
+        let originalCopies = registeredHeroes(named: name).count
+        XCTAssertEqual(originalCopies, 1, "The existing Probe is the import fixture; this test must not create another app.")
+        // Import a different app from the centered hero, exercising the real
+        // picker-to-imported-app selection change as well as idempotence.
+        selectProject(named: "Squircle")
+
+        element("project.add").tap()
+        requireHittable(element("import.path"), timeout: 25)
+        requireHittable(element("import.cancel"))
+        capture("12 — Browse apps on Mac")
+
+        enterMacPath("/Users/anshu/Documents/ChatGPT/RemoteAppDev/examples/NoSuchSquircleProject.xcodeproj")
+        let error = element("import.error")
+        let failed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND label.length > 0"), object: error)
+        XCTAssertEqual(XCTWaiter.wait(for: [failed], timeout: 30), .completed, "An invalid Mac path should report its real lookup error.")
+        capture("13 — Invalid Mac path")
+
+        enterMacPath(projectPath)
+        let nameField = app.textFields["import.name"]
+        requireHittable(nameField, timeout: 45)
+        XCTAssertFalse((nameField.value as? String ?? "").isEmpty, "Inspection should infer the app name.")
+        requireHittable(element("import.scheme"))
+        replaceText(in: nameField, with: name)
+        capture("14 — Inspected Xcode app")
+        let add = element("import.add")
+        requireEnabled(add)
+        add.tap()
+
+        requireHittable(element("thread.new"), timeout: 35)
+        XCTAssertFalse(element("import.add").exists, "A successful import dismisses its form and opens the app.")
+        requireHittable(element("project.builds"))
+        capture("15 — Imported app threads")
+        assertImportedAppCanBuild()
+        element("project.back").tap()
+        requireHittable(element("project.hero"))
+        XCTAssertEqual(element("project.hero").label, name)
+        XCTAssertEqual(element("project.hero").value as? String, originalID, "Reimporting preserves the app's picker and thread identity.")
+        XCTAssertEqual(registeredHeroes(named: name).count, originalCopies, "Reimporting the same project and scheme must not duplicate its picker entry.")
+
+        app.terminate()
+        app.launch()
+        selectProject(named: name)
+        XCTAssertEqual(element("project.hero").value as? String, originalID, "The same app identity survives relaunch.")
+        element("project.hero").tap()
+        requireHittable(element("thread.new"))
+        assertImportedAppCanBuild()
+        capture("17 — Imported app after relaunch")
+        element("project.back").tap()
+        requireHittable(element("project.hero"))
+        XCTAssertEqual(registeredHeroes(named: name).count, originalCopies)
+    }
+
+    @MainActor
     func testCreateSignedBuildOnMac() throws {
         app.launch()
         openProject(named: "Squircle")
@@ -155,6 +244,60 @@ final class StudioUITests: XCTestCase {
         selectProject(named: name)
         element("project.hero").tap()
         requireHittable(element("thread.new"))
+    }
+
+    @MainActor
+    private func enterMacPath(_ path: String) {
+        requireHittable(element("import.path"))
+        element("import.path").tap()
+        let input = app.textFields["import.path.input"]
+        requireHittable(input)
+        replaceText(in: input, with: path)
+        requireHittable(element("import.path.go"))
+        element("import.path.go").tap()
+    }
+
+    @MainActor
+    private func replaceText(in field: XCUIElement, with text: String) {
+        if field.value as? String == text { return }
+        field.tap()
+        if let existing = field.value as? String, !existing.isEmpty,
+           existing != field.placeholderValue {
+            let clear = field.buttons.firstMatch
+            if clear.exists && clear.isHittable {
+                clear.tap()
+            } else {
+                // App names fit in this field. Tapping its trailing whitespace
+                // puts insertion after the text instead of deleting a prefix.
+                field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+                field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: existing.utf16.count))
+            }
+        }
+        field.typeText(text)
+        XCTAssertEqual(field.value as? String, text, "Enter the complete value before submitting to the Mac.")
+    }
+
+    @MainActor
+    private func registeredHeroes(named name: String) -> XCUIElementQuery {
+        app.descendants(matching: .any).matching(NSPredicate(
+            format: "label == %@ AND (identifier == %@ OR identifier BEGINSWITH %@)",
+            name, "project.hero", "project.picker."
+        ))
+    }
+
+    @MainActor
+    private func assertImportedAppCanBuild() {
+        element("project.builds").tap()
+        requireHittable(element("builds.close"))
+        requireHittable(element("project.build"))
+        requireEnabled(element("project.build"))
+        capture("16 — Imported app build action")
+        // Importing should make the saved recipe usable; do not submit another
+        // archive or mutate existing build history just to check its affordance.
+        element("builds.close").tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("builds.close"))
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 15), .completed)
+        requireHittable(element("project.back"))
     }
 
     @MainActor

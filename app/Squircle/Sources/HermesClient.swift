@@ -290,6 +290,41 @@ final class HermesClient: NSObject, URLSessionTaskDelegate {
         let query = previewID.map { [URLQueryItem(name: "version", value: $0)] } ?? []
         return try await fetchPNG(["v1", "apps", id, "preview"], query: query)
     }
+
+    func browseMacProjects(path: String? = nil) async throws -> MacProjectDirectory {
+        struct Reply: Decodable { let ok: Bool; let data: MacProjectDirectory }
+        let query = path.map { [URLQueryItem(name: "path", value: $0)] } ?? []
+        let reply: Reply = try await perform(request(["v1", "projects"], squircle: true, query: query),
+                                             service: "Squircle", exposeAPIError: true)
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data
+    }
+
+    func inspectMacProject(project: String, scheme: String? = nil, configuration: String? = nil) async throws -> MacProjectInspection {
+        struct Reply: Decodable { let ok: Bool; let data: MacProjectInspection }
+        var query = [URLQueryItem(name: "project", value: project)]
+        if let scheme { query.append(URLQueryItem(name: "scheme", value: scheme)) }
+        if let configuration { query.append(URLQueryItem(name: "configuration", value: configuration)) }
+        var request = try request(["v1", "projects", "inspect"], squircle: true, query: query)
+        request.timeoutInterval = 60 // Allow the host's bounded 45-second Xcode inspection to return its result.
+        let reply: Reply = try await perform(request, service: "Squircle", exposeAPIError: true)
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data
+    }
+
+    func importMacProject(project: String, scheme: String, name: String, configuration: String? = nil) async throws -> AppMetadata {
+        struct Reply: Decodable { let ok: Bool; let data: AppMetadata }
+        var body = ["project": project, "scheme": scheme, "name": name]
+        if let configuration { body["configuration"] = configuration }
+        var request = try request(["v1", "apps", "import"], squircle: true)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.httpBody = try JSONEncoder().encode(body)
+        let reply: Reply = try await perform(request, service: "Squircle", exposeAPIError: true)
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data
+    }
+
     func startBuild(_ buildRequest: AppBuildRequest) async throws -> AppBuild {
         struct Reply: Decodable {
             struct Result: Decodable { let job: AppBuild }
@@ -411,15 +446,31 @@ final class HermesClient: NSObject, URLSessionTaskDelegate {
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
         return try await perform(request, service: "Hermes")
     }
-    private func perform<T: Decodable>(_ request: URLRequest, service: String) async throws -> T {
+    private func perform<T: Decodable>(_ request: URLRequest, service: String, exposeAPIError: Bool = false) async throws -> T {
         do {
             let (data, response) = try await session.data(for: request)
+            if exposeAPIError, let response = response as? HTTPURLResponse,
+               !(200..<300).contains(response.statusCode), ![401, 403].contains(response.statusCode),
+               let message = backendMessage(data) {
+                throw ClientError.backend(service, response.statusCode, message)
+            }
             try validate(response, service: service)
             guard let decoded = try? JSONDecoder().decode(T.self, from: data) else { throw ClientError.response(service) }
             return decoded
         } catch is CancellationError { throw CancellationError() }
         catch let error as ClientError { throw error }
         catch { if Task.isCancelled { throw CancellationError() }; throw ClientError.connection(service) }
+    }
+    private func backendMessage(_ data: Data) -> String? {
+        struct Failure: Decodable { struct Detail: Decodable { let message: String }; let error: Detail }
+        guard data.count <= 65_536, let failure = try? JSONDecoder().decode(Failure.self, from: data) else { return nil }
+        var message = failure.error.message
+        for token in [configuration.hermesToken, configuration.squircleToken, configuration.diagnosticToken].sorted(by: { $0.count > $1.count }) {
+            message = message.replacingOccurrences(of: token, with: "[redacted]")
+        }
+        message = String(message.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) || $0 == "\n" })
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return message.isEmpty ? nil : String(message.prefix(1_000))
     }
     private func validate(_ response: URLResponse, service: String) throws {
         guard let response = response as? HTTPURLResponse else { throw ClientError.response(service) }

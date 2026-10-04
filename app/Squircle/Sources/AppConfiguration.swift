@@ -53,6 +53,7 @@ enum ClientError: LocalizedError {
     case configuration
     case response(String)
     case http(String, Int)
+    case backend(String, Int, String)
     case connection(String)
 
     var errorDescription: String? {
@@ -65,11 +66,13 @@ enum ClientError: LocalizedError {
             }
             return "\(service) could not complete the request (HTTP \(status))."
         case .connection(let service): return "Couldn’t reach \(service). Check that your Mac and Tailscale are online."
+        case .backend(_, _, let message): return message
         }
     }
 
     var isMissing: Bool {
         if case .http(_, 404) = self { return true }
+        if case .backend(_, 404, _) = self { return true }
         return false
     }
 }

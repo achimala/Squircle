@@ -1,5 +1,38 @@
 import Foundation
 
+struct MacProjectDirectory: Decodable, Equatable {
+    let path: String
+    let parentPath: String?
+    let entries: [Entry]
+
+    enum CodingKeys: String, CodingKey { case path, entries, parentPath = "parent_path" }
+    struct Entry: Identifiable, Decodable, Equatable {
+        enum Kind: String, Decodable { case directory, project, workspace }
+        let name: String
+        let path: String
+        let kind: Kind
+        var id: String { path }
+    }
+}
+
+struct MacProjectInspection: Decodable, Equatable {
+    let project: String
+    let name: String
+    let schemes: [String]
+    let scheme: String?
+    let configuration: String
+    let bundleID: String?
+    let teamID: String?
+    let exportOptions: String?
+    let issue: String?
+    let canImport: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case project, name, schemes, scheme, configuration, issue
+        case bundleID = "bundle_id", teamID = "team_id", exportOptions = "export_options", canImport = "can_import"
+    }
+}
+
 /// Canonical app identity and agent-published presentation data live on the Mac.
 struct AppMetadata: Identifiable, Codable, Equatable {
     let id: String
@@ -10,11 +43,20 @@ struct AppMetadata: Identifiable, Codable, Equatable {
     let summary: String
     let updatedAt: TimeInterval
     let preview: Preview?
+    let buildRequest: AppBuildRequest?
+
+    init(id: String, name: String, project: String, scheme: String, bundleID: String?,
+         summary: String, updatedAt: TimeInterval, preview: Preview?, buildRequest: AppBuildRequest? = nil) {
+        self.id = id; self.name = name; self.project = project; self.scheme = scheme
+        self.bundleID = bundleID; self.summary = summary; self.updatedAt = updatedAt
+        self.preview = preview; self.buildRequest = buildRequest
+    }
 
     var buildKey: String { project + "\u{1f}" + scheme }
     enum CodingKeys: String, CodingKey {
         case id, name, project, scheme, summary, preview
         case bundleID = "bundle_id", updatedAt = "updated_at"
+        case buildRequest = "build_request"
     }
 
     struct Preview: Identifiable, Codable, Equatable {
@@ -202,8 +244,10 @@ struct AppProjectCatalog: Codable {
             let recipes = appBuilds.compactMap(\.request).filter(\.canSubmit)
             // Device installation is the app's primary loop. A later simulator
             // check must not replace a known archive/export configuration.
-            let request = recipes.first(where: { $0.mode == "archive" }) ?? recipes.first
             let record = metadata.first { $0.id == entry.metadataID }
+            // A registered Mac recipe is authoritative, including before the
+            // first build. Historical jobs only fill in legacy records.
+            let request = record?.buildRequest ?? recipes.first(where: { $0.mode == "archive" }) ?? recipes.first
             let newest = ([entry.createdAt] + appBuilds.map(\.date) + appSessions.map(\.updatedAt)
                           + (record.map { [Date(timeIntervalSince1970: $0.updatedAt)] } ?? [])).max() ?? entry.createdAt
             let fallback = request.map { $0.mode == "archive" ? "Ready for your next build" : "Simulator build configured" }
@@ -211,7 +255,7 @@ struct AppProjectCatalog: Codable {
             let summary = record?.summary.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let subtitle = summary.isEmpty ? fallback : summary
             return AppProject(id: entry.id, name: entry.name, subtitle: subtitle, bundleID: entry.bundleID,
-                              canBuild: request != nil, updatedAt: newest, buildRequest: request,
+                              canBuild: request?.canSubmit == true, updatedAt: newest, buildRequest: request,
                               metadataID: entry.metadataID, metadataPreview: record?.preview)
         }.sorted { lhs, rhs in
             if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }

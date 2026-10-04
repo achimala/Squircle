@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
+		12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
 		2252C1E1AB8A82AA52D1C99A /* ProjectViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5496F738A2EFE2E56A67E8D6 /* ProjectViewController.swift */; };
 		3201C0CC9D1EB1736ED26D0F /* WorkspaceTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1443BECEC1DF2C09B0EE637A /* WorkspaceTransition.swift */; };
 		38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
@@ -64,6 +65,7 @@
 		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DB495D800CF688C469BFF725 /* AppProjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProjectTests.swift; sourceTree = "<group>"; };
 		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
+		FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppImportViewController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -98,6 +100,7 @@
 		80D91E9DBE83CF2C0802769A /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */,
 				157267B086D7FA131DA81ED8 /* DevicePreview.swift */,
 				9685CE2D9A277E148073C169 /* MotionAudit.swift */,
 				94B35CE8628544762087ED78 /* PreviewBinding.swift */,
@@ -289,6 +292,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */,
+				12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */,
 				69A1E4E034A3A9C310663B31 /* AppProject.swift in Sources */,
 				CF07B49F3ABB5DE847A7FEBC /* DevicePreview.swift in Sources */,
 				AB0BD657A5B47630E2FD14E9 /* HermesClient.swift in Sources */,
@@ -416,7 +420,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -494,7 +498,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

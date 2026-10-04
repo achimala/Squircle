@@ -32,6 +32,7 @@ final class SquircleModel: ObservableObject {
     private var buildMonitor: Task<Void, Never>?
     private var metadataMonitor: Task<Void, Never>?
     private var metadataGeneration = UUID()
+    private var importGeneration = UUID()
     private var loadingOperations = 0
     private var sessionRevision = 0
     private var buildRevision = 0
@@ -222,6 +223,36 @@ final class SquircleModel: ObservableObject {
         let project = projects.first { $0.id == id }!
         selectProject(project)
         return project
+    }
+
+    func browseMacProjects(path: String? = nil) async throws -> MacProjectDirectory {
+        guard let client else { throw ClientError.configuration }
+        return try await client.browseMacProjects(path: path)
+    }
+
+    func inspectMacProject(project: String, scheme: String? = nil, configuration: String? = nil) async throws -> MacProjectInspection {
+        guard let client else { throw ClientError.configuration }
+        return try await client.inspectMacProject(project: project, scheme: scheme, configuration: configuration)
+    }
+
+    func importMacProject(project: String, scheme: String, name: String, configuration: String? = nil) async throws -> AppProject {
+        guard let client else { throw ClientError.configuration }
+        try Task.checkCancellation()
+        let generation = UUID()
+        importGeneration = generation
+        let selectionAtStart = selectionGeneration
+        beginLoading()
+        defer { endLoading() }
+        let record = try await client.importMacProject(project: project, scheme: scheme, name: name, configuration: configuration)
+        // A list started before this acknowledged write cannot erase the app.
+        metadataGeneration = UUID()
+        appMetadata.removeAll { $0.id == record.id }
+        appMetadata.append(record)
+        reconcileProjects()
+        guard let imported = projects.first(where: { $0.metadataID == record.id }) else { throw ClientError.response("Squircle") }
+        try Task.checkCancellation()
+        if generation == importGeneration, selectionAtStart == selectionGeneration { selectProject(imported) }
+        return imported
     }
 
     func selectProject(_ project: AppProject) {
