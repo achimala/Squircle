@@ -762,7 +762,17 @@ async fn ingest(
     event: std::result::Result<Json<Diagnostic>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     auth(&state, &headers, true)?;
-    let event = body(event)?;
+    let mut event = body(event)?;
+    // Foundation UUID.uuidString uses uppercase. Normalize valid UUIDs at the
+    // wire boundary so storage paths and replay comparisons remain canonical.
+    event.event_id = uuid::Uuid::parse_str(&event.event_id)
+        .map_err(|_| ApiError::bad("event_id must be a valid UUID"))?
+        .hyphenated()
+        .to_string();
+    event.build_id = uuid::Uuid::parse_str(&event.build_id)
+        .map_err(|_| ApiError::bad("build_id must be a valid UUID"))?
+        .hyphenated()
+        .to_string();
     let inserted = state
         .store
         .lock()
@@ -898,6 +908,71 @@ mod tests {
             std::fs::read(output.ipa_path.unwrap())?,
             std::fs::read(source)?
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn swift_uppercase_diagnostic_uuids_are_accepted_and_lowercase_retries_deduplicate()
+    -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("input.ipa");
+        test_ipa(&source)?;
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let job = import_ipa(&state, &source, copy_and_inspect_ipa)?;
+        let diagnostic_token = state
+            .store
+            .lock()
+            .unwrap()
+            .settings
+            .diagnostic_token
+            .clone();
+        let mut authorization = HeaderMap::new();
+        authorization.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {diagnostic_token}").parse()?,
+        );
+        let event_id = "a50f8213-88d3-4b6f-91d3-143aceef3f9d";
+        let mut event = Diagnostic {
+            event_id: event_id.to_uppercase(),
+            build_id: job.id.to_uppercase(),
+            kind: DiagnosticKind::Crash,
+            message: "Swift crash report".into(),
+            timestamp: 1,
+            attributes: json!({}),
+        };
+        let Json(first) = ingest(
+            State(state.clone()),
+            authorization.clone(),
+            Ok(Json(event.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["data"]["event_id"], event_id);
+        assert_eq!(first["data"]["stored"], true);
+        event.event_id = event_id.into();
+        event.build_id = job.id.clone();
+        let Json(retry) = ingest(
+            State(state.clone()),
+            authorization.clone(),
+            Ok(Json(event.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry["data"]["duplicate"], true);
+        let stored = state
+            .store
+            .lock()
+            .unwrap()
+            .diagnostics(&job.id, 0, 10, None)?;
+        assert_eq!(stored["events"].as_array().unwrap().len(), 1);
+        assert_eq!(stored["events"][0]["event_id"], event_id);
+        assert_eq!(stored["events"][0]["build_id"], job.id);
+
+        event.build_id = "../outside".into();
+        let error = ingest(State(state), authorization, Ok(Json(event)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
         Ok(())
     }
 

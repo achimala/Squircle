@@ -40,6 +40,21 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertTrue(queue.events.isEmpty)
     }
 
+    func testDiagnosticWireUUIDsMatchCanonicalServerFormatIncludingRecoveredIDs() throws {
+        let recoveredID = "B635C552-BAB8-48C8-83F8-37C84A9DB79E"
+        let events = [DiagnosticEvent(buildID: "build-1", kind: .launch, message: "launch"),
+                      DiagnosticEvent(buildID: "build-1", kind: .crash, message: "recovered", eventID: recoveredID)]
+        for event in events {
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any])
+            let wireID = try XCTUnwrap(json["event_id"] as? String)
+            let parsed = try XCTUnwrap(UUID(uuidString: wireID))
+            XCTAssertEqual(wireID, parsed.uuidString.lowercased())
+            XCTAssertEqual(wireID.count, 36)
+        }
+        XCTAssertEqual(events[1].eventID, recoveredID.lowercased())
+        XCTAssertEqual(UUID(uuidString: events[1].eventID), UUID(uuidString: recoveredID))
+    }
+
     func testOnlyExplicitSuccessfulJSONAcknowledgesAnEvent() throws {
         let url = URL(string: "https://example.test/v1/diagnostics")!
         let ok = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!

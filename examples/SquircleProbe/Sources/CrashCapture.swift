@@ -50,7 +50,7 @@ final class CrashCapture: CrashReporting {
         guard let reporter else { throw ProbeError("Crash reporter unavailable.") }
         guard !reporter.hasPendingCrashReport() else { throw ProbeError("Recover the previous crash before enabling another capture.") }
         guard !Self.debuggerAttached else { throw ProbeError("Debugger attached. Stop Xcode and open the app manually to test crash capture.") }
-        reporter.customData = try JSONEncoder().encode(Context(buildID: buildID, eventID: UUID().uuidString))
+        reporter.customData = try JSONEncoder().encode(Context(buildID: buildID, eventID: UUID().uuidString.lowercased()))
         if !enabled {
             try reporter.enableAndReturnError()
             enabled = true

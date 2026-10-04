@@ -19,7 +19,9 @@ struct DiagnosticEvent: Codable, Identifiable, Equatable {
     init(buildID: String, kind: Kind, message: String,
          eventID: String = UUID().uuidString, timestamp: Int = Int(Date().timeIntervalSince1970),
          attributes: [String: String] = [:]) {
-        self.eventID = eventID
+        // Foundation emits uppercase UUIDs; the server's wire format is canonical
+        // lowercase. Normalize recovered IDs too, without changing their identity.
+        self.eventID = UUID(uuidString: eventID)?.uuidString.lowercased() ?? eventID
         self.buildID = buildID
         self.kind = kind
         self.message = message

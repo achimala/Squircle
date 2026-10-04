@@ -43,7 +43,7 @@ Integration into another app: reuse the event schema, queue, transport and Keych
 
 ## Validation status
 
-Validated 2026-10-04 with Xcode **27.1 (27A9269)**: unsigned simulator build succeeded; **8 unit tests passed** on an isolated iPhone 18 Pro / iOS 27.0 simulator. They cover durable replay and deduplication, capacity retention, event limits, explicit acknowledgement, HTTPS endpoint validation, capture without connection credentials, Keychain failure, and recovery failure. Test results: `.build/CaptureTests.xcresult` (local, ignored).
+Validated 2026-10-04 with Xcode **27.1 (27A9269)**: unsigned simulator build succeeded; **9 unit tests passed** on an isolated iPhone 18 Pro / iOS 27.0 simulator. They cover durable replay and deduplication, capacity retention, event limits, canonical UUID wire encoding, explicit acknowledgement, HTTPS endpoint validation, capture without connection credentials, Keychain failure, and recovery failure. Test results: `.build/CanonicalTests.xcresult` (local, ignored).
 
 An actual simulator process was launched without a debugger, sent SIGABRT at its verified PID, and relaunched. PLCrashReporter recovered one report into the durable queue without a configured URL/token, preserving build ID `74efd708-a8a4-4cc9-abbc-924b53164569`. The app/report arm64 UUID matches `1673459F-0F2B-3870-81A7-53F15D66C77F`. Squircle symbolication and an independent `atos` check resolve the app's `main` frame and the reporter's exception thread. The optimized Swift entry point reports line 0; this is not proof of arbitrary app source-line resolution. Reports and symbolication output are under the repository's ignored `.verification/probe-simulator-74efd708-*` paths.
 
