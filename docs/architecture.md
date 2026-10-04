@@ -24,6 +24,17 @@ The presentation uses UIKit/Core Animation with a horizontal 3D app picker → f
 
 App records live in `apps/<app-UUID>/app.json` under the private Squircle store. Registration deduplicates canonical Xcode project path plus scheme. Name/summary edits preserve app identity. Each screenshot publication copies the supplied bounded PNG into a private immutable file with a new preview UUID; the mutable app record points to the latest one. It retains capture time, caption, source and optional build/revision association. The authenticated API serves image bytes, not arbitrary filesystem paths. Build synchronization imports only newer captures and preserves agent-edited names, summaries and newer previews. These records require no model calls or separate memory database.
 
+The implemented Add app flow browses Mac directories, inspects Xcode schemes and
+imports an existing iOS application through the neutral service. The native
+client and `app browse`/`inspect`/`import` CLI commands share the same authenticated
+APIs. Import persists an optional `build_request` on the app record; the client
+uses it before historical build settings, preserving local thread associations
+on duplicate imports. Older records still fall back to job history. Plain
+`app register` remains metadata-only. Import does not build, change the Xcode
+project or invent a preview; signing warnings may need resolution before a
+successful archive. Real native/API import, folder/scheme selection and relaunch are verified; the
+version 5 phone update is pending. [Request contract](cli.md#import-an-existing-app).
+
 ## Core tools and service
 
 The Rust `squircle` CLI is the primary agent interface, with progressive help and structured output. See [CLI design](cli.md). It invokes Xcode's own command-line tools with literal arguments and retains their artifacts. No Hermes imports, model credentials, or LLM dependency belong in the development core.

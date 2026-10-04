@@ -23,6 +23,7 @@ The Mac is both the agent host and the Xcode build environment. Remote use must 
 | Maintenance | Prefer maintained components, native Mac execution, and minimal services/setup. |
 | Interface | Horizontal 3D app picker → flat thread list, with builds in a secondary sheet. App names and actual thread content only: no explanatory summaries, capture captions, build banners or redundant headings. Reserve glass for controls; no cards. Spatial, interruptible transitions and interactive back gestures replace screen crossfades. Verify motion frame by frame. |
 | App identity and previews | Persist names, summaries, project/scheme identity and latest screenshots on the Mac. Agents can update metadata and publish real simulator captures independently of a build. Display those pixels on a live 3D mesh; no generated logo, monogram or other pretend app screen. |
+| Add app | **+ → browse the Mac or paste a project path → scheme/name → Add**. Save the actual Xcode build recipe on the Mac so the first build can start from the phone. Import itself does not build; previews require a real capture. |
 | Setup for the personal build | Bundle the existing Mac connection settings into the signed client. No manual token entry or pairing flow. Hermes remains stock and enforces its normal API authentication internally. |
 
 ## Scope boundaries
@@ -37,6 +38,7 @@ The user stopped the image-judge iteration workflow and requested a working prev
 
 ## Still open
 
+- The Add app flow passes real Mac import, folder/scheme selection, error recovery and relaunch checks. Missing signing configuration can remain a warning during import; the subsequent device build must establish signing readiness. Version 4 remains the latest installed phone build.
 - Version 4's 29 unit tests, navigation checks, archive/export, real preview publication and physical installation/launch pass. Simulator transition frames were inspected; physical-device frame-rate profiling remains unmeasured. See [evidence](validation.md).
 - Real-phone offline diagnostic recovery and actual phone crash upload/symbolication; the simulator crash path is verified.
 - How much independent worker-session control the client needs; this determines whether Paseo adds value.

@@ -31,7 +31,10 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `build cancel ID` | Cancel that queued/running job |
 | `build log ID --offset N --limit N` | Bounded compiler log, byte cursor |
 | `build import --ipa PATH` | Private copy of an existing IPA; no signature certification |
-| `app list`, `app show ID`, `app register` | Persistent app catalog; identity is canonical project path plus scheme |
+| `app browse --path PATH` | Browse one Mac directory; omit the path to start at the service user's home |
+| `app inspect --project PATH --scheme SCHEME` | Discover schemes and inspect iOS application/signing settings without building |
+| `app import --project PATH --scheme SCHEME --name NAME` | Persist app identity and its archive recipe without starting a build |
+| `app list`, `app show ID`, `app register` | Persistent app catalog; `register` adds metadata only, without a build recipe |
 | `app update ID --name NAME --summary TEXT` | Edit app metadata without replacing its identity or preview |
 | `app preview ID --file PATH` | Publish a real PNG as the app's latest immutable preview artifact |
 | `preview capture BUILD_ID --simulator UUID` | Build-associated capture on an explicitly selected simulator |
@@ -45,12 +48,43 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 flag reflects an authenticated diagnostic event, not independent OS attestation.
 The service does not currently track installation/download completion.
 
+## Import an existing app
+
+The native **+ → Mac browser or pasted path → scheme/name → Add** flow uses the
+same service operations available to any agent:
+
+```sh
+squircle app browse --path ~/Projects --json
+squircle app inspect --project /path/Atlas.xcworkspace --json
+squircle app import --project /path/Atlas.xcworkspace --scheme Atlas --name Atlas --json
+```
+
+Inspection accepts optional `--scheme` and `--configuration`; import defaults to
+`Release` and also accepts `--configuration`. Paths refer to the service's Mac.
+The authenticated APIs are `GET /v1/projects?path=…`,
+`GET /v1/projects/inspect?project=…&scheme=…&configuration=…` and
+`POST /v1/apps/import` with `project`, `scheme`, `name` and optional
+`configuration`. Responses use the ordinary `ok`/`data` envelope.
+
+Import inspects the project and persists a `build_request` in its app record.
+The client prefers that recipe over historical jobs, enabling the first build
+without an earlier CLI build. Reimporting the same canonical project/scheme
+keeps its app identity. Import does not start Xcode compilation or publish a
+preview. A missing signing team can return `can_import: true` with an `issue`
+warning; unsupported/non-iOS schemes cannot be imported. Device signing is
+proven only by an actual successful build with Xcode configured.
+
+Real CLI/API inspection and native import, browsing and relaunch checks pass.
+Saved archive recipes allow Xcode provisioning updates when a later build is
+requested; import itself does not change signing or register a device.
+Existing `app register` remains a metadata-only operation.
+
 ## App metadata and previews
 
 The Mac catalog is the source of truth for app names, summaries and screenshots.
-Discover an app with `app list`; register its Xcode project and scheme once with
-`app register --project PATH --scheme SCHEME --name NAME`. Re-registration is
-idempotent and preserves edited text. Use
+Discover an app with `app list`. Use `app import` to save a build recipe, or
+`app register --project PATH --scheme SCHEME --name NAME` for metadata alone.
+Re-registration is idempotent and preserves edited text. Use
 `app update ID --summary TEXT` after meaningful changes; `--name` is optional.
 
 After UI work, capture the running app's actual simulator screen, inspect it,

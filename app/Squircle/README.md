@@ -17,6 +17,19 @@ summaries and preview artifacts. Local client state holds navigation, thread
 associations and active-run pointers for reconnecting. No coordinator,
 memory service or pairing backend is embedded.
 
+## Add an existing app
+
+Tap **+**, browse the Mac or paste an `.xcodeproj`/`.xcworkspace` path, choose
+the scheme and app name, then tap **Add**. The Mac saves the app identity and
+build recipe; no first CLI build is required. Import opens the app without
+building it. Use its builds sheet when ready; a real screenshot appears after
+capture or agent publication.
+
+This flow is implemented and awaiting real integration checks; version 4 remains
+the latest installed phone build. A missing signing team can appear as a warning
+without blocking import, but a successful device build still requires Xcode's
+signing setup. See the [CLI/API contract](../../docs/cli.md#import-an-existing-app).
+
 ## Build
 
 The XcodeGen project uses Dreamslate team `2F26US4NAU` and bundle ID

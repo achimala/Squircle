@@ -155,6 +155,36 @@ than summarized away.
 **Device acceptance:** the updated build was subsequently installed and launched
 on the connected physical phone; see the version 3 evidence below.
 
+## Version 5: users add Mac apps
+
+Rust commit `01cd6c5` adds authenticated shallow directory browsing, real Xcode
+scheme/settings inspection, and app import with a persistent archive recipe.
+**71 Rust tests pass** (49 library, 9 CLI, 10 HTTP, 3 lifecycle); formatting and
+strict Clippy pass. Tests cover import without any build history, preserved
+identity/recipe across restart, package browsing, authentication, real Xcode JSON
+shapes, missing-team handling, export options and bounded subprocess cleanup.
+
+The iOS flow is **+ → browse the Mac or enter a path → choose scheme/name → Add**.
+It imports through the same service and enables builds from the saved recipe.
+Import does not start compilation. The real API inspected Squircle Probe and
+identified its iOS app scheme, bundle, Dreamslate team and existing export plist.
+
+`.verification/ImportV5.xcresult` passed **36 unit tests and 2 UI tests** covering
+invalid-path recovery, actual import, stable app identity on duplicate import,
+build availability, persistence after relaunch and existing spatial navigation.
+`.verification/ImportV5Browser.xcresult` separately passed directory browsing,
+tapping the real project package, and selecting the actual checked Xcode scheme.
+The existing Probe was reimported; no fake app was added to the user's library.
+
+Screenshots are retained under `.verification/import-v5-screens/`, with the first
+UI run recorded in `import-v5-motion.mp4`. Inspection caught an oversized long
+path control; the final browser check includes its width constraint fix.
+Evidence also includes `import-v5-browse.json`, `import-v5-probe-inspection.json`,
+`import-v5-probe-record.json` and `import-v5-squircle-record.json`. The latter
+imports Squircle's own build recipe for the upcoming signed update.
+
+The version 5 signed archive and physical-phone update remain pending.
+
 ## Version 4 picker, motion and physical installation
 
 Final source `07e725f` passed **29 unit tests and the navigation test** in
