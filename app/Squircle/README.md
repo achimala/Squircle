@@ -1,16 +1,20 @@
 # Squircle iPhone app
 
 A UIKit/Core Animation client for the user's independently installed Hermes.
-Version 5 opens with a horizontal live 3D app picker, then a minimal flat thread
-list. Builds live in a secondary sheet. App names and actual thread content carry
-the interface; glass is reserved for controls. The actual phone, title and
-controls move between screens, with interactive back navigation and no fades.
+**Version 0.1.0 (6) source** is a first-principles redesign: one lit 3D stage
+shows every app on a real device with its actual published screenshot. Opening
+an app moves that same device to the top of its workspace (a flat list of real
+Hermes threads); a single interruptible spring drives SceneKit and UIKit, and
+the left-edge back gesture can grab, reverse or finish it at any frame. Builds
+and Add App are native sheets; close, back, Builds, New Thread, compose/send,
+approvals and the connection pill use Liquid Glass (iOS 26 APIs with material
+fallbacks). Light and dark appearance, Dynamic Type, Reduce Motion (no turning,
+receding or lift; short direct moves) and VoiceOver labels are supported. Apps
+without a capture show an honest dark "No screenshot yet" display.
 
-Signed **0.1.0 (5)** is installed and launched on the physical iPhone. The code
-passed 36 unit tests and import/navigation checks, including interactive back
-cancellation and completion. Simulator transition frames were inspected; real
-screenshot publication and the phone's automatic launch report are verified.
-See [validation](../../docs/validation.md) for evidence and recording limits.
+Installed on the physical iPhone: **version 5** (the previous design). Build 6
+has passed simulator tests only; see [validation](../../docs/validation.md) and
+the redesign handoff for exact results. Physical-device motion is unmeasured.
 
 Hermes retains conversation history; the Mac app catalog owns app names,
 summaries and preview artifacts. Local client state holds navigation, thread
@@ -51,18 +55,20 @@ own configuration. Hermes's normal required API authentication stays intact.
 
 ## Implementation
 
-- `Sources/HermesClient.swift`: stock Sessions/Runs REST and SSE, Squircle app/build APIs.
-- `Sources/SquircleModel.swift`: current screen state, reconnect and launch report.
-- `Sources/UI/`: horizontal picker, flat threads and a builds sheet. SceneKit
-  textures the live phone with a real screenshot; transition progress moves its
-  mesh, camera and surrounding UIKit views. Idle continuous rendering is off.
-  Missing screenshots leave the display blank, without placeholder prose or
-  invented artwork. There is no SwiftUI.
-- `Tests/` and `UITests/`: 36 unit tests and version 5 import/navigation checks pass,
-  covering Mac browsing, scheme selection, import persistence, picker swipes,
-  back cancellation/completion, thread and builds sheets.
-  Earlier live tests cover Hermes chat/relaunch. The final signed archive,
-  export, simulator capture and physical installation/launch also succeeded.
+- `Sources/HermesClient.swift`, `SquircleModel.swift`, `AppProject.swift`: unchanged
+  Hermes Sessions/Runs REST + SSE, reconnection, Squircle app/build/import APIs.
+- `Sources/UI/DeviceStage.swift`: one `SCNView` for all devices; hardware geometry is
+  built once and flattened, each device only owns its display material. Renders on
+  change or while a gesture/transition is live; never idles continuously.
+- `StageLayout.swift` (pure gallery/workspace/transition poses), `SpringDriver.swift`
+  (retargetable spring, finger takeover), `ScreenshotBinding.swift` (PNG decode and
+  downsample off the main thread), `StudioViewController.swift` (gallery + navigation),
+  `WorkspaceViewController.swift`, `ThreadViewController.swift`, `BuildsViewController.swift`,
+  `AppImportViewController.swift`, `Theme.swift`. DEBUG-only `MotionAudit` and
+  `SQUIRCLE_SCRUB`/`SQUIRCLE_DEMO` hooks support frame capture; absent from Release.
+- `Tests/` and `UITests/`: 44 unit tests (8 new for layout/spring), navigation, rapid
+  interruption, Reduce Motion, import, Hermes round-trip, build, visual tour,
+  accessibility audit and comparable performance probes.
 
 Keep the Mac and external Tailscale connection available.
 

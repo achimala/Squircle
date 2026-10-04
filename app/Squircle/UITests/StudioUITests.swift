@@ -184,6 +184,196 @@ final class StudioUITests: XCTestCase {
         capture("05 — Returned to picker")
     }
 
+    /// Interrupts transitions mid-flight with raw coordinate taps and fast
+    /// edge drags, then requires one coherent resting screen. Read-only.
+    @MainActor
+    func testRapidNavigationStaysConsistent() throws {
+        app.launch()
+        let hero = element("project.hero")
+        requireHittable(hero, timeout: 35)
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        // Absolute points: the hero element is intentionally absent while
+        // the workspace is open, so it cannot anchor these taps.
+        let heroFrame = hero.frame
+        let heroPoint = origin.withOffset(CGVector(dx: heroFrame.midX, dy: heroFrame.midY))
+        let backPoint = origin.withOffset(CGVector(dx: 38, dy: app.windows.firstMatch.frame.minY + 90))
+
+        // Open then immediately go back, before the open transition settles.
+        for _ in 0..<4 {
+            heroPoint.tap()
+            backPoint.tap()
+        }
+        requireRestingGallery()
+
+        // Rapid open/close cycles through the real controls.
+        for _ in 0..<3 {
+            requireHittable(hero)
+            hero.tap()
+            requireHittable(element("project.back"))
+            element("project.back").tap()
+        }
+        requireRestingGallery()
+
+        // Fast edge drags: a short flick still closes; an aborted drag restores.
+        hero.tap()
+        requireHittable(element("thread.new"))
+        let start = origin.withOffset(CGVector(dx: 2, dy: app.frame.height * 0.5))
+        start.press(forDuration: 0.02, thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.3, dy: app.frame.height * 0.5)),
+                    withVelocity: .fast, thenHoldForDuration: 0)
+        requireRestingGallery()
+        hero.tap()
+        requireHittable(element("thread.new"))
+        edgeDrag(to: 0.12)
+        requireHittable(element("thread.new"))
+        requireHittable(element("project.builds"))
+        XCTAssertFalse(element("project.hero").exists, "The gallery stays hidden behind a resting workspace.")
+        // The cancelled drag left a resting workspace; leave it normally.
+        element("project.back").tap()
+        requireRestingGallery()
+
+        // Quick picker flicks settle on exactly one centered app.
+        let picker = app.scrollViews["app.picker"]
+        for _ in 0..<3 { picker.swipeLeft(velocity: .fast) }
+        for _ in 0..<3 { picker.swipeRight(velocity: .fast) }
+        requireRestingGallery()
+        XCTAssertEqual(elements("project.hero").count, 1)
+        capture("20 — After rapid navigation")
+        XCTAssertEqual(app.state, .runningForeground)
+    }
+
+    /// Reduced Motion: no turning, receding or lift; navigation still works
+    /// with short direct moves and the interactive back gesture.
+    @MainActor
+    func testReducedMotionNavigation() throws {
+        app.launchArguments += ["--reduce-motion"]
+        app.launch()
+        let hero = element("project.hero")
+        requireHittable(hero, timeout: 35)
+        let first = hero.label
+        capture("21 — Reduced motion gallery")
+        app.scrollViews["app.picker"].swipeLeft(velocity: .slow)
+        if !waitForHeroChange(from: first) {
+            app.scrollViews["app.picker"].swipeRight(velocity: .slow)
+            XCTAssertTrue(waitForHeroChange(from: first))
+        }
+        selectProject(named: first)
+        hero.tap()
+        requireHittable(element("thread.new"))
+        requireHittable(element("project.builds"))
+        capture("22 — Reduced motion workspace")
+        element("project.builds").tap()
+        requireHittable(element("builds.close"))
+        capture("23 — Reduced motion builds")
+        element("builds.close").tap()
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("builds.close"))
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 15), .completed)
+        edgeDrag(to: 0.82)
+        requireRestingGallery()
+        XCTAssertEqual(element("project.hero").label, first)
+    }
+
+    /// Read-only: visits every screen and captures it after it settles.
+    /// Prefix comes from SQUIRCLE_CAPTURE_PREFIX (e.g. "dark-").
+    @MainActor
+    func testVisualTour() throws {
+        let prefix = ProcessInfo.processInfo.environment["SQUIRCLE_CAPTURE_PREFIX"] ?? ""
+        app.launch()
+        let hero = element("project.hero")
+        requireHittable(hero, timeout: 35)
+        Thread.sleep(forTimeInterval: 3) // Real screenshots finish loading.
+        capture(prefix + "30 — Gallery")
+        let picker = app.scrollViews["app.picker"]
+        let first = hero.label
+        picker.swipeLeft(velocity: .slow)
+        _ = waitForHeroChange(from: first)
+        Thread.sleep(forTimeInterval: 1)
+        capture(prefix + "31 — Gallery next app")
+        selectProject(named: "Squircle")
+        hero.tap()
+        requireHittable(element("thread.new"))
+        Thread.sleep(forTimeInterval: 1)
+        capture(prefix + "32 — Workspace")
+        app.scrollViews["workspace.threads"].swipeUp(velocity: .slow)
+        Thread.sleep(forTimeInterval: 1.5)
+        capture(prefix + "33 — Workspace scrolled")
+        app.scrollViews["workspace.threads"].swipeDown(velocity: .fast)
+        Thread.sleep(forTimeInterval: 1.5)
+        let row = elements("thread.row").firstMatch
+        if row.waitForExistence(timeout: 10) {
+            reveal(row)
+            row.tap()
+            waitForThread()
+            Thread.sleep(forTimeInterval: 2)
+            capture(prefix + "34 — Thread")
+            element("thread.close").tap()
+            waitForThreadDismissal()
+        }
+        element("project.builds").tap()
+        requireHittable(element("builds.close"))
+        Thread.sleep(forTimeInterval: 1.5)
+        capture(prefix + "35 — Builds")
+        let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.47))
+        top.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)))
+        Thread.sleep(forTimeInterval: 1.5)
+        capture(prefix + "36 — Builds expanded")
+        element("builds.close").tap()
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("builds.close"))
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 15), .completed)
+        element("project.back").tap()
+        requireRestingGallery()
+        element("project.add").tap()
+        requireHittable(element("import.path"), timeout: 25)
+        Thread.sleep(forTimeInterval: 2)
+        capture(prefix + "37 — Add app")
+        enterMacPath("/Users/anshu/Documents/ChatGPT/RemoteAppDev/examples/SquircleProbe/SquircleProbe.xcodeproj")
+        requireHittable(app.textFields["import.name"], timeout: 45)
+        Thread.sleep(forTimeInterval: 1)
+        capture(prefix + "38 — Add app details")
+        // Deliberately leave Add untouched; this tour never imports.
+    }
+
+    /// Apple's automated accessibility audit on each primary screen. Read-only.
+    @MainActor
+    func testAccessibilityAudit() throws {
+        app.launch()
+        let hero = element("project.hero")
+        requireHittable(hero, timeout: 35)
+        try audit("gallery")
+        selectProject(named: "Squircle")
+        hero.tap()
+        requireHittable(element("thread.new"))
+        try audit("workspace")
+        let row = elements("thread.row").firstMatch
+        if row.waitForExistence(timeout: 10) {
+            reveal(row)
+            row.tap()
+            waitForThread()
+            try audit("thread")
+            element("thread.close").tap()
+            waitForThreadDismissal()
+        }
+        element("project.builds").tap()
+        requireHittable(element("builds.close"))
+        try audit("builds")
+    }
+
+    @MainActor
+    private func audit(_ screen: String) throws {
+        try app.performAccessibilityAudit { issue in
+            let element = issue.element.map { "\($0.elementType.rawValue):\($0.identifier):\($0.label)" } ?? "-"
+            print("AUDIT \(screen) \(issue.auditType) \(issue.compactDescription) [\(element)]")
+            return false
+        }
+    }
+
+    @MainActor
+    private func requireRestingGallery(file: StaticString = #filePath, line: UInt = #line) {
+        requireHittable(element("project.hero"), timeout: 15, file: file, line: line)
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("project.builds"))
+        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 10), .completed, "No workspace may remain behind the gallery.", file: file, line: line)
+        XCTAssertTrue(element("project.add").isHittable, file: file, line: line)
+    }
+
     @MainActor
     func testThreadRoundTrip() throws {
         app.launch()
@@ -389,8 +579,11 @@ final class StudioUITests: XCTestCase {
         let screenshot = XCUIScreen.main.screenshot()
         // Keep PNGs directly accessible even when Xcode stalls packaging an
         // xcresult on this SDK. These are unmodified simulator screenshots.
-        if let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
-            let output = directory.appendingPathComponent("SquircleVerification", isDirectory: true)
+        // SQUIRCLE_CAPTURE_DIR (passed as TEST_RUNNER_SQUIRCLE_CAPTURE_DIR)
+        // redirects them to a host artifact directory.
+        let override = ProcessInfo.processInfo.environment["SQUIRCLE_CAPTURE_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let output = override ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("SquircleVerification", isDirectory: true) {
             try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
             try? screenshot.pngRepresentation.write(to: output.appendingPathComponent(name + ".png"), options: .atomic)
         }

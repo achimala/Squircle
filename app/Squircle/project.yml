@@ -7,7 +7,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: 2F26US4NAU
     SWIFT_VERSION: "5.0"
-    CURRENT_PROJECT_VERSION: 5
+    CURRENT_PROJECT_VERSION: 6
     MARKETING_VERSION: 0.1.0
     SQUIRCLE_BUILD_ID: ""
     SQUIRCLE_CLIENT_CONFIG: $(SRCROOT)/../../.squircle/client.json
@@ -45,10 +45,10 @@ targets:
         CFBundleDisplayName: Squircle
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
-        UILaunchScreen: {}
+        UILaunchScreen:
+          UIColorName: LaunchBackground
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
-        UIUserInterfaceStyle: Light
         CADisableMinimumFrameDurationOnPhone: YES
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         SquircleBuildID: $(SQUIRCLE_BUILD_ID)

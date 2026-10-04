@@ -1,7 +1,7 @@
 import UIKit
 
 /// A native browser of the connected Mac. Paths and schemes come from the host;
-/// importing persists a build recipe there before the app enters the picker.
+/// importing persists a build recipe there before the app joins the gallery.
 final class AppImportNavigationController: UINavigationController {
     let model: SquircleModel
     var onImport: ((AppProject) -> Void)?
@@ -9,26 +9,14 @@ final class AppImportNavigationController: UINavigationController {
     init(model: SquircleModel) {
         self.model = model
         super.init(nibName: nil, bundle: nil)
-        let browser = MacProjectBrowserController(model: model, path: nil)
-        setViewControllers([browser], animated: false)
+        setViewControllers([MacProjectBrowserController(model: model, path: nil)], animated: false)
         modalPresentationStyle = .pageSheet
-        navigationBar.tintColor = Studio.ink
-        toolbar.tintColor = Studio.ink
-        let appearance = UINavigationBarAppearance()
-        appearance.configureWithTransparentBackground()
-        appearance.backgroundColor = Studio.canvas
-        appearance.titleTextAttributes = [.foregroundColor: Studio.ink]
-        navigationBar.standardAppearance = appearance
-        navigationBar.scrollEdgeAppearance = appearance
-        let toolbarAppearance = UIToolbarAppearance()
-        toolbarAppearance.configureWithTransparentBackground()
-        toolbarAppearance.backgroundColor = Studio.canvas
-        toolbar.standardAppearance = toolbarAppearance
-        toolbar.scrollEdgeAppearance = toolbarAppearance
+        navigationBar.prefersLargeTitles = true
+        navigationBar.tintColor = .label
+        toolbar.tintColor = .label
         if let sheet = sheetPresentationController {
             sheet.detents = [.large()]
             sheet.prefersGrabberVisible = true
-            sheet.preferredCornerRadius = 32
         }
     }
 
@@ -46,13 +34,14 @@ final class AppImportNavigationController: UINavigationController {
     }
 
     func enterPath(current: String?) {
-        let alert = UIAlertController(title: "Go to folder or project", message: nil, preferredStyle: .alert)
+        let alert = UIAlertController(title: "Go to Folder or Project", message: "A path on your Mac", preferredStyle: .alert)
         alert.addTextField {
             $0.text = current
             $0.placeholder = "~/Developer/MyApp"
             $0.autocorrectionType = .no
             $0.autocapitalizationType = .none
             $0.clearButtonMode = .whileEditing
+            $0.keyboardType = .URL
             $0.accessibilityIdentifier = "import.path.input"
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
@@ -63,6 +52,7 @@ final class AppImportNavigationController: UINavigationController {
         }
         go.accessibilityIdentifier = "import.path.go"
         alert.addAction(go)
+        alert.preferredAction = go
         present(alert, animated: true)
     }
 }
@@ -70,62 +60,61 @@ final class AppImportNavigationController: UINavigationController {
 private class MacImportPage: UITableViewController {
     let model: SquircleModel
     var task: Task<Void, Never>?
-    let spinner = UIActivityIndicatorView(style: .medium)
-    let message = Studio.label(size: 16, color: Studio.muted)
-    let retry = UIButton(type: .system)
+    let spinner = UIActivityIndicatorView(style: .large)
+    let message = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
+    let retry = Theme.glassButton(symbol: "arrow.clockwise", title: "Retry", identifier: "import.retry")
     var currentPath: String?
     private let pathButton = UIButton(type: .system)
     private var pathWidth: NSLayoutConstraint?
 
-    init(model: SquircleModel) {
+    init(model: SquircleModel, style: UITableView.Style) {
         self.model = model
-        super.init(style: .plain)
+        super.init(style: style)
     }
     required init?(coder: NSCoder) { fatalError() }
     deinit { task?.cancel() }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = Studio.canvas
-        tableView.backgroundColor = Studio.canvas
-        tableView.separatorColor = Studio.line
-        tableView.separatorInset = UIEdgeInsets(top: 0, left: 58, bottom: 0, right: 24)
-        tableView.rowHeight = 64
         tableView.keyboardDismissMode = .onDrag
-        tableView.tableFooterView = UIView()
         let backdrop = UIView()
         let stack = UIStackView(arrangedSubviews: [spinner, message, retry])
         stack.axis = .vertical
         stack.alignment = .center
         stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
-        message.numberOfLines = 0
         message.textAlignment = .center
         message.accessibilityIdentifier = "import.error"
-        retry.setTitle("Retry", for: .normal)
-        retry.tintColor = Studio.ink
         retry.addAction(UIAction { [weak self] _ in self?.reload() }, for: .touchUpInside)
         backdrop.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: backdrop.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor, constant: -30),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: backdrop.leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: backdrop.trailingAnchor, constant: -28)
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: backdrop.leadingAnchor, constant: 32),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: backdrop.trailingAnchor, constant: -32)
         ])
         tableView.backgroundView = backdrop
-        pathButton.setImage(UIImage(systemName: "folder"), for: .normal)
-        pathButton.tintColor = Studio.muted
-        pathButton.titleLabel?.font = Studio.font(13)
-        pathButton.titleLabel?.lineBreakMode = .byTruncatingMiddle
+
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "folder")
+        config.imagePadding = 6
+        config.baseForegroundColor = .label
+        config.titleLineBreakMode = .byTruncatingMiddle
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = Theme.font(.subheadline, 15, .medium)
+            return attributes
+        }
+        pathButton.configuration = config
         pathButton.translatesAutoresizingMaskIntoConstraints = false
         pathWidth = pathButton.widthAnchor.constraint(equalToConstant: 280)
         pathWidth?.isActive = true
-        pathButton.heightAnchor.constraint(equalToConstant: 40).isActive = true
+        pathButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         pathButton.accessibilityIdentifier = "import.path"
         pathButton.accessibilityLabel = "Go to folder or project on Mac"
         pathButton.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            (self.navigationController as? AppImportNavigationController)?.enterPath(current: self.currentPath)
+            (navigationController as? AppImportNavigationController)?.enterPath(current: currentPath)
         }, for: .touchUpInside)
         toolbarItems = [.flexibleSpace(), UIBarButtonItem(customView: pathButton), .flexibleSpace()]
         setState(loading: false)
@@ -139,17 +128,16 @@ private class MacImportPage: UITableViewController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        if isMovingFromParent || navigationController?.isBeingDismissed == true {
-            task?.cancel()
-        }
+        if isMovingFromParent || navigationController?.isBeingDismissed == true { task?.cancel() }
     }
 
     func reload() {}
 
     func updatePath() {
-        let path = currentPath ?? "Mac"
-        pathButton.setTitle("  " + path, for: .normal)
-        pathWidth?.constant = max(120, min(330, view.bounds.width - 72))
+        let path = (currentPath ?? "Mac").replacingOccurrences(of: #"^/Users/[^/]+"#, with: "~", options: .regularExpression)
+        pathButton.configuration?.title = path
+        pathButton.accessibilityValue = currentPath
+        pathWidth?.constant = max(140, min(320, view.bounds.width - 80))
     }
 
     func setPathEnabled(_ enabled: Bool) { pathButton.isEnabled = enabled }
@@ -168,16 +156,19 @@ private final class MacProjectBrowserController: MacImportPage {
 
     init(model: SquircleModel, path: String?) {
         initialPath = path
-        super.init(model: model)
+        super.init(model: model, style: .insetGrouped)
         currentPath = path
     }
     required init?(coder: NSCoder) { fatalError() }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = initialPath.map { ($0 as NSString).lastPathComponent } ?? "Add app"
+        title = initialPath.map { ($0 as NSString).lastPathComponent } ?? "Add App"
+        navigationItem.largeTitleDisplayMode = initialPath == nil ? .always : .never
         if initialPath == nil {
-            let close = UIBarButtonItem(image: UIImage(systemName: "xmark"), style: .plain, target: self, action: #selector(close))
+            let close = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
+                self?.navigationController?.dismiss(animated: true)
+            })
             close.accessibilityIdentifier = "import.cancel"
             close.accessibilityLabel = "Close"
             navigationItem.leftBarButtonItem = close
@@ -185,8 +176,6 @@ private final class MacProjectBrowserController: MacImportPage {
         tableView.accessibilityIdentifier = "import.browser"
         reload()
     }
-
-    @objc private func close() { navigationController?.dismiss(animated: true) }
 
     override func reload() {
         task?.cancel()
@@ -200,10 +189,13 @@ private final class MacProjectBrowserController: MacImportPage {
                 currentPath = result.path
                 updatePath()
                 if result.parentPath != nil {
-                    navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "arrow.up"), style: .plain, target: self, action: #selector(parentFolder))
-                    navigationItem.rightBarButtonItem?.accessibilityLabel = "Parent folder"
+                    let up = UIBarButtonItem(image: UIImage(systemName: "arrow.up"), primaryAction: UIAction { [weak self] _ in
+                        self?.parentFolder()
+                    })
+                    up.accessibilityLabel = "Parent folder"
+                    navigationItem.rightBarButtonItem = up
                 }
-                setState(loading: false, empty: result.entries.isEmpty ? "No projects or folders" : nil)
+                setState(loading: false, empty: result.entries.isEmpty ? "No projects or folders here" : nil)
                 tableView.reloadData()
             } catch is CancellationError {
             } catch {
@@ -213,24 +205,51 @@ private final class MacProjectBrowserController: MacImportPage {
         }
     }
 
-    @objc private func parentFolder() {
+    private func parentFolder() {
         guard let parent = directory?.parentPath else { return }
         (navigationController as? AppImportNavigationController)?.open(path: parent)
     }
 
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { directory?.entries.count ?? 0 }
+    private var projects: [MacProjectDirectory.Entry] { directory?.entries.filter { $0.kind != .directory } ?? [] }
+    private var folders: [MacProjectDirectory.Entry] { directory?.entries.filter { $0.kind == .directory } ?? [] }
+    private func entries(in section: Int) -> [MacProjectDirectory.Entry] {
+        projects.isEmpty ? folders : (section == 0 ? projects : folders)
+    }
+
+    override func numberOfSections(in tableView: UITableView) -> Int {
+        guard directory != nil else { return 0 }
+        return projects.isEmpty || folders.isEmpty ? 1 : 2
+    }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        guard directory != nil, !(directory?.entries.isEmpty ?? true) else { return nil }
+        if projects.isEmpty { return "Folders" }
+        return section == 0 ? "Xcode Projects" : "Folders"
+    }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { entries(in: section).count }
+
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-        guard let entry = directory?.entries[indexPath.row] else { return cell }
-        cell.backgroundColor = .clear
+        let entry = entries(in: indexPath.section)[indexPath.row]
         var content = cell.defaultContentConfiguration()
         content.text = entry.name
-        content.textProperties.font = Studio.font(17)
-        content.textProperties.color = Studio.ink
-        content.image = UIImage(systemName: entry.kind == .directory ? "folder" : "app.dashed")
-        content.imageProperties.tintColor = Studio.muted
-        content.imageProperties.maximumSize = CGSize(width: 24, height: 24)
-        content.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 12, leading: 24, bottom: 12, trailing: 24)
+        content.textProperties.font = Theme.font(.body, 17, entry.kind == .directory ? .regular : .semibold)
+        switch entry.kind {
+        case .directory:
+            content.image = UIImage(systemName: "folder.fill")
+            content.imageProperties.tintColor = .secondaryLabel
+        case .project:
+            content.image = UIImage(systemName: "hammer.fill")
+            content.imageProperties.tintColor = Theme.accent
+            content.secondaryText = "Xcode project"
+        case .workspace:
+            content.image = UIImage(systemName: "square.stack.3d.up.fill")
+            content.imageProperties.tintColor = Theme.accent
+            content.secondaryText = "Xcode workspace"
+        }
+        content.secondaryTextProperties.color = .secondaryLabel
+        content.imageProperties.reservedLayoutSize = CGSize(width: 28, height: 28)
         cell.contentConfiguration = content
         cell.accessoryType = .disclosureIndicator
         cell.accessibilityIdentifier = "import.entry"
@@ -240,7 +259,7 @@ private final class MacProjectBrowserController: MacImportPage {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard let entry = directory?.entries[indexPath.row] else { return }
+        let entry = entries(in: indexPath.section)[indexPath.row]
         (navigationController as? AppImportNavigationController)?.open(path: entry.path)
     }
 }
@@ -252,35 +271,58 @@ private final class MacAppImportController: MacImportPage, UITextFieldDelegate {
     private let nameField = UITextField()
     private let schemeButton = UIButton(type: .system)
     private var submitting = false
-    private lazy var add = UIBarButtonItem(title: "Add", style: .done, target: self, action: #selector(importApp))
+    private lazy var add: UIBarButtonItem = {
+        let item = UIBarButtonItem(title: "Add", style: .done, target: self, action: #selector(importApp))
+        if #available(iOS 26.0, *) { item.style = .prominent }
+        item.tintColor = Theme.accent
+        return item
+    }()
 
     init(model: SquircleModel, project: String) {
         projectPath = project
-        super.init(model: model)
+        super.init(model: model, style: .insetGrouped)
         currentPath = project
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    private enum Row { case name, scheme, bundle(String), team(String) }
+    private var rows: [[Row]] {
+        guard let inspection else { return [] }
+        var facts: [Row] = []
+        if let bundle = inspection.bundleID, !bundle.isEmpty { facts.append(.bundle(bundle)) }
+        if let team = inspection.teamID, !team.isEmpty { facts.append(.team(team)) }
+        return facts.isEmpty ? [[.name, .scheme]] : [[.name, .scheme], facts]
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Add app"
+        title = "Add App"
+        navigationItem.largeTitleDisplayMode = .never
         add.accessibilityIdentifier = "import.add"
         navigationItem.rightBarButtonItem = add
-        nameField.font = Studio.font(19, .medium)
-        nameField.textColor = Studio.ink
+        nameField.font = Theme.font(.body, 17)
+        nameField.adjustsFontForContentSizeCategory = true
+        nameField.textAlignment = .right
+        nameField.textColor = .label
         nameField.placeholder = "App name"
         nameField.autocapitalizationType = .words
         nameField.returnKeyType = .done
+        nameField.clearButtonMode = .whileEditing
         nameField.delegate = self
         nameField.accessibilityIdentifier = "import.name"
+        nameField.accessibilityLabel = "App name"
         nameField.addTarget(self, action: #selector(nameChanged), for: .editingChanged)
-        schemeButton.tintColor = Studio.ink
-        schemeButton.titleLabel?.font = Studio.font(17)
+        var schemeStyle = UIButton.Configuration.plain()
+        schemeStyle.baseForegroundColor = .secondaryLabel
+        schemeStyle.image = UIImage(systemName: "chevron.up.chevron.down")
+        schemeStyle.imagePlacement = .trailing
+        schemeStyle.imagePadding = 6
+        schemeStyle.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .footnote)
+        schemeStyle.contentInsets = .zero
+        schemeButton.configuration = schemeStyle
         schemeButton.contentHorizontalAlignment = .trailing
         schemeButton.accessibilityIdentifier = "import.scheme"
         schemeButton.addAction(UIAction { [weak self] _ in self?.chooseScheme() }, for: .touchUpInside)
-        tableView.separatorInset = UIEdgeInsets(top: 0, left: 24, bottom: 0, right: 24)
-        tableView.rowHeight = 72
         reload()
     }
 
@@ -299,7 +341,8 @@ private final class MacAppImportController: MacImportPage, UITextFieldDelegate {
                 currentPath = result.project
                 updatePath()
                 if nameField.text?.isEmpty != false { nameField.text = result.name }
-                schemeButton.setTitle(result.scheme ?? "Choose", for: .normal)
+                schemeButton.configuration?.title = result.scheme ?? "Choose"
+                schemeButton.accessibilityLabel = result.scheme ?? "Choose scheme"
                 setState(loading: false)
                 tableView.reloadData()
                 nameChanged()
@@ -331,41 +374,44 @@ private final class MacAppImportController: MacImportPage, UITextFieldDelegate {
         navigationController?.pushViewController(choices, animated: true)
     }
 
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { inspection == nil ? 0 : 2 }
+    override func numberOfSections(in tableView: UITableView) -> Int { rows.count }
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows[section].count }
+
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = UITableViewCell()
-        cell.backgroundColor = .clear
+        let row = rows[indexPath.section][indexPath.row]
+        let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
         cell.selectionStyle = .none
-        let control: UIView = indexPath.row == 0 ? nameField : schemeButton
-        control.translatesAutoresizingMaskIntoConstraints = false
-        cell.contentView.addSubview(control)
-        NSLayoutConstraint.activate([
-            control.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 12),
-            control.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -12),
-            control.trailingAnchor.constraint(equalTo: cell.contentView.trailingAnchor, constant: -24)
-        ])
-        if indexPath.row == 0 {
-            control.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 24).isActive = true
-        } else {
-            let label = Studio.label("Scheme", size: 17, color: Studio.muted)
-            label.translatesAutoresizingMaskIntoConstraints = false
-            cell.contentView.addSubview(label)
+        var content = UIListContentConfiguration.valueCell()
+        switch row {
+        case .name, .scheme:
+            content.text = { if case .name = row { return "Name" }; return "Scheme" }()
+            cell.contentConfiguration = content
+            let control: UIView = { if case .name = row { return nameField }; return schemeButton }()
+            control.translatesAutoresizingMaskIntoConstraints = false
+            cell.contentView.addSubview(control)
             NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 24),
-                label.centerYAnchor.constraint(equalTo: cell.contentView.centerYAnchor),
-                control.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 24),
-                label.widthAnchor.constraint(greaterThanOrEqualToConstant: 64)
+                control.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 6),
+                control.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -6),
+                control.trailingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.trailingAnchor),
+                control.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 24 + UIFontMetrics(forTextStyle: .body).scaledValue(for: 88)),
+                control.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
             ])
-            label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        case .bundle(let value), .team(let value):
+            content.text = { if case .bundle = row { return "Bundle ID" }; return "Team" }()
+            content.secondaryText = value
+            content.secondaryTextProperties.font = Theme.font(.body, 15, monospaced: true)
+            cell.contentConfiguration = content
         }
         return cell
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        inspection.map { ($0.project as NSString).lastPathComponent }
+        section == 0 ? inspection.map { ($0.project as NSString).lastPathComponent } : "From Xcode"
     }
 
-    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? { inspection?.issue }
+    override func tableView(_ tableView: UITableView, titleForFooterInSection section: Int) -> String? {
+        section == rows.count - 1 ? inspection?.issue : nil
+    }
 
     @objc private func importApp() {
         guard !submitting, let inspection, inspection.canImport, let scheme = selectedScheme,
@@ -384,13 +430,14 @@ private final class MacAppImportController: MacImportPage, UITextFieldDelegate {
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                let app = try await model.importMacProject(project: inspection.project, scheme: scheme, name: name, configuration: inspection.configuration)
+                let app = try await model.importMacProject(project: inspection.project, scheme: scheme, name: name,
+                                                           configuration: inspection.configuration)
                 try Task.checkCancellation()
                 (navigationController as? AppImportNavigationController)?.onImport?(app)
             } catch is CancellationError {
             } catch {
                 guard !Task.isCancelled else { return }
-                let alert = UIAlertController(title: "Couldn’t add app", message: error.localizedDescription, preferredStyle: .alert)
+                let alert = UIAlertController(title: "Couldn’t Add App", message: error.localizedDescription, preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: "OK", style: .default))
                 present(alert, animated: true)
             }
@@ -411,27 +458,28 @@ private final class MacSchemeController: UITableViewController {
     private let selected: String?
     private let onSelect: (String) -> Void
     init(schemes: [String], selected: String?, onSelect: @escaping (String) -> Void) {
-        self.schemes = schemes; self.selected = selected; self.onSelect = onSelect
-        super.init(style: .plain)
+        self.schemes = schemes
+        self.selected = selected
+        self.onSelect = onSelect
+        super.init(style: .insetGrouped)
     }
     required init?(coder: NSCoder) { fatalError() }
     override func viewDidLoad() {
         super.viewDidLoad()
         title = "Scheme"
-        tableView.backgroundColor = Studio.canvas
-        tableView.separatorColor = Studio.line
-        tableView.rowHeight = 60
+        navigationItem.largeTitleDisplayMode = .never
     }
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { schemes.count }
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
-        cell.backgroundColor = .clear
-        cell.textLabel?.text = schemes[indexPath.row]
-        cell.textLabel?.font = Studio.font(17)
-        cell.textLabel?.textColor = Studio.ink
-        cell.tintColor = Studio.ink
-        cell.accessoryType = schemes[indexPath.row] == selected ? .checkmark : .none
-        cell.accessibilityTraits = schemes[indexPath.row] == selected ? [.button, .selected] : .button
+        var content = cell.defaultContentConfiguration()
+        content.text = schemes[indexPath.row]
+        content.textProperties.font = Theme.font(.body, 17)
+        cell.contentConfiguration = content
+        cell.tintColor = Theme.accent
+        let isSelected = schemes[indexPath.row] == selected
+        cell.accessoryType = isSelected ? .checkmark : .none
+        cell.accessibilityTraits = isSelected ? [.button, .selected] : .button
         return cell
     }
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) { onSelect(schemes[indexPath.row]) }
