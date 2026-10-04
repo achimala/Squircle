@@ -4,13 +4,13 @@ Build and iterate on iOS apps from your iPhone. **The native app talks to stock 
 
 ## Current state
 
-Version 7 source switches chat to stock Hermes Desktop’s native protocol, with
+Installed version 7 switches chat to stock Hermes Desktop’s native protocol, with
 full tool arguments/results, requests, shared Desktop sessions and native
 background replies. [Message support and upstream limits](docs/hermes-client.md).
 
-The [native app](app/Squircle/README.md) has persistent conversations, streamed responses/tool progress, approvals, stop, and installable builds. Version **0.1.0 (5)** is installed and launched on the phone. This personal build includes its Mac connection settings: **no token form, pairing flow or additional agent backend**.
+The [native app](app/Squircle/README.md) has persistent conversations, streamed responses/tool progress, approvals, stop, and installable builds. Version **0.1.0 (7)** is installed on the phone; its new manual-launch acknowledgement is pending. This personal build includes its Mac connection settings: **no token form, pairing flow or additional agent backend**.
 
-The interface uses a horizontal live 3D app picker, a minimal flat thread list and a secondary builds sheet. UIKit moves the actual phone, app title and controls through spatial transitions with interactive back navigation; there are no screen fades or explanatory panels. Real screenshots and agent-editable app metadata persist on the Mac. **36 iOS unit tests, import/navigation UI checks and 71 Rust tests pass. Signed build 5 was installed and launched on the connected iPhone, with a new launch acknowledgement received by the Mac.** [Design decisions](docs/product.md), [test evidence and limits](docs/validation.md).
+The interface uses a horizontal live 3D app picker, a minimal flat thread list and a secondary builds sheet. UIKit moves the actual phone, app title and controls through spatial transitions with interactive back navigation; there are no screen fades or explanatory panels. Real screenshots and agent-editable app metadata persist on the Mac. **54 deterministic iOS tests and native chat/navigation UI checks pass, plus two separately exercised live Hermes tests. Version 7 is signed and installed; version 5 is the latest phone launch acknowledgement previously verified.** [Design decisions](docs/product.md), [test evidence and limits](docs/validation.md).
 
 **Add an app from the phone:** **+ → browse the Mac or paste a project path → choose scheme/name → Add**. Import saves the app's build settings on the Mac, so its first build can start from the phone. Import itself does not build or create a screenshot. This flow is verified and included in installed version 5. [Import details](docs/cli.md#import-an-existing-app).
 

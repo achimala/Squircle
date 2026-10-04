@@ -36,6 +36,23 @@ Evidence retained in `.verification/native-hermes/`: `regression.log`,
 one Xcode diagnostic collector hung and was terminated after its tests finished.
 The final runs used `-collect-test-diagnostics never` and completed cleanly.
 
+The final signed archive/export is build `f86d83f5-f046-44bd-8ff4-0ef4018cc54a`,
+from clean integration commit `e41b804`. `devicectl` installed it on the connected
+iPhone and independently reported **0.1.0 (7)**. The phone's manual launch and
+new automatic acknowledgement are still pending; installation is not recorded
+as a new cellular or physical-device chat test.
+
+A separate real simulator recording was inspected in consecutive rendered
+frames over **3.2–4.6 s (opening)** and **5.7–7.1 s (closing)**. The phone, title,
+and controls move continuously between gallery/workspace with no screen
+crossfade. The actual published chat capture appears on the live 3D device.
+Evidence: `motion.mp4`, `native-open-01…04.png`, `native-close-01…04.png` under
+`.verification/native-hermes/`. This is visual continuity evidence on the
+simulator, not a measured physical-device frame rate. The simulator recorder's
+stale lock was cleared by restarting only the dedicated Squircle QA simulator.
+Eleven test-only conversations were archived (recoverably) after verification;
+the latest native example remains visible.
+
 **Upstream limitation reproduced:** this Hermes version can consume the first
 heartbeat tick in its slash-worker watchdog without running a reply; the second
 tick delivered normally through the native owner process. No custom scheduler

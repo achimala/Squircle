@@ -12,9 +12,12 @@ fallbacks). Light and dark appearance, Dynamic Type, Reduce Motion (no turning,
 receding or lift; short direct moves) and VoiceOver labels are supported. Apps
 without a capture show an honest dark "No screenshot yet" display.
 
-Installed on the physical iPhone: **version 5** (the previous design). Build 6
-has passed simulator tests only; see [validation](../../docs/validation.md) and
-the redesign handoff for exact results. Physical-device motion is unmeasured.
+Installed on the physical iPhone: **version 7**, verified by `devicectl` after
+installation from commit `e41b804`. Manual launch acknowledgement for this
+update remains pending. Native tool/question/heartbeat/reconnect tests and chat
+UI/relaunch tests pass on the simulator; opening/closing motion was inspected
+frame by frame. Physical-device motion is unmeasured. See
+[validation](../../docs/validation.md).
 
 Hermes retains conversation history; the Mac app catalog owns app names,
 summaries and preview artifacts. Local client state holds navigation, thread
