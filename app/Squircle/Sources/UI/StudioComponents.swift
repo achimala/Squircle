@@ -95,63 +95,58 @@ final class AppGlyphView: UIView {
 
 final class ProjectHero: UIControl {
     var onPage: ((Int) -> Void)?
-    let project: AppProject
+    private(set) var project: AppProject
     let phone: DevicePreview
+    let titleLabel = Studio.label(size: 30, weight: .semibold)
     private let previewBinding: PreviewBinding
     private let model: SquircleModel
-    private let titleLabel = Studio.label(size: 31, weight: .semibold)
-    private let subtitleLabel = Studio.label(size: 14, color: Studio.muted)
-    private let indexLabel = Studio.label("01", size: 12, color: Studio.muted)
-    private let previous = UIButton(type: .system)
-    private let nextPage = UIButton(type: .system)
-    private let arrow = UIImageView(image: UIImage(systemName: "arrow.up.right", withConfiguration: UIImage.SymbolConfiguration(pointSize: 26, weight: .light)))
-    init(model: SquircleModel, project: AppProject, build: AppBuild?) {
+
+    init(model: SquircleModel, project: AppProject) {
         self.project = project; self.model = model
-        phone = DevicePreview(name: project.name, probe: project.name.localizedCaseInsensitiveContains("probe"))
+        phone = DevicePreview(name: project.name)
         previewBinding = PreviewBinding(phone)
         super.init(frame: .zero)
         backgroundColor = .clear
-        titleLabel.text = project.name
-        update(build: build)
-        arrow.tintColor = Studio.ink
-        [phone,titleLabel,subtitleLabel,indexLabel,arrow].forEach { $0.isUserInteractionEnabled = false; addSubview($0) }
-        for (button, symbol, direction) in [(previous, "chevron.left", -1), (nextPage, "chevron.right", 1)] {
-            button.setImage(UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .light)), for: .normal)
-            button.tintColor = Studio.ink
-            button.addAction(UIAction { [weak self] _ in Studio.haptic(); self?.onPage?(direction) }, for: .touchUpInside)
-            addSubview(button)
-        }
-        accessibilityCustomActions = [UIAccessibilityCustomAction(name: "Previous app", actionHandler: { [weak self] _ in self?.onPage?(-1); return true }), UIAccessibilityCustomAction(name: "Next app", actionHandler: { [weak self] _ in self?.onPage?(1); return true })]
-        isAccessibilityElement = true; accessibilityLabel = "\(project.name), \(build?.version ?? "No builds yet")"
-        accessibilityTraits = .button; accessibilityIdentifier = "project.hero"
+        [phone, titleLabel].forEach { $0.isUserInteractionEnabled = false; addSubview($0) }
+        titleLabel.textAlignment = .center; titleLabel.lineBreakMode = .byTruncatingTail
+        accessibilityCustomActions = [
+            UIAccessibilityCustomAction(name: "Previous app", actionHandler: { [weak self] _ in self?.onPage?(-1); return true }),
+            UIAccessibilityCustomAction(name: "Next app", actionHandler: { [weak self] _ in self?.onPage?(1); return true })
+        ]
+        isAccessibilityElement = true; accessibilityTraits = .button
+        update(project: project)
     }
     required init?(coder: NSCoder) { fatalError() }
-    func update(build: AppBuild?) {
-        previewBinding.update(model: model, project: project)
-        let version = build?.version.split(separator: " ").first.map(String.init) ?? ""
-        subtitleLabel.text = build.map { $0.canInstall ? "\(version) · Ready to install" : $0.status.capitalized } ?? "Start with an idea"
-        accessibilityLabel = "\(project.name), \(build?.version ?? "No builds yet")"
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        // Empty cell margins pass taps through to neighboring phones.
+        let device = CGRect(x: bounds.width * 0.22, y: 0, width: bounds.width * 0.56, height: bounds.height - 85)
+        return device.contains(point) || titleLabel.frame.insetBy(dx: -16, dy: -12).contains(point)
     }
-    func setPosition(_ index: Int, count: Int) {
-        indexLabel.text = String(format: "%02d / %02d", index, count)
-        previous.isHidden = count < 2; nextPage.isHidden = count < 2
+    func update(project: AppProject) {
+        self.project = project
+        titleLabel.text = project.name; accessibilityLabel = project.name
+        previewBinding.update(model: model, project: project)
+        setNeedsLayout()
+    }
+    func setSelected(_ selected: Bool) {
+        accessibilityIdentifier = selected ? "project.hero" : "project.picker.\(project.id)"
+        accessibilityTraits = selected ? [.button, .selected] : .button
+    }
+    func setPickerOffset(_ offset: CGFloat) {
+        phone.setPickerOffset(offset)
+        let distance = min(1, abs(offset))
+        phone.transform = CGAffineTransform(scaleX: 1 - distance * 0.12, y: 1 - distance * 0.12)
+        phone.isHidden = abs(offset) > 1.7
     }
     override func layoutSubviews() {
         super.layoutSubviews()
-        indexLabel.frame = CGRect(x: 0, y: 9, width: 70, height: 18)
-        previous.frame = CGRect(x: bounds.width-98, y: 0, width: 44, height: 44)
-        nextPage.frame = CGRect(x: bounds.width-44, y: 0, width: 44, height: 44)
-        phone.bounds = CGRect(x: 0, y: 0, width: bounds.width-24, height: bounds.height-118)
-        phone.center = CGPoint(x: bounds.midX, y: 19 + (bounds.height-118)/2)
-        titleLabel.frame = CGRect(x: 0, y: bounds.height-75, width: bounds.width-45, height: 40)
-        subtitleLabel.frame = CGRect(x: 1, y: bounds.height-28, width: bounds.width-40, height: 21)
-        arrow.frame = CGRect(x: bounds.width-26, y: bounds.height-61, width: 26, height: 26)
-    }
-    override var isHighlighted: Bool {
-        didSet {
-            UIView.animate(withDuration: 0.24, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
-                self.phone.transform = self.isHighlighted ? CGAffineTransform(scaleX: 0.975, y: 0.975) : .identity
-            }
+        phone.bounds = CGRect(x: 0, y: 0, width: bounds.width, height: max(150, bounds.height - 85))
+        phone.center = CGPoint(x: bounds.midX, y: (bounds.height - 85) * 0.48)
+        if titleLabel.superview === self {
+            let available = bounds.width * 0.58 - 24
+            let size = titleLabel.sizeThatFits(CGSize(width: available, height: 54))
+            titleLabel.frame = CGRect(x: (bounds.width - min(size.width, available)) / 2,
+                                      y: bounds.height - 65, width: min(size.width, available), height: max(40, size.height))
         }
     }
 }

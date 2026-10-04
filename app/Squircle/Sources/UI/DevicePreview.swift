@@ -13,14 +13,20 @@ final class DevicePreview: UIView {
     private let cameraNode = SCNNode()
     private let contactShadowNode = SCNNode()
     private let display = SCNMaterial()
-    private let previewStatus = UILabel()
     private var animationRequested = false
     private(set) var screenshot: UIImage?
     private(set) var hasScreenshot = false
     private(set) var poseProgress: CGFloat = 0
+    private(set) var pickerOffset: CGFloat = 0
+    private(set) var previewStatus: String?
     private static let viewportAspect: CGFloat = 0.82
     private static let screenAspect: CGFloat = 3.34 / 7.205
     private static let canvas = UIColor(red: 0.974, green: 0.964, blue: 0.945, alpha: 1)
+
+    /// Empty apps still have a physical place in the picker, with a blank screen.
+    var showsHardwareWithoutScreenshot = true {
+        didSet { updateVisibility() }
+    }
 
     var upright: Bool {
         get { poseProgress == 1 }
@@ -55,14 +61,6 @@ final class DevicePreview: UIView {
         sceneView.rendersContinuously = false
         sceneView.isPlaying = false
         addSubview(sceneView)
-        previewStatus.text = "No screenshot published"
-        previewStatus.textColor = .secondaryLabel
-        previewStatus.font = .preferredFont(forTextStyle: .subheadline)
-        previewStatus.textAlignment = .center
-        previewStatus.numberOfLines = 0
-        previewStatus.adjustsFontForContentSizeCategory = true
-        addSubview(previewStatus)
-        sceneView.isHidden = true
         scene.rootNode.addChildNode(phone)
         buildPhone()
         buildStudio()
@@ -74,7 +72,6 @@ final class DevicePreview: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        previewStatus.frame = bounds.insetBy(dx: 20, dy: 20)
         let height = min(bounds.height, bounds.width / Self.viewportAspect)
         let size = CGSize(width: height * Self.viewportAspect, height: height)
         let frame = CGRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
@@ -93,7 +90,7 @@ final class DevicePreview: UIView {
     }
 
     /// Only real screenshots enter the display. Without one the screen remains
-    /// neutral and empty; the enclosing UI can show its own unavailable state.
+    /// neutral and empty. No generated screen content or status text is drawn.
     func setScreenshot(_ image: UIImage?) {
         SCNTransaction.begin()
         SCNTransaction.disableActions = true
@@ -117,33 +114,52 @@ final class DevicePreview: UIView {
             display.diffuse.contents = Self.canvas
         }
         SCNTransaction.commit()
-        sceneView.isHidden = !hasScreenshot
-        previewStatus.isHidden = hasScreenshot
+        updateVisibility()
         sceneView.setNeedsDisplay()
     }
 
-    func setPreviewStatus(_ message: String) { previewStatus.text = message }
+    /// Retained as metadata for callers; status never becomes visual screen art.
+    func setPreviewStatus(_ message: String) { previewStatus = message }
+
+    /// Negative is left of the picker center; positive is right. Neighbors turn
+    /// toward the center and recede, driven only by the actual scroll position.
+    func setPickerOffset(_ offset: CGFloat) {
+        pickerOffset = poseProgress == 1 ? 0 : (offset.isFinite ? min(1, max(-1, offset)) : 0)
+        applyPose()
+    }
 
     /// Gallery (0) to workspace (1). A transition driver supplies progress each
     /// frame; slerp rotates the actual mesh, its normals, and its reflections.
     func setPose(_ progress: CGFloat) {
         poseProgress = progress.isFinite ? min(1, max(0, progress)) : 0
+        if poseProgress == 1 { pickerOffset = 0 }
+        applyPose()
+    }
+
+    private func applyPose() {
         SCNTransaction.begin()
         SCNTransaction.disableActions = true
-        let gallery = simd_quatf(angle: -0.085, axis: [0, 0, 1])
-            * simd_quatf(angle: 0.52, axis: [0, 1, 0])
-            * simd_quatf(angle: -0.50, axis: [1, 0, 0])
-        let workspace = simd_quatf(angle: 0.10, axis: [0, 1, 0])
-            * simd_quatf(angle: -0.10, axis: [1, 0, 0])
-        phone.simdOrientation = simd_slerp(gallery, workspace, Float(poseProgress))
+        let offset = Float(pickerOffset)
+        let progress = Float(poseProgress)
+        let edge = offset * offset
+        let gallery = simd_quatf(angle: 0.035 * offset, axis: [0, 0, 1])
+            * simd_quatf(angle: 0.08 - 0.50 * offset, axis: [0, 1, 0])
+            * simd_quatf(angle: -0.16 - 0.04 * edge, axis: [1, 0, 0])
+        let dock = simd_quatf(angle: 0, axis: [0, 1, 0])
+        phone.simdOrientation = simd_slerp(gallery, dock, progress)
         phone.position = SCNVector3(0, 0.15, 0)
-        // The upright phone has a taller projected silhouette. A small physical
-        // dolly preserves breathing room without scaling or warping the mesh.
-        cameraNode.position.z = 32 + 3 * Float(poseProgress)
+        // A quadratic dolly is smooth through the centered page. During the
+        // workspace transition it settles into a straight, compact dock pose.
+        let galleryDistance: Float = 34.6 + 1.8 * edge
+        cameraNode.position.z = galleryDistance + (36 - galleryDistance) * progress
         let foot = phone.convertPosition(SCNVector3(0, -3.71, 0), to: nil)
         contactShadowNode.position = SCNVector3(foot.x, foot.y - 0.27, -1.2)
         SCNTransaction.commit()
         sceneView.setNeedsDisplay()
+    }
+
+    private func updateVisibility() {
+        sceneView.isHidden = !hasScreenshot && !showsHardwareWithoutScreenshot
     }
 
     /// Continuous rendering is limited to the transition or direct interaction.

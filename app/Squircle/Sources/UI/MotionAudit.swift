@@ -11,6 +11,15 @@ final class MotionAudit: NSObject {
     private var name = ""
     private var generation = UUID()
 
+    func note(_ event: String, values: [String: Any]) {
+        guard ProcessInfo.processInfo.arguments.contains("--motion-audit"),
+              let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
+        let path = directory.appendingPathComponent("gesture-audit.json")
+        var records = (try? Data(contentsOf: path)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [[String: Any]] } ?? []
+        records.append(["event": event, "timestamp": Date().timeIntervalSince1970, "values": values])
+        if let data = try? JSONSerialization.data(withJSONObject: records, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: path, options: .atomic) }
+    }
+
     func begin(_ name: String, duration: Double = 1.1) {
         guard ProcessInfo.processInfo.arguments.contains("--motion-audit") else { return }
         finish()

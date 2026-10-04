@@ -14,8 +14,8 @@ final class StudioUITests: XCTestCase {
     func testCreateSignedBuildOnMac() throws {
         app.launch()
         openProject(named: "Squircle")
-        let segments = app.segmentedControls["project.sections"]
-        segments.buttons["Builds"].tap()
+        element("project.builds").tap()
+        requireHittable(element("builds.close"))
         let existing = Set(elements("build.row").allElementsBoundByIndex.compactMap { $0.value as? String })
         let build = element("project.build")
         requireHittable(build)
@@ -38,10 +38,30 @@ final class StudioUITests: XCTestCase {
         app.launch()
         let hero = element("project.hero")
         requireHittable(hero, timeout: 35)
-        capture("01 — App shelf")
-        hero.tap()
-        requireHittable(element("project.sections"))
-        capture("02 — App workspace")
+        let firstApp = hero.label
+        capture("01 — App picker")
+        let picker = app.scrollViews["app.picker"]
+        picker.swipeLeft(velocity: .slow)
+        if !waitForHeroChange(from: firstApp) {
+            picker.swipeRight(velocity: .slow)
+            XCTAssertTrue(waitForHeroChange(from: firstApp), "The live picker should include another registered app.")
+        }
+        capture("01b — Another app")
+        selectProject(named: firstApp)
+        openProject(named: "Squircle")
+        capture("02 — App threads")
+
+        // A short physical edge drag, held still before release, should cancel.
+        // The endpoint stays below the gesture's distance threshold; the hold
+        // avoids accidentally finishing through release velocity.
+        edgeDrag(to: 0.18)
+        requireHittable(element("project.builds"))
+        requireHittable(element("thread.new"))
+        capture("02b — Cancelled edge gesture")
+        edgeDrag(to: 0.82)
+        requireHittable(element("project.hero"))
+        XCTAssertFalse(element("project.builds").exists)
+        openProject(named: "Squircle")
 
         // A fresh installation can legitimately have no mapped thread yet.
         // In that case create an empty real thread, close it, then navigate the
@@ -61,18 +81,18 @@ final class StudioUITests: XCTestCase {
         element("thread.close").tap()
         waitForThreadDismissal()
 
-        let segments = app.segmentedControls["project.sections"]
-        reveal(segments)
-        let builds = segments.buttons["Builds"]
-        builds.tap()
-        XCTAssertTrue(builds.isSelected, "Builds must replace the thread list inside this app workspace.")
-        XCTAssertFalse(elements("thread.row").firstMatch.exists)
-        capture("04 — App builds")
+        element("project.builds").tap()
+        requireHittable(element("builds.close"))
+        requireHittable(element("project.build"))
+        capture("04 — Builds sheet")
+        element("builds.close").tap()
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("builds.close"))
+        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 15), .completed)
         requireHittable(element("project.back"))
         element("project.back").tap()
         requireHittable(element("project.hero"))
-        XCTAssertFalse(element("project.sections").exists)
-        capture("05 — Returned to shelf")
+        XCTAssertFalse(element("project.builds").exists)
+        capture("05 — Returned to picker")
     }
 
     @MainActor
@@ -80,7 +100,8 @@ final class StudioUITests: XCTestCase {
         app.launch()
         let hero = element("project.hero")
         requireHittable(hero, timeout: 35)
-        let projectName = try XCTUnwrap(hero.label.components(separatedBy: ",").first)
+        let projectName = hero.label
+        XCTAssertFalse(projectName.isEmpty)
         hero.tap()
         requireHittable(element("thread.new"))
         element("thread.new").tap()
@@ -131,17 +152,42 @@ final class StudioUITests: XCTestCase {
 
     @MainActor
     private func openProject(named name: String) {
+        selectProject(named: name)
+        element("project.hero").tap()
+        requireHittable(element("thread.new"))
+    }
+
+    @MainActor
+    private func selectProject(named name: String) {
         let hero = element("project.hero")
         requireHittable(hero, timeout: 35)
-        if hero.label.hasPrefix(name + ",") {
-            hero.tap()
-        } else {
-            let row = element("project.row.\(name)")
-            XCTAssertTrue(row.waitForExistence(timeout: 15))
-            reveal(row)
-            row.tap()
+        if hero.label == name { return }
+        let picker = app.scrollViews["app.picker"]
+        for direction in [true, false] {
+            for _ in 0..<12 {
+                let previous = hero.label
+                if direction { picker.swipeLeft(velocity: .slow) }
+                else { picker.swipeRight(velocity: .slow) }
+                if hero.label == name { return }
+                if !waitForHeroChange(from: previous) { break }
+                if hero.label == name { return }
+            }
         }
-        requireHittable(element("thread.new"))
+        XCTFail("Could not find the registered app \(name) in the live picker.")
+    }
+
+    @MainActor
+    private func waitForHeroChange(from name: String) -> Bool {
+        let changed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", name), object: element("project.hero"))
+        return XCTWaiter.wait(for: [changed], timeout: 2) == .completed
+    }
+
+    @MainActor
+    private func edgeDrag(to fraction: CGFloat) {
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let start = origin.withOffset(CGVector(dx: 2, dy: app.frame.height * 0.48))
+        let end = origin.withOffset(CGVector(dx: app.frame.width * fraction, dy: app.frame.height * 0.48))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
     }
 
     @MainActor

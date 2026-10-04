@@ -27,7 +27,6 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     private let sendButton = UIButton(type: .system)
     private let composer = UIVisualEffectView()
     private var inputHeight: NSLayoutConstraint!
-    private let emptyState = ThreadEmptyState()
 
     init(model: SquircleModel, project: AppProject, sessionID: String?) {
         self.model = model
@@ -140,7 +139,6 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         table.contentInset = UIEdgeInsets(top: 20, left: 0, bottom: 20, right: 0)
         table.scrollIndicatorInsets = UIEdgeInsets(top: 16, left: 0, bottom: 16, right: 5)
         table.register(ThreadMessageCell.self, forCellReuseIdentifier: ThreadMessageCell.reuseID)
-        table.backgroundView = emptyState
         view.addSubview(table)
         NSLayoutConstraint.activate([
             table.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
@@ -260,7 +258,6 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         let title = model.sessions.first(where: { $0.id == model.selectedSessionID })?.title ?? "New thread"
         let prefix = project.name + " · "
         titleLabel.text = title.hasPrefix(prefix) ? String(title.dropFirst(prefix.count)) : title
-        emptyState.isHidden = isOpening || !messages.isEmpty
 
         UIView.performWithoutAnimation {
             if oldIDs == newIDs {
@@ -385,35 +382,6 @@ private enum ThreadPalette {
     static func font(_ size: CGFloat, weight: UIFont.Weight = .regular, style: UIFont.TextStyle = .body) -> UIFont {
         UIFontMetrics(forTextStyle: style).scaledFont(for: .systemFont(ofSize: size, weight: weight))
     }
-}
-
-private final class ThreadEmptyState: UIView {
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        let title = UILabel()
-        title.text = "A new thread."
-        title.font = ThreadPalette.font(28, weight: .medium, style: .title1)
-        title.textColor = ThreadPalette.ink
-        title.adjustsFontForContentSizeCategory = true
-        let detail = UILabel()
-        detail.text = "Tell Hermes what you want to make."
-        detail.font = ThreadPalette.font(16)
-        detail.textColor = ThreadPalette.muted
-        detail.numberOfLines = 0
-        detail.adjustsFontForContentSizeCategory = true
-        let stack = UIStackView(arrangedSubviews: [title, detail])
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.axis = .vertical
-        stack.spacing = 12
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -28),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -30)
-        ])
-    }
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
 }
 
 private final class ThreadMessageCell: UITableViewCell {
