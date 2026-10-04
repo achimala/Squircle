@@ -12,9 +12,9 @@ fallbacks). Light and dark appearance, Dynamic Type, Reduce Motion (no turning,
 receding or lift; short direct moves) and VoiceOver labels are supported. Apps
 without a capture show an honest dark "No screenshot yet" display.
 
-Installed on the physical iPhone: **version 8**, verified by `devicectl` after
-installation from commit `6078d89`. Version 9 adds live delegated Claude/Codex
-activity; its installation evidence is recorded in validation. Native tool/question/heartbeat/reconnect tests and chat
+Installed on the physical iPhone: **version 9**, verified by `devicectl` after
+installation from commit `564428f`. It adds live delegated Claude/Codex activity.
+The version 9 manual-launch acknowledgement remains pending. Native tool/question/heartbeat/reconnect tests and chat
 UI/relaunch tests pass on the simulator; opening/closing motion was inspected
 frame by frame. Physical-device motion is unmeasured. See
 [validation](../../docs/validation.md).

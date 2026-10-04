@@ -477,3 +477,11 @@ Focused final regression: 62 deterministic tests passed, two opt-in tests skippe
 `/tmp/squircle-coding-regression.xcresult`. Child-relayed log paths are preserved
 in streamed assistant text and restored history. Signed version 9 installation
 is tracked separately below.
+
+Version 9 signed archive/export and physical-phone installation passed from clean
+commit `564428f1f9a2fd3532ae368066c9d4ba915e6352`, build
+`dcde5313-d814-4f53-a1e1-24c8d8d066c8`. `devicectl` reports 0.1.0 (9);
+`.verification/coding-live/install.json` and `installed-version.json` retain
+confirmation. Version 9 manual-launch acknowledgement is pending; no remote
+phone launch was performed. The actual live Codex simulator capture was published
+as catalog preview `ccfc5749-da3b-4eb7-ac8b-80e08c7236c4`.
