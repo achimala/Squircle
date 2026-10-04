@@ -30,8 +30,9 @@ final class SquircleModel: ObservableObject {
     private var catalog: AppProjectCatalog
     private var buildMonitor: Task<Void, Never>?
     private var loadingOperations = 0
-    private var creatingSession = false
     private var sessionRevision = 0
+    private var buildRevision = 0
+    private var pendingSubmissions: Set<String> = []
     private var monitor: Task<Void, Never>?
     private var monitorGeneration = UUID()
     private var selectionGeneration = UUID()
@@ -105,7 +106,7 @@ final class SquircleModel: ObservableObject {
         if let projectID = catalog.sessionProjects[id] { selectedProjectID = projectID }
         persistSelection()
         approvals = []
-        isRunning = activeRuns[id] != nil
+        isRunning = activeRuns[id] != nil || pendingSubmissions.contains(id)
         do {
             let page = try await client.messages(sessionID: id)
             guard generation == selectionGeneration else { return }
@@ -164,14 +165,14 @@ final class SquircleModel: ObservableObject {
     }
 
     func createSession(in project: AppProject, title: String? = nil) async {
-        guard let client, !creatingSession else { return }
-        creatingSession = true
+        guard let client else { return }
         beginLoading()
-        defer { creatingSession = false; endLoading() }
+        defer { endLoading() }
         // A new thread may be opened during a foreground refresh. Invalidate
         // its old selection immediately rather than silently ignoring the tap.
         stopMonitoring()
         selectionGeneration = UUID()
+        let creationSelection = selectionGeneration
         selectedProjectID = project.id
         selectedSessionID = nil
         messages = []
@@ -185,8 +186,10 @@ final class SquircleModel: ObservableObject {
             sessionRevision += 1
             sessions.insert(session, at: 0)
             reconcileProjects()
-            await selectSession(session.id)
-        } catch { show(error) }
+            if creationSelection == selectionGeneration { await selectSession(session.id) }
+        } catch {
+            if creationSelection == selectionGeneration { show(error) }
+        }
     }
 
     func send(_ text: String) async {
@@ -194,7 +197,13 @@ final class SquircleModel: ObservableObject {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         if selectedSessionID == nil { await createSession() }
-        guard let sessionID = selectedSessionID, activeRuns[sessionID] == nil else { return }
+        guard let sessionID = selectedSessionID, activeRuns[sessionID] == nil,
+              !pendingSubmissions.contains(sessionID) else { return }
+        pendingSubmissions.insert(sessionID)
+        defer {
+            pendingSubmissions.remove(sessionID)
+            isRunning = selectedSessionID.map { activeRuns[$0] != nil || pendingSubmissions.contains($0) } ?? false
+        }
         error = nil
         isRunning = true
         status = "Sending to Hermes…"
@@ -264,6 +273,7 @@ final class SquircleModel: ObservableObject {
         error = nil
         do {
             let job = try await client.startBuild(recipe.freshSubmission())
+            buildRevision += 1
             catalog.assign(buildID: job.id, to: project.id)
             builds.removeAll { $0.id == job.id }
             builds.insert(job, at: 0)
@@ -276,7 +286,17 @@ final class SquircleModel: ObservableObject {
 
     private func refreshBuilds() async {
         guard let client else { return }
-        do { builds = try await client.builds() }
+        let revision = buildRevision
+        do {
+            let listed = try await client.builds()
+            if revision == buildRevision { builds = listed }
+            else {
+                // Preserve acknowledged submissions absent from an older list;
+                // use current server status for every job it did include.
+                let ids = Set(listed.map(\.id))
+                builds = (listed + builds.filter { !ids.contains($0.id) }).sorted { $0.date > $1.date }
+            }
+        }
         catch { if self.error == nil { show(error) } }
         reconcileProjects()
         ensureBuildMonitor()

@@ -231,6 +231,145 @@ final class HermesClientTests: XCTestCase {
         XCTAssertFalse(model.isLoading)
     }
 
+    @MainActor
+    func testOlderThreadCreationCannotOverrideANewerProjectThread() async throws {
+        let held = expectation(description: "first thread creation held")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.holdRequest = { $0.httpMethod == "POST" && $0.url?.path == "/api/sessions" }
+        FixtureProtocol.onHold = { held.fulfill() }
+        FixtureProtocol.handler = { request in
+            if request.httpMethod == "POST" {
+                let title = try Self.body(request)["title"] as? String ?? ""
+                let id = title.hasPrefix("Alpha") ? "alpha-thread" : "beta-thread"
+                return (201, String(decoding: try JSONSerialization.data(withJSONObject: ["session": ["id": id, "title": title, "message_count": 0]]), as: UTF8.self))
+            }
+            let id = request.url!.pathComponents[3]
+            return (200, "{\"session_id\":\"\(id)\",\"data\":[]}")
+        }
+        let suite = "SquircleCreationRace.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        let alpha = model.createProject(name: "Alpha")
+        let beta = model.createProject(name: "Beta")
+        let first = Task { await model.createSession(in: alpha) }
+        await fulfillment(of: [held], timeout: 2)
+        FixtureProtocol.holdRequest = nil
+        await model.createSession(in: beta)
+        XCTAssertEqual(model.selectedSessionID, "beta-thread")
+        let release = FixtureProtocol.heldDelivery
+        FixtureProtocol.heldDelivery = nil
+        release?()
+        await first.value
+        XCTAssertEqual(model.selectedProjectID, beta.id)
+        XCTAssertEqual(model.selectedSessionID, "beta-thread")
+        XCTAssertEqual(model.sessions(for: alpha).map(\.id), ["alpha-thread"])
+        XCTAssertEqual(model.sessions(for: beta).map(\.id), ["beta-thread"])
+        XCTAssertNil(model.error)
+        XCTAssertFalse(model.isLoading)
+    }
+
+    @MainActor
+    func testStaleBuildListPreservesAcknowledgedSubmission() async throws {
+        let held = expectation(description: "build list held")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        let recipe: [String: Any] = ["project": "/src/Atlas.xcodeproj", "scheme": "Atlas", "configuration": "Release", "mode": "archive", "export_options": "/src/export.plist", "allow_provisioning_updates": false]
+        let old: [String: Any] = ["id": "old-build", "state": "succeeded", "created_at": 1, "request": recipe,
+                                  "output": ["title": "Atlas", "bundle_id": "test.atlas", "version": "1", "build_number": "1", "ipa_path": "/build/app.ipa"]]
+        FixtureProtocol.handler = { request in
+            let response: [String: Any]
+            switch (request.httpMethod ?? "GET", request.url?.path ?? "") {
+            case ("GET", "/api/sessions"): response = ["data": []]
+            case ("GET", "/v1/builds"): response = ["ok": true, "data": [old]]
+            case ("POST", "/v1/builds"):
+                response = ["ok": true, "data": ["job": ["id": "new-build", "state": "queued", "created_at": 2, "request": try Self.body(request)]]]
+            default: XCTFail("Unexpected request"); response = [:]
+            }
+            return (200, String(decoding: try JSONSerialization.data(withJSONObject: response), as: UTF8.self))
+        }
+        let suite = "SquircleBuildRace.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        await model.refresh()
+        let project = try XCTUnwrap(model.projects.first { $0.name == "Atlas" })
+        FixtureProtocol.holdRequest = { $0.httpMethod == "GET" && $0.url?.path == "/v1/builds" }
+        FixtureProtocol.onHold = { held.fulfill() }
+        let refresh = Task { await model.refresh() }
+        await fulfillment(of: [held], timeout: 2)
+        let submitted = await model.startBuild(for: project)
+        XCTAssertEqual(submitted?.id, "new-build")
+        let release = FixtureProtocol.heldDelivery
+        FixtureProtocol.heldDelivery = nil
+        FixtureProtocol.holdRequest = nil
+        release?()
+        await refresh.value
+        XCTAssertEqual(Set(model.builds(for: project).map(\.id)), ["old-build", "new-build"])
+        XCTAssertEqual(model.builds.first { $0.id == "new-build" }?.status, "queued")
+    }
+
+    @MainActor
+    func testPendingRunStateFollowsSelectedThreadUntilAcceptance() async throws {
+        let held = expectation(description: "run admission held")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.handler = { request in
+            if request.url?.path == "/v1/runs" {
+                XCTAssertEqual(try Self.body(request)["session_id"] as? String, "alpha-thread")
+                return (202, #"{"run_id":"run_alpha","status":"started","replayed":false}"#)
+            }
+            if request.httpMethod == "POST" {
+                let title = try Self.body(request)["title"] as? String ?? ""
+                let id = title.hasPrefix("Alpha") ? "alpha-thread" : "beta-thread"
+                return (201, String(decoding: try JSONSerialization.data(withJSONObject: ["session": ["id": id, "title": title, "message_count": 0]]), as: UTF8.self))
+            }
+            let id = request.url!.pathComponents[3]
+            return (200, "{\"session_id\":\"\(id)\",\"data\":[]}")
+        }
+        let suite = "SquircleRunAdmissionRace.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        let alpha = model.createProject(name: "Alpha")
+        let beta = model.createProject(name: "Beta")
+        await model.createSession(in: alpha, title: "Alpha work")
+        await model.createSession(in: beta, title: "Beta work")
+        await model.selectSession("alpha-thread")
+        FixtureProtocol.holdRequest = { $0.url?.path == "/v1/runs" }
+        FixtureProtocol.onHold = { held.fulfill() }
+        let submission = Task { await model.send("Build Alpha") }
+        await fulfillment(of: [held], timeout: 2)
+        XCTAssertTrue(model.isRunning)
+        await model.selectSession("beta-thread")
+        XCTAssertFalse(model.isRunning)
+        await model.selectSession("alpha-thread")
+        XCTAssertTrue(model.isRunning, "Pending admission was forgotten when returning to its thread")
+        await model.selectSession("beta-thread")
+        let release = FixtureProtocol.heldDelivery
+        FixtureProtocol.heldDelivery = nil
+        release?()
+        await submission.value
+        XCTAssertEqual(model.selectedSessionID, "beta-thread")
+        XCTAssertFalse(model.isRunning, "Alpha’s admission changed Beta’s activity state")
+    }
+
+    private static func resetFixture() {
+        FixtureProtocol.heldDelivery?()
+        FixtureProtocol.heldDelivery = nil
+        FixtureProtocol.onHold = nil
+        FixtureProtocol.holdRequest = nil
+        FixtureProtocol.holdSessionList = false
+        FixtureProtocol.handler = nil
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: Any] {
         var data = request.httpBody ?? Data()
         if data.isEmpty, let stream = request.httpBodyStream {
@@ -250,6 +389,7 @@ final class HermesClientTests: XCTestCase {
 private final class FixtureProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, String))?
     static var holdSessionList = false
+    static var holdRequest: ((URLRequest) -> Bool)?
     static var onHold: (() -> Void)?
     static var heldDelivery: (() -> Void)?
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -263,7 +403,7 @@ private final class FixtureProtocol: URLProtocol {
                 client?.urlProtocol(self, didLoad: Data(text.utf8))
                 client?.urlProtocolDidFinishLoading(self)
             }
-            if Self.holdSessionList, request.httpMethod == "GET", request.url?.path == "/api/sessions" {
+            if (Self.holdSessionList && request.httpMethod == "GET" && request.url?.path == "/api/sessions") || Self.holdRequest?(request) == true {
                 Self.heldDelivery = deliver
                 Self.onHold?()
             } else { deliver() }
