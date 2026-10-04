@@ -1,8 +1,8 @@
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
-    io::Write,
-    os::unix::process::CommandExt,
+    io::{Read, Write},
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -48,7 +48,11 @@ pub async fn run(
                 .context("archive requires export options")?
                 .canonicalize()
                 .context("export options do not exist")?;
-            validate_export_options(&options)?;
+            let options_bytes = validate_export_options(&options)?;
+            // Export the validated configuration even if the source is edited
+            // while Xcode archives. In particular, never switch to upload.
+            let options = job_dir.join("ExportOptions.plist");
+            fs::write(&options, options_bytes)?;
             let archive = job_dir.join("App.xcarchive");
             let export = job_dir.join("export");
             ensure!(
@@ -217,8 +221,30 @@ fn export_args(
     args
 }
 
-fn validate_export_options(path: &Path) -> Result<()> {
-    let value = plist::Value::from_file(path).context("cannot read export-options plist")?;
+fn validate_export_options(path: &Path) -> Result<Vec<u8>> {
+    const MAX_BYTES: u64 = 1024 * 1024;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .context("cannot open export-options plist")?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file(),
+        "export-options plist must be a regular file"
+    );
+    ensure!(
+        metadata.len() <= MAX_BYTES,
+        "export-options plist exceeds 1 MiB"
+    );
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= MAX_BYTES,
+        "export-options plist exceeds 1 MiB"
+    );
+    let value = plist::Value::from_reader(std::io::Cursor::new(&bytes))
+        .context("cannot read export-options plist")?;
     let dictionary = value
         .as_dictionary()
         .context("export-options plist must be a dictionary")?;
@@ -228,7 +254,7 @@ fn validate_export_options(path: &Path) -> Result<()> {
             "only local export is supported; export-options destination must be 'export'"
         );
     }
-    Ok(())
+    Ok(bytes)
 }
 
 async fn cancelled(mut cancel: watch::Receiver<bool>) {
@@ -572,6 +598,52 @@ mod tests {
             .to_file_xml(file.path())
             .unwrap();
         assert!(validate_export_options(file.path()).is_ok());
+    }
+
+    #[test]
+    fn export_options_reject_pipes_and_oversized_files_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let directory = tempfile::tempdir().unwrap();
+        let pipe = directory.path().join("options.plist");
+        let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let started = std::time::Instant::now();
+        assert!(
+            validate_export_options(&pipe)
+                .unwrap_err()
+                .to_string()
+                .contains("regular file")
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(1024 * 1024 + 1).unwrap();
+        assert!(
+            validate_export_options(file.path())
+                .unwrap_err()
+                .to_string()
+                .contains("1 MiB")
+        );
+    }
+
+    #[test]
+    fn validated_export_bytes_are_independent_of_later_source_edits() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut options = plist::Dictionary::new();
+        options.insert("destination".into(), plist::Value::String("export".into()));
+        plist::Value::Dictionary(options.clone())
+            .to_file_xml(file.path())
+            .unwrap();
+        let snapshot = validate_export_options(file.path()).unwrap();
+        options.insert("destination".into(), plist::Value::String("upload".into()));
+        plist::Value::Dictionary(options)
+            .to_file_xml(file.path())
+            .unwrap();
+        assert!(validate_export_options(file.path()).is_err());
+        let saved = plist::Value::from_reader(std::io::Cursor::new(snapshot)).unwrap();
+        assert_eq!(
+            saved.as_dictionary().unwrap()["destination"].as_string(),
+            Some("export")
+        );
     }
 
     #[tokio::test]
