@@ -1,0 +1,7 @@
+.build/
+DerivedData/
+*.xcresult/
+*.log
+client.json
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
