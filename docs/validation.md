@@ -4,6 +4,36 @@ Recorded 2026-10-04 on this Mac. This page records observed results, not claims
 that the entire proposed product works. Local artifacts and credentials are
 ignored by Git. Reproduce with the [walkthrough](verification.md).
 
+## Readable coding activity — version 8
+
+Verified on 2026-10-05 against the actual Hermes redesign conversation
+`api_1791143482_c3abbb94` and Claude run
+`cf8e1749-c37e-483c-85a3-2da2ff0f0bd9`, not a reconstructed demo:
+
+- The stock Hermes file API supplied the real 11.6 MB Claude stream log. The
+  simulator displayed 103 actions, readable command output, and actual edits.
+- UI checks opened that existing conversation, its Claude activity view, the
+  README command/output, an actual ScreenshotBinding.swift change, and the
+  published simulator capture. Screens were visually inspected. No user prompt
+  was sent to the existing conversation.
+- **60 deterministic iOS tests pass**, with two opt-in network tests skipped.
+- The live native chat test separately passed send, tool-result inspection,
+  controls and persistent-thread reopening with the new detail sheet.
+- Authentication from the actual running Hermes terminal reports `claude.ai`
+  and `max` after the supported Claude settings fix. A fresh minimal Claude
+  request completed with no API-key source. The old run reported $11.7172548
+  and remains labeled API-billed. See [authentication evidence](coding-visibility.md).
+- Native Hermes request/heartbeat tests were not rerun for this presentation
+  change; their version 7 evidence remains below. The current test suite skips
+  those opt-in network tests by default.
+- Version 7's physical-phone launch acknowledgement is now verified. Version 8
+  signed installation is recorded below when complete. New screenshots verify
+  static presentation; the unchanged 3D transition evidence remains version 7.
+
+Local evidence: `.verification/claude-activity/`, simulator result bundles
+`/tmp/squircle-activity-final.xcresult` (including live chat) and
+`/tmp/squircle-activity-verified.xcresult` (final parser and real-trace checks).
+
 ## Native Hermes Desktop integration — version 7
 
 The redesign was checkpointed first as `52b616d`. The chat integration now uses

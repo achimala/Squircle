@@ -655,6 +655,11 @@ final class SquircleModel: ObservableObject {
 }
 
 extension SquircleModel {
+    func codingTraceChunk(_ path: String, sessionID: String, offset: Int) async throws -> (Data, Bool) {
+        guard let gateway else { throw ClientError.configuration }
+        return try await gateway.traceChunk(path, sessionID: sessionID, offset: offset)
+    }
+
     private func listHermesSessions() async throws -> [ChatSession] {
         guard let gateway else { return try await client?.sessions() ?? [] }
         try await gateway.connect()
@@ -946,8 +951,8 @@ extension SquircleModel {
 
 
 extension SquircleModel {
-    func hermesAttachment(_ reference: String) async throws -> URL {
-        guard let gateway, let id = selectedSessionID else { throw ClientError.configuration }
+    func hermesAttachment(_ reference: String, sessionID: String? = nil) async throws -> URL {
+        guard let gateway, let id = sessionID ?? selectedSessionID else { throw ClientError.configuration }
         return try await gateway.attachment(reference, sessionID: id)
     }
 }

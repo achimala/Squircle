@@ -47,14 +47,15 @@ struct HermesConversation {
         return HermesQuestion(id: id, method: method, params: frame["params"])
     }
 
-    static func project(_ rows: [JSONValue]) -> [ChatMessage] {
+    static func project(_ inputRows: [JSONValue]) -> [ChatMessage] {
+        let rows = inputRows.filter { $0["display_kind"].string != "hidden" }
         var calls: [String: JSONValue] = [:]
         for row in rows {
             for call in row["tool_calls"].array {
                 if let id = call["id"].string { calls[id] = call["function"] }
             }
         }
-        return rows.enumerated().compactMap { index, row in
+        let projected: [ChatMessage] = rows.enumerated().compactMap { index, row in
             guard row["display_kind"].string != "hidden" else { return nil }
             let role = row["role"].string ?? "notice"
             let id = row["row_id"].identifier ?? row["id"].identifier ?? "history-\(index)"
@@ -70,23 +71,36 @@ struct HermesConversation {
                 let call = calls[callID] ?? .null
                 let rawArgs = call["arguments"]
                 let args = row["args"] != .null ? row["args"] : rawArgs.string.flatMap { try? JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) } ?? rawArgs
-                return ChatMessage(id: "tool-\(callID)", role: "tool", content: row["context"].string ?? args["command"].string ?? "",
-                                   detail: details(args: args, result: row["content"] == .null ? .string(text) : row["content"], diff: row["inline_diff"]),
-                                   activity: row["name"].string ?? row["tool_name"].string ?? call["name"].string ?? "Tool", failed: isFailure(row["content"]))
+                let name = row["name"].string ?? row["tool_name"].string ?? call["name"].string ?? "Tool"
+                let result = row["content"] == .null ? JSONValue.string(text) : row["content"]
+                return ChatMessage(id: "tool-\(callID)", role: "tool", content: ToolPresentation.summary(result),
+                                   detail: details(args: args, result: result, diff: row["inline_diff"]),
+                                   activity: ToolPresentation.title(name, args), failed: isFailure(result),
+                                   traceFiles: CodingTrace.references(in: [row, args]))
             }
             if role == "system" { return nil }
             var result = ChatMessage(id: "row-\(id)", role: role, content: text)
             // Preserve structured content and sidecars rather than silently dropping an unfamiliar message.
-            if text.isEmpty, row["content"] != .null { result.content = row["content"].formatted }
+            if text.isEmpty, row["content"] != .null { result.content = ToolPresentation.readable(row["content"]) }
             if let reasoning = row["reasoning"].string, !reasoning.isEmpty { result.detail = reasoning; result.activity = "Reasoning" }
             return result.content.isEmpty && result.detail.isEmpty ? nil : result
         }
+        let completed = Set(rows.compactMap { $0["tool_call_id"].string })
+        // A resumed long-running command may have a call but no result yet.
+        // Keep its log discoverable without inventing a completion or running state.
+        let pending = rows.flatMap { $0["tool_calls"].array }.compactMap { call -> ChatMessage? in
+            guard let id = call["id"].string, !completed.contains(id) else { return nil }
+            let function = call["function"], args = ToolPresentation.decoded(function["arguments"])
+            return ChatMessage(id: "tool-\(id)", role: "tool", content: "No result recorded yet",
+                               detail: Self.details(args: args, result: .null),
+                               activity: ToolPresentation.title(function["name"].string ?? "Tool", args),
+                               traceFiles: CodingTrace.references(in: [args]))
+        }
+        return projected + pending
     }
 
     static func details(args: JSONValue, result: JSONValue, diff: JSONValue = .null) -> String {
-        [("Arguments", args), ("Result", result), ("Changes", diff)].compactMap { label, value in
-            value == .null ? nil : "\(label)\n\(value.formatted)"
-        }.joined(separator: "\n\n")
+        ToolPresentation.detail(args: args, result: result, diff: diff)
     }
 
     static func isFailure(_ result: JSONValue) -> Bool {
@@ -125,10 +139,11 @@ struct HermesConversation {
             let prior = index.map { messages[$0] }
             let name = p["name"].string ?? prior?.activity ?? "Tool"
             let duration = p["duration_s"].formatted
-            let row = ChatMessage(id: id, role: "tool", content: p["summary"].string ?? p["context"].string ?? prior?.content ?? "",
+            let row = ChatMessage(id: id, role: "tool", content: type == "tool.start" ? "" : ToolPresentation.summary(p["result"]),
                                   isStreaming: type == "tool.start",
                                   detail: (p["args"] == .null ? prior?.detail ?? "" : "") + Self.details(args: p["args"], result: p["result"], diff: p["inline_diff"]),
-                                  activity: name + (duration.isEmpty ? "" : " · \(duration)s"), failed: Self.isFailure(p["result"]))
+                                  activity: (p["args"] == .null ? prior?.activity ?? name : ToolPresentation.title(name, p["args"])) + (duration.isEmpty ? "" : " · \(duration)s"), failed: Self.isFailure(p["result"]),
+                                  traceFiles: Array(Set((prior?.traceFiles ?? []) + CodingTrace.references(in: [p]))).sorted())
             if let index { messages[index] = row } else { messages.append(row) }
             status = type == "tool.start" ? "Using \(name)" : "Hermes is working"
         case "status.update": status = p["text"].string ?? status
@@ -138,7 +153,7 @@ struct HermesConversation {
         case "connection.request", "connection.update": updateConnection(p, sessionID: event["session_id"].string ?? "")
         case "todo.updated":
             let todos = p["todos"].array.isEmpty ? p["todo_state"]["todos"].array : p["todos"].array
-            notice(todos.map { "\($0["status"].string == "completed" ? "✓" : "○") \($0["content"].string ?? $0["text"].string ?? $0.formatted)" }.joined(separator: "\n"), id: "todos")
+            notice(todos.map { "\($0["status"].string == "completed" ? "✓" : "○") \($0["content"].string ?? $0["text"].string ?? ToolPresentation.readable($0))" }.joined(separator: "\n"), id: "todos")
         case "session.control.update": control = p["control"]
         case "request.cancel": questions.removeAll { $0.id == p["id"].identifier }
         case "approval.cancelled": questions.removeAll { $0.method == "approval" }
@@ -157,28 +172,28 @@ struct HermesConversation {
             var row = i.map { messages[$0] } ?? ChatMessage(id: id, role: "activity", content: p["goal"].string ?? "", activity: "Delegated task")
             row.isStreaming = type != "subagent.complete"
             row.childSessionID = p["child_session_id"].string ?? row.childSessionID
-            row.detail += (row.detail.isEmpty ? "" : "\n\n") + p.formatted
+            row.detail += (row.detail.isEmpty ? "" : "\n\n") + ToolPresentation.readable(p)
             row.failed = ["failed", "error", "timeout", "interrupted"].contains(p["status"].string ?? "")
             if let summary = p["summary"].string { row.content = summary }
             row.activity = p["status"].string.map { "Delegated task · \($0)" } ?? "Delegated task"
             if let i { messages[i] = row } else { messages.append(row) }
-        case "error": running = false; seal(); notice(p["message"].string ?? p.formatted, failed: true)
-        case "notice", "notification.show": notice(p["text"].string ?? p["message"].string ?? p.formatted, failed: p["level"].string == "error", id: p["key"].string)
+        case "error": running = false; seal(); notice(p["message"].string ?? ToolPresentation.readable(p), failed: true)
+        case "notice", "notification.show": notice(p["text"].string ?? p["message"].string ?? ToolPresentation.readable(p), failed: p["level"].string == "error", id: p["key"].string)
         case "notification.clear": messages.removeAll { $0.id == "notice-\(p["key"].string ?? "")" }
         case "preview.open":
             let ref = p["url"].string ?? ""
             notice("[\(p["label"].string ?? "Open preview")](\(ref))")
         case "voice.transcript": notice(p["text"].string ?? (p["stop_phrase"].bool ? "Voice stopped" : ""))
         case "session.resume_progress": status = p["message"].string ?? status
-        case "review.summary", "background.complete", "btw.complete": seal(); notice(p["text"].string ?? p.formatted)
+        case "review.summary", "background.complete", "btw.complete": seal(); notice(p["text"].string ?? ToolPresentation.readable(p))
         case "agent.terminal.output":
             let id = "terminal-\(p["terminal_id"].identifier ?? p["process_id"].identifier ?? "output")"
-            if let i = messages.firstIndex(where: { $0.id == id }) { messages[i].detail += p["chunk"].string ?? p["data"].string ?? p["text"].string ?? p.formatted }
-            else { messages.append(ChatMessage(id: id, role: "activity", content: "", detail: p["chunk"].string ?? p["data"].string ?? p["text"].string ?? p.formatted, activity: "Terminal output")) }
+            if let i = messages.firstIndex(where: { $0.id == id }) { messages[i].detail += p["chunk"].string ?? p["data"].string ?? p["text"].string ?? ToolPresentation.readable(p) }
+            else { messages.append(ChatMessage(id: id, role: "activity", content: "", detail: p["chunk"].string ?? p["data"].string ?? p["text"].string ?? ToolPresentation.readable(p), activity: "Terminal output")) }
         case "gateway.ready", "session.usage", "session.title", "sessions.changed", "cron.changed", "projects.changed", "platforms.changed", "skin.changed", "setup.ready": break
         default:
             // New Hermes message types remain inspectable instead of vanishing.
-            messages.append(ChatMessage(id: "event-\(UUID().uuidString)", role: "activity", content: p["text"].string ?? p["message"].string ?? "", detail: p.formatted, activity: type))
+            messages.append(ChatMessage(id: "event-\(UUID().uuidString)", role: "activity", content: p["text"].string ?? p["message"].string ?? "", detail: ToolPresentation.fields(p), activity: type.replacingOccurrences(of: ".", with: " ").capitalized))
         }
     }
 

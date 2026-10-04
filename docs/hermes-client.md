@@ -7,7 +7,8 @@ serve`**, the same backend used by Hermes Desktop. The previous Sessions/Runs
 HTTP API was real Hermes, but was the wrong surface for an interactive companion:
 it exposes shortened tool previews and does not supply Desktop's native request,
 background-event and session-control behavior. There is no new coordinator,
-timer service, CLI-output interception or Claude/Codex adapter.
+timer service or coding-agent execution adapter. Version 8 reads referenced
+Claude event logs for presentation; see [coding visibility](coding-visibility.md).
 
 The installed protocol source is `tui_gateway/contracts/` and
 `apps/shared/src/gateway-contract.generated.ts` in the independent Hermes
@@ -19,7 +20,7 @@ Do not infer compatibility with every future Hermes release.
 | Hermes messages | Phone behavior |
 | --- | --- |
 | `message.start/delta/interim/complete`, errors | Streaming text and separate commentary segments; authoritative history reconciliation after completion |
-| `tool.start/complete/generating`, terminal output | Stable tool rows with expandable, selectable arguments, complete results, errors, duration and supplied diffs; output chunks accumulated |
+| `tool.start/complete/generating`, terminal output | Concise action rows; full-height command, file, change and result views; errors and duration; output chunks accumulated |
 | `reasoning.*`, `thinking.delta` | Collapsible detail supplied by Hermes |
 | `subagent.*` | Hermes-provided child identities, progress and result details; open the native child conversation when an ID is supplied |
 | `status.update`, notices, background/btw/review | Progress or conversation notices; replies remain subscribed after the initiating turn finishes |
@@ -28,7 +29,7 @@ Do not infer compatibility with every future Hermes release.
 | `connection.request/update` | Native connector/catalog approval, required credentials, authorization links, skip and continue; server-owned settlement |
 | Images and local-file links | Attachment buttons; authenticated stock file download and native Quick Look; remote URLs open normally |
 | `todo.updated`, preview links, voice transcript | Visible todo state, tappable links and transcript text |
-| Unknown session events | Expandable original payload, never silently discarded |
+| Unknown session events | Readable labeled fields in detail, never silently discarded |
 
 The compact WebSocket history omits most tool result bodies. The client uses
 the stock Desktop `GET /api/sessions/{id}/messages` transcript, paging through
@@ -55,8 +56,9 @@ associations and navigation only.
   non-owner response, so an attached Desktop renderer can handle them. It does
   not pretend to own the Mac browser or terminal. Desktop layout/pet/display
   operations remain Desktop features; unfamiliar notifications are inspectable.
-- This does not instrument nested Codex/Claude CLI internals. Visibility is
-  exactly the arguments, results, process output and child events Hermes emits.
+- Hermes events alone do not include all nested CLI internals. Version 8 can
+  read a referenced Claude `stream-json` log through the existing authenticated
+  file API; it does not intercept execution, and Codex logs are not parsed.
 - iOS can suspend its socket in the background. Hermes continues on the Mac;
   reopening catches up. Push notifications and iOS background execution are not
   supplied by this protocol migration.
@@ -66,7 +68,7 @@ associations and navigation only.
   tick through the stock session-owner poller. No Hermes code was patched and
   no phone scheduler hides this behavior. Heartbeats also require the owning
   Hermes process; durable scheduling remains Hermes cron.
-- Attachment preview is implemented; composer file/photo picking and the full
+- Attachment preview and the published simulator capture are implemented; composer file/photo picking and the full
   Desktop settings, editor, browser, voice-call and operating-system UI are not
   part of this chat-message integration.
 

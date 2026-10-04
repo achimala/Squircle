@@ -99,9 +99,9 @@ final class HermesConversationTests: XCTestCase {
         let projected = HermesConversation.project(rows)
         XCTAssertEqual(projected.count, 1)
         XCTAssertEqual(projected[0].id, "tool-call-1")
-        XCTAssertEqual(projected[0].activity, "terminal")
+        XCTAssertEqual(projected[0].activity, "Run printf hello")
         XCTAssertTrue(projected[0].detail.contains("printf hello"))
-        XCTAssertTrue(projected[0].detail.contains("output"))
+        XCTAssertTrue(projected[0].detail.contains("Output"))
     }
 
 }

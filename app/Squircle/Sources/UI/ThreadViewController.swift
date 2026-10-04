@@ -28,6 +28,8 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     private let titleLabel = Theme.label("New thread", Theme.font(.headline, 17, .semibold))
     private let projectLabel = Theme.label("", Theme.font(.caption1, 12, .medium), color: .secondaryLabel)
     private let footer = UIStackView()
+    private let activityButton = Theme.glassButton(title: "Claude Code", identifier: "thread.codingActivity")
+    private let previewButton = Theme.glassButton(symbol: "iphone", identifier: "thread.appPreview", accessibilityLabel: "App preview")
     private let approvalContainer = UIStackView()
     private let statusRow = UIStackView()
     private let statusSpinner = UIActivityIndicatorView(style: .medium)
@@ -212,6 +214,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
 
     private func buildComposer() {
         footer.translatesAutoresizingMaskIntoConstraints = false
+        footer.backgroundColor = Theme.paper
         footer.axis = .vertical
         footer.spacing = 10
         view.addSubview(footer)
@@ -219,6 +222,12 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         approvalContainer.isHidden = true
         footer.addArrangedSubview(approvalContainer)
 
+        let activityBar = UIStackView(arrangedSubviews: [activityButton, UIView(), previewButton])
+        activityBar.spacing = 10
+        activityButton.addAction(UIAction { [weak self] _ in self?.showCodingActivity() }, for: .touchUpInside)
+        previewButton.addAction(UIAction { [weak self] _ in self?.showAppPreview() }, for: .touchUpInside)
+        activityButton.isHidden = true
+        footer.addArrangedSubview(activityBar)
         statusSpinner.hidesWhenStopped = true
         statusRow.addArrangedSubview(statusSpinner)
         statusRow.addArrangedSubview(statusLabel)
@@ -331,6 +340,8 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
             scrollToBottom(animated: false)
             if !messages.isEmpty { initialScrollNeeded = false }
         }
+        activityButton.isHidden = traceReferences.isEmpty
+        previewButton.isHidden = model.metadata(for: project)?.preview == nil
         renderHermesQuestion()
         if shownQuestion == nil { renderApproval() }
         let terminalNotice = model.status.hasPrefix("Run ") || model.status.hasPrefix("Submission ") ? model.status : ""
@@ -439,6 +450,32 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         if scrollView === table { wasNearBottom = isNearBottom }
     }
 
+    private var traceReferences: [String] {
+        var seen = Set<String>()
+        return messages.flatMap(\.traceFiles).filter { seen.insert($0).inserted }
+    }
+
+    private func showCodingActivity() {
+        input.resignFirstResponder()
+        let screen = CodingActivityViewController(model: model, references: traceReferences)
+        present(UINavigationController(rootViewController: screen), animated: true)
+    }
+
+    private func showAppPreview() {
+        guard let metadata = model.metadata(for: project) else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let data = try await model.previewData(for: metadata)
+                let controller = AppCaptureViewController(data: data, name: project.name, capturedAt: metadata.preview?.capturedAt)
+                present(UINavigationController(rootViewController: controller), animated: true)
+            } catch {
+                let alert = UIAlertController(title: "Preview unavailable", message: error.localizedDescription, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default)); present(alert, animated: true)
+            }
+        }
+    }
+
     private func openAttachment(_ attachment: HermesAttachment) {
         if let url = URL(string: attachment.reference), ["http", "https"].contains(url.scheme) { UIApplication.shared.open(url); return }
         Task { [weak self] in
@@ -460,13 +497,14 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: ThreadMessageCell.reuseID, for: indexPath) as! ThreadMessageCell
         cell.configure(messages[indexPath.row])
+        cell.openDetail = { [weak self] message in self?.present(ToolDetailViewController.navigation(message), animated: true) }
         cell.openAttachment = { [weak self] attachment in self?.openAttachment(attachment) }
         cell.openChild = { [weak self] id in Task { await self?.model.openHermesChild(id) } }
         return cell
     }
 }
 
-private final class ThreadMessageCell: UITableViewCell {
+final class ThreadMessageCell: UITableViewCell {
     static let reuseID = "thread.message"
     private let bubble = UIView()
     private let text = UITextView()
@@ -474,6 +512,7 @@ private final class ThreadMessageCell: UITableViewCell {
     private let toolDetails = UITextView()
     private let childButton = UIButton(type: .system)
     var openChild: ((String) -> Void)?
+    var openDetail: ((ChatMessage) -> Void)?
     var openAttachment: ((HermesAttachment) -> Void)?
     private let attachments = UIStackView()
     private let content = UIStackView()
@@ -515,13 +554,16 @@ private final class ThreadMessageCell: UITableViewCell {
         toolStyle.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .caption1)
         toolStyle.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var attributes = attributes
-            attributes.font = Theme.font(.footnote, 13, .medium)
+            attributes.font = Theme.font(.subheadline, 15, .medium)
             return attributes
         }
+        toolStyle.titleLineBreakMode = .byWordWrapping
         tools.configuration = toolStyle
+        tools.titleLabel?.numberOfLines = 0
         tools.contentHorizontalAlignment = .leading
         tools.addAction(UIAction { [weak self] _ in
             guard let self else { return }
+            if let message, let openDetail { openDetail(message); return }
             toolsExpanded.toggle()
             updateTools()
             UIAccessibility.post(notification: .layoutChanged, argument: toolsExpanded ? toolDetails : tools)
@@ -531,7 +573,7 @@ private final class ThreadMessageCell: UITableViewCell {
                 ancestor = current.superview
             }
         }, for: .touchUpInside)
-        content.addArrangedSubview(tools)
+        content.insertArrangedSubview(tools, at: 0)
         toolDetails.isAccessibilityElement = true
         toolDetails.isEditable = false
         toolDetails.isSelectable = true
@@ -603,6 +645,7 @@ private final class ThreadMessageCell: UITableViewCell {
             if selection.length > 0, NSMaxRange(selection) <= text.attributedText.length { text.selectedRange = selection }
         }
         text.isHidden = next.content.isEmpty
+        if next.role == "tool" { text.font = Theme.font(.footnote, 14); text.textColor = .secondaryLabel }
         updateTools()
     }
 
@@ -613,7 +656,7 @@ private final class ThreadMessageCell: UITableViewCell {
         tools.isHidden = !hasDetail
         let title = message.activity ?? (names.count == 1 ? names[0] : "\(names.count) tool steps")
         tools.configuration?.title = title
-        tools.configuration?.baseForegroundColor = message.failed ? Theme.failure : .secondaryLabel
+        tools.configuration?.baseForegroundColor = message.failed ? Theme.failure : .label
         tools.configuration?.image = UIImage(systemName: toolsExpanded ? "chevron.down" : message.isStreaming ? "ellipsis" : message.failed ? "exclamationmark.triangle" : "chevron.right")
         tools.accessibilityLabel = "\(toolsExpanded ? "Hide" : "Show") details, \(title)"
         toolDetails.text = message.detail.isEmpty ? names.joined(separator: "\n") : message.detail

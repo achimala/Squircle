@@ -12,6 +12,7 @@ Read [README.md](README.md), then only the linked detail relevant to the task. D
 - Tailscale is user-managed. Do not bundle, install, or configure it as an implicit part of this product.
 - Cellular operation is required. Signed installation, manual app launch, and app logs/crashes satisfy the requirement; LLDB and remote launch are outside the initial scope.
 - Preserve the working phone installation, Hermes chat and automatic launch acknowledgement while refining the client. Real-phone crash recovery and Mac startup supervision remain separate checks.
+- When using Claude Code, verify subscription auth and retain its standard structured activity log for the phone. See [coding visibility](docs/coding-visibility.md).
 - Existing Codex/Claude CLIs are the first delegation path. Paseo, separate memory services, and cloud distribution services are optional, not dependencies.
 
 ## Documentation discipline

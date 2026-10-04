@@ -4,13 +4,18 @@ Build and iterate on iOS apps from your iPhone. **The native app talks to stock 
 
 ## Current state
 
-Installed version 7 switches chat to stock Hermes Desktop’s native protocol, with
+Version 8 adds readable Claude activity, full-height command/change/output views,
+and actual simulator captures. It uses standard event logs through stock Hermes,
+with no additional agent runner. The Mac’s Claude Code now uses the existing Max
+login. [Coding visibility and authentication](docs/coding-visibility.md).
+
+Version 7 switched chat to stock Hermes Desktop’s native protocol, with
 full tool arguments/results, requests, shared Desktop sessions and native
 background replies. [Message support and upstream limits](docs/hermes-client.md).
 
-The [native app](app/Squircle/README.md) has persistent conversations, streamed responses/tool progress, approvals, stop, and installable builds. Version **0.1.0 (7)** is installed on the phone; its new manual-launch acknowledgement is pending. This personal build includes its Mac connection settings: **no token form, pairing flow or additional agent backend**.
+The [native app](app/Squircle/README.md) has persistent conversations, streamed responses/tool progress, approvals, stop, and installable builds. Version **0.1.0 (7)** is installed on the phone; its manual-launch acknowledgement is verified. This personal build includes its Mac connection settings: **no token form, pairing flow or additional agent backend**.
 
-The interface uses a horizontal live 3D app picker, a minimal flat thread list and a secondary builds sheet. UIKit moves the actual phone, app title and controls through spatial transitions with interactive back navigation; there are no screen fades or explanatory panels. Real screenshots and agent-editable app metadata persist on the Mac. **54 deterministic iOS tests and native chat/navigation UI checks pass, plus two separately exercised live Hermes tests. Version 7 is signed and installed; version 5 is the latest phone launch acknowledgement previously verified.** [Design decisions](docs/product.md), [test evidence and limits](docs/validation.md).
+The interface uses a horizontal live 3D app picker, a minimal flat thread list and a secondary builds sheet. UIKit moves the actual phone, app title and controls through spatial transitions with interactive back navigation; there are no screen fades or explanatory panels. Real screenshots and agent-editable app metadata persist on the Mac. **60 deterministic iOS tests and native chat/navigation UI checks pass, plus two separately exercised live Hermes tests. Version 7 is signed and installed; version 7 has a verified phone launch acknowledgement.** [Design decisions](docs/product.md), [test evidence and limits](docs/validation.md).
 
 **Add an app from the phone:** **+ → browse the Mac or paste a project path → choose scheme/name → Add**. Import saves the app's build settings on the Mac, so its first build can start from the phone. Import itself does not build or create a screenshot. This flow is verified and included in installed version 5. [Import details](docs/cli.md#import-an-existing-app).
 

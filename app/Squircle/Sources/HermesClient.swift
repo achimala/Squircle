@@ -36,6 +36,7 @@ struct ChatMessage: Identifiable, Equatable {
     var activity: String?
     var failed = false
     var childSessionID: String?
+    var traceFiles: [String] = []
 }
 
 struct AppBuild: Identifiable, Decodable, Equatable {

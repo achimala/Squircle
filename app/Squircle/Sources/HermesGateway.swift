@@ -189,6 +189,31 @@ final class HermesGateway {
         }
     }
 
+    /// Stock FileResponse supports byte ranges, so a live trace refresh reads only new bytes.
+    func traceChunk(_ path: String, sessionID: String, offset: Int) async throws -> (Data, Bool) {
+        guard let origin = configuration.desktopURL, let fallback = configuration.desktopToken else { throw ClientError.configuration }
+        var url = URLComponents(url: origin.appendingPathComponent("api/fs/download"), resolvingAgainstBaseURL: false)!
+        url.queryItems = [URLQueryItem(name: "path", value: path), URLQueryItem(name: "profile", value: configuration.hermesProfile), URLQueryItem(name: "session_id", value: sessionID)]
+        var request = URLRequest(url: url.url!)
+        request.setValue("Bearer " + (try await accessToken(fallback: fallback)), forHTTPHeaderField: "Authorization")
+        request.setValue("bytes=\(offset)-\(offset + 1024 * 1024 - 1)", forHTTPHeaderField: "Range")
+        let (file, response) = try await session.download(for: request)
+        defer { try? FileManager.default.removeItem(at: file) }
+        guard let http = response as? HTTPURLResponse else { throw ClientError.response("Claude activity") }
+        if http.statusCode == 416 {
+            if let total = http.value(forHTTPHeaderField: "Content-Range")?.split(separator: "/").last.flatMap({ Int($0) }), total < offset {
+                throw ClientError.response("Trace was replaced or truncated; reopen activity")
+            }
+            return (Data(), true)
+        }
+        guard http.statusCode == 206 || (http.statusCode == 200 && offset == 0) else { throw ClientError.http("Claude activity", http.statusCode) }
+        let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.intValue ?? 0
+        guard size <= 32 * 1024 * 1024 else { throw ClientError.response("Trace exceeds 32 MB") }
+        let data = try Data(contentsOf: file)
+        let total = http.value(forHTTPHeaderField: "Content-Range")?.split(separator: "/").last.flatMap { Int($0) }
+        return (data, total.map { offset + data.count >= $0 } ?? true)
+    }
+
     func attachment(_ reference: String, sessionID: String) async throws -> URL {
         if reference.hasPrefix("data:"), let comma = reference.firstIndex(of: ","),
            reference[..<comma].contains(";base64"), let data = Data(base64Encoded: String(reference[reference.index(after: comma)...])) {

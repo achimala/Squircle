@@ -374,6 +374,48 @@ final class StudioUITests: XCTestCase {
         XCTAssertTrue(element("project.add").isHittable, file: file, line: line)
     }
 
+    /// Read the user's actual Hermes/Claude redesign session. Never sends a prompt.
+    @MainActor
+    func testActualClaudeActivity() throws {
+        app.launch()
+        openProject(named: "Squircle")
+        let row = elements("thread.row").matching(NSPredicate(format: "value == %@", "api_1791143482_c3abbb94")).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 20)); reveal(row); row.tap()
+        waitForThread()
+        let activity = element("thread.codingActivity")
+        requireHittable(activity, timeout: 30)
+        capture("40 — Actual Hermes conversation")
+        activity.tap()
+        let action = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Read README and list app files")).firstMatch
+        XCTAssertTrue(action.waitForExistence(timeout: 45))
+        reveal(action)
+        capture("41 — Actual Claude activity")
+        action.tap()
+        let detail = element("thread.toolDetails")
+        XCTAssertTrue(detail.waitForExistence(timeout: 10))
+        XCTAssertTrue((detail.value as? String ?? "").contains("cat README.md"))
+        XCTAssertFalse((detail.value as? String ?? "").contains("\"tool_use_id\""))
+        capture("42 — Actual Claude command and output")
+        app.buttons["Done"].firstMatch.tap()
+        app.tables["coding.activity"].swipeUp()
+        app.tables["coding.activity"].swipeUp()
+        let edit = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Edit ScreenshotBinding.swift")).firstMatch
+        for _ in 0..<6 {
+            if edit.isHittable { break }
+            app.tables["coding.activity"].swipeUp()
+        }
+        XCTAssertTrue(edit.isHittable)
+        capture("43 — Claude file work")
+        edit.tap()
+        XCTAssertTrue((element("thread.toolDetails").value as? String ?? "").contains("nonisolated"))
+        capture("43b — Actual Claude code change")
+        app.buttons["Done"].firstMatch.tap()
+        app.buttons["Done"].firstMatch.tap()
+        element("thread.appPreview").tap()
+        XCTAssertTrue(app.images.matching(NSPredicate(format: "label == %@", "Actual simulator capture")).firstMatch.waitForExistence(timeout: 10))
+        capture("44 — Published simulator capture")
+    }
+
     @MainActor
     func testThreadRoundTrip() throws {
         app.launch()
@@ -402,7 +444,7 @@ final class StudioUITests: XCTestCase {
         let finished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Send message"), object: send)
         XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 25), .completed, "Wait for the real run to finish before testing persistence.")
         XCTAssertEqual(input.value as? String ?? "", "", "Sending clears the composer without replacing its text view.")
-        let detail = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Show details, terminal")).firstMatch
+        let detail = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Show details, Run printf")).firstMatch
         XCTAssertTrue(detail.waitForExistence(timeout: 15), "Native tool calls remain inspectable after the final reply.")
         reveal(detail); detail.tap()
         capture("08a — Expanded tool")
@@ -410,6 +452,7 @@ final class StudioUITests: XCTestCase {
         XCTAssertTrue(output.waitForExistence(timeout: 10))
         XCTAssertTrue((output.value as? String ?? "").contains("SQUIRCLE_NATIVE_TOOL_DETAIL"))
         capture("08 — Live Hermes tool result")
+        app.buttons["Done"].firstMatch.tap()
         element("thread.actions").tap()
         XCTAssertTrue(app.buttons["Set recurring update…"].waitForExistence(timeout: 5))
         if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }

@@ -67,7 +67,9 @@ Run builds outside request handlers. Keep artifacts and complete logs in dedicat
 
 ## Coding agents and persistence
 
-Hermes already ships [Codex](https://github.com/NousResearch/hermes-agent/blob/main/skills/autonomous-ai-agents/codex/SKILL.md) and [Claude Code](https://github.com/NousResearch/hermes-agent/blob/main/skills/autonomous-ai-agents/claude-code/SKILL.md) orchestration skills. First verify executable discovery, existing login, working directory, approvals, completion reporting, and any needed resume behavior from the actual Hermes process. No custom agent bridge is assumed necessary.
+Hermes already ships [Codex](https://github.com/NousResearch/hermes-agent/blob/main/skills/autonomous-ai-agents/codex/SKILL.md) and [Claude Code](https://github.com/NousResearch/hermes-agent/blob/main/skills/autonomous-ai-agents/claude-code/SKILL.md) orchestration skills. First verify executable discovery, existing login, working directory, approvals, completion reporting, and any needed resume behavior from the actual Hermes process. No custom execution bridge is needed for the current path. The client can read
+referenced standard Claude event logs through Hermes’s stock file API; see
+[coding visibility and authentication](coding-visibility.md).
 
 Hermes's model credentials do not authenticate a standalone CLI. A shell-launched worker is not automatically a structured Hermes subagent, and Hermes's approval endpoint may not answer a nested CLI prompt. Validate those boundaries before designing worker controls in the client.
 

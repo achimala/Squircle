@@ -24,7 +24,7 @@ final class HermesGatewayLiveTests: XCTestCase {
         let transcript = try await gateway.transcript(stored)
         let tool = try XCTUnwrap(HermesConversation.project(transcript).first { $0.role == "tool" })
         XCTAssertTrue(tool.detail.contains("SQUIRCLE_NATIVE_TOOL_OK"))
-        XCTAssertTrue(tool.detail.contains("Result"))
+        XCTAssertTrue(tool.detail.contains("Output"))
         let initialCount = events.filter { $0["type"].string == "message.complete" }.count
         _ = try await gateway.call("slash.exec", scope.merging(["command": .string("/heartbeat every 60s Reply exactly SQUIRCLE_NATIVE_HEARTBEAT_OK. Do not use tools.")]) { _, new in new })
         do {
@@ -65,8 +65,8 @@ final class HermesGatewayLiveTests: XCTestCase {
         try await waitUntil(120) { completed }
         XCTAssertTrue(answered, "A real native clarification must be answered through request.answer")
         let rows = try await gateway.transcript(stored)
-        let tool = try XCTUnwrap(HermesConversation.project(rows).first { $0.activity == "terminal" })
-        XCTAssertTrue(tool.detail.contains("output"))
+        let tool = try XCTUnwrap(HermesConversation.project(rows).first { $0.activity?.hasPrefix("Run printf") == true })
+        XCTAssertTrue(tool.detail.contains("Output"))
         XCTAssertTrue(tool.detail.contains("SQUIRCLE_ANSWER_OK"))
     }
 

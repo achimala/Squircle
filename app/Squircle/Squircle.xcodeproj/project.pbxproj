@@ -12,6 +12,7 @@
 		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
 		12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
 		1547D25B2CCA15B5DA2065DC /* HermesGateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = D612CC7F67F8F2B562BB5C38 /* HermesGateway.swift */; };
+		1F73FD295AA892BC880DD715 /* ToolPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03D3A562DA0A87A12F5A5C5B /* ToolPresentation.swift */; };
 		261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */; };
 		2FBB59AD4C1AE916730CEA4C /* SpringDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */; };
 		38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
@@ -29,10 +30,12 @@
 		AB0BD657A5B47630E2FD14E9 /* HermesClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FC692C762B7D87D9DF84878 /* HermesClient.swift */; };
 		B01389D86B5540237E36C1A7 /* HermesClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */; };
 		B082B3E58EBF50C44166470A /* WorkspaceViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB106DA6DB124E287DDBB5E8 /* WorkspaceViewController.swift */; };
+		B3B12DBA650F232E6977C77B /* CodingTraceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FD3AAC8ABE7FA31C308B3BD /* CodingTraceTests.swift */; };
 		B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613DF9097AAA330CB0F89A33 /* SquircleApp.swift */; };
 		C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AE56C52866D21AD27A18697 /* DeviceStage.swift */; };
 		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
 		E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
+		E5A4D2136D03D4CF2C6F6D34 /* CodingActivityViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80759530540FC318F4364B0 /* CodingActivityViewController.swift */; };
 		EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */; };
 		FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
 /* End PBXBuildFile section */
@@ -56,9 +59,11 @@
 
 /* Begin PBXFileReference section */
 		00483E8542F562C568728AB7 /* SquircleUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		03D3A562DA0A87A12F5A5C5B /* ToolPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolPresentation.swift; sourceTree = "<group>"; };
 		0882163016B1D5C885051FAD /* AppProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProject.swift; sourceTree = "<group>"; };
 		0D5F85DA67966D2090740EE5 /* StageLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageLayout.swift; sourceTree = "<group>"; };
 		0FC692C762B7D87D9DF84878 /* HermesClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesClient.swift; sourceTree = "<group>"; };
+		0FD3AAC8ABE7FA31C308B3BD /* CodingTraceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodingTraceTests.swift; sourceTree = "<group>"; };
 		1AE56C52866D21AD27A18697 /* DeviceStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStage.swift; sourceTree = "<group>"; };
 		2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViewController.swift; sourceTree = "<group>"; };
 		2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioViewController.swift; sourceTree = "<group>"; };
@@ -78,6 +83,7 @@
 		8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildsViewController.swift; sourceTree = "<group>"; };
 		9685CE2D9A277E148073C169 /* MotionAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionAudit.swift; sourceTree = "<group>"; };
 		9AA8EBB035561F94C3724C6D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		C80759530540FC318F4364B0 /* CodingActivityViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodingActivityViewController.swift; sourceTree = "<group>"; };
 		CC4FF2241CD3E30E5B1C77C9 /* HermesGatewayLiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesGatewayLiveTests.swift; sourceTree = "<group>"; };
 		D612CC7F67F8F2B562BB5C38 /* HermesGateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HermesGateway.swift; sourceTree = "<group>"; };
 		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -93,6 +99,7 @@
 			isa = PBXGroup;
 			children = (
 				DB495D800CF688C469BFF725 /* AppProjectTests.swift */,
+				0FD3AAC8ABE7FA31C308B3BD /* CodingTraceTests.swift */,
 				4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */,
 				538A9EA913479DC6F5A05DAE /* HermesConversationTests.swift */,
 				CC4FF2241CD3E30E5B1C77C9 /* HermesGatewayLiveTests.swift */,
@@ -125,6 +132,7 @@
 			children = (
 				FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */,
 				8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */,
+				C80759530540FC318F4364B0 /* CodingActivityViewController.swift */,
 				1AE56C52866D21AD27A18697 /* DeviceStage.swift */,
 				75C1104B79916907568EBBBA /* HermesQuestionPanel.swift */,
 				9685CE2D9A277E148073C169 /* MotionAudit.swift */,
@@ -150,6 +158,7 @@
 				D612CC7F67F8F2B562BB5C38 /* HermesGateway.swift */,
 				613DF9097AAA330CB0F89A33 /* SquircleApp.swift */,
 				EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */,
+				03D3A562DA0A87A12F5A5C5B /* ToolPresentation.swift */,
 				80D91E9DBE83CF2C0802769A /* UI */,
 			);
 			path = Sources;
@@ -326,6 +335,7 @@
 				12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */,
 				69A1E4E034A3A9C310663B31 /* AppProject.swift in Sources */,
 				6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */,
+				E5A4D2136D03D4CF2C6F6D34 /* CodingActivityViewController.swift in Sources */,
 				C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */,
 				4E8139B7AA30F17E5D4DDA65 /* HermesAttachment.swift in Sources */,
 				AB0BD657A5B47630E2FD14E9 /* HermesClient.swift in Sources */,
@@ -341,6 +351,7 @@
 				AA83956C51857C3A127A8AB9 /* StudioViewController.swift in Sources */,
 				E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */,
 				FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */,
+				1F73FD295AA892BC880DD715 /* ToolPresentation.swift in Sources */,
 				B082B3E58EBF50C44166470A /* WorkspaceViewController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -350,6 +361,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */,
+				B3B12DBA650F232E6977C77B /* CodingTraceTests.swift in Sources */,
 				B01389D86B5540237E36C1A7 /* HermesClientTests.swift in Sources */,
 				A135CA975A92AE5B62246E8A /* HermesConversationTests.swift in Sources */,
 				90A7643CCEAE44A05612C379 /* HermesGatewayLiveTests.swift in Sources */,
@@ -460,7 +472,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -538,7 +550,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
