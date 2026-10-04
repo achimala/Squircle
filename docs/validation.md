@@ -24,10 +24,9 @@ Rust tests cover private durable records/credentials, legacy record compatibilit
 diagnostic deduplication/conflicts/quotas/cursors, argument safety, cancellation,
 retry identity, shutdown admission, manifest construction, HTTP authorization,
 ticket expiry, byte-identical IPA delivery, and CLI JSON/timeout behavior.
-**45 Rust tests passed across the latest suites**: 34 library, 5 CLI process,
-4 HTTP contract and 2 real service-lifecycle tests.
-`cargo clippy --all-targets -- -D warnings`, formatting checks and the optimized
-release build pass. Regression tests also cover import responsiveness and
+**61 Rust tests passed across the latest suites**, including app metadata and
+preview coverage. `cargo clippy --all-targets -- -D warnings` passes. Formatting
+checks and the optimized release build also passed. Regression tests cover import responsiveness and
 absolute artifact paths across working-directory changes.
 
 Probe: **9 XCTest tests passed** on isolated **iPhone 18 Pro / iOS 27.0** simulator
@@ -65,9 +64,97 @@ installed on the phone. Automatic launch event
 that chat works in the installed app. The personal build embeds the existing
 connection settings; it requires no manual token entry or pairing flow.
 
-The subsequent **UIKit/Core Animation redesign** is an accepted direction.
-Its project home, thread/build navigation and fluid transitions are not yet
-claimed implemented or visually verified. Frame-by-frame acceptance is pending.
+The **UIKit/Core Animation app is implemented**, with project-scoped threads,
+build lists and installation actions. Earlier versions used a cached SceneKit
+phone image with generated identity artwork. That implementation has been
+replaced: the live SceneKit view accepts only supplied screenshots, and transition
+progress rotates the actual mesh. Without a capture, its screen remains empty.
+Actual screenshot texture rendering and replacement without client relaunch
+have now been observed, as recorded below. Live opening and closing transitions
+also passed frame-by-frame inspection on the simulator.
+
+An earlier full run logged **20 model/network tests and all 3 live UI tests
+passing**: navigation, an exact `SQUIRCLE_DESIGN_OK` Hermes reply retained after
+app relaunch, and a real signed build started from the app. Evidence:
+`.verification/uikit-tests-final.log`. Xcode then hung finalizing its result
+bundle and the process was interrupted, so this is test-log evidence, not a clean
+completed `.xcresult`. An earlier UIKit run completed cleanly with 17 unit tests
+and 2 UI tests. The build-action test produced signed job
+`f3b5440a-81f7-4511-9b5b-c795265420f7` from clean source revision `70e53d0`.
+
+The latest run completed **29 Swift unit tests and 1 navigation UI test cleanly**,
+with exit 0 and `.verification/RealPreviewFinal.xcresult`. Log:
+`.verification/real-preview-final-tests.log`. The earlier 28-unit clean run and
+navigation-only run with a packaging hang are superseded by this completed run.
+Navigation assertions and the visual motion inspection are separate evidence.
+
+The user explicitly stopped the image-judge workflow. Its screenshot scores are
+not acceptance evidence for the new functional preview path.
+
+**Implemented and locally tested:** a private JSON app
+catalog stores names/summaries and immutable PNG publications independently of
+builds. Registration deduplicates canonical project+scheme; build synchronization
+preserves edited text and newer screenshots. Six focused catalog tests passed
+(`cargo test apps::tests --lib`), covering persistence, copy/provenance, invalid
+input, app/build association and private paths. No Xcode or live service was
+involved in those tests.
+
+## Real simulator preview and HTTPS retrieval
+
+After restarting the updated service with the dedicated simulator configured,
+`preview capture 74efd708-a8a4-4cc9-abbc-924b53164569` installed and launched the
+Probe's built simulator product and captured a **229,826-byte PNG**. Capture
+source was `built_simulator_product`, at Unix time **1791140527**. It automatically
+created app record `4e49ae98-345e-4218-a831-00c4f3a33677` and preview
+`9b4ae41d-4f38-4267-a266-1de41f5b34b7`.
+
+The authenticated app-preview request over private HTTPS port 8443, using that
+preview version, returned bytes identical to the original simulator capture.
+SHA-256: `293f52e73e2c29fa9d8eb3769bd5fd48530af14a9e334d497c9e8f7cb403bb7d`.
+Evidence: `.verification/https-preview-proof.json`. This proves actual capture,
+automatic catalog association and HTTPS image delivery on this Mac.
+
+The main client is registered separately as app
+`5f9b0650-b20b-4cd6-bcf2-a57574cab08c`. Through `app preview`, the CLI published
+actual Squircle UI-test screenshot **03 (thread)**; the running client displayed
+those pixels on its 3D phone. Screenshot **04 (builds)** was then published while
+the client remained open, and replaced the displayed texture **without relaunch**.
+Evidence: `.verification/published-thread-on-phone.png` and
+`.verification/published-builds-without-relaunch.png`. The thread screenshot was
+restored through the CLI afterward. These are actual app screenshots, separate
+from the Probe capture and from a new physical-device installation.
+
+`app update` changed the summary to “Apps, threads and installable builds.
+Previews update from real simulator captures.” A separate `app show` confirmed
+the persisted value through the API. Evidence:
+`.verification/squircle-metadata-edit.json` and
+`.verification/squircle-metadata-readback.json`. Restart persistence is covered
+by the focused catalog tests.
+
+## Live 3D motion verification
+
+Every consecutive frame **238–321 (opening)** and **441–524 (closing)** from
+`.verification/live-3d-navigation.mp4` was inspected. The phone stayed continuous,
+its perspective changed in 3D, and neither handoff showed a blank or duplicated
+device. Contact sheets: `.verification/live-3d-open-{0..3}.jpg` and
+`.verification/live-3d-close-{0..3}.jpg`.
+
+The last four samples in `.verification/live-3d-motion-audit.json` measured:
+
+| Transition | Intervals | Median ms | Maximum ms | Above 33.5 ms |
+| --- | ---: | ---: | ---: | ---: |
+| Workspace open, live 3D | 64 | 16.67 | 34.79 | 1 |
+| Workspace close, live 3D | 68 | 16.67 | 16.67 | 0 |
+| Thread open | 63 | 16.67 | 55.71 | 1 |
+| Thread close | 67 | 16.67 | 16.67 | 0 |
+
+These are **simulator main-run-loop intervals**, not GPU timings or proof of
+120 Hz rendering on a physical phone. The opening outliers are retained rather
+than summarized away.
+
+**Pending:** the updated device archive, installation and launch acknowledgement.
+Signed version **0.1.0 (3)** is underway;
+no successful export or new phone installation is claimed yet.
 
 ## Real Xcode jobs through Squircle
 
@@ -78,8 +165,9 @@ claimed implemented or visually verified. Frame-by-frame acceptance is pending.
 | `74efd708-a8a4-4cc9-abbc-924b53164569` | Updated simulator Probe; actual crash/recovery and symbolication succeeded |
 | `7e9e1246-ee57-4dd9-8b6f-f070976283a3` | Updated signed Probe; installed/opened on the phone over cellular (user confirmation) |
 | `05d980f6-be8c-4e21-acb5-f82971f7db37` | Signed native client installed; automatic phone launch event received and chat confirmed |
+| `f3b5440a-81f7-4511-9b5b-c795265420f7` | UIKit build-button test submitted a real signed archive/export; clean source `70e53d0` |
 
-These jobs were submitted through the CLI to the real loopback service. Their records,
+These jobs were submitted through the CLI or native app to the real service. Their records,
 build logs, result bundles and outputs are retained under `.squircle/jobs/<ID>/`.
 The device build explicitly enabled provisioning updates using the configured
 Apple account. No account or device was registered by Squircle.
@@ -132,7 +220,7 @@ Still unverified:
 - Phone app-log collection, offline/reconnect recovery and actual phone crash upload/symbolication.
 - Installing a visible update and distinguishing old/new build feedback.
 - Coding-worker delegation and OpenClaw invocation in their actual environments.
-- UIKit redesign and frame-by-frame transition verification.
+- The updated signed build's export, installation and launch acknowledgement.
 - Packaged Mac startup supervision and suspended-client notifications.
 
 Pairing, manual credential entry, coordinator adapters and additional backend

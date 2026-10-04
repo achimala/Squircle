@@ -1,6 +1,6 @@
 # Architecture
 
-Status: native controller, stock Hermes API integration and Rust build/diagnostic core implemented, updated 2026-10-04. Phone installation, chat and automatic launch acknowledgement are verified. A UIKit/Core Animation redesign is underway; its visual acceptance is pending. See [evidence](validation.md).
+Status: UIKit client, stock Hermes API integration and Rust build/diagnostic core implemented, updated 2026-10-04. Phone installation, chat and automatic launch acknowledgement are verified for the first client. Earlier UIKit chat/relaunch and build tests passed; end-to-end verification of persistent app metadata, real screenshots and the live 3D transition is pending. See [evidence](validation.md).
 
 ## Ownership
 
@@ -11,16 +11,18 @@ flowchart TD
     Hermes --> CLI[iOS development CLI]
     Other[OpenClaw or another agent] --> CLI
     CLI --> Core[Local build and diagnostics service]
-    Phone <-->|Builds and diagnostics API| Core
+    Phone <-->|Apps, previews, builds and diagnostics API| Core
     Core --> Build[Xcode and existing build tools]
-    Core --> Storage[Job records, artifacts and diagnostics]
+    Core --> Storage[App catalog, job records, artifacts and diagnostics]
 ```
 
 Remote phone connections use user-managed Tailscale and appropriate authentication/HTTPS. The CLI executes on the Mac, or through an explicitly configured remote execution path to it.
 
 Hermes owns identity, memory, sessions, model configuration, and agent task coordination. The development tool owns local build jobs and artifacts, independently of chat history. A build job is an execution record, not another agent task planner. Our client presents both kinds of state without copying the coordinator's database.
 
-The selected presentation is UIKit/Core Animation with project home → threads → installable builds. Project labels and thread/build associations are client navigation data; conversation content remains in Hermes. The first SwiftUI client established the working API and phone flow; replacing its UI does not add another agent runtime.
+The presentation uses UIKit/Core Animation with app home → threads → installable builds. The Mac app catalog owns names, summaries, project/scheme identity and latest preview metadata; conversation content remains in Hermes. SceneKit displays a live procedural phone with a real screenshot texture, preserving the image's aspect ratio. Transition progress rotates the mesh with quaternion interpolation and adjusts its camera. Rendering runs continuously only during movement; an idle view redraws when its scene changes. The transition reparents the live viewport rather than animating a cached phone image. No screenshot means a neutral empty display, never invented screen artwork. The client contains no SwiftUI or additional agent runtime.
+
+App records live in `apps/<app-UUID>/app.json` under the private Squircle store. Registration deduplicates canonical Xcode project path plus scheme. Name/summary edits preserve app identity. Each screenshot publication copies the supplied bounded PNG into a private immutable file with a new preview UUID; the mutable app record points to the latest one. It retains capture time, caption, source and optional build/revision association. The authenticated API serves image bytes, not arbitrary filesystem paths. Build synchronization imports only newer captures and preserves agent-edited names, summaries and newer previews. These records require no model calls or separate memory database.
 
 ## Core tools and service
 

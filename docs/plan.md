@@ -8,29 +8,43 @@ its launch acknowledgement reached the Mac. Exact evidence is in
 ## Completed foundation
 
 - Rust CLI/service for Xcode jobs, signed artifacts, installation links and
-  diagnostic collection; 45 Rust tests passed.
+  diagnostic collection; 61 Rust tests passed.
 - Signed cellular installs of Probe and the native client, with automatic launch
   acknowledgement from client job `05d980f6-be8c-4e21-acb5-f82971f7db37`.
 - Stock Hermes CLI/API invocation, persistent sessions, streamed runs and
   idempotent run retries over the existing Tailscale HTTPS connection.
-- First SwiftUI client with chat, tool progress, approvals, stop and builds;
-  seven client tests plus live Swift transport/model checks passed.
+- UIKit client with project-scoped threads, chat, tool progress, approvals,
+  stop and builds. Twenty model/network tests and three live UI tests passed,
+  including chat after relaunch and a real signed archive. See validation for
+  the Xcode result-finalization limitation.
 - Probe instrumentation with nine tests, real simulator crash recovery,
   matching symbols and successful symbolication. Physical-phone crash recovery
   remains unverified.
+- Real simulator capture, private HTTPS PNG retrieval and CLI publication of
+  Squircle screenshots. The client displayed them on its 3D device and replaced
+  the texture with a second publication while remaining open. The latest run
+  completed 29 unit tests and one navigation UI test cleanly.
+- Consecutive simulator frames of the live 3D opening/closing transition were
+  inspected: continuous phone, changing perspective, no blank or duplicate
+  handoff. Timing evidence and simulator limits are in validation.
 
-## 1 Refine the native app
+## 1 Complete real app previews and device acceptance
 
-Replace the initial SwiftUI presentation with UIKit and Core Animation. Start
-from an app-centric project home, then threads and installable builds. Use a
-continuous ivory canvas, floating dimensional device, typography and flat rows;
-reserve glass for controls. The user rejected the initial rounded-card target.
-Keep fluid transitions and direct access to the working Hermes conversation.
+The UIKit/Core Animation app is implemented: project home, threads and
+installable builds on a continuous ivory canvas, with a floating dimensional
+device and flat rows. Glass is reserved for controls. The phone is a live 3D mesh
+displaying a real app screenshot. App names, summaries and immutable captures
+persist in the Mac catalog and can be updated by agents independently of builds.
+The user stopped the image-judge workflow; no further score-driven iterations.
 
-**Acceptance:** inspect rendered screens and transitions frame by frame, fix
-visible discontinuities, and preserve sending, streaming, reconnecting and
-installation access. This redesign and visual acceptance are currently pending;
-the working first client is the baseline, not proof of the redesign.
+**Verified:** actual screenshot publication and visible texture replacement
+without relaunch, CLI metadata editing with separate persisted API readback,
+clean tests and frame-by-frame live 3D transition inspection.
+
+**Remaining acceptance:** finish the **0.1.0 (3)** signed archive now underway,
+install it and confirm its launch
+acknowledgement. Preserve sending, streaming, reconnecting and installation
+access. No generated artwork may stand in for a missing capture.
 
 ## 2 Complete phone feedback and worker verification
 
