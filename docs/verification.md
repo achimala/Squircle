@@ -85,9 +85,19 @@ ID. Send a log, test offline buffering/retry, then deliberately crash and relaun
 ./target/debug/squircle build status BUILD_ID --json
 ```
 
-Crash capture/upload is distinct from symbolication. The archive and matching
-dSYMs are retained under the job directory; symbolication currently uses external
-Apple/PLCrashReporter tools. See the Probe README for its test crash workflow.
+Crash capture/upload is distinct from symbolication. Save an event's `message`
+as an Apple-text `.crash` file and use the retained dSYM:
+
+```sh
+./target/debug/squircle symbolicate --report report.crash \
+  --dsym /path/from/build/status/SquircleProbe.app.dSYM --json
+```
+
+This invokes the selected Xcode's `symbolicatecrash`. Inspect the resulting app
+frames; command completion alone does not prove symbol resolution. JSON `.ips`
+is unsupported. See [Probe instructions](../examples/SquircleProbe/README.md)
+for its test crash workflow and [validation evidence](validation.md) for what
+has actually been exercised.
 
 ## Limits and lifecycle
 
@@ -105,3 +115,7 @@ Disconnecting the CLI/phone does not cancel a service-owned job. A graceful serv
 shutdown cancels active jobs. After a crash/restart, unfinished records become
 interrupted; inspect any remaining processes/artifacts before explicitly retrying.
 No claim is made that active Xcode processes resume after a service restart.
+
+Build records capture the Git revision and dirty state at submission when
+available. Builds use the working tree, which can change while queued; this is
+provenance metadata, not a source snapshot or reproducibility guarantee.

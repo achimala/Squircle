@@ -85,6 +85,13 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+    /// Attempt local Apple-text crash symbolication using the selected Xcode and a dSYM.
+    Symbolicate {
+        #[arg(long, help = "Apple-text .crash report; JSON .ips is not supported")]
+        report: PathBuf,
+        #[arg(long, help = "Retained .dSYM bundle; Xcode matches its binary UUID")]
+        dsym: PathBuf,
+    },
     /// Submit a JSON diagnostic fixture; useful for checking the phone-to-Mac contract.
     Diagnostics {
         #[command(subcommand)]
@@ -306,7 +313,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","install-link","logs","crashes","diagnostics.send"],"build_modes":["archive","simulator"],"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"external tools; matching dSYMs retained","cellular_install_verified":false}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","install-link","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false}),
         ),
         Commands::Doctor => doctor(cli),
         Commands::Help { topic } => {
@@ -474,6 +481,12 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 ),
             )
             .await?
+        }
+        Commands::Symbolicate { report, dsym } => {
+            let output = squircle::symbolicate::run(report, dsym).await?;
+            success(
+                json!({"report":output,"frames_verified":false,"note":"Tool completed; inspect application frames to confirm resolution and matching symbols."}),
+            )
         }
         Commands::Diagnostics {
             command: DiagnosticCommand::Send { file },
