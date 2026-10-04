@@ -181,9 +181,28 @@ UI run recorded in `import-v5-motion.mp4`. Inspection caught an oversized long
 path control; the final browser check includes its width constraint fix.
 Evidence also includes `import-v5-browse.json`, `import-v5-probe-inspection.json`,
 `import-v5-probe-record.json` and `import-v5-squircle-record.json`. The latter
-imports Squircle's own build recipe for the upcoming signed update.
+imports Squircle's own build recipe, used for the signed update below.
 
-The version 5 signed archive and physical-phone update remain pending.
+Job `6429fb55-c679-4ea3-8c10-538c33471830` archived/exported **0.1.0 (5)** from clean
+revision `ea4ecd7`, then built, launched and captured its simulator counterpart.
+Automatic preview publication succeeded; the actual verified Mac browser PNG
+was subsequently selected as the featured app preview. The job retains its own
+capture, whose source is `current_working_tree`.
+
+Archive and IPA signatures verify under team `2F26US4NAU`; their arm64 binaries
+and the dSYM share UUID `6DD13129-FD87-36FF-98EB-DA64AA4884B3`.
+IPA SHA-256: `0e0f22fb7c2194e4fdf100ca5f2ece26548ed4fee75cbf859f0f999802ef15c3`.
+Evidence: `.verification/squircle-v5-final-status.json`,
+`squircle-v5-signing-proof.json` and `squircle-v5-featured-preview.json`.
+
+CoreDevice installed the exported app on the connected iPhone 17 Pro Max and
+activated it as PID **88082**. New launch event
+`17999c21-bbf7-44cb-a1b2-ae6d0091dfa5` arrived at timestamp **1791144314**, distinct
+from the simulator launch at 1791144254. Evidence:
+`.verification/squircle-v5-phone-install.json`, `squircle-v5-phone-launch.json`,
+`squircle-v5-before-phone-launch.json` and `squircle-v5-phone-launch-events.json`.
+This verifies the connected-phone update, not a new cellular installation test
+or physical-phone animation frame-rate measurement.
 
 ## Version 4 picker, motion and physical installation
 
@@ -272,6 +291,7 @@ and launch, not a new cellular installation test or physical-device frame-rate t
 | `f3b5440a-81f7-4511-9b5b-c795265420f7` | UIKit build-button test submitted a real signed archive/export; clean source `70e53d0` |
 | `a8cc8e8e-ece9-4d8a-9a8a-1af3a3082a5e` | Signed 0.1.0 (3), exported IPA and automatic simulator preview/catalog update succeeded; clean source `95ab906` |
 | `204882db-9d4e-4fff-8411-f14aefbd42c3` | Signed 0.1.0 (4), automatic preview, physical installation and launch succeeded; clean source `e96e80e` |
+| `6429fb55-c679-4ea3-8c10-538c33471830` | Signed 0.1.0 (5), saved import recipe, automatic preview, physical installation and launch succeeded; clean source `ea4ecd7` |
 
 These jobs were submitted through the CLI or native app to the real service. Their records,
 build logs, result bundles and outputs are retained under `.squircle/jobs/<ID>/`.

@@ -1,13 +1,13 @@
 # Squircle iPhone app
 
 A UIKit/Core Animation client for the user's independently installed Hermes.
-Version 4 opens with a horizontal live 3D app picker, then a minimal flat thread
+Version 5 opens with a horizontal live 3D app picker, then a minimal flat thread
 list. Builds live in a secondary sheet. App names and actual thread content carry
 the interface; glass is reserved for controls. The actual phone, title and
 controls move between screens, with interactive back navigation and no fades.
 
-Signed **0.1.0 (4)** is installed and launched on the physical iPhone. The final
-code passed 29 unit tests and navigation checks, including interactive back
+Signed **0.1.0 (5)** is installed and launched on the physical iPhone. The code
+passed 36 unit tests and import/navigation checks, including interactive back
 cancellation and completion. Simulator transition frames were inspected; real
 screenshot publication and the phone's automatic launch report are verified.
 See [validation](../../docs/validation.md) for evidence and recording limits.
@@ -25,8 +25,8 @@ build recipe; no first CLI build is required. Import opens the app without
 building it. Use its builds sheet when ready; a real screenshot appears after
 capture or agent publication.
 
-This flow is implemented and awaiting real integration checks; version 4 remains
-the latest installed phone build. A missing signing team can appear as a warning
+This flow passed real Mac import, folder/scheme selection, error recovery and
+relaunch checks and is included in installed version 5. A missing signing team can appear as a warning
 without blocking import, but a successful device build still requires Xcode's
 signing setup. See the [CLI/API contract](../../docs/cli.md#import-an-existing-app).
 
@@ -58,8 +58,9 @@ own configuration. Hermes's normal required API authentication stays intact.
   mesh, camera and surrounding UIKit views. Idle continuous rendering is off.
   Missing screenshots leave the display blank, without placeholder prose or
   invented artwork. There is no SwiftUI.
-- `Tests/` and `UITests/`: 29 unit tests and version 4 navigation checks pass,
-  covering picker swipes, back cancellation/completion, thread and builds sheets.
+- `Tests/` and `UITests/`: 36 unit tests and version 5 import/navigation checks pass,
+  covering Mac browsing, scheme selection, import persistence, picker swipes,
+  back cancellation/completion, thread and builds sheets.
   Earlier live tests cover Hermes chat/relaunch. The final signed archive,
   export, simulator capture and physical installation/launch also succeeded.
 

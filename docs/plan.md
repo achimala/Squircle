@@ -1,14 +1,15 @@
 # Implementation plan
 
 Status on 2026-10-04: the Mac build service, stock Hermes API and native client
-work together. Version 4's minimal picker/thread interface is installed and
-launched on the phone. The final code passed 29 unit tests and navigation checks;
-rendered simulator motion was inspected. Exact evidence is in [validation](validation.md).
+work together. Version 5 adds native Mac app import to the minimal picker/thread
+interface and is installed and launched on the phone. 36 iOS unit tests,
+import/navigation UI checks and 71 Rust tests pass. Exact evidence is in
+[validation](validation.md).
 
 ## Completed foundation
 
 - Rust CLI/service for Xcode jobs, signed artifacts, installation links and
-  diagnostic collection; 61 Rust tests passed.
+  diagnostic collection and app import; 71 Rust tests passed.
 - Signed cellular installs of Probe and the native client, with automatic launch
   acknowledgement from client job `05d980f6-be8c-4e21-acb5-f82971f7db37`.
 - Stock Hermes CLI/API invocation, persistent sessions, streamed runs and
@@ -40,6 +41,12 @@ irregularities limit frame-pacing conclusions; physical-device FPS is unmeasured
 Continue functional verification without image judges.
 
 ## 2 Complete phone feedback and worker verification
+
+Version 5 completes **+ → browse Mac → select project/scheme/name → Add**, saving
+an archive recipe before any build exists. Real import, error recovery,
+folder/scheme selection, stable identity and relaunch persistence pass. Its
+signed archive/export, simulator preview and connected-phone installation and
+launch acknowledgement also pass.
 
 Exercise phone logs, offline queue recovery, controlled crash/relaunch/upload
 and matching-dSYM symbolication. Install a visible update and distinguish its

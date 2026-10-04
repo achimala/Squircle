@@ -1,6 +1,6 @@
 # Architecture
 
-Status: UIKit client, stock Hermes API integration and Rust build/diagnostic core implemented, updated 2026-10-04. Signed version 4 is installed and launched on the phone. Persistent app metadata, real screenshot refresh, navigation checks and simulator transition inspection are verified. See [evidence](validation.md).
+Status: UIKit client, stock Hermes API integration and Rust build/diagnostic core implemented, updated 2026-10-04. Signed version 5 is installed and launched on the phone. Native Mac app import, persistent app metadata, real screenshot refresh, navigation checks and simulator transition inspection are verified. See [evidence](validation.md).
 
 ## Ownership
 
@@ -33,7 +33,7 @@ on duplicate imports. Older records still fall back to job history. Plain
 `app register` remains metadata-only. Import does not build, change the Xcode
 project or invent a preview; signing warnings may need resolution before a
 successful archive. Real native/API import, folder/scheme selection and relaunch are verified; the
-version 5 phone update is pending. [Request contract](cli.md#import-an-existing-app).
+version 5 phone update is installed. [Request contract](cli.md#import-an-existing-app).
 
 ## Core tools and service
 

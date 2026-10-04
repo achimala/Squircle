@@ -38,8 +38,8 @@ The user stopped the image-judge iteration workflow and requested a working prev
 
 ## Still open
 
-- The Add app flow passes real Mac import, folder/scheme selection, error recovery and relaunch checks. Missing signing configuration can remain a warning during import; the subsequent device build must establish signing readiness. Version 4 remains the latest installed phone build.
-- Version 4's 29 unit tests, navigation checks, archive/export, real preview publication and physical installation/launch pass. Simulator transition frames were inspected; physical-device frame-rate profiling remains unmeasured. See [evidence](validation.md).
+- Version 5 includes the verified Add app flow and is installed on the phone. Missing signing configuration can remain a warning during import; the subsequent device build must establish signing readiness. Broader third-party Xcode project compatibility remains to be exercised.
+- Simulator transition frames were inspected and navigation tests pass; physical-device frame-rate profiling remains unmeasured. See [evidence](validation.md).
 - Real-phone offline diagnostic recovery and actual phone crash upload/symbolication; the simulator crash path is verified.
 - How much independent worker-session control the client needs; this determines whether Paseo adds value.
 - Notification delivery while the iOS client is suspended, onboarding polish, and future support for other users/multiple hosts.
