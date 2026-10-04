@@ -21,7 +21,7 @@ The Mac is both the agent host and the Xcode build environment. Remote use must 
 | Connectivity | User-managed Tailscale is acceptable. Do not bundle it. |
 | Device feedback | Installing builds, opening them manually, and returning live app logs/crashes are sufficient. |
 | Maintenance | Prefer maintained components, native Mac execution, and minimal services/setup. |
-| Interface | App-centric project home → threads → installable builds. Continuous ivory canvas, a floating dimensional device, expressive typography and flat app/thread/build rows. Reserve glass for controls; the initial rounded-card direction was explicitly rejected. Require frame-by-frame verification of fluid transitions. |
+| Interface | Horizontal 3D app picker → flat thread list, with builds in a secondary sheet. App names and actual thread content only: no explanatory summaries, capture captions, build banners or redundant headings. Reserve glass for controls; no cards. Spatial, interruptible transitions and interactive back gestures replace screen crossfades. Verify motion frame by frame. |
 | App identity and previews | Persist names, summaries, project/scheme identity and latest screenshots on the Mac. Agents can update metadata and publish real simulator captures independently of a build. Display those pixels on a live 3D mesh; no generated logo, monogram or other pretend app screen. |
 | Setup for the personal build | Bundle the existing Mac connection settings into the signed client. No manual token entry or pairing flow. Hermes remains stock and enforces its normal API authentication internally. |
 
@@ -33,11 +33,11 @@ The CLI-first decision refines the earlier Hermes-plugin proposal: keep domain l
 
 The Mac-hosted install route has worked on the user's phone. Firebase is unnecessary for this flow; other apps still need Apple's signing prerequisites.
 
-The user stopped the image-judge iteration workflow and requested a working preview. Functional verification now centers on real screenshot capture/publication, metadata persistence and a continuous live 3D transition. A missing screenshot has an honest empty/unavailable state.
+The user stopped the image-judge iteration workflow and requested a working preview. Functional verification now centers on real screenshot capture/publication, metadata persistence and a continuous live 3D transition. A missing screenshot leaves the modeled display blank. The subsequent version 4 redesign also removes visible preview-status copy; metadata stays available to agents.
 
 ## Still open
 
-- End-to-end app-catalog publication, actual screenshot rendering, live 3D transition verification and the latest signed archive. Earlier UIKit project navigation, Hermes chat/relaunch and build submission passed live UI tests; those results do not validate the new preview flow. See [evidence](validation.md).
+- Version 3 app-catalog publication, live texture refresh, archive/export and physical installation/launch are verified. Version 4's 29 unit tests and navigation checks pass; final checks of the committed layout, rendered motion and phone update remain pending. See [evidence](validation.md).
 - Real-phone offline diagnostic recovery and actual phone crash upload/symbolication; the simulator crash path is verified.
 - How much independent worker-session control the client needs; this determines whether Paseo adds value.
 - Notification delivery while the iOS client is suspended, onboarding polish, and future support for other users/multiple hosts.

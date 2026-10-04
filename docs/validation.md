@@ -82,7 +82,7 @@ completed `.xcresult`. An earlier UIKit run completed cleanly with 17 unit tests
 and 2 UI tests. The build-action test produced signed job
 `f3b5440a-81f7-4511-9b5b-c795265420f7` from clean source revision `70e53d0`.
 
-The latest run completed **29 Swift unit tests and 1 navigation UI test cleanly**,
+The version 3 run completed **29 Swift unit tests and 1 navigation UI test cleanly**,
 with exit 0 and `.verification/RealPreviewFinal.xcresult`. Log:
 `.verification/real-preview-final-tests.log`. The earlier 28-unit clean run and
 navigation-only run with a packaging hang are superseded by this completed run.
@@ -131,7 +131,7 @@ the persisted value through the API. Evidence:
 `.verification/squircle-metadata-readback.json`. Restart persistence is covered
 by the focused catalog tests.
 
-## Live 3D motion verification
+## Version 3 live 3D motion verification
 
 Every consecutive frame **238–321 (opening)** and **441–524 (closing)** from
 `.verification/live-3d-navigation.mp4` was inspected. The phone stayed continuous,
@@ -154,7 +154,23 @@ than summarized away.
 
 **Device acceptance:** the updated build was subsequently installed and launched
 on the connected physical phone; see the version 3 evidence below.
-no successful export or new phone installation is claimed yet.
+
+## Version 4 interaction checks
+
+**29 unit tests passed** (`.verification/picker-v4-tests.log`). The navigation
+test in `.verification/PickerV4Final.xcresult` passed picker swipes, app opening,
+short-edge cancellation, full-edge back, reopening, existing thread/builds sheets
+and normal back navigation. Frame inspection then found an opaque transition
+container hiding neighboring apps until the transition ended. Passing interaction
+assertions had not established visual continuity.
+
+After clearing that container, fixing a stale destination-preview race and
+removing chat empty-state prose, the full navigation test passed again in
+`.verification/PickerV4Accepted.xcresult`. UI revision `07e725f` also includes
+transform-safe layout using bounds and center. Its unit/navigation rerun is
+underway in `.verification/PickerV4ReleaseCheck.xcresult`; final rendered-motion
+inspection remains pending. Version 3 is still the latest installed phone build.
+No version 4 archive, phone update or launch acknowledgement is claimed yet.
 
 ## Signed version 0.1.0 (3)
 
@@ -250,7 +266,7 @@ This exposed and fixed uppercase Swift UUID rejection at the server boundary.
 Still unverified:
 
 - Phone app-log collection, offline/reconnect recovery and actual phone crash upload/symbolication.
-- Installing a visible update and distinguishing old/new build feedback.
+- Version 4 installation/launch and distinguishing feedback from the previous build.
 - Coding-worker delegation and OpenClaw invocation in their actual environments.
 - Packaged Mac startup supervision and suspended-client notifications.
 

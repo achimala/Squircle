@@ -1,16 +1,16 @@
 # Squircle iPhone app
 
-A UIKit/Core Animation client for the user's independently installed Hermes:
-project home → threads → installable builds, on a continuous ivory canvas with
-a live floating 3D device, flat rows and glass controls. The device displays
-actual app screenshots; app metadata and previews persist on the Mac. Publishing
-a new screenshot through the CLI has updated the visible texture without
-relaunching the client. Opening and closing transitions were inspected frame by
-frame on the simulator, with continuous perspective changes and no blank or
-duplicated phone. Signed **0.1.0 (3)** is installed and launched on the connected iPhone,
-with a new launch event received by the Mac. Its build also captured
-the simulator screen and updated the Mac catalog automatically.
-The first client build is already installed and phone chat works.
+A UIKit/Core Animation client for the user's independently installed Hermes.
+Version 4 opens with a horizontal live 3D app picker, then a minimal flat thread
+list. Builds live in a secondary sheet. App names and actual thread content carry
+the interface; glass is reserved for controls. The actual phone, title and
+controls move between screens, with interactive back navigation and no fades.
+
+Signed **0.1.0 (3)** remains the latest installed phone build. Its simulator
+preview refresh and automatic phone launch reporting are verified. Version 4
+has passed 29 unit tests and navigation checks, including interactive back
+cancellation and completion. The final committed-layout rerun, rendered-motion
+check and device update remain pending. See [validation](../../docs/validation.md).
 
 Hermes retains conversation history; the Mac app catalog owns app names,
 summaries and preview artifacts. Local client state holds navigation, thread
@@ -40,19 +40,17 @@ own configuration. Hermes's normal required API authentication stays intact.
 
 - `Sources/HermesClient.swift`: stock Sessions/Runs REST and SSE, Squircle app/build APIs.
 - `Sources/SquircleModel.swift`: current screen state, reconnect and launch report.
-- `Sources/UI/`: UIKit screens and Core Animation transitions, with no SwiftUI.
-  SceneKit displays a live procedural phone textured with a real screenshot.
-  Transition progress rotates its mesh and moves its camera. The live viewport
-  is reparented during the transition; idle continuous rendering is disabled.
-  Missing screenshots remain empty, with no generated identity artwork.
-- `Tests/` and `UITests/`: **29 unit tests and one navigation UI test completed
-  cleanly**, with `.verification/RealPreviewFinal.xcresult` and a successful exit.
-  Earlier UI tests exercised real Hermes chat/relaunch and build submission. See
-  [validation](../../docs/validation.md) for the evidence and remaining checks.
+- `Sources/UI/`: horizontal picker, flat threads and a builds sheet. SceneKit
+  textures the live phone with a real screenshot; transition progress moves its
+  mesh, camera and surrounding UIKit views. Idle continuous rendering is off.
+  Missing screenshots leave the display blank, without placeholder prose or
+  invented artwork. There is no SwiftUI.
+- `Tests/` and `UITests/`: 29 unit tests and version 4 navigation checks pass,
+  covering picker swipes, back cancellation/completion, thread and builds sheets.
+  Earlier live tests cover Hermes chat/relaunch and signed builds. The latest
+  layout changes are undergoing their final rerun.
 
-The installed baseline was signed, exported and installed; its automatic launch
-event reached the Mac. Live model send/stream/history reconciliation also passed
-in seven seconds. Keep the Mac and external Tailscale connection available.
+Keep the Mac and external Tailscale connection available.
 
 After changing an app's UI, capture and inspect its actual simulator screenshot.
 Use `squircle app list` to find the persistent app ID, `app update ID --summary

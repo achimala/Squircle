@@ -1,9 +1,10 @@
 # Implementation plan
 
-Status on 2026-10-04: the Mac build service, stock Hermes API and first native
-client work together. The user installed the client and confirmed phone chat;
-its launch acknowledgement reached the Mac. Exact evidence is in
-[validation](validation.md).
+Status on 2026-10-04: the Mac build service, stock Hermes API and native client
+work together. Version 3 is installed on the phone. Version 4's picker/thread
+redesign has passed 29 unit tests and navigation checks. The final committed
+layout, rendered motion and device update remain under verification. Exact
+evidence is in [validation](validation.md).
 
 ## Completed foundation
 
@@ -14,38 +15,33 @@ its launch acknowledgement reached the Mac. Exact evidence is in
 - Stock Hermes CLI/API invocation, persistent sessions, streamed runs and
   idempotent run retries over the existing Tailscale HTTPS connection.
 - UIKit client with project-scoped threads, chat, tool progress, approvals,
-  stop and builds. Twenty model/network tests and three live UI tests passed,
-  including chat after relaunch and a real signed archive. See validation for
-  the Xcode result-finalization limitation.
+  stop and builds. Earlier live UI tests exercised Hermes chat after relaunch
+  and a real signed build.
 - Probe instrumentation with nine tests, real simulator crash recovery,
   matching symbols and successful symbolication. Physical-phone crash recovery
   remains unverified.
 - Real simulator capture, private HTTPS PNG retrieval and CLI publication of
   Squircle screenshots. The client displayed them on its 3D device and replaced
-  the texture with a second publication while remaining open. The latest run
-  completed 29 unit tests and one navigation UI test cleanly.
-- Consecutive simulator frames of the live 3D opening/closing transition were
-  inspected: continuous phone, changing perspective, no blank or duplicate
-  handoff. Timing evidence and simulator limits are in validation.
+  the texture with a second publication while remaining open. Version 3's tests,
+  live 3D transition inspection, automatic capture and connected-phone
+  install/launch passed. This was not a new cellular installation test.
 
-## 1 Complete real app previews and device acceptance
+## 1 Verify the version 4 interaction and device update
 
-The UIKit/Core Animation app is implemented: project home, threads and
-installable builds on a continuous ivory canvas, with a floating dimensional
-device and flat rows. Glass is reserved for controls. The phone is a live 3D mesh
-displaying a real app screenshot. App names, summaries and immutable captures
-persist in the Mac catalog and can be updated by agents independently of builds.
-The user stopped the image-judge workflow; no further score-driven iterations.
+Version 4 implements a horizontal live 3D app picker → minimal flat threads,
+with builds in a secondary sheet. Actual phone/title/control views move spatially
+with interactive back navigation. There are no fades, explanatory panels or
+placeholder prose. Metadata remains available to agents; the device displays
+only real screenshots.
 
-**Verified:** actual screenshot publication and visible texture replacement
-without relaunch, CLI metadata editing with separate persisted API readback,
-clean tests and frame-by-frame live 3D transition inspection.
+**Passed:** picker swipes, opening an app, interactive back cancellation and
+completion, reopening, existing thread/builds sheets and normal back navigation.
 
-**Device acceptance:** **0.1.0 (3)** was installed and launched on the connected
-physical iPhone through CoreDevice; its new launch event reached the Mac. This
-was a connected-device update, not a new cellular installation test. Archive/export,
-automatic simulator capture/catalog update and byte-identical private HTTPS delivery passed. Preserve sending, streaming, reconnecting and installation
-access. No generated artwork may stand in for a missing capture.
+**Pending:** finish the rerun after the last layout changes, inspect rendered
+motion frame by frame, then sign, install and confirm version 4's launch
+acknowledgement. Preserve the working chat/build/install flows. Passing
+interaction assertions alone does not establish visual continuity. Continue
+functional verification without image judges.
 
 ## 2 Complete phone feedback and worker verification
 
