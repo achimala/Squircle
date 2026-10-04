@@ -87,6 +87,30 @@ final class HermesClientTests: XCTestCase {
         XCTAssertFalse(simulator.canInstall)
     }
 
+    func testBuildPreviewStateKeepsLegacyBuildsCompatibleAndInstallationIndependent() throws {
+        func build(_ output: String) throws -> AppBuild {
+            try JSONDecoder().decode(AppBuild.self, from: Data("{\"id\":\"build\",\"state\":\"succeeded\",\"created_at\":1720000000,\"output\":\(output)}".utf8))
+        }
+        let legacy = try build(#"{"ipa_path":"/build/app.ipa"}"#)
+        XCTAssertFalse(legacy.previewAvailable)
+        XCTAssertNil(legacy.previewState)
+        XCTAssertFalse(legacy.needsPolling)
+        let captured = try build(#"{"preview_path":"/build/preview.png","preview_state":"succeeded","preview_captured_at":1720000100}"#)
+        XCTAssertTrue(captured.previewAvailable)
+        XCTAssertEqual(captured.previewCapturedAt?.timeIntervalSince1970, 1720000100)
+        for state in ["pending", "running"] {
+            let pending = try build("{\"ipa_path\":\"/build/app.ipa\",\"preview_state\":\"\(state)\"}")
+            XCTAssertTrue(pending.canInstall)
+            XCTAssertTrue(pending.needsPolling)
+            XCTAssertFalse(pending.previewAvailable)
+        }
+        let failed = try build(#"{"ipa_path":"/build/app.ipa","preview_state":"failed","preview_error":"App could not launch"}"#)
+        XCTAssertTrue(failed.canInstall)
+        XCTAssertFalse(failed.previewAvailable)
+        XCTAssertFalse(failed.needsPolling)
+        XCTAssertEqual(failed.previewError, "App could not launch")
+    }
+
     func testRunSubmissionUsesCorrectOriginCredentialAndIdempotencyHeader() async throws {
         let received = expectation(description: "run request")
         let config = URLSessionConfiguration.ephemeral
@@ -152,6 +176,7 @@ final class HermesClientTests: XCTestCase {
             XCTAssertEqual(body["request_id"] as? String, "fresh-build")
             XCTAssertEqual(body["project"] as? String, "/src/Atlas.xcworkspace")
             XCTAssertEqual(body["allow_provisioning_updates"] as? Bool, true)
+            XCTAssertEqual(body["capture_preview"] as? Bool, true)
             let response: [String: Any] = ["schema_version": 1, "ok": true, "data": ["job": ["id": "queued-build", "state": "queued", "created_at": 1720000000, "request": body], "replayed": false]]
             return (200, String(decoding: try JSONSerialization.data(withJSONObject: response), as: UTF8.self))
         }
@@ -196,6 +221,8 @@ final class HermesClientTests: XCTestCase {
             case ("GET", "/api/sessions/new-thread/messages"):
                 return (200, #"{"object":"list","session_id":"new-thread","data":[]}"#)
             case ("GET", "/v1/builds"):
+                return (200, #"{"schema_version":1,"ok":true,"data":[]}"#)
+            case ("GET", "/v1/apps"):
                 return (200, #"{"schema_version":1,"ok":true,"data":[]}"#)
             default:
                 XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(request.url?.path ?? "")")
@@ -285,6 +312,7 @@ final class HermesClientTests: XCTestCase {
             switch (request.httpMethod ?? "GET", request.url?.path ?? "") {
             case ("GET", "/api/sessions"): response = ["data": []]
             case ("GET", "/v1/builds"): response = ["ok": true, "data": [old]]
+            case ("GET", "/v1/apps"): response = ["ok": true, "data": []]
             case ("POST", "/v1/builds"):
                 response = ["ok": true, "data": ["job": ["id": "new-build", "state": "queued", "created_at": 2, "request": try Self.body(request)]]]
             default: XCTFail("Unexpected request"); response = [:]
@@ -361,6 +389,117 @@ final class HermesClientTests: XCTestCase {
         XCTAssertFalse(model.isRunning, "Alpha’s admission changed Beta’s activity state")
     }
 
+    func testBuildPreviewUsesSquircleAuthenticationAndReturnsCapturedPNGBytes() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        let captured = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aYxkAAAAASUVORK5CYII="))
+        FixtureProtocol.binaryHandler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://mac.example.test:8443/v1/builds/captured-build/preview")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-control-key")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "image/png")
+            return (200, "image/png", captured)
+        }
+        defer { Self.resetFixture() }
+        let client = HermesClient(configuration: try configuration(), sessionConfiguration: config)
+        let received = try await client.fetchBuildPreview(id: "captured-build")
+        XCTAssertEqual(received, captured)
+    }
+
+    func testAppMetadataUsesSquircleOriginAndSupportsOlderServers() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.handler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://mac.example.test:8443/v1/apps")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-control-key")
+            return (200, #"{"schema_version":1,"ok":true,"data":[{"id":"atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"Saved places","updated_at":1720000000,"preview":{"id":"screen-1","captured_at":1720000001,"caption":"Home","source":"agent"}}]}"#)
+        }
+        defer { Self.resetFixture() }
+        let client = HermesClient(configuration: try configuration(), sessionConfiguration: config)
+        let records = try await client.fetchAppMetadata()
+        XCTAssertEqual(records.first?.summary, "Saved places")
+        XCTAssertEqual(records.first?.preview?.capturedAt, 1720000001)
+        FixtureProtocol.handler = { _ in (404, "{}") }
+        let legacy = try await client.fetchAppMetadata()
+        XCTAssertTrue(legacy.isEmpty)
+        FixtureProtocol.handler = { _ in (401, "{}") }
+        do { _ = try await client.fetchAppMetadata(); XCTFail("Only a missing endpoint should be treated as an old server") }
+        catch let error as ClientError { XCTAssertFalse(error.isMissing) }
+    }
+
+    @MainActor
+    func testAppPreviewCacheUsesImmutablePreviewIDAndAppEndpoint() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        let captured = Data([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3])
+        var requests = 0
+        FixtureProtocol.binaryHandler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/apps/atlas/preview")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.name, "version")
+            XCTAssertEqual(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first?.value, requests == 0 ? "screen-1" : "screen-2")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-control-key")
+            requests += 1
+            return (200, "image/png", captured)
+        }
+        let suite = "SquircleAppPreviewCache.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        func record(_ previewID: String) throws -> AppMetadata {
+            try JSONDecoder().decode(AppMetadata.self, from: Data("{\"id\":\"atlas\",\"name\":\"Atlas\",\"project\":\"/src/Atlas.xcodeproj\",\"scheme\":\"Atlas\",\"summary\":\"Saved places\",\"updated_at\":1720000000,\"preview\":{\"id\":\"\(previewID)\",\"captured_at\":1720000001,\"caption\":\"Home\",\"source\":\"agent\"}}".utf8))
+        }
+        let first = try await model.previewData(for: record("screen-1"))
+        _ = try await model.previewData(for: record("screen-1"))
+        XCTAssertEqual(first, captured)
+        XCTAssertEqual(requests, 1)
+        _ = try await model.previewData(for: record("screen-2"))
+        XCTAssertEqual(requests, 2, "A published screenshot must replace the previous app preview")
+    }
+
+    func testBuildPreviewRejectsAnErrorOrNonImagePayload() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        defer { Self.resetFixture() }
+        let client = HermesClient(configuration: try configuration(), sessionConfiguration: config)
+        for (status, mime, bytes) in [(404, "application/json", Data("{}".utf8)),
+                                      (200, "application/json", Data("{}".utf8)),
+                                      (200, "image/png", Data("not an image".utf8))] {
+            FixtureProtocol.binaryHandler = { _ in (status, mime, bytes) }
+            do {
+                _ = try await client.fetchBuildPreview(id: "build")
+                XCTFail("Expected a missing/invalid preview to fail")
+            } catch let error as ClientError {
+                if status == 404 { XCTAssertTrue(error.isMissing) }
+            }
+        }
+    }
+
+    @MainActor
+    func testPreviewDataReusesTheCapturedArtifactForItsBuild() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        let captured = Data([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3])
+        var requests = 0
+        FixtureProtocol.binaryHandler = { _ in requests += 1; return (200, "image/png", captured) }
+        let suite = "SquirclePreviewCache.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        let build = try JSONDecoder().decode(AppBuild.self, from: Data(#"{"id":"captured-build","state":"succeeded","created_at":1720000000}"#.utf8))
+        let first = try await model.previewData(for: build)
+        let second = try await model.previewData(for: build)
+        XCTAssertEqual(first, captured)
+        XCTAssertEqual(second, captured)
+        XCTAssertEqual(requests, 1)
+        let recaptured = try JSONDecoder().decode(AppBuild.self, from: Data(#"{"id":"captured-build","state":"succeeded","created_at":1720000000,"output":{"preview_path":"/build/preview.png","preview_state":"succeeded","preview_captured_at":1720000200}}"#.utf8))
+        _ = try await model.previewData(for: recaptured)
+        XCTAssertEqual(requests, 2, "A recapture of the same build should replace its cached image")
+    }
+
     private static func resetFixture() {
         FixtureProtocol.heldDelivery?()
         FixtureProtocol.heldDelivery = nil
@@ -368,6 +507,7 @@ final class HermesClientTests: XCTestCase {
         FixtureProtocol.holdRequest = nil
         FixtureProtocol.holdSessionList = false
         FixtureProtocol.handler = nil
+        FixtureProtocol.binaryHandler = nil
     }
 
     private static func body(_ request: URLRequest) throws -> [String: Any] {
@@ -388,6 +528,7 @@ final class HermesClientTests: XCTestCase {
 
 private final class FixtureProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, String))?
+    static var binaryHandler: ((URLRequest) throws -> (Int, String, Data))?
     static var holdSessionList = false
     static var holdRequest: ((URLRequest) -> Bool)?
     static var onHold: (() -> Void)?
@@ -396,11 +537,18 @@ private final class FixtureProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         do {
-            let (status, text) = try XCTUnwrap(Self.handler)(request)
-            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+            let status: Int
+            let mime: String
+            let data: Data
+            if let binary = Self.binaryHandler { (status, mime, data) = try binary(request) }
+            else {
+                let (code, text) = try XCTUnwrap(Self.handler)(request)
+                status = code; mime = "application/json"; data = Data(text.utf8)
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": mime])!
             let deliver = { [self] in
                 client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                client?.urlProtocol(self, didLoad: Data(text.utf8))
+                client?.urlProtocol(self, didLoad: data)
                 client?.urlProtocolDidFinishLoading(self)
             }
             if (Self.holdSessionList && request.httpMethod == "GET" && request.url?.path == "/api/sessions") || Self.holdRequest?(request) == true {

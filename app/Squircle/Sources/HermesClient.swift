@@ -43,6 +43,14 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     let canInstall: Bool
     let bundleID: String?
     let request: AppBuildRequest?
+    let previewAvailable: Bool
+    let previewState: String?
+    let previewError: String?
+    let previewCapturedAt: Date?
+
+    var needsPolling: Bool {
+        status == "queued" || status == "running" || previewState == "pending" || previewState == "running"
+    }
 
     enum CodingKeys: String, CodingKey { case id, state, output, createdAt = "created_at", request }
     private struct Output: Decodable {
@@ -51,6 +59,10 @@ struct AppBuild: Identifiable, Decodable, Equatable {
         let build_number: String?
         let ipa_path: String?
         let bundle_id: String?
+        let preview_path: String?
+        let preview_state: String?
+        let preview_error: String?
+        let preview_captured_at: Double?
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -62,6 +74,10 @@ struct AppBuild: Identifiable, Decodable, Equatable {
         bundleID = output?.bundle_id
         version = [output?.version, output?.build_number.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")
         canInstall = status == "succeeded" && output?.ipa_path != nil
+        previewState = output?.preview_state
+        previewError = output?.preview_error
+        previewCapturedAt = output?.preview_captured_at.map { Date(timeIntervalSince1970: $0) }
+        previewAvailable = !(output?.preview_path ?? "").isEmpty && (previewState == nil || previewState == "succeeded")
         date = Date(timeIntervalSince1970: try values.decode(Double.self, forKey: .createdAt))
     }
 }
@@ -258,6 +274,22 @@ final class HermesClient: NSObject, URLSessionTaskDelegate {
         guard reply.ok else { throw ClientError.response("Squircle") }
         return reply.data
     }
+
+    func fetchAppMetadata() async throws -> [AppMetadata] {
+        struct Reply: Decodable { let ok: Bool; let data: [AppMetadata] }
+        do {
+            let reply: Reply = try await get(["v1", "apps"], squircle: true)
+            guard reply.ok else { throw ClientError.response("Squircle") }
+            return reply.data
+        } catch let error as ClientError where error.isMissing {
+            return [] // Older Squircle servers have no persistent app registry.
+        }
+    }
+
+    func fetchAppPreview(id: String, previewID: String? = nil) async throws -> Data {
+        let query = previewID.map { [URLQueryItem(name: "version", value: $0)] } ?? []
+        return try await fetchPNG(["v1", "apps", id, "preview"], query: query)
+    }
     func startBuild(_ buildRequest: AppBuildRequest) async throws -> AppBuild {
         struct Reply: Decodable {
             struct Result: Decodable { let job: AppBuild }
@@ -281,6 +313,26 @@ final class HermesClient: NSObject, URLSessionTaskDelegate {
               url.host == configuration.squircleURL.host, url.port == configuration.squircleURL.port,
               url.user == nil, url.password == nil else { throw ClientError.response("Squircle") }
         return url
+    }
+
+    func fetchBuildPreview(id: String) async throws -> Data {
+        try await fetchPNG(["v1", "builds", id, "preview"])
+    }
+
+    private func fetchPNG(_ path: [String], query: [URLQueryItem] = []) async throws -> Data {
+        var request = try request(path, squircle: true, query: query)
+        request.setValue("image/png", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await session.data(for: request)
+            try validate(response, service: "Squircle")
+            guard response.mimeType?.lowercased() == "image/png",
+                  data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else {
+                throw ClientError.response("Squircle")
+            }
+            return data
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as ClientError { throw error }
+        catch { if Task.isCancelled { throw CancellationError() }; throw ClientError.connection("Squircle") }
     }
 
     func reportLaunch(buildID: String, eventID: String, timestamp: Int) async throws {

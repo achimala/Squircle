@@ -8,6 +8,7 @@ final class SquircleModel: ObservableObject {
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var builds: [AppBuild] = []
     @Published private(set) var projects: [AppProject] = []
+    @Published private(set) var appMetadata: [AppMetadata] = []
     @Published private(set) var selectedProjectID: String?
     @Published private(set) var buildingProjectIDs: Set<String> = []
     @Published private(set) var approvals: [AgentApproval] = []
@@ -29,9 +30,13 @@ final class SquircleModel: ObservableObject {
     private var activeRuns: [String: String]
     private var catalog: AppProjectCatalog
     private var buildMonitor: Task<Void, Never>?
+    private var metadataMonitor: Task<Void, Never>?
+    private var metadataGeneration = UUID()
     private var loadingOperations = 0
     private var sessionRevision = 0
     private var buildRevision = 0
+    private let previewCache = NSCache<NSString, NSData>()
+    private var previewRequests: [String: Task<Data, Error>] = [:]
     private var pendingSubmissions: Set<String> = []
     private var monitor: Task<Void, Never>?
     private var monitorGeneration = UUID()
@@ -56,6 +61,8 @@ final class SquircleModel: ObservableObject {
             catalog = stored
         } else { catalog = AppProjectCatalog() }
         self.embeddedBuildID = embeddedBuildID ?? Bundle.main.object(forInfoDictionaryKey: "SquircleBuildID") as? String ?? ""
+        previewCache.countLimit = 12
+        previewCache.totalCostLimit = 48 * 1024 * 1024
         reconcileProjects()
         if self.client == nil { status = "Connection configuration is missing from this build." }
     }
@@ -140,6 +147,70 @@ final class SquircleModel: ObservableObject {
 
     func builds(for project: AppProject) -> [AppBuild] {
         builds.filter { catalog.buildProjects[$0.id] == project.id }.sorted { $0.date > $1.date }
+    }
+
+    func metadata(for project: AppProject) -> AppMetadata? {
+        appMetadata.first { $0.id == project.metadataID }
+    }
+
+    func startMetadataUpdates() {
+        guard client != nil, metadataMonitor == nil else { return }
+        metadataMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if !self.isLoading { await self.refreshMetadata() }
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            }
+        }
+    }
+
+    func stopMetadataUpdates() {
+        metadataMonitor?.cancel()
+        metadataMonitor = nil
+    }
+
+    func refreshMetadata() async {
+        await fetchMetadata()
+        reconcileProjects()
+    }
+
+    private func fetchMetadata() async {
+        guard let client else { return }
+        let generation = UUID()
+        metadataGeneration = generation
+        do {
+            let records = try await client.fetchAppMetadata()
+            guard generation == metadataGeneration, !Task.isCancelled else { return }
+            if records != appMetadata { appMetadata = records }
+        } catch is CancellationError { return }
+        catch { if generation == metadataGeneration, error is ClientError, self.error == nil { show(error) } }
+    }
+
+    /// Build previews are immutable artifacts. Keep a small in-memory cache;
+    /// conversation refreshes do not redownload the same captured image.
+    func previewData(for build: AppBuild) async throws -> Data {
+        guard let client else { throw ClientError.configuration }
+        // A manual recapture may replace the image for an existing build.
+        let key = "build|\(build.id)|\(build.previewCapturedAt?.timeIntervalSince1970 ?? 0)"
+        return try await cachedPreview(key: key) { try await client.fetchBuildPreview(id: build.id) }
+    }
+
+    func previewData(for metadata: AppMetadata) async throws -> Data {
+        guard let client else { throw ClientError.configuration }
+        guard let preview = metadata.preview else { throw ClientError.http("Squircle", 404) }
+        let key = "app|\(metadata.id)|\(preview.id)"
+        return try await cachedPreview(key: key) { try await client.fetchAppPreview(id: metadata.id, previewID: preview.id) }
+    }
+
+    private func cachedPreview(key: String, fetch: @escaping () async throws -> Data) async throws -> Data {
+        if let cached = previewCache.object(forKey: key as NSString) { return cached as Data }
+        if let pending = previewRequests[key] { return try await pending.value }
+        let task = Task { try await fetch() }
+        previewRequests[key] = task
+        defer { previewRequests[key] = nil }
+        let data = try await task.value
+        previewCache.setObject(data as NSData, forKey: key as NSString, cost: data.count)
+        return data
     }
 
     func createProject(name: String) -> AppProject {
@@ -287,6 +358,7 @@ final class SquircleModel: ObservableObject {
     private func refreshBuilds() async {
         guard let client else { return }
         let revision = buildRevision
+        async let metadata: Void = fetchMetadata()
         do {
             let listed = try await client.builds()
             if revision == buildRevision { builds = listed }
@@ -298,12 +370,13 @@ final class SquircleModel: ObservableObject {
             }
         }
         catch { if self.error == nil { show(error) } }
+        await metadata
         reconcileProjects()
         ensureBuildMonitor()
     }
 
     private func reconcileProjects() {
-        projects = catalog.reconcile(builds: builds, sessions: sessions)
+        projects = catalog.reconcile(builds: builds, sessions: sessions, metadata: appMetadata)
         if let id = selectedSessionID, let projectID = catalog.sessionProjects[id] { selectedProjectID = projectID }
         if selectedProjectID == nil { selectedProjectID = projects.first?.id }
         if let data = try? JSONEncoder().encode(catalog) { defaults.set(data, forKey: "\(preferencePrefix).projects") }
@@ -337,13 +410,13 @@ final class SquircleModel: ObservableObject {
     }
 
     private func ensureBuildMonitor() {
-        guard buildMonitor == nil, builds.contains(where: { $0.status == "queued" || $0.status == "running" }) else { return }
+        guard buildMonitor == nil, builds.contains(where: { $0.needsPolling }) else { return }
         buildMonitor = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(3)) } catch { break }
                 guard let self else { return }
                 await self.refreshBuilds()
-                if !self.builds.contains(where: { $0.status == "queued" || $0.status == "running" }) { break }
+                if !self.builds.contains(where: { $0.needsPolling }) { break }
             }
             self?.buildMonitor = nil
         }

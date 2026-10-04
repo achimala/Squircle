@@ -90,6 +90,8 @@ final class AppProjectTests: XCTestCase {
         XCTAssertEqual(body["mode"] as? String, "archive")
         XCTAssertEqual(body["request_id"] as? String, "new-request")
         XCTAssertEqual(body["allow_provisioning_updates"] as? Bool, false)
+        XCTAssertFalse(request.capturePreview, "Legacy requests did not request a screenshot")
+        XCTAssertEqual(body["capture_preview"] as? Bool, true, "A fresh client build should capture its actual screen")
         var catalog = AppProjectCatalog()
         let project = try XCTUnwrap(catalog.reconcile(builds: [actual], sessions: []).first { $0.name == "Atlas" })
         XCTAssertTrue(project.agentContext.contains("test.atlas"))
@@ -104,5 +106,41 @@ final class AppProjectTests: XCTestCase {
         let project = try XCTUnwrap(catalog.reconcile(builds: [archive, simulator], sessions: []).first { $0.name == "Atlas" })
         XCTAssertEqual(project.buildRequest?.mode, "archive")
         XCTAssertTrue(project.canBuild)
+    }
+
+    func testMacMetadataUpdatesPreserveExistingProjectAndThreadIdentity() throws {
+        var catalog = AppProjectCatalog()
+        let actual = try build(id: "atlas-build", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcodeproj")
+        let original = try XCTUnwrap(catalog.reconcile(builds: [actual], sessions: []).first { $0.name == "Atlas" })
+        catalog.assign(sessionID: "atlas-thread", to: original.id)
+        let record = try JSONDecoder().decode(AppMetadata.self, from: Data(#"{"id":"app-atlas","name":"Atlas Maps","project":"/src/Atlas.xcodeproj","scheme":"Atlas","bundle_id":"test.atlas","summary":"Offline maps with saved places.","updated_at":1720000000,"preview":{"id":"screen-home","captured_at":1720000000,"build_id":"atlas-build","source_revision":"abc123","caption":"Saved places","source":"agent"}}"#.utf8))
+        let sessions = [ChatSession(id: "atlas-thread", title: "Atlas · Plan maps")]
+        let updated = try XCTUnwrap(catalog.reconcile(builds: [actual], sessions: sessions, metadata: [record]).first { $0.metadataID == record.id })
+        XCTAssertEqual(updated.id, original.id)
+        XCTAssertEqual(updated.name, "Atlas Maps")
+        XCTAssertEqual(updated.subtitle, record.summary)
+        XCTAssertEqual(updated.metadataPreview?.id, "screen-home")
+        XCTAssertEqual(catalog.sessionProjects["atlas-thread"], original.id)
+        XCTAssertEqual(catalog.buildProjects["atlas-build"], original.id)
+        XCTAssertTrue(updated.canBuild)
+        XCTAssertTrue(updated.agentContext.contains("squircle app update app-atlas --summary"))
+        XCTAssertTrue(updated.agentContext.contains("squircle app preview app-atlas --file"))
+        var restored = try JSONDecoder().decode(AppProjectCatalog.self, from: JSONEncoder().encode(catalog))
+        let again = restored.reconcile(builds: [actual], sessions: sessions, metadata: [record])
+        XCTAssertEqual(again.first { $0.metadataID == record.id }?.id, original.id)
+        XCTAssertEqual(restored.sessionProjects["atlas-thread"], original.id)
+    }
+
+    func testMetadataWithoutABuildDoesNotInventAnArchiveRecipe() throws {
+        var catalog = AppProjectCatalog()
+        let localID = catalog.create(name: "Atlas")
+        let record = try JSONDecoder().decode(AppMetadata.self, from: Data(#"{"id":"app-atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"An app in development.","updated_at":1720000000}"#.utf8))
+        let projects = catalog.reconcile(builds: [], sessions: [], metadata: [record])
+        let app = try XCTUnwrap(projects.first { $0.metadataID == record.id })
+        XCTAssertEqual(app.id, localID)
+        XCTAssertEqual(app.subtitle, record.summary)
+        XCTAssertFalse(app.canBuild)
+        XCTAssertNil(app.buildRequest)
+        XCTAssertNil(app.metadataPreview)
     }
 }
