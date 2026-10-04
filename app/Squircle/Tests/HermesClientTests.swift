@@ -126,6 +126,111 @@ final class HermesClientTests: XCTestCase {
         }
     }
 
+    func testAppContextIsAppendedToExistingInstructionsOnRunSubmission() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.handler = { request in
+            let body = try Self.body(request)
+            XCTAssertEqual(body["instructions"] as? String, "Use the configured workspace.\n\nThis conversation belongs to Atlas.")
+            return (202, #"{"run_id":"run_project","status":"started","replayed":false}"#)
+        }
+        defer { FixtureProtocol.handler = nil }
+        let client = HermesClient(configuration: try configuration(), sessionConfiguration: config)
+        _ = try await client.startRun(sessionID: "atlas-thread", text: "Build it", idempotencyKey: "app-key", projectContext: "This conversation belongs to Atlas.")
+    }
+
+    func testStartBuildPostsActualRecipeToSquircleAndDecodesQueuedJob() async throws {
+        let fixture = #"{"project":"/src/Atlas.xcworkspace","scheme":"Atlas","configuration":"Release","mode":"archive","export_options":"/src/ExportOptions.plist","allow_provisioning_updates":true,"request_id":"previous-build"}"#
+        let recipe = try JSONDecoder().decode(AppBuildRequest.self, from: Data(fixture.utf8)).freshSubmission(id: "fresh-build")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.handler = { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://mac.example.test:8443/v1/builds")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-control-key")
+            let body = try Self.body(request)
+            XCTAssertEqual(body["request_id"] as? String, "fresh-build")
+            XCTAssertEqual(body["project"] as? String, "/src/Atlas.xcworkspace")
+            XCTAssertEqual(body["allow_provisioning_updates"] as? Bool, true)
+            let response: [String: Any] = ["schema_version": 1, "ok": true, "data": ["job": ["id": "queued-build", "state": "queued", "created_at": 1720000000, "request": body], "replayed": false]]
+            return (200, String(decoding: try JSONSerialization.data(withJSONObject: response), as: UTF8.self))
+        }
+        defer { FixtureProtocol.handler = nil }
+        let client = HermesClient(configuration: try configuration(), sessionConfiguration: config)
+        let build = try await client.startBuild(recipe)
+        XCTAssertEqual(build.id, "queued-build")
+        XCTAssertEqual(build.status, "queued")
+        XCTAssertEqual(build.title, "Atlas")
+        XCTAssertFalse(build.canInstall)
+    }
+
+    func testThreadNamingUpdatesHermesSessionMetadata() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/sessions/atlas-thread")
+            XCTAssertEqual(request.httpMethod, "PATCH")
+            XCTAssertEqual(try Self.body(request)["title"] as? String, "Atlas · Add a map")
+            return (200, #"{"object":"hermes.session","session":{"id":"atlas-thread","title":"Atlas · Add a map","message_count":1}}"#)
+        }
+        defer { FixtureProtocol.handler = nil }
+        let client = HermesClient(configuration: try configuration(), sessionConfiguration: config)
+        let session = try await client.renameSession("atlas-thread", title: "Atlas · Add a map")
+        XCTAssertEqual(session.title, "Atlas · Add a map")
+    }
+
+    @MainActor
+    func testCreatingProjectThreadDuringRefreshIsNotDroppedOrReplacedByOldSelection() async throws {
+        let listStarted = expectation(description: "session list held in flight")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.holdSessionList = true
+        FixtureProtocol.onHold = { listStarted.fulfill() }
+        FixtureProtocol.handler = { request in
+            switch (request.httpMethod ?? "GET", request.url?.path ?? "") {
+            case ("GET", "/api/sessions"):
+                return (200, #"{"object":"list","data":[{"id":"old-thread","title":"Squircle · Old","message_count":2}]}"#)
+            case ("POST", "/api/sessions"):
+                XCTAssertEqual(try Self.body(request)["title"] as? String, "Atlas · 1")
+                return (201, #"{"object":"hermes.session","session":{"id":"new-thread","title":"Atlas · 1","message_count":0}}"#)
+            case ("GET", "/api/sessions/new-thread/messages"):
+                return (200, #"{"object":"list","session_id":"new-thread","data":[]}"#)
+            case ("GET", "/v1/builds"):
+                return (200, #"{"schema_version":1,"ok":true,"data":[]}"#)
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "GET") \(request.url?.path ?? "")")
+                return (404, "{}")
+            }
+        }
+        let suite = "SquircleProjectRaceTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            FixtureProtocol.heldDelivery?()
+            FixtureProtocol.heldDelivery = nil
+            FixtureProtocol.onHold = nil
+            FixtureProtocol.holdSessionList = false
+            FixtureProtocol.handler = nil
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let configuration = try configuration()
+        let client = HermesClient(configuration: configuration, sessionConfiguration: config)
+        let model = SquircleModel(configuration: configuration, defaults: defaults, client: client, embeddedBuildID: "")
+        let refresh = Task { await model.refresh() }
+        await fulfillment(of: [listStarted], timeout: 2)
+        XCTAssertTrue(model.isLoading)
+        let project = model.createProject(name: "Atlas")
+        await model.createSession(in: project)
+        XCTAssertEqual(model.selectedSessionID, "new-thread")
+        let release = FixtureProtocol.heldDelivery
+        FixtureProtocol.heldDelivery = nil
+        release?()
+        await refresh.value
+        XCTAssertEqual(model.selectedProjectID, project.id)
+        XCTAssertEqual(model.selectedSessionID, "new-thread")
+        XCTAssertEqual(model.sessions(for: project).map(\.id), ["new-thread"])
+        XCTAssertFalse(model.isLoading)
+    }
+
     private static func body(_ request: URLRequest) throws -> [String: Any] {
         var data = request.httpBody ?? Data()
         if data.isEmpty, let stream = request.httpBodyStream {
@@ -144,15 +249,24 @@ final class HermesClientTests: XCTestCase {
 
 private final class FixtureProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, String))?
+    static var holdSessionList = false
+    static var onHold: (() -> Void)?
+    static var heldDelivery: (() -> Void)?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         do {
             let (status, text) = try XCTUnwrap(Self.handler)(request)
             let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(text.utf8))
-            client?.urlProtocolDidFinishLoading(self)
+            let deliver = { [self] in
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data(text.utf8))
+                client?.urlProtocolDidFinishLoading(self)
+            }
+            if Self.holdSessionList, request.httpMethod == "GET", request.url?.path == "/api/sessions" {
+                Self.heldDelivery = deliver
+                Self.onHold?()
+            } else { deliver() }
         } catch { client?.urlProtocol(self, didFailWithError: error) }
     }
     override func stopLoading() {}

@@ -41,6 +41,8 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     let status: String
     let date: Date
     let canInstall: Bool
+    let bundleID: String?
+    let request: AppBuildRequest?
 
     enum CodingKeys: String, CodingKey { case id, state, output, createdAt = "created_at", request }
     private struct Output: Decodable {
@@ -48,15 +50,16 @@ struct AppBuild: Identifiable, Decodable, Equatable {
         let version: String?
         let build_number: String?
         let ipa_path: String?
+        let bundle_id: String?
     }
-    private struct Request: Decodable { let scheme: String? }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(String.self, forKey: .id)
         status = try values.decode(String.self, forKey: .state)
         let output = try values.decodeIfPresent(Output.self, forKey: .output)
-        let request = try values.decodeIfPresent(Request.self, forKey: .request)
+        request = try values.decodeIfPresent(AppBuildRequest.self, forKey: .request)
         title = output?.title ?? request?.scheme ?? "App build"
+        bundleID = output?.bundle_id
         version = [output?.version, output?.build_number.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")
         canInstall = status == "succeeded" && output?.ipa_path != nil
         date = Date(timeIntervalSince1970: try values.decode(Double.self, forKey: .createdAt))
@@ -207,9 +210,11 @@ final class HermesClient: NSObject, URLSessionTaskDelegate {
         return page.data
     }
 
-    func createSession() async throws -> ChatSession {
+    func createSession(title: String? = nil) async throws -> ChatSession {
         struct Reply: Decodable { let session: ChatSession }
-        let reply: Reply = try await post(["api", "sessions"], body: ["source": "api_server"])
+        var body = ["source": "api_server"]
+        if let title, !title.isEmpty { body["title"] = title }
+        let reply: Reply = try await post(["api", "sessions"], body: body)
         return reply.session
     }
 
@@ -218,10 +223,20 @@ final class HermesClient: NSObject, URLSessionTaskDelegate {
                       query: [URLQueryItem(name: "limit", value: "500"), URLQueryItem(name: "order", value: "latest")])
     }
 
-    func startRun(sessionID: String, text: String, idempotencyKey: String) async throws -> String {
+    func renameSession(_ id: String, title: String) async throws -> ChatSession {
+        struct Reply: Decodable { let session: ChatSession }
+        var request = try request(["api", "sessions", id])
+        request.httpMethod = "PATCH"
+        request.httpBody = try JSONEncoder().encode(["title": title])
+        let reply: Reply = try await perform(request, service: "Hermes")
+        return reply.session
+    }
+
+    func startRun(sessionID: String, text: String, idempotencyKey: String, projectContext: String? = nil) async throws -> String {
         struct Reply: Decodable { let run_id: String }
         var body = ["session_id": sessionID, "input": text]
-        if let instructions = configuration.agentInstructions, !instructions.isEmpty { body["instructions"] = instructions }
+        let instructions = [configuration.agentInstructions, projectContext].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
+        if !instructions.isEmpty { body["instructions"] = instructions }
         let reply: Reply = try await post(["v1", "runs"], body: body, idempotencyKey: idempotencyKey)
         return reply.run_id
     }
@@ -242,6 +257,19 @@ final class HermesClient: NSObject, URLSessionTaskDelegate {
         let reply: Reply = try await get(["v1", "builds"], squircle: true)
         guard reply.ok else { throw ClientError.response("Squircle") }
         return reply.data
+    }
+    func startBuild(_ buildRequest: AppBuildRequest) async throws -> AppBuild {
+        struct Reply: Decodable {
+            struct Result: Decodable { let job: AppBuild }
+            let ok: Bool
+            let data: Result
+        }
+        var request = try request(["v1", "builds"], squircle: true)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONEncoder().encode(buildRequest)
+        let reply: Reply = try await perform(request, service: "Squircle")
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data.job
     }
     func installURL(buildID: String) async throws -> URL {
         struct Reply: Decodable { struct Links: Decodable { let page_url: String }; let ok: Bool; let data: Links }

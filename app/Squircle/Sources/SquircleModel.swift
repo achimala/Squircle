@@ -7,6 +7,9 @@ final class SquircleModel: ObservableObject {
     @Published private(set) var selectedSessionID: String?
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var builds: [AppBuild] = []
+    @Published private(set) var projects: [AppProject] = []
+    @Published private(set) var selectedProjectID: String?
+    @Published private(set) var buildingProjectIDs: Set<String> = []
     @Published private(set) var approvals: [AgentApproval] = []
     @Published private(set) var isLoading = false
     @Published private(set) var isRunning = false
@@ -24,6 +27,11 @@ final class SquircleModel: ObservableObject {
     // These are reconnect pointers, not another conversation database. Hermes
     // remains authoritative for history, approvals, and run outcomes.
     private var activeRuns: [String: String]
+    private var catalog: AppProjectCatalog
+    private var buildMonitor: Task<Void, Never>?
+    private var loadingOperations = 0
+    private var creatingSession = false
+    private var sessionRevision = 0
     private var monitor: Task<Void, Never>?
     private var monitorGeneration = UUID()
     private var selectionGeneration = UUID()
@@ -41,39 +49,60 @@ final class SquircleModel: ObservableObject {
         // Different Mac endpoints must not share session/run pointers.
         preferencePrefix = "squircle.\(configuration?.hermesURL.absoluteString ?? "unconfigured")"
         selectedSessionID = defaults.string(forKey: "\(preferencePrefix).selectedSession")
+        selectedProjectID = defaults.string(forKey: "\(preferencePrefix).selectedProject")
         activeRuns = defaults.dictionary(forKey: "\(preferencePrefix).activeRuns") as? [String: String] ?? [:]
+        if let data = defaults.data(forKey: "\(preferencePrefix).projects"), let stored = try? JSONDecoder().decode(AppProjectCatalog.self, from: data) {
+            catalog = stored
+        } else { catalog = AppProjectCatalog() }
         self.embeddedBuildID = embeddedBuildID ?? Bundle.main.object(forInfoDictionaryKey: "SquircleBuildID") as? String ?? ""
+        reconcileProjects()
         if self.client == nil { status = "Connection configuration is missing from this build." }
     }
 
     func refresh() async {
         guard let client, !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
+        beginLoading()
+        defer { endLoading() }
+        let selectionAtStart = selectionGeneration
+        let revisionAtStart = sessionRevision
         error = nil
+        var loadedBuilds = false
         do {
-            sessions = try await client.sessions()
+            let listed = try await client.sessions()
+            mergeSessions(listed, requestedAtRevision: revisionAtStart)
             connected = true
-            if selectedSessionID == nil, let first = sessions.first {
+            // Discover apps from real builds before migrating unassigned chats.
+            await refreshBuilds()
+            loadedBuilds = true
+            let buildError = error
+            if selectionGeneration == selectionAtStart, selectedSessionID == nil,
+               let project = projects.first(where: { $0.id == selectedProjectID }),
+               let first = sessions(for: project).first {
                 selectedSessionID = first.id
                 persistSelection()
             }
-            if let id = selectedSessionID { await selectSession(id) }
-            else { status = "Connected. Start a conversation." }
+            if selectionGeneration == selectionAtStart {
+                if let id = selectedSessionID { await selectSession(id) }
+                else { status = "Connected. Start a conversation." }
+            }
+            if let buildError { error = buildError }
         } catch { show(error); connected = false }
         // The build service has its own availability; its list remains useful
         // even while the agent gateway reconnects.
-        await refreshBuilds()
+        if !loadedBuilds { await refreshBuilds() }
         await reportLaunchIfNeeded()
     }
 
     func selectSession(_ id: String) async {
         guard let client else { return }
+        beginLoading()
+        defer { endLoading() }
         let generation = UUID()
         selectionGeneration = generation
         stopMonitoring()
         if selectedSessionID != id { messages = [] }
         selectedSessionID = id
+        if let projectID = catalog.sessionProjects[id] { selectedProjectID = projectID }
         persistSelection()
         approvals = []
         isRunning = activeRuns[id] != nil
@@ -100,12 +129,62 @@ final class SquircleModel: ObservableObject {
     }
 
     func createSession() async {
-        guard let client, !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
+        guard let project = projects.first(where: { $0.id == selectedProjectID }) ?? projects.first else { return }
+        await createSession(in: project)
+    }
+
+    func sessions(for project: AppProject) -> [ChatSession] {
+        sessions.filter { catalog.sessionProjects[$0.id] == project.id }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func builds(for project: AppProject) -> [AppBuild] {
+        builds.filter { catalog.buildProjects[$0.id] == project.id }.sorted { $0.date > $1.date }
+    }
+
+    func createProject(name: String) -> AppProject {
+        let id = catalog.create(name: name)
+        reconcileProjects()
+        let project = projects.first { $0.id == id }!
+        selectProject(project)
+        return project
+    }
+
+    func selectProject(_ project: AppProject) {
+        guard projects.contains(where: { $0.id == project.id }) else { return }
+        if selectedProjectID != project.id {
+            stopMonitoring()
+            selectionGeneration = UUID()
+            selectedSessionID = nil
+            messages = []
+            approvals = []
+            isRunning = false
+        }
+        selectedProjectID = project.id
+        persistSelection()
+    }
+
+    func createSession(in project: AppProject, title: String? = nil) async {
+        guard let client, !creatingSession else { return }
+        creatingSession = true
+        beginLoading()
+        defer { creatingSession = false; endLoading() }
+        // A new thread may be opened during a foreground refresh. Invalidate
+        // its old selection immediately rather than silently ignoring the tap.
+        stopMonitoring()
+        selectionGeneration = UUID()
+        selectedProjectID = project.id
+        selectedSessionID = nil
+        messages = []
+        approvals = []
+        isRunning = false
+        persistSelection()
         do {
-            let session = try await client.createSession()
+            let cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let session = try await client.createSession(title: cleanTitle?.isEmpty == false ? cleanTitle : "\(project.name) · \(sessions(for: project).count + 1)")
+            catalog.assign(sessionID: session.id, to: project.id)
+            sessionRevision += 1
             sessions.insert(session, at: 0)
+            reconcileProjects()
             await selectSession(session.id)
         } catch { show(error) }
     }
@@ -123,13 +202,21 @@ final class SquircleModel: ObservableObject {
         messages.append(ChatMessage(id: localID, role: "user", content: text))
         let key = UUID().uuidString.lowercased()
         do {
-            let runID = try await client.startRun(sessionID: sessionID, text: text, idempotencyKey: key)
+            let project = projects.first { $0.id == catalog.sessionProjects[sessionID] }
+            let oldSession = sessions.first { $0.id == sessionID }
+            let runID = try await client.startRun(sessionID: sessionID, text: text, idempotencyKey: key, projectContext: project?.agentContext)
             activeRuns[sessionID] = runID
             persistRuns()
             if selectedSessionID == sessionID {
                 connected = true
                 status = "Hermes is working"
                 startMonitoring(sessionID: sessionID, runID: runID)
+            }
+            if let project, let oldSession, oldSession.messageCount == 0 {
+                let prefix = project.name + " · "
+                if oldSession.title.hasPrefix(prefix), Int(oldSession.title.dropFirst(prefix.count)) != nil {
+                    Task { [weak self] in await self?.nameSession(sessionID, project: project, firstMessage: text) }
+                }
             }
         } catch {
             if selectedSessionID == sessionID {
@@ -165,10 +252,81 @@ final class SquircleModel: ObservableObject {
         catch { show(error); return nil }
     }
 
+    @discardableResult
+    func startBuild(for project: AppProject) async -> AppBuild? {
+        guard let client, !buildingProjectIDs.contains(project.id) else { return nil }
+        guard let current = projects.first(where: { $0.id == project.id }), let recipe = current.buildRequest, recipe.canSubmit else {
+            error = "Start a conversation to set up this app’s Xcode project and first build."
+            return nil
+        }
+        buildingProjectIDs.insert(project.id)
+        defer { buildingProjectIDs.remove(project.id) }
+        error = nil
+        do {
+            let job = try await client.startBuild(recipe.freshSubmission())
+            catalog.assign(buildID: job.id, to: project.id)
+            builds.removeAll { $0.id == job.id }
+            builds.insert(job, at: 0)
+            reconcileProjects()
+            status = "Build queued on your Mac."
+            ensureBuildMonitor()
+            return job
+        } catch { show(error); return nil }
+    }
+
     private func refreshBuilds() async {
         guard let client else { return }
         do { builds = try await client.builds() }
         catch { if self.error == nil { show(error) } }
+        reconcileProjects()
+        ensureBuildMonitor()
+    }
+
+    private func reconcileProjects() {
+        projects = catalog.reconcile(builds: builds, sessions: sessions)
+        if let id = selectedSessionID, let projectID = catalog.sessionProjects[id] { selectedProjectID = projectID }
+        if selectedProjectID == nil { selectedProjectID = projects.first?.id }
+        if let data = try? JSONEncoder().encode(catalog) { defaults.set(data, forKey: "\(preferencePrefix).projects") }
+        persistSelection()
+    }
+
+    private func mergeSessions(_ listed: [ChatSession], requestedAtRevision revision: Int) {
+        if revision == sessionRevision { sessions = listed; return }
+        // A list that began before a local create/rename cannot erase that
+        // acknowledged mutation. The next ordinary refresh is authoritative.
+        let local = Dictionary(uniqueKeysWithValues: sessions.map { ($0.id, $0) })
+        var merged = listed.map { local[$0.id] ?? $0 }
+        let ids = Set(merged.map(\.id))
+        merged.append(contentsOf: sessions.filter { !ids.contains($0.id) })
+        sessions = merged.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func nameSession(_ id: String, project: AppProject, firstMessage: String) async {
+        guard let client else { return }
+        let summary = firstMessage.split(whereSeparator: \.isNewline).joined(separator: " ")
+        do {
+            let updated = try await client.renameSession(id, title: "\(project.name) · \(summary.prefix(64))")
+            sessionRevision += 1
+            if let index = sessions.firstIndex(where: { $0.id == id }) { sessions[index] = updated }
+            else { sessions.insert(updated, at: 0) }
+            reconcileProjects()
+        } catch {
+            // Naming is optional metadata; the accepted run continues even if
+            // this request cannot reach Hermes.
+        }
+    }
+
+    private func ensureBuildMonitor() {
+        guard buildMonitor == nil, builds.contains(where: { $0.status == "queued" || $0.status == "running" }) else { return }
+        buildMonitor = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(3)) } catch { break }
+                guard let self else { return }
+                await self.refreshBuilds()
+                if !self.builds.contains(where: { $0.status == "queued" || $0.status == "running" }) { break }
+            }
+            self?.buildMonitor = nil
+        }
     }
 
     private func reportLaunchIfNeeded() async {
@@ -311,16 +469,23 @@ final class SquircleModel: ObservableObject {
             if let output = run.output, !output.isEmpty, !messages.contains(where: { $0.role == "assistant" && $0.content == output }) {
                 messages.append(ChatMessage(id: "result-\(run.run_id)", role: "assistant", content: output))
             }
+            let revision = sessionRevision
             let updatedSessions = try await client.sessions()
             guard generation == monitorGeneration, selectedSessionID == sessionID else { return }
-            sessions = updatedSessions
+            mergeSessions(updatedSessions, requestedAtRevision: revision)
+            reconcileProjects()
             error = nil
             status = run.status == "completed" ? "Connected to your Mac" : "Run \(run.status)."
         } catch { show(error) }
         await refreshBuilds()
     }
 
-    private func persistSelection() { defaults.set(selectedSessionID, forKey: "\(preferencePrefix).selectedSession") }
+    private func persistSelection() {
+        defaults.set(selectedSessionID, forKey: "\(preferencePrefix).selectedSession")
+        defaults.set(selectedProjectID, forKey: "\(preferencePrefix).selectedProject")
+    }
+    private func beginLoading() { loadingOperations += 1; isLoading = true }
+    private func endLoading() { loadingOperations = max(0, loadingOperations - 1); isLoading = loadingOperations > 0 }
     private func persistRuns() { defaults.set(activeRuns, forKey: "\(preferencePrefix).activeRuns") }
     private func show(_ error: Error) {
         self.error = (error as? ClientError)?.localizedDescription ?? "The connection could not complete this operation."
