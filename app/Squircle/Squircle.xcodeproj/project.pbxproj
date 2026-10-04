@@ -19,6 +19,7 @@
 		B01389D86B5540237E36C1A7 /* HermesClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D58B8C364E6D56622FDA4AC /* HermesClientTests.swift */; };
 		B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613DF9097AAA330CB0F89A33 /* SquircleApp.swift */; };
 		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
+		CD98F5B66390028323DDF27B /* PreviewBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94B35CE8628544762087ED78 /* PreviewBinding.swift */; };
 		CF07B49F3ABB5DE847A7FEBC /* DevicePreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 157267B086D7FA131DA81ED8 /* DevicePreview.swift */; };
 		EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */; };
 		FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
@@ -55,6 +56,7 @@
 		6D09120CE693437EA02625DD /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
 		7A74125807E9A3E968F73119 /* SquircleTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7CA4496328C7FF8D8B604A0A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		94B35CE8628544762087ED78 /* PreviewBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewBinding.swift; sourceTree = "<group>"; };
 		9672A31D1485CE1FEFFBBD00 /* StudioComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioComponents.swift; sourceTree = "<group>"; };
 		9685CE2D9A277E148073C169 /* MotionAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionAudit.swift; sourceTree = "<group>"; };
 		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -96,6 +98,7 @@
 			children = (
 				157267B086D7FA131DA81ED8 /* DevicePreview.swift */,
 				9685CE2D9A277E148073C169 /* MotionAudit.swift */,
+				94B35CE8628544762087ED78 /* PreviewBinding.swift */,
 				9672A31D1485CE1FEFFBBD00 /* StudioComponents.swift */,
 				2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */,
 				2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */,
@@ -287,6 +290,7 @@
 				CF07B49F3ABB5DE847A7FEBC /* DevicePreview.swift in Sources */,
 				AB0BD657A5B47630E2FD14E9 /* HermesClient.swift in Sources */,
 				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
+				CD98F5B66390028323DDF27B /* PreviewBinding.swift in Sources */,
 				B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */,
 				38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */,
 				80270B9E181CD54B226002C1 /* StudioComponents.swift in Sources */,
@@ -408,7 +412,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -486,7 +490,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

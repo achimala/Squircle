@@ -97,20 +97,22 @@ final class ProjectHero: UIControl {
     var onPage: ((Int) -> Void)?
     let project: AppProject
     let phone: DevicePreview
+    private let previewBinding: PreviewBinding
+    private let model: SquircleModel
     private let titleLabel = Studio.label(size: 31, weight: .semibold)
     private let subtitleLabel = Studio.label(size: 14, color: Studio.muted)
     private let indexLabel = Studio.label("01", size: 12, color: Studio.muted)
     private let previous = UIButton(type: .system)
     private let nextPage = UIButton(type: .system)
     private let arrow = UIImageView(image: UIImage(systemName: "arrow.up.right", withConfiguration: UIImage.SymbolConfiguration(pointSize: 26, weight: .light)))
-    init(project: AppProject, build: AppBuild?) {
-        self.project = project
+    init(model: SquircleModel, project: AppProject, build: AppBuild?) {
+        self.project = project; self.model = model
         phone = DevicePreview(name: project.name, probe: project.name.localizedCaseInsensitiveContains("probe"))
+        previewBinding = PreviewBinding(phone)
         super.init(frame: .zero)
         backgroundColor = .clear
         titleLabel.text = project.name
-        let version = build?.version.split(separator: " ").first.map(String.init) ?? ""
-        subtitleLabel.text = build.map { $0.canInstall ? "\(version) · Ready to install" : $0.status.capitalized } ?? "Start with an idea"
+        update(build: build)
         arrow.tintColor = Studio.ink
         [phone,titleLabel,subtitleLabel,indexLabel,arrow].forEach { $0.isUserInteractionEnabled = false; addSubview($0) }
         for (button, symbol, direction) in [(previous, "chevron.left", -1), (nextPage, "chevron.right", 1)] {
@@ -124,16 +126,23 @@ final class ProjectHero: UIControl {
         accessibilityTraits = .button; accessibilityIdentifier = "project.hero"
     }
     required init?(coder: NSCoder) { fatalError() }
+    func update(build: AppBuild?) {
+        previewBinding.update(model: model, project: project)
+        let version = build?.version.split(separator: " ").first.map(String.init) ?? ""
+        subtitleLabel.text = build.map { $0.canInstall ? "\(version) · Ready to install" : $0.status.capitalized } ?? "Start with an idea"
+        accessibilityLabel = "\(project.name), \(build?.version ?? "No builds yet")"
+    }
     func setPosition(_ index: Int, count: Int) {
         indexLabel.text = String(format: "%02d / %02d", index, count)
         previous.isHidden = count < 2; nextPage.isHidden = count < 2
     }
     override func layoutSubviews() {
         super.layoutSubviews()
-        indexLabel.frame = CGRect(x: 0, y: 0, width: 60, height: 18)
-        previous.frame = CGRect(x: bounds.width-87, y: -13, width: 44, height: 44)
-        nextPage.frame = CGRect(x: bounds.width-33, y: -13, width: 44, height: 44)
-        phone.frame = CGRect(x: 7, y: 22, width: bounds.width-14, height: bounds.height-106)
+        indexLabel.frame = CGRect(x: 0, y: 9, width: 70, height: 18)
+        previous.frame = CGRect(x: bounds.width-98, y: 0, width: 44, height: 44)
+        nextPage.frame = CGRect(x: bounds.width-44, y: 0, width: 44, height: 44)
+        phone.bounds = CGRect(x: 0, y: 0, width: bounds.width-24, height: bounds.height-118)
+        phone.center = CGPoint(x: bounds.midX, y: 19 + (bounds.height-118)/2)
         titleLabel.frame = CGRect(x: 0, y: bounds.height-75, width: bounds.width-45, height: 40)
         subtitleLabel.frame = CGRect(x: 1, y: bounds.height-28, width: bounds.width-40, height: 21)
         arrow.frame = CGRect(x: bounds.width-26, y: bounds.height-61, width: 26, height: 26)

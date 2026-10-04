@@ -25,6 +25,8 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
+        model.startMetadataUpdates()
         Task { await model.refresh() }
     }
+    func sceneWillResignActive(_ scene: UIScene) { model.stopMetadataUpdates() }
 }

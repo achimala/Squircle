@@ -428,6 +428,31 @@ final class HermesClientTests: XCTestCase {
     }
 
     @MainActor
+    func testRetainedProjectFindsMetadataRegisteredWhileTheGalleryIsOpen() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FixtureProtocol.self]
+        FixtureProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/v1/apps")
+            return (200, #"{"ok":true,"data":[{"id":"app-atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"Start with an idea","updated_at":1720000000,"preview":{"id":"screen-home","captured_at":1720000000,"caption":"Home","source":"agent"}}]}"#)
+        }
+        let suite = "SquircleRetainedProject.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { Self.resetFixture(); defaults.removePersistentDomain(forName: suite) }
+        let configuration = try configuration()
+        let model = SquircleModel(configuration: configuration, defaults: defaults,
+                                  client: HermesClient(configuration: configuration, sessionConfiguration: config), embeddedBuildID: "")
+        let retainedProject = model.createProject(name: "Atlas")
+        XCTAssertNil(retainedProject.metadataID)
+        XCTAssertNil(model.metadata(for: retainedProject))
+        await model.refreshMetadata()
+        XCTAssertEqual(model.metadata(for: retainedProject)?.id, "app-atlas")
+        XCTAssertEqual(model.metadata(for: retainedProject)?.preview?.id, "screen-home")
+        XCTAssertEqual(model.projects.first { $0.metadataID == "app-atlas" }?.id, retainedProject.id)
+        XCTAssertEqual(model.projects.first { $0.id == retainedProject.id }?.subtitle, retainedProject.subtitle,
+                       "The lookup must work even when presentation text does not trigger a gallery rebuild")
+    }
+
+    @MainActor
     func testAppPreviewCacheUsesImmutablePreviewIDAndAppEndpoint() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [FixtureProtocol.self]

@@ -1,7 +1,7 @@
 import XCTest
 
-/// Runs against the configured Mac. It creates only verification threads and
-/// never edits an existing conversation or invokes a build/install action.
+/// Runs against the configured Mac. Creates verification threads and a real
+/// signed build; never edits existing conversations or installs on the phone.
 final class StudioUITests: XCTestCase {
     private let app = XCUIApplication()
 
@@ -197,7 +197,15 @@ final class StudioUITests: XCTestCase {
 
     @MainActor
     private func capture(_ name: String) {
-        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        let screenshot = XCUIScreen.main.screenshot()
+        // Keep PNGs directly accessible even when Xcode stalls packaging an
+        // xcresult on this SDK. These are unmodified simulator screenshots.
+        if let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let output = directory.appendingPathComponent("SquircleVerification", isDirectory: true)
+            try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+            try? screenshot.pngRepresentation.write(to: output.appendingPathComponent(name + ".png"), options: .atomic)
+        }
+        let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

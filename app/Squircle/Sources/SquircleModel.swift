@@ -150,7 +150,10 @@ final class SquircleModel: ObservableObject {
     }
 
     func metadata(for project: AppProject) -> AppMetadata? {
-        appMetadata.first { $0.id == project.metadataID }
+        // A retained gallery/workspace view may predate registration on the
+        // Mac. Resolve its stable local identity before reading the record ID.
+        let current = projects.first { $0.id == project.id } ?? project
+        return appMetadata.first { $0.id == current.metadataID }
     }
 
     func startMetadataUpdates() {

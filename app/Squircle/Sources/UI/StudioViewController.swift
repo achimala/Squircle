@@ -9,6 +9,7 @@ final class StudioViewController: UIViewController {
     private let dot = UIView()
     private var subscriptions = Set<AnyCancellable>()
     private var renderedKey = ""
+    private var layoutIdentity = ""
     private var heroes: [String: ProjectHero] = [:]
     private var workspaceTransition: WorkspaceTransition?
     private var galleryIndex = 0
@@ -40,11 +41,20 @@ final class StudioViewController: UIViewController {
         if let id = galleryProjectID, let index = model.projects.firstIndex(where: { $0.id == id }) { galleryIndex = index }
         connection.text = model.connected ? "Mac online" : "Mac offline"
         dot.backgroundColor = model.connected ? UIColor(red: 0.20, green: 0.69, blue: 0.45, alpha: 1) : Studio.muted
+        for project in model.projects { heroes[project.id]?.update(build: model.builds(for: project).first(where: { $0.canInstall })) }
         let key = "\(galleryIndex):\(model.error ?? "")|" + model.projects.map { project in
-            "\(project.id):\(project.name):" + model.builds(for: project).prefix(3).map { "\($0.id):\($0.status):\($0.version)" }.joined(separator: ";")
+            "\(project.id):\(project.name):\(project.subtitle):" + model.builds(for: project).prefix(3).map { "\($0.id):\($0.status):\($0.version)" }.joined(separator: ";")
         }.joined(separator: "|")
         guard key != renderedKey || stack.arrangedSubviews.isEmpty else { return }
         renderedKey = key
+        let identity = "\(galleryIndex):\(model.error ?? "")|" + model.projects.map { "\($0.id):\($0.name):\($0.subtitle)" }.joined(separator: "|")
+        if identity == layoutIdentity, !heroes.isEmpty {
+            for project in model.projects {
+                heroes[project.id]?.update(build: model.builds(for: project).first(where: { $0.canInstall }) ?? model.builds(for: project).first)
+            }
+            return
+        }
+        layoutIdentity = identity
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }; heroes.removeAll()
         let meta = UIView(); meta.heightAnchor.constraint(equalToConstant: 35).isActive = true
         let wordmark = Studio.label("squircle", size: 17, weight: .semibold)
@@ -55,11 +65,11 @@ final class StudioViewController: UIViewController {
         add.addAction(UIAction { [weak self] _ in self?.createProject() }, for: .touchUpInside)
         [wordmark, mark, add].forEach { meta.addSubview($0); $0.translatesAutoresizingMaskIntoConstraints = false }
         NSLayoutConstraint.activate([mark.leadingAnchor.constraint(equalTo: meta.leadingAnchor, constant: -7), mark.centerYAnchor.constraint(equalTo: meta.centerYAnchor), mark.widthAnchor.constraint(equalToConstant: 35), mark.heightAnchor.constraint(equalToConstant: 35), wordmark.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 6), wordmark.centerYAnchor.constraint(equalTo: meta.centerYAnchor), add.trailingAnchor.constraint(equalTo: meta.trailingAnchor, constant: 6), add.centerYAnchor.constraint(equalTo: meta.centerYAnchor), add.widthAnchor.constraint(equalToConstant: 44), add.heightAnchor.constraint(equalToConstant: 44)])
-        stack.addArrangedSubview(meta); stack.setCustomSpacing(25, after: meta)
+        stack.addArrangedSubview(meta); stack.setCustomSpacing(18, after: meta)
         let title = Studio.label("Your apps", size: 40, weight: .semibold)
         title.accessibilityTraits = .header
         title.heightAnchor.constraint(equalToConstant: 53).isActive = true
-        stack.addArrangedSubview(title); stack.setCustomSpacing(19, after: title)
+        stack.addArrangedSubview(title); stack.setCustomSpacing(12, after: title)
         if model.projects.isEmpty {
             let empty = Studio.label(model.isLoading ? "Finding your apps…" : "Your next app starts here.", size: 20, color: Studio.muted)
             empty.numberOfLines = 0; empty.heightAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
@@ -73,8 +83,8 @@ final class StudioViewController: UIViewController {
         let ordered = model.projects.isEmpty ? [] : [model.projects[galleryIndex]] + model.projects.enumerated().filter { $0.offset != galleryIndex }.map(\.element)
         for (index, project) in ordered.enumerated() {
             if index == 0 {
-                let hero = ProjectHero(project: project, build: model.builds(for: project).first(where: { $0.canInstall }) ?? model.builds(for: project).first)
-                hero.heightAnchor.constraint(equalToConstant: min(520, max(430, view.bounds.height * 0.565))).isActive = true
+                let hero = ProjectHero(model: model, project: project, build: model.builds(for: project).first(where: { $0.canInstall }) ?? model.builds(for: project).first)
+                hero.heightAnchor.constraint(equalToConstant: min(540, max(430, view.bounds.height * 0.59))).isActive = true
                 hero.addAction(UIAction { [weak self, weak hero] _ in self?.open(project, source: hero) }, for: .touchUpInside)
                 heroes[project.id] = hero; stack.addArrangedSubview(hero)
                 hero.setPosition(galleryIndex + 1, count: model.projects.count)
@@ -112,7 +122,7 @@ final class StudioViewController: UIViewController {
         let detail = ProjectViewController(model: model, project: project)
         let transition = WorkspaceTransition(source: source)
         workspaceTransition = transition
-        detail.transitioningDelegate = transition; detail.modalPresentationStyle = .fullScreen
+        detail.transitioningDelegate = transition; detail.modalPresentationStyle = .overFullScreen
         present(detail, animated: true)
     }
 }
@@ -149,10 +159,13 @@ final class ProjectViewController: UIViewController {
     let model: SquircleModel
     private(set) var project: AppProject
     let preview: DevicePreview
+    private let previewBinding: PreviewBinding
     private let scroll = UIScrollView()
     private let content = UIStackView()
     private let rows = UIStackView()
     private let section = UISegmentedControl(items: ["Threads", "Builds"])
+    private let workSummary = Studio.label(size: 15, color: Studio.muted)
+    private let captureCaption = Studio.label(size: 11, color: Studio.muted)
     private let buildCaption = Studio.label(size: 13, color: Studio.muted)
     private let buildTitle = Studio.label(size: 20, weight: .semibold)
     private let errorLabel = Studio.label(size: 13, color: Studio.muted)
@@ -167,6 +180,8 @@ final class ProjectViewController: UIViewController {
     init(model: SquircleModel, project: AppProject) {
         self.model = model; self.project = project
         preview = DevicePreview(name: project.name, probe: project.name.localizedCaseInsensitiveContains("probe"))
+        preview.setPose(1)
+        previewBinding = PreviewBinding(preview)
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -189,12 +204,16 @@ final class ProjectViewController: UIViewController {
         NSLayoutConstraint.activate([scroll.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10), scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor), scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor), content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 24), content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -24), content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -120)])
         let title = Studio.label(project.name, size: 34, weight: .bold); title.accessibilityTraits = .header
         content.addArrangedSubview(title)
+        workSummary.numberOfLines = 3; workSummary.isHidden = true
+        content.addArrangedSubview(workSummary)
         errorLabel.numberOfLines = 0; errorLabel.isHidden = true; content.addArrangedSubview(errorLabel)
         let stage = UIView(); stage.backgroundColor = .clear
         stage.heightAnchor.constraint(equalToConstant: min(275, view.bounds.height*0.29)).isActive = true
         stage.addSubview(preview); preview.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([preview.topAnchor.constraint(equalTo: stage.topAnchor, constant: 9), preview.bottomAnchor.constraint(equalTo: stage.bottomAnchor, constant: -10), preview.leadingAnchor.constraint(equalTo: stage.leadingAnchor, constant: 30), preview.trailingAnchor.constraint(equalTo: stage.trailingAnchor, constant: -30)])
         content.addArrangedSubview(stage)
+        captureCaption.textAlignment = .center; captureCaption.numberOfLines = 2; captureCaption.isHidden = true
+        content.addArrangedSubview(captureCaption)
         let buildBar = UIView(); buildBar.heightAnchor.constraint(equalToConstant: 53).isActive = true
         [buildTitle,buildCaption,install].forEach { buildBar.addSubview($0); $0.translatesAutoresizingMaskIntoConstraints = false }
         var installStyle = UIButton.Configuration.filled(); installStyle.title = "Install"; installStyle.baseBackgroundColor = Studio.ink; installStyle.baseForegroundColor = .white; installStyle.cornerStyle = .capsule; installStyle.contentInsets = NSDirectionalEdgeInsets(top: 13, leading: 22, bottom: 13, trailing: 22)
@@ -235,6 +254,16 @@ final class ProjectViewController: UIViewController {
 
     private func render() {
         if let current = model.projects.first(where: { $0.id == project.id }) { project = current }
+        previewBinding.update(model: model, project: project)
+        let metadata = model.metadata(for: project)
+        workSummary.text = metadata?.summary
+        workSummary.isHidden = metadata?.summary.isEmpty != false
+        if let capture = metadata?.preview {
+            let date = Date(timeIntervalSince1970: capture.capturedAt)
+            let label = capture.caption.isEmpty ? "Simulator capture" : capture.caption
+            captureCaption.text = "\(label) · \(date.formatted(date: .omitted, time: .shortened))"
+            captureCaption.isHidden = false
+        } else { captureCaption.isHidden = true }
         let builds = model.builds(for: project)
         latestBuild = builds.first(where: { $0.canInstall })
         let current = builds.first
