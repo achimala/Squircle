@@ -376,6 +376,40 @@ final class StudioUITests: XCTestCase {
 
     /// Read the user's actual Hermes/Claude redesign session. Never sends a prompt.
     @MainActor
+    func testLiveDelegatedCodex() throws { try verifyLiveCodingAgent("codex") }
+
+    @MainActor
+    func testLiveDelegatedClaude() throws { try verifyLiveCodingAgent("claude") }
+
+    @MainActor
+    private func verifyLiveCodingAgent(_ agent: String) throws {
+        app.launch()
+        openProject(named: "Squircle")
+        element("thread.new").tap(); waitForThread()
+        let nonce = UUID().uuidString.prefix(8)
+        let log = "/tmp/\(agent)-squircle-live-\(nonce).jsonl"
+        let task = "Read README.md. Then read docs/coding-visibility.md and docs/hermes-client.md one at a time. Then write /tmp/\(agent)-squircle-live-\(nonce).txt containing VERIFIED. Reply LIVE_CODING_DONE. Do not modify repository files."
+        let command = agent == "codex"
+            ? "env -u OPENAI_API_KEY -u CODEX_API_KEY /Users/anshu/.local/bin/codex exec --json --sandbox workspace-write '\(task)' > \(log)"
+            : "env -u ANTHROPIC_API_KEY claude -p '\(task)' --model haiku --allowedTools Read Write 'Bash(sleep:*)' --max-turns 8 --output-format stream-json --verbose > \(log)"
+        let prompt = "Verify delegated \(agent) coding through your existing terminal tools. First check \(agent == "codex" ? "/Users/anshu/.local/bin/codex login status" : "claude auth status") and STOP if it is not the subscription login (ChatGPT for Codex, claude.ai Max for Claude). Keep your own model and role unchanged. Execute this command in /Users/anshu/Documents/ChatGPT/RemoteAppDev with background=true: \(command). State the absolute log path \(log) immediately, then monitor the background process until it exits. Do not implement the task yourself."
+        let input = app.textViews["thread.input"]
+        input.tap(); input.typeText(prompt); element("thread.send").tap()
+        let activity = element("thread.codingActivity")
+        requireHittable(activity, timeout: 150); activity.tap()
+        let working = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "· Working")).firstMatch
+        XCTAssertTrue(working.waitForExistence(timeout: 150), "Must observe a real CLI run before completion")
+        let action = app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "README")).firstMatch
+        XCTAssertTrue(action.waitForExistence(timeout: 150), "Nested CLI command must arrive live")
+        XCTAssertTrue(working.exists, "Activity must be visible while coding agent is working")
+        capture("50 — Live \(agent) activity before completion")
+        let completed = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "· Completed")).firstMatch
+        XCTAssertTrue(completed.waitForExistence(timeout: 180), "Foreground activity must refresh through completion")
+        capture("51 — Live \(agent) completed")
+        app.buttons["Done"].firstMatch.tap()
+    }
+
+    @MainActor
     func testActualClaudeActivity() throws {
         app.launch()
         openProject(named: "Squircle")

@@ -79,7 +79,7 @@ struct HermesConversation {
                                    traceFiles: CodingTrace.references(in: [row, args]))
             }
             if role == "system" { return nil }
-            var result = ChatMessage(id: "row-\(id)", role: role, content: text)
+            var result = ChatMessage(id: "row-\(id)", role: role, content: text, traceFiles: role == "assistant" ? CodingTrace.references(in: [.string(text)]) : [])
             // Preserve structured content and sidecars rather than silently dropping an unfamiliar message.
             if text.isEmpty, row["content"] != .null { result.content = ToolPresentation.readable(row["content"]) }
             if let reasoning = row["reasoning"].string, !reasoning.isEmpty { result.detail = reasoning; result.activity = "Reasoning" }
@@ -125,7 +125,10 @@ struct HermesConversation {
         case "message.complete":
             let text = p["text"].text
             let id = "live-\(segment)"
-            if let i = messages.firstIndex(where: { $0.id == id }) { messages[i].content = text.isEmpty ? messages[i].content : text }
+            if let i = messages.firstIndex(where: { $0.id == id }) {
+                messages[i].content = text.isEmpty ? messages[i].content : text
+                messages[i].traceFiles = CodingTrace.references(in: [.string(messages[i].content)])
+            }
             else if !text.isEmpty { appendText(text, role: "assistant", streaming: false) }
             seal(); running = false
             status = p["status"].string == "interrupted" ? "Stopped" : "Connected to your Mac"
@@ -221,5 +224,6 @@ struct HermesConversation {
         let id = "live-\(segment)"
         if let i = messages.firstIndex(where: { $0.id == id }) { messages[i].content += text }
         else { messages.append(ChatMessage(id: id, role: role, content: text, isStreaming: streaming)) }
+        if role == "assistant", let i = messages.firstIndex(where: { $0.id == id }) { messages[i].traceFiles = CodingTrace.references(in: [.string(messages[i].content)]) }
     }
 }

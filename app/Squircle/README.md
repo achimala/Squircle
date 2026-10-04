@@ -1,7 +1,7 @@
 # Squircle iPhone app
 
 A UIKit/Core Animation client for the user's independently installed Hermes.
-**Version 0.1.0 (7) source** is a first-principles redesign: one lit 3D stage
+**Version 0.1.0 (9) source** is a first-principles redesign: one lit 3D stage
 shows every app on a real device with its actual published screenshot. Opening
 an app moves that same device to the top of its workspace (a flat list of real
 Hermes threads); a single interruptible spring drives SceneKit and UIKit, and
@@ -12,9 +12,9 @@ fallbacks). Light and dark appearance, Dynamic Type, Reduce Motion (no turning,
 receding or lift; short direct moves) and VoiceOver labels are supported. Apps
 without a capture show an honest dark "No screenshot yet" display.
 
-Installed on the physical iPhone: **version 7**, verified by `devicectl` after
-installation from commit `e41b804`. Manual launch acknowledgement for this
-update remains pending. Native tool/question/heartbeat/reconnect tests and chat
+Installed on the physical iPhone: **version 8**, verified by `devicectl` after
+installation from commit `6078d89`. Version 9 adds live delegated Claude/Codex
+activity; its installation evidence is recorded in validation. Native tool/question/heartbeat/reconnect tests and chat
 UI/relaunch tests pass on the simulator; opening/closing motion was inspected
 frame by frame. Physical-device motion is unmeasured. See
 [validation](../../docs/validation.md).
@@ -74,7 +74,7 @@ to the iOS Keychain. See [connection details](../../docs/hermes-client.md).
   `WorkspaceViewController.swift`, `ThreadViewController.swift`, `BuildsViewController.swift`,
   `AppImportViewController.swift`, `Theme.swift`. DEBUG-only `MotionAudit` and
   `SQUIRCLE_SCRUB`/`SQUIRCLE_DEMO` hooks support frame capture; absent from Release.
-- `Tests/` and `UITests/`: 54 deterministic unit tests, two opt-in native Hermes
+- `Tests/` and `UITests/`: 62 deterministic unit tests, two opt-in native Hermes
   integration tests, navigation, rapid
   interruption, Reduce Motion, import, Hermes round-trip, build, visual tour,
   accessibility audit and comparable performance probes.

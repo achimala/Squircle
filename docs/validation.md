@@ -435,3 +435,45 @@ Still unverified:
 Pairing, manual credential entry, coordinator adapters and additional backend
 infrastructure are excluded from this personal build. No TestFlight or Firebase
 service is required for the verified distribution path.
+
+## Version 9: delegated Claude and Codex, 2026-10-05
+
+Hermes's default model/runtime remains unchanged (`gpt-6.1-sol`, `openai-codex`,
+general-assistant loop). Neither the tested alternate Codex-runtime profile nor
+an experimental Claude model provider is part of the delivered integration.
+The unused test profile was removed using stock Hermes.
+
+Real simulator UI tests submitted tasks to Hermes and observed **Working** plus
+nested file-read/command activity before CLI completion, then automatic updates
+to **Completed**. Both CLIs read repository documentation and wrote isolated
+`/tmp` verification files containing `VERIFIED`; both returned `LIVE_CODING_DONE`.
+Claude session `20261005_004548_6a8890` verified `claude.ai` / Max in the actual
+Hermes environment. Codex session `20261005_004652_0504ef` verified `Logged in
+using ChatGPT`. API-key variables were absent from the delegated invocations.
+Hermes retained its own model in both sessions.
+
+Evidence: `/tmp/squircle-live-agents-final.xcresult`; private copies of CLI events,
+Hermes messages, test log and before-completion screenshots in
+`.verification/coding-live/`. Live Claude and Codex UI tests passed in 63.1 and
+69.8 seconds respectively. The first Codex attempt correctly stopped because
+Hermes's PATH resolved an older incompatible Homebrew CLI; user skill instructions
+now select the existing `/Users/anshu/.local/bin/codex` 0.159.0. An initial Claude
+wait probe was blocked by Claude and is not counted as a successful task; the
+replacement file task completed without permission denials.
+
+Activity uses five-second foreground incremental file reads through Hermes's
+stock file endpoint, not a native nested-agent push subscription. Logs must be
+retained/referenced; unavailable events cannot be reconstructed. CLI approvals
+remain with the existing Hermes/CLI workflow. Codex event data does not attest
+billing; the login check is separate. Actual simulator captures remain snapshots,
+not live video.
+
+Rendered 3D transition checked across consecutive frames at 3.2–4.0 seconds in
+`/tmp/squircle-v8-motion.mp4` (`/tmp/squircle-v8-all-transition-frames.png`): the same
+device/title move continuously into the flat workspace without crossfades or
+blank replacement frames. Version 9 does not change those transition paths.
+
+Focused final regression: 62 deterministic tests passed, two opt-in tests skipped;
+`/tmp/squircle-coding-regression.xcresult`. Child-relayed log paths are preserved
+in streamed assistant text and restored history. Signed version 9 installation
+is tracked separately below.

@@ -1,7 +1,7 @@
 # Coding activity and subscription authentication
 
 The phone is a client of stock Hermes. It does not launch an alternative coding
-backend. Version 8 adds a **reader for Claude Code's standard `stream-json` log**:
+backend. The client presents **Claude Code's standard `stream-json` and Codex's `exec --json` events**:
 commands, read/write/edit actions, text, failures and results are displayed as a
 native timeline. JSON envelopes, hooks, signatures and thinking blocks are not
 conversation content. Details show the command, file contents, before/after edit
@@ -29,7 +29,35 @@ seconds between refreshes), tolerates an incomplete final JSON line, and parses
 off the UI thread. Initial files are capped at 32 MiB. It does not discover every
 Claude process on the Mac, reconstruct absent logs, or provide native nested CLI
 approvals. Runs without a referenced standard log retain ordinary Hermes tool
-visibility. Codex trace parsing is not implemented by this change.
+visibility. Codex uses its documented `thread`, `turn`, and `item` event records;
+item updates replace existing actions by ID. This is a presentation adapter, not
+terminal-text scraping or another execution backend. Commands, file changes,
+agent text, MCP calls, searches, plans and failures are projected into the same UI.
+Incremental reads refresh every five seconds while the activity view is open;
+this is live polling, not a native nested-agent push stream.
+
+## Codex execution convention
+
+Hermes remains the general assistant with its existing model and runtime. Use
+its bundled `codex` or `claude-code` skills and terminal/background-process tools
+to delegate. Do not switch Hermes providers or runtime to expose coding activity.
+The separately tested Codex-runtime profile was removed; no model picker was added.
+
+Before launching Codex, run `/Users/anshu/.local/bin/codex login status` in Hermes's execution environment
+and require `Logged in using ChatGPT`. Do not fall back to an API key. Use
+`env -u OPENAI_API_KEY -u CODEX_API_KEY /Users/anshu/.local/bin/codex exec --json --sandbox workspace-write`
+with the task and explicit working directory, retaining stdout in an absolute
+`codex-<task>.jsonl` path. Reference the path immediately in the parent Hermes
+conversation/tool arguments so activity can be opened before completion. Keep
+normal sandbox and permission controls; inspect failures rather than retrying
+with bypass flags. Codex's JSON output does not attest billing itself; the UI
+must not infer subscription billing merely from its presence.
+
+[Codex's supported structured event stream](https://developers.openai.com/codex/noninteractive/)
+is the source contract. Stock Hermes currently exposes the terminal invocation,
+not these nested CLI items, so a small native presentation adapter is necessary
+for this delegation path. No Hermes fork, new agent server, or custom process
+runner is involved.
 
 ## Authentication finding on this Mac
 
@@ -58,3 +86,14 @@ capture and displays its timestamp. After UI work, agents must capture and
 publish current pixels using the existing `squircle app preview` workflow.
 This is a capture, not a live video feed or remote simulator control. Existing
 builds and diagnostics remain in their secondary sheet.
+
+On this Mac, use `/Users/anshu/.local/bin/codex` (0.159.0). Hermes’s login shell
+resolves an older Homebrew installation first; that binary rejects the current
+Codex configuration. The explicit current executable preserves user settings
+and subscription login without altering global shell configuration.
+
+The installed **user copies** of Hermes's `claude-code` and `codex` skills now
+contain these conventions; each previous file is retained alongside it as
+`SKILL.before-squircle-visibility.md`. Hermes's installed source is unmodified.
+No experimental Claude provider was installed. Default Hermes remains
+`gpt-6.1-sol` / `openai-codex` with its general-assistant tool loop.

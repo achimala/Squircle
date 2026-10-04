@@ -28,7 +28,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     private let titleLabel = Theme.label("New thread", Theme.font(.headline, 17, .semibold))
     private let projectLabel = Theme.label("", Theme.font(.caption1, 12, .medium), color: .secondaryLabel)
     private let footer = UIStackView()
-    private let activityButton = Theme.glassButton(title: "Claude Code", identifier: "thread.codingActivity")
+    private let activityButton = Theme.glassButton(title: "Coding activity", identifier: "thread.codingActivity")
     private let previewButton = Theme.glassButton(symbol: "iphone", identifier: "thread.appPreview", accessibilityLabel: "App preview")
     private let approvalContainer = UIStackView()
     private let statusRow = UIStackView()

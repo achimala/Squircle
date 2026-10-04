@@ -44,7 +44,7 @@ final class CodingActivityViewController: UITableViewController, QLPreviewContro
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Claude Code"
+        title = "Coding activity"
         view.backgroundColor = Theme.paper; tableView.backgroundColor = Theme.paper
         tableView.separatorStyle = .none
         tableView.register(ThreadMessageCell.self, forCellReuseIdentifier: ThreadMessageCell.reuseID)
@@ -58,7 +58,7 @@ final class CodingActivityViewController: UITableViewController, QLPreviewContro
             }))
         }
         summary.numberOfLines = 0; summary.font = Theme.font(.footnote, 13); summary.textColor = .secondaryLabel
-        summary.text = "Loading recorded Claude activity…"
+        summary.text = "Loading coding activity…"
         refreshControl = UIRefreshControl()
         refreshControl?.addAction(UIAction { [weak self] _ in self?.refresh() }, for: .valueChanged)
         refresh()
@@ -106,12 +106,13 @@ final class CodingActivityViewController: UITableViewController, QLPreviewContro
                 try Task.checkCancellation()
                 let nearBottom = !self.bytes.isEmpty && tableView.contentOffset.y + tableView.bounds.height >= tableView.contentSize.height - 100
                 self.bytes = data; self.trace = parsed
-                summary.text = "\(parsed.model) · \(parsed.state)\n\(parsed.authentication)\n\(parsed.messages.filter { $0.role == "tool" }.count) actions · refreshes while open"
+                summary.text = "\(parsed.model.lowercased().contains("claude") ? "Claude Code" : parsed.model) · \(parsed.state)"
+                if parsed.authentication.contains("API billing") { summary.text! += "\nThis recorded run used an API key" }
                 tableView.reloadData(); layoutSummary()
                 if nearBottom && !parsed.messages.isEmpty { tableView.scrollToRow(at: IndexPath(row: parsed.messages.count - 1, section: 0), at: .bottom, animated: false) }
             } catch is CancellationError {} catch {
                 guard self.loadGeneration == generation else { return }
-                summary.text = "Could not load Claude activity. Pull to retry.\n" + error.localizedDescription
+                summary.text = "Could not load coding activity. Pull to retry.\n" + error.localizedDescription
                 layoutSummary()
             }
         }

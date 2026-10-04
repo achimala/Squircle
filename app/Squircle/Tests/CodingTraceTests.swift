@@ -22,6 +22,42 @@ final class CodingTraceTests: XCTestCase {
         XCTAssertEqual(trace.state, "Completed")
     }
 
+    func testCodexIncrementalItemsUpdateWithoutDuplicateActions() {
+        let started = #"""
+        {"type":"thread.started","thread_id":"t"}
+        {"type":"turn.started"}
+        {"type":"item.started","item":{"id":"cmd","type":"command_execution","command":"sleep 45","status":"in_progress"}}
+        """#
+        let live = CodingTrace.parse(Data(started.utf8))
+        XCTAssertEqual(live.model, "Codex")
+        XCTAssertEqual(live.state, "Working")
+        XCTAssertTrue(live.messages[0].isStreaming)
+        let finished = started + "\n" + #"""
+        {"type":"item.completed","item":{"id":"cmd","type":"command_execution","command":"sleep 45","aggregated_output":"test failed","exit_code":1,"status":"completed"}}
+        {"type":"item.completed","item":{"id":"patch","type":"file_change","changes":[{"path":"/tmp/check.txt","kind":"add","diff":"+VERIFIED"}],"status":"completed"}}
+        {"type":"turn.completed","usage":{"input_tokens":12}}
+        """#
+        let done = CodingTrace.parse(Data(finished.utf8))
+        XCTAssertEqual(done.messages.count, 2)
+        XCTAssertFalse(done.messages[0].isStreaming)
+        XCTAssertTrue(done.messages[0].failed)
+        XCTAssertTrue(done.messages[0].detail.contains("test failed"))
+        XCTAssertEqual(done.messages[1].activity, "Edit check.txt")
+        XCTAssertTrue(done.messages[1].detail.contains("+VERIFIED"))
+        XCTAssertEqual(done.state, "Completed")
+        XCTAssertEqual(CodingTrace.references(in: [.string("/tmp/codex-work.jsonl")]), ["/tmp/codex-work.jsonl"])
+    }
+
+    func testParentRelayedTraceSurvivesHistoryAndStreaming() {
+        let path = "/tmp/codex-child.jsonl"
+        let rows: [JSONValue] = [.object(["role": .string("assistant"), "content": .string("Child activity: " + path)])]
+        XCTAssertEqual(HermesConversation.project(rows).first?.traceFiles, [path])
+        var live = HermesConversation()
+        live.consume(.object(["type": .string("message.delta"), "payload": .object(["text": .string("Child activity: /tmp/codex-")])]))
+        live.consume(.object(["type": .string("message.delta"), "payload": .object(["text": .string("child.jsonl")])]))
+        XCTAssertEqual(live.messages.first?.traceFiles, [path])
+    }
+
     func testResumeRetainsLogForToolWithoutResult() throws {
         let raw = #"[{"role":"assistant","tool_calls":[{"id":"pending","function":{"name":"terminal","arguments":"{\"command\":\"claude -p task > /tmp/claude-task.jsonl\"}"}}]}]"#
         let rows = try JSONDecoder().decode([JSONValue].self, from: Data(raw.utf8))
