@@ -391,7 +391,7 @@ final class StudioUITests: XCTestCase {
         input.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
         capture("06 — Thread keyboard")
-        input.typeText("Reply exactly SQUIRCLE_DESIGN_OK. Do not use tools.")
+        input.typeText("Run terminal command printf SQUIRCLE_NATIVE_TOOL_DETAIL then reply exactly SQUIRCLE_DESIGN_OK. Do not change files.")
         let send = element("thread.send")
         requireEnabled(send)
         capture("07 — Composed verification message")
@@ -402,7 +402,19 @@ final class StudioUITests: XCTestCase {
         let finished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Send message"), object: send)
         XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 25), .completed, "Wait for the real run to finish before testing persistence.")
         XCTAssertEqual(input.value as? String ?? "", "", "Sending clears the composer without replacing its text view.")
-        capture("08 — Live Hermes reply")
+        let detail = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Show details, terminal")).firstMatch
+        XCTAssertTrue(detail.waitForExistence(timeout: 15), "Native tool calls remain inspectable after the final reply.")
+        reveal(detail); detail.tap()
+        capture("08a — Expanded tool")
+        let output = elements("thread.toolDetails").firstMatch
+        XCTAssertTrue(output.waitForExistence(timeout: 10))
+        XCTAssertTrue((output.value as? String ?? "").contains("SQUIRCLE_NATIVE_TOOL_DETAIL"))
+        capture("08 — Live Hermes tool result")
+        element("thread.actions").tap()
+        XCTAssertTrue(app.buttons["Set recurring update…"].waitForExistence(timeout: 5))
+        if app.buttons["Cancel"].exists { app.buttons["Cancel"].tap() }
+        else { element("thread.close").tap() } // iOS 27 presents an anchored popover; tap outside to dismiss.
+        capture("08b — Native Hermes controls")
         element("thread.close").tap()
         waitForThreadDismissal()
 

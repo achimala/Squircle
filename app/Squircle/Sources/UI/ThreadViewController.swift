@@ -1,18 +1,21 @@
 import Combine
 import UIKit
+import QuickLook
 
 /// One Hermes conversation. Assistant text reads as a page; the user's own
 /// messages sit in quiet bubbles. Close, compose, send/stop and approvals are
 /// the only glass. Streaming updates mutate visible cells in place.
 @MainActor
-final class ThreadViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UITextViewDelegate {
+final class ThreadViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UITextViewDelegate, QLPreviewControllerDataSource {
     private let model: SquircleModel
     private let project: AppProject
-    private let initialSessionID: String?
+    private var initialSessionID: String?
     private var subscriptions = Set<AnyCancellable>()
     private var messages: [ChatMessage] = []
     private var isOpening = true
     private var initialScrollNeeded = true
+    private var previewFile: URL?
+    private var shownQuestion: HermesQuestion?
     private var shownApproval: AgentApproval?
     private var resolvingApproval = false
     private var lastViewportHeight: CGFloat = 0
@@ -20,6 +23,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
 
     private let table = UITableView(frame: .zero, style: .plain)
     private let header = UIView()
+    private let more = Theme.glassButton(symbol: "ellipsis", identifier: "thread.actions", accessibilityLabel: "Hermes controls")
     private let close = Theme.glassButton(symbol: "xmark", identifier: "thread.close", accessibilityLabel: "Close thread")
     private let titleLabel = Theme.label("New thread", Theme.font(.headline, 17, .semibold))
     private let projectLabel = Theme.label("", Theme.font(.caption1, 12, .medium), color: .secondaryLabel)
@@ -57,7 +61,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
             guard let self else { return }
             model.selectProject(project)
             if let id = initialSessionID { await model.selectSession(id) }
-            else { await model.createSession(in: project) }
+            else { await model.createSession(in: project); initialSessionID = model.selectedSessionID }
             isOpening = false
             render()
         }
@@ -99,12 +103,53 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         return true
     }
 
+    private func showHermesControls() {
+        view.endEditing(true)
+        let control = model.hermesControl
+        let summary = ["goal", "loop", "heartbeat"].compactMap { kind -> String? in
+            let value = control[kind]
+            guard value != .null else { return nil }
+            return "\(kind.capitalized): \(value["status"].string ?? "")\n\(value["prompt"].string ?? value["objective"].string ?? "")"
+        }.joined(separator: "\n\n")
+        let sheet = UIAlertController(title: "Hermes", message: summary.isEmpty ? nil : summary, preferredStyle: .actionSheet)
+        for kind in ["goal", "loop", "heartbeat"] where control[kind] != .null {
+            let paused = control[kind]["status"].string == "paused"
+            let action = kind + (paused ? ".resume" : ".pause")
+            sheet.addAction(UIAlertAction(title: "\(paused ? "Resume" : "Pause") \(kind)", style: .default) { [weak self] _ in
+                Task { await self?.model.performHermesControl(action) }
+            })
+            sheet.addAction(UIAlertAction(title: "Clear \(kind)", style: .destructive) { [weak self] _ in
+                Task { await self?.model.performHermesControl(kind + (kind == "loop" ? ".stop" : ".clear")) }
+            })
+        }
+        for (title, command) in [("Set recurring update…", "/heartbeat every 5m "), ("Hermes commands", "/help")] {
+            sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
+                guard let self else { return }
+                if command == "/help" { Task { await self.model.send(command) } }
+                else { self.input.text = command; self.input.becomeFirstResponder(); self.updateSendButton() }
+            })
+        }
+        if let initialSessionID, model.selectedSessionID != initialSessionID {
+            sheet.addAction(UIAlertAction(title: "Back to parent conversation", style: .default) { [weak self] _ in Task { await self?.model.selectSession(initialSessionID) } })
+        }
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = more
+        present(sheet, animated: true)
+    }
+
     private func buildHeader() {
         header.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(header)
         close.translatesAutoresizingMaskIntoConstraints = false
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
         header.addSubview(close)
+        more.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(more)
+        more.addAction(UIAction { [weak self] _ in self?.showHermesControls() }, for: .touchUpInside)
+        NSLayoutConstraint.activate([
+            more.trailingAnchor.constraint(equalTo: header.trailingAnchor), more.centerYAnchor.constraint(equalTo: close.centerYAnchor),
+            more.widthAnchor.constraint(equalToConstant: 44), more.heightAnchor.constraint(equalToConstant: 44)
+        ])
         projectLabel.text = project.name
         projectLabel.textAlignment = .center
         titleLabel.textAlignment = .center
@@ -286,7 +331,8 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
             scrollToBottom(animated: false)
             if !messages.isEmpty { initialScrollNeeded = false }
         }
-        renderApproval()
+        renderHermesQuestion()
+        if shownQuestion == nil { renderApproval() }
         let terminalNotice = model.status.hasPrefix("Run ") || model.status.hasPrefix("Submission ") ? model.status : ""
         let status = model.error ?? (isOpening ? "Opening thread…" : model.isRunning ? model.status : terminalNotice)
         if statusLabel.text != status { statusLabel.text = status }
@@ -295,6 +341,23 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         let working = model.error == nil && (isOpening || model.isRunning)
         if working != statusSpinner.isAnimating { working ? statusSpinner.startAnimating() : statusSpinner.stopAnimating() }
         updateSendButton()
+        if let prefill = model.composerPrefill { input.text = prefill; model.composerPrefill = nil; updateInputHeight() }
+    }
+
+    private func renderHermesQuestion() {
+        let question = isOpening ? nil : model.hermesQuestions.first
+        guard question != shownQuestion else { return }
+        shownQuestion = question; shownApproval = nil
+        approvalContainer.arrangedSubviews.forEach { approvalContainer.removeArrangedSubview($0); $0.removeFromSuperview() }
+        approvalContainer.isHidden = question == nil
+        guard let question else { return }
+        let panel = HermesQuestionPanel(question: question)
+        panel.respond = { [weak self, weak panel] result in
+            panel?.isUserInteractionEnabled = false
+            Task { await self?.model.answerHermes(question, result: result); panel?.isUserInteractionEnabled = true }
+        }
+        approvalContainer.addArrangedSubview(panel)
+        UIAccessibility.post(notification: .announcement, argument: question.title)
     }
 
     private func renderApproval() {
@@ -321,7 +384,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     private func updateSendButton() {
-        let running = !isOpening && model.isRunning
+        let running = !isOpening && model.isRunning && input.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let symbol = running ? "stop.fill" : "arrow.up"
         if sendButton.configuration?.image != UIImage(systemName: symbol) {
             sendButton.configuration?.image = UIImage(systemName: symbol)
@@ -332,7 +395,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     private func sendOrStop() {
-        if model.isRunning {
+        if model.isRunning && input.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             Task { await model.stop() }
             return
         }
@@ -376,10 +439,29 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         if scrollView === table { wasNearBottom = isNearBottom }
     }
 
+    private func openAttachment(_ attachment: HermesAttachment) {
+        if let url = URL(string: attachment.reference), ["http", "https"].contains(url.scheme) { UIApplication.shared.open(url); return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                previewFile = try await model.hermesAttachment(attachment.reference)
+                let preview = QLPreviewController(); preview.dataSource = self
+                present(preview, animated: true)
+            } catch {
+                let alert = UIAlertController(title: "Could not open attachment", message: error.localizedDescription, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default)); present(alert, animated: true)
+            }
+        }
+    }
+    func numberOfPreviewItems(in controller: QLPreviewController) -> Int { previewFile == nil ? 0 : 1 }
+    func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem { previewFile! as NSURL }
+
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { messages.count }
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: ThreadMessageCell.reuseID, for: indexPath) as! ThreadMessageCell
         cell.configure(messages[indexPath.row])
+        cell.openAttachment = { [weak self] attachment in self?.openAttachment(attachment) }
+        cell.openChild = { [weak self] id in Task { await self?.model.openHermesChild(id) } }
         return cell
     }
 }
@@ -389,7 +471,11 @@ private final class ThreadMessageCell: UITableViewCell {
     private let bubble = UIView()
     private let text = UITextView()
     private let tools = UIButton(type: .system)
-    private let toolDetails = Theme.label("", Theme.font(.caption1, 12, monospaced: true), color: .secondaryLabel, lines: 0)
+    private let toolDetails = UITextView()
+    private let childButton = UIButton(type: .system)
+    var openChild: ((String) -> Void)?
+    var openAttachment: ((HermesAttachment) -> Void)?
+    private let attachments = UIStackView()
     private let content = UIStackView()
     private var userConstraints: [NSLayoutConstraint] = []
     private var assistantConstraints: [NSLayoutConstraint] = []
@@ -419,6 +505,8 @@ private final class ThreadMessageCell: UITableViewCell {
         text.adjustsFontForContentSizeCategory = true
         text.linkTextAttributes = [.foregroundColor: Theme.accent, .underlineStyle: NSUnderlineStyle.single.rawValue]
         content.addArrangedSubview(text)
+        attachments.axis = .vertical; attachments.spacing = 8
+        content.addArrangedSubview(attachments)
 
         var toolStyle = UIButton.Configuration.plain()
         toolStyle.contentInsets = .zero
@@ -436,6 +524,7 @@ private final class ThreadMessageCell: UITableViewCell {
             guard let self else { return }
             toolsExpanded.toggle()
             updateTools()
+            UIAccessibility.post(notification: .layoutChanged, argument: toolsExpanded ? toolDetails : tools)
             var ancestor = superview
             while let current = ancestor {
                 if let table = current as? UITableView { table.performBatchUpdates(nil); break }
@@ -443,7 +532,22 @@ private final class ThreadMessageCell: UITableViewCell {
             }
         }, for: .touchUpInside)
         content.addArrangedSubview(tools)
+        toolDetails.isAccessibilityElement = true
+        toolDetails.isEditable = false
+        toolDetails.isSelectable = true
+        toolDetails.font = Theme.font(.caption1, 12, monospaced: true)
+        toolDetails.backgroundColor = Theme.codeFill
+        toolDetails.layer.cornerRadius = 10
+        toolDetails.heightAnchor.constraint(equalToConstant: 260).isActive = true
+        toolDetails.accessibilityLabel = "Tool arguments and results"
+        toolDetails.accessibilityIdentifier = "thread.toolDetails"
         content.addArrangedSubview(toolDetails)
+        childButton.setTitle("Open agent conversation", for: .normal)
+        childButton.contentHorizontalAlignment = .leading
+        childButton.addAction(UIAction { [weak self] _ in
+            guard let self, let id = self.message?.childSessionID else { return }; self.openChild?(id)
+        }, for: .touchUpInside)
+        content.addArrangedSubview(childButton)
 
         let readable = contentView.readableContentGuide
         userConstraints = [
@@ -485,7 +589,17 @@ private final class ThreadMessageCell: UITableViewCell {
         bubble.backgroundColor = user ? Theme.userBubble : .clear
         if changedText || text.attributedText.length == 0 {
             let selection = text.selectedRange
-            text.attributedText = Self.markdown(next.content, isUser: user)
+            text.attributedText = Self.markdown(HermesAttachment.displayText(next.content), isUser: user)
+            attachments.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            for attachment in HermesAttachment.parse(next.content) {
+                let button = UIButton(type: .system)
+                var config = UIButton.Configuration.plain(); config.title = attachment.name
+                config.image = UIImage(systemName: attachment.image ? "photo" : "doc"); config.imagePadding = 8
+                button.configuration = config; button.contentHorizontalAlignment = .leading
+                button.addAction(UIAction { [weak self] _ in self?.openAttachment?(attachment) }, for: .touchUpInside)
+                attachments.addArrangedSubview(button)
+            }
+            attachments.isHidden = attachments.arrangedSubviews.isEmpty
             if selection.length > 0, NSMaxRange(selection) <= text.attributedText.length { text.selectedRange = selection }
         }
         text.isHidden = next.content.isEmpty
@@ -493,14 +607,23 @@ private final class ThreadMessageCell: UITableViewCell {
     }
 
     private func updateTools() {
-        let names = message?.tools ?? []
-        tools.isHidden = names.isEmpty
-        let title = names.count == 1 ? names[0] : "\(names.count) tool steps"
+        guard let message else { return }
+        let names = message.tools
+        let hasDetail = !message.detail.isEmpty || !names.isEmpty || message.activity != nil
+        tools.isHidden = !hasDetail
+        let title = message.activity ?? (names.count == 1 ? names[0] : "\(names.count) tool steps")
         tools.configuration?.title = title
-        tools.configuration?.image = UIImage(systemName: toolsExpanded ? "chevron.down" : "wrench.and.screwdriver")
-        tools.accessibilityLabel = "\(toolsExpanded ? "Hide" : "Show") tool details, \(title)"
-        toolDetails.text = names.joined(separator: "\n")
-        toolDetails.isHidden = names.isEmpty || !toolsExpanded
+        tools.configuration?.baseForegroundColor = message.failed ? Theme.failure : .secondaryLabel
+        tools.configuration?.image = UIImage(systemName: toolsExpanded ? "chevron.down" : message.isStreaming ? "ellipsis" : message.failed ? "exclamationmark.triangle" : "chevron.right")
+        tools.accessibilityLabel = "\(toolsExpanded ? "Hide" : "Show") details, \(title)"
+        toolDetails.text = message.detail.isEmpty ? names.joined(separator: "\n") : message.detail
+        toolDetails.accessibilityValue = toolDetails.text
+        toolDetails.isHidden = !hasDetail || !toolsExpanded
+        childButton.isHidden = message.childSessionID == nil
+        // UITableView can cache the descendants while the detail view is hidden.
+        // Rebuild the cell's accessibility order when disclosure changes.
+        isAccessibilityElement = false
+        accessibilityElements = ([text, tools, toolDetails, childButton] + attachments.arrangedSubviews).filter { !$0.isHidden }
     }
 
     private static func markdown(_ source: String, isUser: Bool) -> NSAttributedString {

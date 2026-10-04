@@ -4,6 +4,10 @@ Build and iterate on iOS apps from your iPhone. **The native app talks to stock 
 
 ## Current state
 
+Version 7 source switches chat to stock Hermes Desktop’s native protocol, with
+full tool arguments/results, requests, shared Desktop sessions and native
+background replies. [Message support and upstream limits](docs/hermes-client.md).
+
 The [native app](app/Squircle/README.md) has persistent conversations, streamed responses/tool progress, approvals, stop, and installable builds. Version **0.1.0 (5)** is installed and launched on the phone. This personal build includes its Mac connection settings: **no token form, pairing flow or additional agent backend**.
 
 The interface uses a horizontal live 3D app picker, a minimal flat thread list and a secondary builds sheet. UIKit moves the actual phone, app title and controls through spatial transitions with interactive back navigation; there are no screen fades or explanatory panels. Real screenshots and agent-editable app metadata persist on the Mac. **36 iOS unit tests, import/navigation UI checks and 71 Rust tests pass. Signed build 5 was installed and launched on the connected iPhone, with a new launch acknowledgement received by the Mac.** [Design decisions](docs/product.md), [test evidence and limits](docs/validation.md).

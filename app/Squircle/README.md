@@ -1,7 +1,7 @@
 # Squircle iPhone app
 
 A UIKit/Core Animation client for the user's independently installed Hermes.
-**Version 0.1.0 (6) source** is a first-principles redesign: one lit 3D stage
+**Version 0.1.0 (7) source** is a first-principles redesign: one lit 3D stage
 shows every app on a real device with its actual published screenshot. Opening
 an app moves that same device to the top of its workspace (a flat list of real
 Hermes threads); a single interruptible spring drives SceneKit and UIKit, and
@@ -51,12 +51,17 @@ ignored file supplies `hermes_url`, `hermes_token`, `squircle_url`,
 `squircle_token`, `diagnostic_token`, and optional `agent_instructions`. It is
 already configured on this Mac. Values are copied into the signed app; they are
 not entered by the phone user or committed to Git. A different host needs its
-own configuration. Hermes's normal required API authentication stays intact.
+own configuration. The personal build also supplies the native Desktop URL, access/refresh credential
+and profile. Stock authentication and TLS stay enabled; renewed credentials go
+to the iOS Keychain. See [connection details](../../docs/hermes-client.md).
 
 ## Implementation
 
-- `Sources/HermesClient.swift`, `SquircleModel.swift`, `AppProject.swift`: unchanged
-  Hermes Sessions/Runs REST + SSE, reconnection, Squircle app/build/import APIs.
+- `HermesGateway.swift`, `HermesConversation.swift`, `HermesQuestionPanel.swift`:
+  stock Desktop WebSocket protocol, full tool details, requests, native controls,
+  replay and shared Desktop sessions. [Supported messages and limits](../../docs/hermes-client.md).
+- `HermesClient.swift`, `SquircleModel.swift`, `AppProject.swift`: Squircle
+  app/build/import APIs and a legacy chat adapter for older configurations.
 - `Sources/UI/DeviceStage.swift`: one `SCNView` for all devices; hardware geometry is
   built once and flattened, each device only owns its display material. Renders on
   change or while a gesture/transition is live; never idles continuously.
@@ -66,7 +71,8 @@ own configuration. Hermes's normal required API authentication stays intact.
   `WorkspaceViewController.swift`, `ThreadViewController.swift`, `BuildsViewController.swift`,
   `AppImportViewController.swift`, `Theme.swift`. DEBUG-only `MotionAudit` and
   `SQUIRCLE_SCRUB`/`SQUIRCLE_DEMO` hooks support frame capture; absent from Release.
-- `Tests/` and `UITests/`: 44 unit tests (8 new for layout/spring), navigation, rapid
+- `Tests/` and `UITests/`: 54 deterministic unit tests, two opt-in native Hermes
+  integration tests, navigation, rapid
   interruption, Reduce Motion, import, Hermes round-trip, build, visual tour,
   accessibility audit and comparable performance probes.
 

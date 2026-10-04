@@ -4,6 +4,43 @@ Recorded 2026-10-04 on this Mac. This page records observed results, not claims
 that the entire proposed product works. Local artifacts and credentials are
 ignored by Git. Reproduce with the [walkthrough](verification.md).
 
+## Native Hermes Desktop integration — version 7
+
+The redesign was checkpointed first as `52b616d`. The chat integration now uses
+stock Hermes `serve` v0.21.5+6977.gaf90026, through the approved existing HTTPS
+8444 route. Hermes itself was not modified. Desktop's **Mac Hermes** connection
+was selected in its actual UI; the native test chat and timed reply appeared in
+its ordinary session list and transcript.
+
+- **54 deterministic iOS tests pass.** The final regression also passed the live
+  UI tool-detail/controls/relaunch test. Two opt-in network tests were skipped
+  in that regression and exercised separately as described below.
+- The native live transport test passed full `terminal` arguments/results,
+  a real heartbeat reply, and a second client resuming the **same runtime ID**.
+- A separate native live request test passed an actual `clarify` question,
+  `request.answer`, continuation to a terminal call, and full stored tool-body
+  retrieval through the existing Desktop REST transcript endpoint.
+- The navigation UI test passed open/back, cancelled interactive back, thread
+  and builds sheets. Expanded tool output is now in the accessibility tree;
+  this was caught and corrected during the live UI test.
+- Real simulator images were inspected. The native tool-result image was
+  published to app `5f9b0650-b20b-4cd6-bcf2-a57574cab08c` as preview
+  `e4dec16a-8a1d-4c20-8b41-ee8952f9a0fb`.
+
+Evidence retained in `.verification/native-hermes/`: `regression.log`,
+`live-heartbeat.log`, `live-clarification-and-ui.log`, `tool-result.png`, and
+`restored-conversation.png`. Clean result bundles are in
+`/tmp/squircle-hermes-release-check.xcresult`,
+`/tmp/squircle-hermes-tests-v2.xcresult`, and
+`/tmp/squircle-hermes-verified.xcresult`. Initial failing UI runs are superseded;
+one Xcode diagnostic collector hung and was terminated after its tests finished.
+The final runs used `-collect-test-diagnostics never` and completed cleanly.
+
+**Upstream limitation reproduced:** this Hermes version can consume the first
+heartbeat tick in its slash-worker watchdog without running a reply; the second
+tick delivered normally through the native owner process. No custom scheduler
+was added. [Message coverage, Mac lifecycle and remaining limits](hermes-client.md).
+
 ## Environment
 
 - Apple Silicon macOS; Xcode **27.1 (27A9269)**, Swift **6.4**.

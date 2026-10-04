@@ -21,6 +21,21 @@ final class SquircleModel: ObservableObject {
     var isConfigured: Bool { client != nil }
     var hostName: String { configuration?.hermesURL.host ?? "Your Mac" }
 
+    @Published private(set) var hermesQuestions: [HermesQuestion] = []
+    @Published private(set) var hermesControl: JSONValue = .null
+    @Published var composerPrefill: String?
+    private var gateway: HermesGateway?
+    private var gatewayWatch: Task<Void, Never>?
+    private var gatewayGeneration: UUID?
+    private var replayEpoch: String?
+    private var runtimeIDs: [String: String] = [:]
+    private var conversations: [String: HermesConversation] = [:]
+    private var turnVersions: [String: Int] = [:]
+    private var attaching: Set<String> = []
+    private var bufferedEvents: [JSONValue] = []
+    private var bufferedRequests: [JSONValue] = []
+    private var sessionListRefresh: Task<Void, Never>?
+
     private let configuration: AppConfiguration?
     private let client: HermesClient?
     private let defaults: UserDefaults
@@ -64,12 +79,22 @@ final class SquircleModel: ObservableObject {
         self.embeddedBuildID = embeddedBuildID ?? Bundle.main.object(forInfoDictionaryKey: "SquircleBuildID") as? String ?? ""
         previewCache.countLimit = 12
         previewCache.totalCostLimit = 48 * 1024 * 1024
+        if let configuration, configuration.desktopURL != nil {
+            let gateway = HermesGateway(configuration: configuration)
+            self.gateway = gateway
+            gateway.onEvent = { [weak self] in self?.receiveHermesEvent($0) }
+            gateway.onRequest = { [weak self] in self?.receiveHermesRequest($0) }
+            gateway.onDisconnect = { [weak self] in
+                self?.connected = false
+                self?.status = "Reconnecting to Hermes…"
+            }
+        }
         reconcileProjects()
         if self.client == nil { status = "Connection configuration is missing from this build." }
     }
 
     func refresh() async {
-        guard let client, !isLoading else { return }
+        guard client != nil, !isLoading else { return }
         beginLoading()
         defer { endLoading() }
         let selectionAtStart = selectionGeneration
@@ -77,7 +102,7 @@ final class SquircleModel: ObservableObject {
         error = nil
         var loadedBuilds = false
         do {
-            let listed = try await client.sessions()
+            let listed = try await listHermesSessions()
             mergeSessions(listed, requestedAtRevision: revisionAtStart)
             connected = true
             // Discover apps from real builds before migrating unassigned chats.
@@ -103,6 +128,7 @@ final class SquircleModel: ObservableObject {
     }
 
     func selectSession(_ id: String) async {
+        if gateway != nil { await selectDesktopSession(id); return }
         guard let client else { return }
         beginLoading()
         defer { endLoading() }
@@ -262,6 +288,8 @@ final class SquircleModel: ObservableObject {
             selectionGeneration = UUID()
             selectedSessionID = nil
             messages = []
+            hermesQuestions = []
+            hermesControl = .null
             approvals = []
             isRunning = false
         }
@@ -270,6 +298,7 @@ final class SquircleModel: ObservableObject {
     }
 
     func createSession(in project: AppProject, title: String? = nil) async {
+        if gateway != nil { await createDesktopSession(in: project, title: title); return }
         guard let client else { return }
         beginLoading()
         defer { endLoading() }
@@ -298,6 +327,7 @@ final class SquircleModel: ObservableObject {
     }
 
     func send(_ text: String) async {
+        if gateway != nil { await sendDesktop(text); return }
         guard let client, !isRunning, !isLoading else { return }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
@@ -343,6 +373,11 @@ final class SquircleModel: ObservableObject {
     }
 
     func stop() async {
+        if let gateway, let id = selectedSessionID, let runtime = runtimeIDs[id] {
+            do { _ = try await gateway.call("session.interrupt", ["session_id": .string(runtime)]); status = "Stopping Hermes…" }
+            catch { show(error) }
+            return
+        }
         guard let client, let id = selectedSessionID, let runID = activeRuns[id] else { return }
         do {
             try await client.stop(runID)
@@ -616,5 +651,303 @@ final class SquircleModel: ObservableObject {
     private func persistRuns() { defaults.set(activeRuns, forKey: "\(preferencePrefix).activeRuns") }
     private func show(_ error: Error) {
         self.error = (error as? ClientError)?.localizedDescription ?? "The connection could not complete this operation."
+    }
+}
+
+extension SquircleModel {
+    private func listHermesSessions() async throws -> [ChatSession] {
+        guard let gateway else { return try await client?.sessions() ?? [] }
+        try await gateway.connect()
+        ensureGatewayWatch()
+        let result = try await gateway.call("session.list", ["limit": .number(500)])
+        return try JSONDecoder().decode([ChatSession].self, from: JSONEncoder().encode(result["sessions"]))
+    }
+
+    private func ensureGatewayWatch() {
+        guard gatewayWatch == nil else { return }
+        gatewayGeneration = gateway?.generation
+        gatewayWatch = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, let gateway = self.gateway else { return }
+                do {
+                    try await gateway.connect()
+                    if gatewayGeneration != gateway.generation {
+                        gatewayGeneration = gateway.generation
+                        for id in Array(runtimeIDs.keys) where id != selectedSessionID { try await attachDesktop(id) }
+                        if let id = selectedSessionID { try await attachDesktop(id) }
+                    }
+                    _ = try await gateway.call("ping")
+                    connected = true
+                } catch { connected = false; show(error) }
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            }
+        }
+    }
+
+    private func selectDesktopSession(_ id: String) async {
+        beginLoading(); defer { endLoading() }
+        selectionGeneration = UUID()
+        selectedSessionID = id
+        if let projectID = catalog.sessionProjects[id] { selectedProjectID = projectID }
+        persistSelection()
+        publishDesktop(id)
+        do {
+            try await attachDesktop(id)
+            ensureGatewayWatch()
+            connected = true; error = nil
+        } catch { show(error) }
+    }
+
+    private func attachDesktop(_ id: String) async throws {
+        guard let gateway, !attaching.contains(id) else { return }
+        attaching.insert(id)
+        defer {
+            attaching.remove(id)
+            if attaching.isEmpty {
+                let events = bufferedEvents; bufferedEvents = []
+                for event in events { receiveHermesEvent(event) }
+                let requests = bufferedRequests; bufferedRequests = []
+                for request in requests { receiveHermesRequest(request) }
+            }
+        }
+        let oldRuntime = runtimeIDs[id]
+        let oldSequence = conversations[id]?.lastSequence ?? 0
+        let snapshot = try await gateway.call("session.resume", ["session_id": .string(id), "source": .string("desktop"), "close_on_disconnect": .bool(false)])
+        guard let runtime = snapshot["session_id"].string else { throw ClientError.response("Hermes") }
+        runtimeIDs[id] = runtime
+        // Reuse the live projection only when the replay can bridge the gap.
+        let replay = try await gateway.call("session.events.since", ["session_id": .string(runtime), "last_seen": .number(Double(oldSequence))])
+        if oldRuntime == runtime, oldSequence > 0, !replay["truncated"].bool, conversations[id] != nil {
+            for event in replay["events"].array { conversations[id]?.consume(event) }
+            conversations[id]?.questions = snapshot["open_requests"].array.compactMap(HermesConversation.question).filter { HermesQuestion.supported.contains($0.method) }
+            conversations[id]?.running = snapshot["running"].bool || snapshot["info"]["running"].bool
+        } else {
+            var conversation = HermesConversation()
+            conversation.hydrate(snapshot)
+            // The snapshot already contains historical events. Only frames received
+            // after its response belong on top; replaying the whole ring duplicates history.
+            let boundary = snapshot["_client_order"].int ?? 0
+            for event in bufferedEvents where event["session_id"].string == runtime && (event["_client_order"].int ?? 0) > boundary { conversation.consume(event) }
+            conversation.lastSequence = max(conversation.lastSequence, replay["latest_seq"].int ?? 0)
+            conversations[id] = conversation
+        }
+        if conversations[id]?.running == false, let rows = try? await gateway.transcript(id) {
+            let boundary = snapshot["_client_order"].int ?? 0
+            let started = bufferedEvents.contains { $0["session_id"].string == runtime && $0["type"].string == "message.start" && ($0["_client_order"].int ?? 0) > boundary }
+            if !started { conversations[id]?.messages = HermesConversation.project(rows) }
+        }
+        let control = try await gateway.call("session.control.read", ["session_id": .string(runtime)])
+        conversations[id]?.control = control["control"] == .null ? control : control["control"]
+        publishDesktop(id)
+    }
+
+    private func createDesktopSession(in project: AppProject, title: String?) async {
+        guard let gateway else { return }
+        beginLoading(); defer { endLoading() }
+        error = nil
+        let name = title ?? "\(project.name) · \(sessions(for: project).count + 1)"
+        var params: [String: JSONValue] = ["source": .string("desktop"), "title": .string(name), "close_on_disconnect": .bool(false), "idempotency_key": .string(UUID().uuidString)]
+        if let path = metadata(for: project)?.project ?? project.buildRequest?.project {
+            params["cwd"] = .string(URL(fileURLWithPath: path).deletingLastPathComponent().path)
+            params["cwd_explicit"] = .bool(true)
+        }
+        do {
+            attaching.insert("__creating__")
+            defer {
+                attaching.remove("__creating__")
+                let events = bufferedEvents; bufferedEvents = []
+                for event in events { receiveHermesEvent(event) }
+                let requests = bufferedRequests; bufferedRequests = []
+                for request in requests { receiveHermesRequest(request) }
+            }
+            let snapshot = try await gateway.call("session.create", params)
+            guard let id = snapshot["stored_session_id"].string, let runtime = snapshot["session_id"].string else { throw ClientError.response("Hermes") }
+            runtimeIDs[id] = runtime
+            var conversation = HermesConversation(); conversation.hydrate(snapshot); conversations[id] = conversation
+            catalog.assign(sessionID: id, to: project.id)
+            sessions.insert(ChatSession(id: id, title: name), at: 0); sessionRevision += 1
+            selectedSessionID = id; selectedProjectID = project.id
+            reconcileProjects(); publishDesktop(id); ensureGatewayWatch()
+        } catch { show(error) }
+    }
+
+    private func sendDesktop(_ rawText: String, depth: Int = 0) async {
+        guard let gateway, depth < 5 else { return }
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if selectedSessionID == nil { await createSession() }
+        guard let id = selectedSessionID else { return }
+        do {
+            if runtimeIDs[id] == nil { try await attachDesktop(id) }
+            guard let runtime = runtimeIDs[id] else { return }
+            error = nil
+            if text.range(of: #"^/[^\s/]*(?:\s|$)"#, options: .regularExpression) != nil {
+                let result = try await gateway.call("slash.exec", ["session_id": .string(runtime), "command": .string(text)])
+                switch result["type"].string {
+                case "alias": await sendDesktop(result["target"].string ?? "", depth: depth + 1)
+                case "prefill": composerPrefill = result["message"].string
+                case "send", "skill":
+                    if let message = result["message"].string {
+                        _ = try await gateway.call("prompt.submit", ["session_id": .string(runtime), "text": .string(message)])
+                    }
+                default:
+                    if let output = result["output"].string, !output.isEmpty { conversations[id]?.notice(output) }
+                }
+                for key in ["warning", "notice", "error"] {
+                    if let text = result[key].string, !text.isEmpty { conversations[id]?.notice(text, failed: key == "error") }
+                }
+                let control = try await gateway.call("session.control.read", ["session_id": .string(runtime)])
+                conversations[id]?.control = control["control"]
+                publishDesktop(id)
+                return
+            }
+            let localID = "pending-\(UUID().uuidString)"
+            conversations[id]?.messages.append(ChatMessage(id: localID, role: "user", content: text))
+            publishDesktop(id)
+            _ = try await gateway.call("prompt.submit", ["session_id": .string(runtime), "text": .string(text)])
+            connected = true
+        } catch {
+            show(error)
+            status = "Submission was not confirmed. Reconnect before retrying."
+        }
+    }
+
+    private func receiveHermesEvent(_ event: JSONValue) {
+        let type = event["type"].string ?? ""
+        if type == "gateway.ready" {
+            let epoch = event["payload"]["replay_epoch"].string
+            if replayEpoch != nil, replayEpoch != epoch {
+                for id in conversations.keys { conversations[id]?.lastSequence = 0 }
+            }
+            replayEpoch = epoch
+            return
+        }
+        if type == "sessions.changed" || type == "session.title" { scheduleDesktopListRefresh() }
+        if type == "session.reclaimed" {
+            guard let runtime = event["payload"]["session_id"].string,
+                  let id = runtimeIDs.first(where: { $0.value == runtime })?.key else { return }
+            var scoped = event.object; scoped.removeValue(forKey: "seq")
+            conversations[id]?.consume(.object(scoped)); runtimeIDs.removeValue(forKey: id); publishDesktop(id)
+            return
+        }
+        let globalIgnore: Set<String> = ["sessions.changed", "cron.changed", "projects.changed", "platforms.changed", "skin.changed", "setup.ready", "pet.changed", "pairing.changed"]
+        if (event["session_id"].string ?? "").isEmpty {
+            if !globalIgnore.contains(type), let id = selectedSessionID {
+                var global = event.object; global.removeValue(forKey: "seq")
+                conversations[id]?.consume(.object(global)); publishDesktop(id)
+            }
+            return
+        }
+        guard let runtime = event["session_id"].string,
+              let id = runtimeIDs.first(where: { $0.value == runtime || $0.key == runtime })?.key else {
+            if !attaching.isEmpty { bufferedEvents.append(event) }
+            return
+        }
+        if attaching.contains(id) { bufferedEvents.append(event); return }
+        if type == "message.start" { turnVersions[id, default: 0] += 1 }
+        conversations[id]?.consume(event)
+        publishDesktop(id)
+        if type == "message.complete" || (type == "session.resume_progress" && event["payload"]["status"].string == "complete") { refreshDesktopHistory(id) }
+        if type == "session.reclaimed" { runtimeIDs.removeValue(forKey: id) }
+    }
+
+    private func refreshDesktopHistory(_ id: String) {
+        guard let gateway, runtimeIDs[id] != nil else { return }
+        let version = turnVersions[id, default: 0]
+        Task { [weak self] in
+            do {
+                let rows = try await gateway.transcript(id)
+                guard let self, self.turnVersions[id, default: 0] == version, self.conversations[id]?.running == false else { return }
+                let projected = HermesConversation.project(rows)
+                // Keep native transient activity (child rollups, notices) absent from stored history.
+                let transient = self.conversations[id]?.messages.filter { $0.role == "activity" || $0.role == "notice" } ?? []
+                self.conversations[id]?.messages = projected + transient
+                self.publishDesktop(id)
+            } catch { /* Live reply remains visible if history is temporarily unavailable. */ }
+        }
+    }
+
+    private func scheduleDesktopListRefresh() {
+        guard sessionListRefresh == nil else { return }
+        sessionListRefresh = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard let self else { return }
+            defer { self.sessionListRefresh = nil }
+            let revision = self.sessionRevision
+            if let listed = try? await self.listHermesSessions() {
+                self.mergeSessions(listed, requestedAtRevision: revision)
+                self.reconcileProjects()
+            }
+        }
+    }
+
+    private func receiveHermesRequest(_ frame: JSONValue) {
+        guard let gateway, let question = HermesConversation.question(frame) else { return }
+        let desktopOnly = ["preview.read", "preview.act", "terminal.read", "window.read", "tour"]
+        if desktopOnly.contains(question.method) {
+            // Let an attached Desktop window answer its own GUI requests.
+            Task { try? await gateway.decline(id: question.id, code: 4404, message: "This phone does not own the Hermes Desktop window.") }
+            return
+        }
+        let supported = HermesQuestion.supported
+        guard supported.contains(question.method) else {
+            Task { try? await gateway.decline(id: question.id, message: "This Hermes request is not supported by this client: \(question.method)") }
+            return
+        }
+        guard let id = runtimeIDs.first(where: { $0.value == question.sessionID })?.key else {
+            if !attaching.isEmpty { bufferedRequests.append(frame) }
+            return
+        }
+        if conversations[id]?.questions.contains(where: { $0.id == question.id }) == false { conversations[id]?.questions.append(question) }
+        publishDesktop(id)
+    }
+
+    func answerHermes(_ question: HermesQuestion, result: JSONValue) async {
+        guard let gateway else { return }
+        do {
+            if question.method == "connection" {
+                _ = try await gateway.call("connection.respond", ["profile": .string(configuration?.hermesProfile ?? "default"), "op_id": question.params["op_id"], "owner": .object(["type": .string("session"), "session_id": .string(question.sessionID)]), "result": result])
+                return // The server's connection.update is authoritative.
+            }
+            let reply = try await gateway.call("request.answer", ["id": .string(question.id), "result": result])
+            if let id = runtimeIDs.first(where: { $0.value == question.sessionID })?.key {
+                conversations[id]?.questions.removeAll { $0.id == question.id }
+                if reply["status"].string == "expired" { conversations[id]?.notice("This request has already ended.") }
+                publishDesktop(id)
+            }
+        } catch { show(error) }
+    }
+
+    func openHermesChild(_ id: String) async { await selectDesktopSession(id) }
+
+    private func publishDesktop(_ id: String) {
+        guard selectedSessionID == id else { return }
+        let conversation = conversations[id] ?? HermesConversation()
+        messages = conversation.messages
+        hermesQuestions = conversation.questions
+        hermesControl = conversation.control
+        isRunning = conversation.running
+        status = conversation.status
+        approvals = []
+    }
+}
+
+extension SquircleModel {
+    func performHermesControl(_ action: String) async {
+        guard let gateway, let id = selectedSessionID, let runtime = runtimeIDs[id] else { return }
+        do {
+            let result = try await gateway.call("session.control", ["session_id": .string(runtime), "action": .string(action)])
+            conversations[id]?.control = result["control"]
+            if let text = result["dispatch"]["output"].string, !text.isEmpty { conversations[id]?.notice(text) }
+            publishDesktop(id)
+        } catch { show(error) }
+    }
+}
+
+
+extension SquircleModel {
+    func hermesAttachment(_ reference: String) async throws -> URL {
+        guard let gateway, let id = selectedSessionID else { throw ClientError.configuration }
+        return try await gateway.attachment(reference, sessionID: id)
     }
 }

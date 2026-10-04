@@ -45,7 +45,7 @@ Control and diagnostic bearer tokens are separate. Expiring URL tickets authoriz
 
 ## Existing integration surfaces
 
-- **Client:** use Hermes's documented Sessions/Runs HTTP APIs and SSE, including history, approvals, cancellation, and capability discovery. Keep stable session/run IDs and reconcile after reconnect. The generic Chat Completions endpoint alone is insufficient as the persistence design. [API documentation](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server/)
+- **Client:** use the stock Hermes Desktop WebSocket JSON-RPC protocol (`hermes serve`, `/api/ws`). Native sessions, full tool events, requests, background replies and controls replace the limited Sessions/Runs adapter in the personal build. [Protocol support and limits](hermes-client.md).
 - **Agent discovery:** a short skill can teach coordinators to use the CLI. OpenClaw already has shell execution and skills; actual access to the Mac executable, signing environment, and permissions must be verified. [OpenClaw exec](https://docs.openclaw.ai/tools/exec), [skills](https://docs.openclaw.ai/tools/skills)
 - **Optional Hermes plugin:** useful for hooks, notifications, tool registration, or proxying domain endpoints onto one gateway address. Its documented API can add routes, but the plugin should delegate to the neutral core. [Plugin guide](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/)
 - **Optional MCP:** add an adapter only if a client benefits. Do not duplicate build logic in it. [MCP support](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp)
@@ -55,12 +55,13 @@ CLI portability does not automatically make the native chat client compatible wi
 Custom routes need explicit authentication. Diagnostic upload credentials must not grant agent-control access. Installation downloads use URL authorization compatible with the system installer. This Mac's private HTTPS routes are configured and tested.
 
 The personal client bundles the existing connection configuration during signing.
-It uses Hermes's required API key and Squircle's existing credentials directly;
-there is no manual token screen, pairing protocol, scoped-token subsystem or new
-gateway wrapper. These were explicitly rejected as unnecessary setup. The stock
-Hermes API runs on loopback port 8642 and Squircle on port 8787, reached through
-private Tailscale HTTPS ports 8444 and 8443. Hermes uses its stock environment
-overlay from `.squircle/hermes-runtime`; the private settings remain local.
+Stock Hermes native authentication and the iOS Keychain handle chat credentials;
+Squircle retains its independent build/diagnostic credentials. There is no manual
+token form or new gateway wrapper. With explicit approval, this Mac's private
+HTTPS 8444 route targets stock `hermes serve` on loopback 9119; Desktop's
+**Mac Hermes** connection uses the same server and default profile. Squircle
+remains on loopback 8787 via HTTPS 8443. See the [native client details](hermes-client.md)
+for lifecycle, migration and upstream limitations.
 
 Run builds outside request handlers. Keep artifacts and complete logs in dedicated persistent storage, independent of the agent's tool-result previews.
 

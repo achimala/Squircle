@@ -7,8 +7,14 @@ struct AppConfiguration: Decodable {
     let squircleToken: String
     let diagnosticToken: String
     let agentInstructions: String?
+    let desktopURL: URL?
+    let desktopToken: String?
+    let desktopRefreshToken: String?
+    let hermesProfile: String
 
     enum CodingKeys: String, CodingKey {
+        case desktopRefreshToken = "hermes_desktop_refresh_token"
+        case desktopURL = "hermes_desktop_url", desktopToken = "hermes_desktop_token", hermesProfile = "hermes_profile"
         case hermesURL = "hermes_url", hermesToken = "hermes_token"
         case squircleURL = "squircle_url", squircleToken = "squircle_token"
         case diagnosticToken = "diagnostic_token", agentInstructions = "agent_instructions"
@@ -21,6 +27,11 @@ struct AppConfiguration: Decodable {
         hermesToken = try Self.credential(values.decode(String.self, forKey: .hermesToken))
         squircleToken = try Self.credential(values.decode(String.self, forKey: .squircleToken))
         diagnosticToken = try Self.credential(values.decode(String.self, forKey: .diagnosticToken))
+        desktopURL = try values.decodeIfPresent(String.self, forKey: .desktopURL).map(Self.origin)
+        desktopToken = try values.decodeIfPresent(String.self, forKey: .desktopToken).map(Self.credential)
+        desktopRefreshToken = try values.decodeIfPresent(String.self, forKey: .desktopRefreshToken).map(Self.credential)
+        guard (desktopURL == nil) == (desktopToken == nil) else { throw ClientError.configuration }
+        hermesProfile = try values.decodeIfPresent(String.self, forKey: .hermesProfile) ?? "default"
         agentInstructions = try values.decodeIfPresent(String.self, forKey: .agentInstructions)
     }
 

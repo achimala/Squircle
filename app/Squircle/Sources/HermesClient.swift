@@ -32,6 +32,10 @@ struct ChatMessage: Identifiable, Equatable {
     var content: String
     var isStreaming = false
     var tools: [String] = []
+    var detail: String = ""
+    var activity: String?
+    var failed = false
+    var childSessionID: String?
 }
 
 struct AppBuild: Identifiable, Decodable, Equatable {
@@ -91,7 +95,7 @@ struct AgentApproval: Identifiable, Equatable {
 }
 
 /// JSON content can be text or multimodal blocks. Reasoning fields are never projected.
-enum JSONValue: Decodable {
+enum JSONValue: Codable, Equatable {
     case string(String), number(Double), bool(Bool), object([String: JSONValue]), array([JSONValue]), null
     init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer()
@@ -102,6 +106,26 @@ enum JSONValue: Decodable {
         else if let v = try? value.decode([String: JSONValue].self) { self = .object(v) }
         else { self = .array(try value.decode([JSONValue].self)) }
     }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null: try c.encodeNil()
+        case .string(let v): try c.encode(v)
+        case .number(let v): try c.encode(v)
+        case .bool(let v): try c.encode(v)
+        case .object(let v): try c.encode(v)
+        case .array(let v): try c.encode(v)
+        }
+    }
+    var bool: Bool { if case .bool(let v) = self { return v }; return false }
+    var int: Int? { if case .number(let v) = self { return Int(v) }; return nil }
+    var formatted: String {
+        if let string { return string }
+        if self == .null { return "" }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return (try? String(data: encoder.encode(self), encoding: .utf8)) ?? ""
+    }
+    subscript(_ key: String) -> JSONValue { object[key] ?? .null }
     var string: String? { if case .string(let value) = self { return value }; return nil }
     var object: [String: JSONValue] { if case .object(let value) = self { return value }; return [:] }
     var array: [JSONValue] { if case .array(let value) = self { return value }; return [] }
