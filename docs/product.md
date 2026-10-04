@@ -37,7 +37,7 @@ The user stopped the image-judge iteration workflow and requested a working prev
 
 ## Still open
 
-- Version 3 app-catalog publication, live texture refresh, archive/export and physical installation/launch are verified. Version 4's 29 unit tests and navigation checks pass; final checks of the committed layout, rendered motion and phone update remain pending. See [evidence](validation.md).
+- Version 4's 29 unit tests, navigation checks, archive/export, real preview publication and physical installation/launch pass. Simulator transition frames were inspected; physical-device frame-rate profiling remains unmeasured. See [evidence](validation.md).
 - Real-phone offline diagnostic recovery and actual phone crash upload/symbolication; the simulator crash path is verified.
 - How much independent worker-session control the client needs; this determines whether Paseo adds value.
 - Notification delivery while the iOS client is suspended, onboarding polish, and future support for other users/multiple hosts.

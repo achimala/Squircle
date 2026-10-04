@@ -4,9 +4,9 @@ Build and iterate on iOS apps from your iPhone. **The native app talks to stock 
 
 ## Current state
 
-The [native app](app/Squircle/README.md) has persistent conversations, streamed responses/tool progress, approvals, stop, and installable builds. Version **0.1.0 (3)** is the latest installed phone build. This personal build includes its Mac connection settings: **no token form, pairing flow or additional agent backend**.
+The [native app](app/Squircle/README.md) has persistent conversations, streamed responses/tool progress, approvals, stop, and installable builds. Version **0.1.0 (4)** is installed and launched on the phone. This personal build includes its Mac connection settings: **no token form, pairing flow or additional agent backend**.
 
-The current **version 4** interface uses a horizontal live 3D app picker, a minimal flat thread list and a secondary builds sheet. UIKit moves the actual phone, app title and controls through spatial transitions with interactive back navigation; there are no screen fades or explanatory panels. Real screenshots and agent-editable app metadata persist on the Mac. **29 unit tests and the navigation test pass. Final checks of the committed layout changes, rendered motion and the phone update remain pending.** [Design decisions](docs/product.md), [test evidence and limits](docs/validation.md).
+The current **version 4** interface uses a horizontal live 3D app picker, a minimal flat thread list and a secondary builds sheet. UIKit moves the actual phone, app title and controls through spatial transitions with interactive back navigation; there are no screen fades or explanatory panels. Real screenshots and agent-editable app metadata persist on the Mac. **29 unit tests and navigation checks pass on the final code. Simulator transition frames were inspected; signed build 4 was installed and launched on the connected iPhone, with a new launch acknowledgement received by the Mac.** [Design decisions](docs/product.md), [test evidence and limits](docs/validation.md).
 
 **Verified on 2026-10-04:** cellular installation, automatic native-app launch acknowledgement on the Mac, live Hermes API interaction, signed builds and matching symbols, and real simulator crash recovery/symbolication. [Evidence and remaining checks](docs/validation.md). The Probe remains a diagnostic test fixture, separate from the app.
 

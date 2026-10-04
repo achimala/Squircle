@@ -6,11 +6,11 @@ list. Builds live in a secondary sheet. App names and actual thread content carr
 the interface; glass is reserved for controls. The actual phone, title and
 controls move between screens, with interactive back navigation and no fades.
 
-Signed **0.1.0 (3)** remains the latest installed phone build. Its simulator
-preview refresh and automatic phone launch reporting are verified. Version 4
-has passed 29 unit tests and navigation checks, including interactive back
-cancellation and completion. The final committed-layout rerun, rendered-motion
-check and device update remain pending. See [validation](../../docs/validation.md).
+Signed **0.1.0 (4)** is installed and launched on the physical iPhone. The final
+code passed 29 unit tests and navigation checks, including interactive back
+cancellation and completion. Simulator transition frames were inspected; real
+screenshot publication and the phone's automatic launch report are verified.
+See [validation](../../docs/validation.md) for evidence and recording limits.
 
 Hermes retains conversation history; the Mac app catalog owns app names,
 summaries and preview artifacts. Local client state holds navigation, thread
@@ -47,8 +47,8 @@ own configuration. Hermes's normal required API authentication stays intact.
   invented artwork. There is no SwiftUI.
 - `Tests/` and `UITests/`: 29 unit tests and version 4 navigation checks pass,
   covering picker swipes, back cancellation/completion, thread and builds sheets.
-  Earlier live tests cover Hermes chat/relaunch and signed builds. The latest
-  layout changes are undergoing their final rerun.
+  Earlier live tests cover Hermes chat/relaunch. The final signed archive,
+  export, simulator capture and physical installation/launch also succeeded.
 
 Keep the Mac and external Tailscale connection available.
 

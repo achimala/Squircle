@@ -1,6 +1,6 @@
 # Architecture
 
-Status: UIKit client, stock Hermes API integration and Rust build/diagnostic core implemented, updated 2026-10-04. Phone installation/launch is verified through version 3, together with persistent app metadata, real screenshot refresh and simulator transition inspection. Version 4's unit and navigation checks pass; final committed-layout, rendered-motion and device checks remain pending. See [evidence](validation.md).
+Status: UIKit client, stock Hermes API integration and Rust build/diagnostic core implemented, updated 2026-10-04. Signed version 4 is installed and launched on the phone. Persistent app metadata, real screenshot refresh, navigation checks and simulator transition inspection are verified. See [evidence](validation.md).
 
 ## Ownership
 

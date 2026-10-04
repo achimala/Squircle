@@ -155,22 +155,49 @@ than summarized away.
 **Device acceptance:** the updated build was subsequently installed and launched
 on the connected physical phone; see the version 3 evidence below.
 
-## Version 4 interaction checks
+## Version 4 picker, motion and physical installation
 
-**29 unit tests passed** (`.verification/picker-v4-tests.log`). The navigation
-test in `.verification/PickerV4Final.xcresult` passed picker swipes, app opening,
+Final source `07e725f` passed **29 unit tests and the navigation test** in
+`.verification/PickerV4ReleaseCheck.xcresult`: picker swipes, app opening,
 short-edge cancellation, full-edge back, reopening, existing thread/builds sheets
-and normal back navigation. Frame inspection then found an opaque transition
-container hiding neighboring apps until the transition ended. Passing interaction
-assertions had not established visual continuity.
+and normal back. Thread/chat content remains real; test history was not replaced
+with design fixtures. Earlier checks in `PickerV4Final` and `PickerV4Accepted`
+exposed hierarchy and visible-transition defects before the final run.
 
-After clearing that container, fixing a stale destination-preview race and
-removing chat empty-state prose, the full navigation test passed again in
-`.verification/PickerV4Accepted.xcresult`. UI revision `07e725f` also includes
-transform-safe layout using bounds and center. Its unit/navigation rerun is
-underway in `.verification/PickerV4ReleaseCheck.xcresult`; final rendered-motion
-inspection remains pending. Version 3 is still the latest installed phone build.
-No version 4 archive, phone update or launch acknowledgement is claimed yet.
+Sequential simulator frames were inspected for the live phone/title transport,
+neighbor motion, cancellation and final handoff. Fixes preserve the presenting
+window hierarchy, use a transparent transition container, avoid assigning frames
+to transformed controls, and preserve a newer destination screenshot arriving
+mid-transition. The empty-chat explanation was removed too.
+
+Evidence: `.verification/picker-v4-release-motion.mp4`, `picker-v4-release-frames/`,
+`picker-v4-release-screens/`, and the matching gesture/motion audit JSON files.
+The recording has irregular and some non-monotonic timestamps, so it does not
+establish rendered frame pacing. The apparent interactive-finalization gap spans
+recording gaps longer than the measured **167.95 ms** settling interval; the
+normal dismissal has continuous geometry and the same endpoint. Main-run-loop
+cadence was mostly 16.67 ms, with some longer intervals; this is not a GPU or
+physical-phone FPS measurement.
+
+Job `204882db-9d4e-4fff-8411-f14aefbd42c3` archived/exported **0.1.0 (4)** from clean
+revision `e96e80e`, then built, launched and captured its simulator counterpart.
+Automatic preview publication succeeded; afterward the agent selected the actual
+verified thread-list PNG as the featured app preview. Build capture remains
+attached to the job. Preview source is `current_working_tree`.
+
+Archive and exported IPA signatures verify. Distribution team: `2F26US4NAU`.
+Archive, IPA and dSYM share arm64 UUID `F7BCE3FC-2636-3FDA-9B1E-05A8E8165A42`.
+IPA SHA-256: `9aff08ce073cfc746f14584004c479502fce54632e5c61c20b2efef739705b1f`.
+Evidence: `.verification/squircle-v4-final-status.json`, `squircle-v4-signing-proof.json`
+and `squircle-v4-featured-preview.json`.
+
+CoreDevice installed the exported app on the connected iPhone 17 Pro Max and
+activated it as PID **87961**. New launch event
+`b02f220d-289c-4a96-ab7b-1f62ebf9a68b` arrived at timestamp **1791143307**, distinct
+from the simulator launch at 1791143175. Evidence:
+`.verification/squircle-v4-phone-install.json`, `squircle-v4-phone-launch.json`,
+`squircle-v4-phone-launch-events.json`. This verifies a connected-phone update,
+not a new cellular test or a physical-device animation-performance measurement.
 
 ## Signed version 0.1.0 (3)
 
@@ -214,6 +241,7 @@ and launch, not a new cellular installation test or physical-device frame-rate t
 | `05d980f6-be8c-4e21-acb5-f82971f7db37` | Signed native client installed; automatic phone launch event received and chat confirmed |
 | `f3b5440a-81f7-4511-9b5b-c795265420f7` | UIKit build-button test submitted a real signed archive/export; clean source `70e53d0` |
 | `a8cc8e8e-ece9-4d8a-9a8a-1af3a3082a5e` | Signed 0.1.0 (3), exported IPA and automatic simulator preview/catalog update succeeded; clean source `95ab906` |
+| `204882db-9d4e-4fff-8411-f14aefbd42c3` | Signed 0.1.0 (4), automatic preview, physical installation and launch succeeded; clean source `e96e80e` |
 
 These jobs were submitted through the CLI or native app to the real service. Their records,
 build logs, result bundles and outputs are retained under `.squircle/jobs/<ID>/`.
@@ -266,7 +294,7 @@ This exposed and fixed uppercase Swift UUID rejection at the server boundary.
 Still unverified:
 
 - Phone app-log collection, offline/reconnect recovery and actual phone crash upload/symbolication.
-- Version 4 installation/launch and distinguishing feedback from the previous build.
+- Feedback association beyond the verified per-build launch events.
 - Coding-worker delegation and OpenClaw invocation in their actual environments.
 - Packaged Mac startup supervision and suspended-client notifications.
 

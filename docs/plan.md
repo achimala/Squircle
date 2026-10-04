@@ -1,10 +1,9 @@
 # Implementation plan
 
 Status on 2026-10-04: the Mac build service, stock Hermes API and native client
-work together. Version 3 is installed on the phone. Version 4's picker/thread
-redesign has passed 29 unit tests and navigation checks. The final committed
-layout, rendered motion and device update remain under verification. Exact
-evidence is in [validation](validation.md).
+work together. Version 4's minimal picker/thread interface is installed and
+launched on the phone. The final code passed 29 unit tests and navigation checks;
+rendered simulator motion was inspected. Exact evidence is in [validation](validation.md).
 
 ## Completed foundation
 
@@ -26,22 +25,19 @@ evidence is in [validation](validation.md).
   live 3D transition inspection, automatic capture and connected-phone
   install/launch passed. This was not a new cellular installation test.
 
-## 1 Verify the version 4 interaction and device update
+## 1 Completed: version 4 interaction and device update
 
-Version 4 implements a horizontal live 3D app picker → minimal flat threads,
-with builds in a secondary sheet. Actual phone/title/control views move spatially
-with interactive back navigation. There are no fades, explanatory panels or
-placeholder prose. Metadata remains available to agents; the device displays
-only real screenshots.
+The horizontal live 3D app picker opens a flat thread list; builds occupy a
+secondary sheet. Actual phone/title/control views move spatially with
+interactive back navigation. Explanatory panels and empty-state prose are gone.
+Metadata remains available to agents; the device displays real screenshots.
 
-**Passed:** picker swipes, opening an app, interactive back cancellation and
-completion, reopening, existing thread/builds sheets and normal back navigation.
-
-**Pending:** finish the rerun after the last layout changes, inspect rendered
-motion frame by frame, then sign, install and confirm version 4's launch
-acknowledgement. Preserve the working chat/build/install flows. Passing
-interaction assertions alone does not establish visual continuity. Continue
-functional verification without image judges.
+Passed: picker swipes, opening, back cancellation/completion, reopening, thread
+and builds sheets, normal back, signed archive/export, automatic simulator
+capture, connected-phone installation and launch acknowledgement. Frame
+inspection found and drove fixes for hierarchy/layout issues. Capture timestamp
+irregularities limit frame-pacing conclusions; physical-device FPS is unmeasured.
+Continue functional verification without image judges.
 
 ## 2 Complete phone feedback and worker verification
 
