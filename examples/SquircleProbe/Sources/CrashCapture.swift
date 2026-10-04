@@ -3,7 +3,13 @@ import Darwin
 import Foundation
 
 @MainActor
-final class CrashCapture {
+protocol CrashReporting {
+    func recover(into queue: PersistentEventQueue) throws -> Bool
+    func enable(buildID: String) throws
+}
+
+@MainActor
+final class CrashCapture: CrashReporting {
     struct Context: Codable {
         let buildID: String
         let eventID: String
@@ -38,6 +44,9 @@ final class CrashCapture {
     }
 
     func enable(buildID: String) throws {
+        guard !buildID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ProbeError("A build ID is required before crash capture can start.")
+        }
         guard let reporter else { throw ProbeError("Crash reporter unavailable.") }
         guard !reporter.hasPendingCrashReport() else { throw ProbeError("Recover the previous crash before enabling another capture.") }
         guard !Self.debuggerAttached else { throw ProbeError("Debugger attached. Stop Xcode and open the app manually to test crash capture.") }

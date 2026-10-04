@@ -17,24 +17,54 @@ final class ProbeModel: ObservableObject {
 
     private var queue: PersistentEventQueue?
     private let transport = DiagnosticsTransport()
-    private let crash = CrashCapture()
+    private let crash: any CrashReporting
+    private let defaults: UserDefaults
     private var sentLaunchFor: String?
     private var savedOrigin = ""
     private var savedToken = ""
     private var savedBuildID = ""
 
-    init() {
-        let defaults = UserDefaults.standard
+    init(defaults: UserDefaults = .standard, embeddedBuildID: String? = nil,
+         queueFile: URL? = nil, crash: (any CrashReporting)? = nil,
+         readToken: () throws -> String = TokenStore.read) {
+        self.defaults = defaults
+        self.crash = crash ?? CrashCapture()
         serverOrigin = defaults.string(forKey: "serverOrigin") ?? ""
-        let embedded = Bundle.main.object(forInfoDictionaryKey: "SquircleBuildID") as? String ?? ""
+        let embedded = embeddedBuildID ?? Bundle.main.object(forInfoDictionaryKey: "SquircleBuildID") as? String ?? ""
         buildID = embedded.isEmpty ? defaults.string(forKey: "buildID") ?? "" : embedded
         do {
-            token = try TokenStore.read()
-            let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            queue = try PersistentEventQueue(file: folder.appendingPathComponent("SquircleProbe/events.json"))
-            recoverCrash()
-            refresh()
+            let file: URL
+            if let queueFile {
+                file = queueFile
+            } else {
+                let folder = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                file = folder.appendingPathComponent("SquircleProbe/events.json")
+            }
+            queue = try PersistentEventQueue(file: file)
+            savedBuildID = buildID.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Recovery precedes capture; neither depends on credentials, HTTPS
+            // setup, or Keychain availability.
+            if savedBuildID.isEmpty { prepareCrashCapture() } else { saveBuildIdentity() }
+        } catch { status = error.localizedDescription }
+        do {
+            token = try readToken()
             if !serverOrigin.isEmpty && !token.isEmpty && !buildID.isEmpty { saveConfiguration() }
+        } catch { status = error.localizedDescription }
+    }
+
+    func saveBuildIdentity() {
+        do {
+            guard queue != nil else { throw ProbeError("Queue unavailable; no events will be discarded.") }
+            let cleanID = buildID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanID.isEmpty else { throw ProbeError("Enter the build ID before enabling capture.") }
+            savedBuildID = cleanID
+            defaults.set(cleanID, forKey: "buildID")
+            prepareCrashCapture()
+            if sentLaunchFor != cleanID {
+                try enqueue(.launch, message: "Squircle Probe launched")
+                sentLaunchFor = cleanID
+            }
+            status = "Build identity saved. Events remain on device until the connection is configured."
         } catch { status = error.localizedDescription }
     }
 
@@ -50,23 +80,9 @@ final class ProbeModel: ObservableObject {
             try TokenStore.write(cleanToken)
             savedOrigin = serverOrigin.trimmingCharacters(in: .whitespacesAndNewlines)
             savedToken = cleanToken
-            savedBuildID = cleanID
-            UserDefaults.standard.set(savedOrigin, forKey: "serverOrigin")
-            UserDefaults.standard.set(savedBuildID, forKey: "buildID")
-            recoverCrash()
-            do {
-                try crash.enable(buildID: savedBuildID)
-                canCrash = true
-                crashStatus = "PLCrashReporter ready"
-            } catch {
-                canCrash = false
-                crashStatus = error.localizedDescription
-            }
+            defaults.set(savedOrigin, forKey: "serverOrigin")
+            saveBuildIdentity()
             status = "Configuration saved. Token is in Keychain."
-            if sentLaunchFor != savedBuildID {
-                try enqueue(.launch, message: "Squircle Probe launched")
-                sentLaunchFor = savedBuildID
-            }
             Task { await retry() }
         } catch { status = error.localizedDescription }
     }
@@ -83,13 +99,13 @@ final class ProbeModel: ObservableObject {
 
     func retry() async {
         guard !sending, let queue else { return }
+        prepareCrashCapture()
         guard !savedToken.isEmpty, !savedBuildID.isEmpty else { status = "Save a diagnostics connection before uploading."; return }
         sending = true
         defer { sending = false; refresh() }
         do {
             let endpoint = try DiagnosticsTransport.endpoint(savedOrigin)
             let credential = savedToken
-            recoverCrash()
             while let event = queue.events.first {
                 try await transport.send(event, to: endpoint, token: credential)
                 try queue.acknowledge(event.id)
@@ -107,7 +123,7 @@ final class ProbeModel: ObservableObject {
     }
 
     private func enqueue(_ kind: DiagnosticEvent.Kind, message: String) throws {
-        guard let queue, !savedBuildID.isEmpty else { throw ProbeError("Save the build ID and connection first.") }
+        guard let queue, !savedBuildID.isEmpty else { throw ProbeError("Save the build ID first.") }
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
         try queue.append(DiagnosticEvent(buildID: savedBuildID, kind: kind, message: message,
                                          attributes: ["bundle_id": Bundle.main.bundleIdentifier ?? "", "app_version": version]))
@@ -115,11 +131,24 @@ final class ProbeModel: ObservableObject {
         refresh()
     }
 
-    private func recoverCrash() {
+    private func prepareCrashCapture() {
         guard let queue else { return }
         do {
-            if try crash.recover(into: queue) { crashStatus = "Previous crash recovered into upload queue." }
-        } catch { crashStatus = error.localizedDescription }
+            let recovered = try crash.recover(into: queue)
+            let identity = savedBuildID
+            guard !identity.isEmpty else {
+                crashStatus = recovered ? "Previous crash queued. Enter a build ID to enable capture." : "Enter a build ID to enable crash capture."
+                canCrash = false
+                refresh()
+                return
+            }
+            try crash.enable(buildID: identity)
+            canCrash = true
+            crashStatus = recovered ? "Previous crash queued. PLCrashReporter ready." : "PLCrashReporter ready"
+        } catch {
+            canCrash = false
+            crashStatus = error.localizedDescription
+        }
         refresh()
     }
 

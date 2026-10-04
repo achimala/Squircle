@@ -28,6 +28,16 @@ struct ProbeView: View {
                     Text("A small probe for your remote iOS development loop.")
                         .foregroundStyle(.secondary)
                 }
+                Section("Build identity") {
+                    TextField("Build ID from Squircle", text: $model.buildID)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("buildID")
+                    Button("Save build ID & enable capture", action: model.saveBuildIdentity)
+                        .disabled(model.sending)
+                    Text("Capture starts automatically when this build embeds its ID. Upload settings can be added later.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("Diagnostics connection") {
                     TextField("HTTPS server origin", text: $model.serverOrigin)
                         .keyboardType(.URL)
@@ -38,10 +48,6 @@ struct ProbeView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .accessibilityIdentifier("diagnosticToken")
-                    TextField("Build ID from Squircle", text: $model.buildID)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .accessibilityIdentifier("buildID")
                     Button("Save & report launch", action: model.saveConfiguration)
                         .disabled(model.sending)
                 }

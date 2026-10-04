@@ -16,7 +16,7 @@ xcodebuild -project SquircleProbe.xcodeproj -scheme SquircleProbe \
 
 The project declares team `2F26US4NAU` (Dreamslate Inc.) and bundle ID `ai.dreamslate.SquircleProbe`. `ExportOptions.plist` selects Xcode's `release-testing` export method for registered devices. Device signing/export requires valid certificates and profiles; this scaffold does not create or update them. Do not add `-allowProvisioningUpdates` without coordinating that setup.
 
-Optionally pass `SQUIRCLE_BUILD_ID=<id>` when archiving to embed the server build ID; otherwise enter the ID in the app. Preserve the archive/dSYMs for that exact binary. Run queue and transport tests against an available simulator:
+Pass `SQUIRCLE_BUILD_ID=<id>` when archiving to embed the server build ID; otherwise enter and save the ID in the app. Capture starts as soon as that identity is known, independently of the server URL, token or Keychain availability. Preserve the archive/dSYMs for that exact binary. Run queue and transport tests against an available simulator:
 
 ```sh
 xcodebuild -project SquircleProbe.xcodeproj -scheme SquircleProbe \
@@ -27,7 +27,7 @@ xcodebuild -project SquircleProbe.xcodeproj -scheme SquircleProbe \
 ## Exercise the loop
 
 1. Install the exported build on the phone through Squircle's OTA page, with Wi-Fi disabled. Open it manually.
-2. Enter the HTTPS **origin**, the **diagnostic** bearer token (never an agent/admin key), and the build ID returned by Squircle. Save. A launch event is queued and sent.
+2. Confirm the embedded build ID, or enter and save the ID returned by Squircle. A launch event is queued even while offline. Enter the HTTPS **origin** and **diagnostic** bearer token (never an agent/admin key); save the connection to upload queued events.
 3. Send a recognizable log. With networking unavailable, enqueue another; reconnect and tap Retry or foreground the app.
 4. With no debugger attached, confirm **Crash this probe**. Relaunch manually. PLCrashReporter recovers its actual crash report; the app queues it with its original build ID and uploads it. Symbolicate using the matching dSYM UUIDs on the Mac.
 
@@ -43,6 +43,8 @@ Integration into another app: reuse the event schema, queue, transport and Keych
 
 ## Validation status
 
-Validated 2026-10-04 with Xcode **27.1 (27A9269)**: unsigned simulator build succeeded; **5 unit tests passed** on an isolated iPhone 18 Pro / iOS 27.0 simulator. They cover durable replay and deduplication, capacity retention, event limits, explicit acknowledgement, and HTTPS endpoint validation. Test results: `.build/Tests.xcresult` (local, ignored).
+Validated 2026-10-04 with Xcode **27.1 (27A9269)**: unsigned simulator build succeeded; **8 unit tests passed** on an isolated iPhone 18 Pro / iOS 27.0 simulator. They cover durable replay and deduplication, capacity retention, event limits, explicit acknowledgement, HTTPS endpoint validation, capture without connection credentials, Keychain failure, and recovery failure. Test results: `.build/CaptureTests.xcresult` (local, ignored).
 
-Signed archive/export now succeeds for Dreamslate; the exported signature verifies and its dSYM UUID matches. See [validation evidence](../../docs/validation.md). Physical installation, cellular HTTPS routing, crash capture/relaunch and actual Mac symbolication remain **pending**. The crash code compiled against the pinned library; the unit tests do not prove the actual crash/recovery loop.
+An actual simulator process was launched without a debugger, sent SIGABRT at its verified PID, and relaunched. PLCrashReporter recovered one report into the durable queue without a configured URL/token, preserving build ID `74efd708-a8a4-4cc9-abbc-924b53164569`. The app/report arm64 UUID matches `1673459F-0F2B-3870-81A7-53F15D66C77F`. Squircle symbolication and an independent `atos` check resolve the app's `main` frame and the reporter's exception thread. The optimized Swift entry point reports line 0; this is not proof of arbitrary app source-line resolution. Reports and symbolication output are under the repository's ignored `.verification/probe-simulator-74efd708-*` paths.
+
+Signed archive/export also succeeds for Dreamslate; see [validation evidence](../../docs/validation.md). **Physical cellular installation and app-originated launch/log/crash uploads remain pending.** The simulator recovery above does not prove the phone's network or installation path.

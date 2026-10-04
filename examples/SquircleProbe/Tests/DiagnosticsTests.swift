@@ -57,4 +57,55 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertEqual(try DiagnosticsTransport.endpoint("https://example.test:8443").absoluteString,
                        "https://example.test:8443/v1/diagnostics")
     }
+
+    @MainActor
+    func testKnownBuildStartsCaptureAndQueuesLaunchWithoutNetworkCredentials() throws {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let capture = RecordingCrashReporter()
+        let file = folder.appendingPathComponent("events.json")
+        let model = ProbeModel(defaults: defaults, embeddedBuildID: "embedded-build", queueFile: file,
+                               crash: capture, readToken: { "" })
+        XCTAssertTrue(model.serverOrigin.isEmpty)
+        XCTAssertTrue(model.token.isEmpty)
+        XCTAssertTrue(model.canCrash)
+        XCTAssertEqual(capture.identities.last, "embedded-build")
+        let queued = try PersistentEventQueue(file: file).events
+        XCTAssertEqual(queued.count, 1)
+        XCTAssertEqual(queued.first?.kind, .launch)
+        XCTAssertEqual(queued.first?.buildID, "embedded-build")
+    }
+
+    @MainActor
+    func testKeychainFailureDoesNotDisableCaptureForKnownBuild() {
+        let capture = RecordingCrashReporter()
+        let model = ProbeModel(defaults: UserDefaults(suiteName: UUID().uuidString)!,
+                               embeddedBuildID: "offline-build", queueFile: folder.appendingPathComponent("events.json"),
+                               crash: capture, readToken: { throw ProbeError("Keychain unavailable") })
+        XCTAssertTrue(model.canCrash)
+        XCTAssertEqual(capture.identities.last, "offline-build")
+        XCTAssertEqual(model.status, "Keychain unavailable")
+    }
+
+    @MainActor
+    func testUnrecoveredCrashPreventsNewCaptureAndRemainsVisible() {
+        let capture = RecordingCrashReporter()
+        capture.recoveryError = ProbeError("Previous report retained: queue full")
+        let model = ProbeModel(defaults: UserDefaults(suiteName: UUID().uuidString)!,
+                               embeddedBuildID: "new-build", queueFile: folder.appendingPathComponent("events.json"),
+                               crash: capture, readToken: { "" })
+        XCTAssertFalse(model.canCrash)
+        XCTAssertTrue(capture.identities.isEmpty)
+        XCTAssertEqual(model.crashStatus, "Previous report retained: queue full")
+    }
+}
+
+@MainActor
+private final class RecordingCrashReporter: CrashReporting {
+    var identities: [String] = []
+    var recoveryError: Error?
+    func recover(into queue: PersistentEventQueue) throws -> Bool {
+        if let recoveryError { throw recoveryError }
+        return false
+    }
+    func enable(buildID: String) throws { identities.append(buildID) }
 }
