@@ -152,8 +152,8 @@ These are **simulator main-run-loop intervals**, not GPU timings or proof of
 120 Hz rendering on a physical phone. The opening outliers are retained rather
 than summarized away.
 
-**Pending:** installation and launch acknowledgement on the physical phone for
-the updated signed build.
+**Device acceptance:** the updated build was subsequently installed and launched
+on the connected physical phone; see the version 3 evidence below.
 no successful export or new phone installation is claimed yet.
 
 ## Signed version 0.1.0 (3)
@@ -177,6 +177,15 @@ Evidence: `.verification/squircle-v3-final-status.json`, `squircle-v3-catalog.js
 and `squircle-v3-https-proof.json`. After checking automatic publication, the
 agent selected the previously captured real thread screen as the app's featured
 preview; the build's own capture remains attached to the build.
+
+On the user's request, CoreDevice found the physical iPhone 17 Pro Max connected.
+The exported version 3 app was installed successfully and activated in the
+foreground as PID **87823**. A new launch event
+`aa0ab753-d6dc-4074-a417-1b80a6bf7e68` arrived at timestamp **1791141439**,
+separate from the simulator event at 1791141210. Evidence:
+`.verification/squircle-v3-phone-install.json`, `squircle-v3-phone-launch.json`
+and `squircle-v3-phone-launch-events.json`. This proves a connected-device update
+and launch, not a new cellular installation test or physical-device frame-rate test.
 
 ## Real Xcode jobs through Squircle
 
@@ -243,7 +252,6 @@ Still unverified:
 - Phone app-log collection, offline/reconnect recovery and actual phone crash upload/symbolication.
 - Installing a visible update and distinguishing old/new build feedback.
 - Coding-worker delegation and OpenClaw invocation in their actual environments.
-- Physical-phone installation and launch acknowledgement for version 0.1.0 (3).
 - Packaged Mac startup supervision and suspended-client notifications.
 
 Pairing, manual credential entry, coordinator adapters and additional backend

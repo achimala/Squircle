@@ -41,9 +41,10 @@ The user stopped the image-judge workflow; no further score-driven iterations.
 without relaunch, CLI metadata editing with separate persisted API readback,
 clean tests and frame-by-frame live 3D transition inspection.
 
-**Remaining acceptance:** install the exported **0.1.0 (3)** update on the
-physical phone and confirm its launch acknowledgement. Archive/export, automatic
-simulator capture/catalog update and byte-identical private HTTPS delivery passed. Preserve sending, streaming, reconnecting and installation
+**Device acceptance:** **0.1.0 (3)** was installed and launched on the connected
+physical iPhone through CoreDevice; its new launch event reached the Mac. This
+was a connected-device update, not a new cellular installation test. Archive/export,
+automatic simulator capture/catalog update and byte-identical private HTTPS delivery passed. Preserve sending, streaming, reconnecting and installation
 access. No generated artwork may stand in for a missing capture.
 
 ## 2 Complete phone feedback and worker verification

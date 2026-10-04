@@ -7,7 +7,8 @@ actual app screenshots; app metadata and previews persist on the Mac. Publishing
 a new screenshot through the CLI has updated the visible texture without
 relaunching the client. Opening and closing transitions were inspected frame by
 frame on the simulator, with continuous perspective changes and no blank or
-duplicated phone. Signed **0.1.0 (3)** is exported and ready to install. Its build also captured
+duplicated phone. Signed **0.1.0 (3)** is installed and launched on the connected iPhone,
+with a new launch event received by the Mac. Its build also captured
 the simulator screen and updated the Mac catalog automatically.
 The first client build is already installed and phone chat works.
 
