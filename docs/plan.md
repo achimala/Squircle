@@ -41,9 +41,9 @@ The user stopped the image-judge workflow; no further score-driven iterations.
 without relaunch, CLI metadata editing with separate persisted API readback,
 clean tests and frame-by-frame live 3D transition inspection.
 
-**Remaining acceptance:** finish the **0.1.0 (3)** signed archive now underway,
-install it and confirm its launch
-acknowledgement. Preserve sending, streaming, reconnecting and installation
+**Remaining acceptance:** install the exported **0.1.0 (3)** update on the
+physical phone and confirm its launch acknowledgement. Archive/export, automatic
+simulator capture/catalog update and byte-identical private HTTPS delivery passed. Preserve sending, streaming, reconnecting and installation
 access. No generated artwork may stand in for a missing capture.
 
 ## 2 Complete phone feedback and worker verification

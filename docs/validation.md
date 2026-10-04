@@ -152,9 +152,31 @@ These are **simulator main-run-loop intervals**, not GPU timings or proof of
 120 Hz rendering on a physical phone. The opening outliers are retained rather
 than summarized away.
 
-**Pending:** the updated device archive, installation and launch acknowledgement.
-Signed version **0.1.0 (3)** is underway;
+**Pending:** installation and launch acknowledgement on the physical phone for
+the updated signed build.
 no successful export or new phone installation is claimed yet.
+
+## Signed version 0.1.0 (3)
+
+Job `a8cc8e8e-ece9-4d8a-9a8a-1af3a3082a5e` archived and exported the client
+from clean revision `95ab906`. The same job built its simulator counterpart,
+installed/launched it, captured the actual screen, and published preview
+`bd74d46b-21ef-4b80-8a40-c1569a470162` to the existing app record. The agent-edited
+summary was preserved. Capture source is `current_working_tree`, not a claim
+that the archived binary itself ran in the simulator. The job's observed launch
+was from the **simulator**, not proof of installation on the physical phone.
+
+The private HTTPS install page returned 200; its manifest identified
+`ai.dreamslate.Squircle`. The downloaded **347,184-byte IPA** matched the exported
+file: SHA-256 `110a3548f5a5ded61eb76aed4221d942738210b1301ccdda2a29a1b6c260b74e`.
+Both archive and exported app passed `codesign --verify --deep --strict`; the
+IPA uses Apple Distribution for Dreamslate team `2F26US4NAU`. Archive, exported
+binary and dSYM share arm64 UUID `13CE61CD-7CCD-370E-ABED-BE26F8EE40C1`.
+Signing evidence: `.verification/squircle-v3-signing-proof.json`.
+Evidence: `.verification/squircle-v3-final-status.json`, `squircle-v3-catalog.json`
+and `squircle-v3-https-proof.json`. After checking automatic publication, the
+agent selected the previously captured real thread screen as the app's featured
+preview; the build's own capture remains attached to the build.
 
 ## Real Xcode jobs through Squircle
 
@@ -166,6 +188,7 @@ no successful export or new phone installation is claimed yet.
 | `7e9e1246-ee57-4dd9-8b6f-f070976283a3` | Updated signed Probe; installed/opened on the phone over cellular (user confirmation) |
 | `05d980f6-be8c-4e21-acb5-f82971f7db37` | Signed native client installed; automatic phone launch event received and chat confirmed |
 | `f3b5440a-81f7-4511-9b5b-c795265420f7` | UIKit build-button test submitted a real signed archive/export; clean source `70e53d0` |
+| `a8cc8e8e-ece9-4d8a-9a8a-1af3a3082a5e` | Signed 0.1.0 (3), exported IPA and automatic simulator preview/catalog update succeeded; clean source `95ab906` |
 
 These jobs were submitted through the CLI or native app to the real service. Their records,
 build logs, result bundles and outputs are retained under `.squircle/jobs/<ID>/`.
@@ -220,7 +243,7 @@ Still unverified:
 - Phone app-log collection, offline/reconnect recovery and actual phone crash upload/symbolication.
 - Installing a visible update and distinguishing old/new build feedback.
 - Coding-worker delegation and OpenClaw invocation in their actual environments.
-- The updated signed build's export, installation and launch acknowledgement.
+- Physical-phone installation and launch acknowledgement for version 0.1.0 (3).
 - Packaged Mac startup supervision and suspended-client notifications.
 
 Pairing, manual credential entry, coordinator adapters and additional backend
