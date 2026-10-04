@@ -1,0 +1,456 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		42877F1B73DBC479D27168B1 /* CrashCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = E48325B527550D8E7802E881 /* CrashCapture.swift */; };
+		7FFAC3821800B9EF79062061 /* CrashReporter in Frameworks */ = {isa = PBXBuildFile; productRef = C8A45DDDF9ED6AC00F4A0CD2 /* CrashReporter */; };
+		A7C164315D4AB1A07AEA572F /* ProbeModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 143C44FB30B29CB344964FC5 /* ProbeModel.swift */; };
+		AB96FE38DD1D7BED255CF014 /* DiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F202F3FDD12ED61B5D79189 /* DiagnosticsTests.swift */; };
+		B5D7A30199D8F9EAD31645C6 /* TokenStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA2696E5E96924A7A4E80A02 /* TokenStore.swift */; };
+		D6570DD84D25403DECEFA137 /* DiagnosticEvent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B06F92271743681F9F4BC6E /* DiagnosticEvent.swift */; };
+		D87FDBD50DF2934B0E5DE7DD /* SquircleProbeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBF373F8463F0BFB2A6C45B0 /* SquircleProbeApp.swift */; };
+		F5571BA859A1E998C5765DC7 /* DiagnosticsTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4A39969464EA6B23443B68 /* DiagnosticsTransport.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A964230DE200A020A62F4DD7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A2A2EBAE8BBD1B6CE31B6850 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 59915197D03A87C138FE87A1;
+			remoteInfo = SquircleProbe;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		143C44FB30B29CB344964FC5 /* ProbeModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProbeModel.swift; sourceTree = "<group>"; };
+		724D4D1EDB7DD8F21676CD5D /* SquircleProbe.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SquircleProbe.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7B06F92271743681F9F4BC6E /* DiagnosticEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticEvent.swift; sourceTree = "<group>"; };
+		9F202F3FDD12ED61B5D79189 /* DiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsTests.swift; sourceTree = "<group>"; };
+		AC4A39969464EA6B23443B68 /* DiagnosticsTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsTransport.swift; sourceTree = "<group>"; };
+		CA2696E5E96924A7A4E80A02 /* TokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStore.swift; sourceTree = "<group>"; };
+		DCB9F164531F23811B28E399 /* SquircleProbeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleProbeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E48325B527550D8E7802E881 /* CrashCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashCapture.swift; sourceTree = "<group>"; };
+		FBF373F8463F0BFB2A6C45B0 /* SquircleProbeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleProbeApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		67CB0925961BF3FE7DA53CA0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7FFAC3821800B9EF79062061 /* CrashReporter in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		7FF6BFF2B0AA8896CEC5A216 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				E48325B527550D8E7802E881 /* CrashCapture.swift */,
+				7B06F92271743681F9F4BC6E /* DiagnosticEvent.swift */,
+				AC4A39969464EA6B23443B68 /* DiagnosticsTransport.swift */,
+				143C44FB30B29CB344964FC5 /* ProbeModel.swift */,
+				FBF373F8463F0BFB2A6C45B0 /* SquircleProbeApp.swift */,
+				CA2696E5E96924A7A4E80A02 /* TokenStore.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		8EEB40BAD55080F5FD65F74B /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				9F202F3FDD12ED61B5D79189 /* DiagnosticsTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		DDEFFD2DC1F754F258F52F56 = {
+			isa = PBXGroup;
+			children = (
+				7FF6BFF2B0AA8896CEC5A216 /* Sources */,
+				8EEB40BAD55080F5FD65F74B /* Tests */,
+				EE82ECDC2A72F03016D7A404 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		EE82ECDC2A72F03016D7A404 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				724D4D1EDB7DD8F21676CD5D /* SquircleProbe.app */,
+				DCB9F164531F23811B28E399 /* SquircleProbeTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		59915197D03A87C138FE87A1 /* SquircleProbe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 175EA61D1B150FB066B1D61B /* Build configuration list for PBXNativeTarget "SquircleProbe" */;
+			buildPhases = (
+				B33779B1EC03578017F0601D /* Sources */,
+				67CB0925961BF3FE7DA53CA0 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SquircleProbe;
+			packageProductDependencies = (
+				C8A45DDDF9ED6AC00F4A0CD2 /* CrashReporter */,
+			);
+			productName = SquircleProbe;
+			productReference = 724D4D1EDB7DD8F21676CD5D /* SquircleProbe.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B24938CCD92373462B1BEFCA /* SquircleProbeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 000788E4870B527E41EE6EAF /* Build configuration list for PBXNativeTarget "SquircleProbeTests" */;
+			buildPhases = (
+				8F8410D3C608778812B2B536 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FFB6B2203D86561EEF9EDBA3 /* PBXTargetDependency */,
+			);
+			name = SquircleProbeTests;
+			packageProductDependencies = (
+			);
+			productName = SquircleProbeTests;
+			productReference = DCB9F164531F23811B28E399 /* SquircleProbeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A2A2EBAE8BBD1B6CE31B6850 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					59915197D03A87C138FE87A1 = {
+						DevelopmentTeam = 2F26US4NAU;
+						ProvisioningStyle = Automatic;
+					};
+					B24938CCD92373462B1BEFCA = {
+						DevelopmentTeam = 2F26US4NAU;
+					};
+				};
+			};
+			buildConfigurationList = 31B4728886E695B26EE0C836 /* Build configuration list for PBXProject "SquircleProbe" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = DDEFFD2DC1F754F258F52F56;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				9AC43FBFC25E951EC069F4AB /* XCRemoteSwiftPackageReference "plcrashreporter" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = EE82ECDC2A72F03016D7A404 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				59915197D03A87C138FE87A1 /* SquircleProbe */,
+				B24938CCD92373462B1BEFCA /* SquircleProbeTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8F8410D3C608778812B2B536 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AB96FE38DD1D7BED255CF014 /* DiagnosticsTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B33779B1EC03578017F0601D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				42877F1B73DBC479D27168B1 /* CrashCapture.swift in Sources */,
+				D6570DD84D25403DECEFA137 /* DiagnosticEvent.swift in Sources */,
+				F5571BA859A1E998C5765DC7 /* DiagnosticsTransport.swift in Sources */,
+				A7C164315D4AB1A07AEA572F /* ProbeModel.swift in Sources */,
+				D87FDBD50DF2934B0E5DE7DD /* SquircleProbeApp.swift in Sources */,
+				B5D7A30199D8F9EAD31645C6 /* TokenStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FFB6B2203D86561EEF9EDBA3 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 59915197D03A87C138FE87A1 /* SquircleProbe */;
+			targetProxy = A964230DE200A020A62F4DD7 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		02E5635A7FD561440981B07F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 2F26US4NAU;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SQUIRCLE_BUILD_ID = "";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		35670F8BEF5E6281A4F08DA0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleProbeTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SquircleProbe.app/SquircleProbe";
+			};
+			name = Debug;
+		};
+		9BBB1C7D57E88BB3A35D13EC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 2F26US4NAU;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SQUIRCLE_BUILD_ID = "";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A43E0E30D3FB992563C552FD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				INFOPLIST_FILE = Generated/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleProbe;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		E4F487BA8E3B33C0E3A5FF82 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				INFOPLIST_FILE = Generated/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleProbe;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		EAA62E832B1D9150DEC8AC10 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleProbeTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SquircleProbe.app/SquircleProbe";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		000788E4870B527E41EE6EAF /* Build configuration list for PBXNativeTarget "SquircleProbeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				35670F8BEF5E6281A4F08DA0 /* Debug */,
+				EAA62E832B1D9150DEC8AC10 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		175EA61D1B150FB066B1D61B /* Build configuration list for PBXNativeTarget "SquircleProbe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A43E0E30D3FB992563C552FD /* Debug */,
+				E4F487BA8E3B33C0E3A5FF82 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		31B4728886E695B26EE0C836 /* Build configuration list for PBXProject "SquircleProbe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				02E5635A7FD561440981B07F /* Debug */,
+				9BBB1C7D57E88BB3A35D13EC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		9AC43FBFC25E951EC069F4AB /* XCRemoteSwiftPackageReference "plcrashreporter" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/microsoft/plcrashreporter.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.12.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C8A45DDDF9ED6AC00F4A0CD2 /* CrashReporter */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 9AC43FBFC25E951EC069F4AB /* XCRemoteSwiftPackageReference "plcrashreporter" */;
+			productName = CrashReporter;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A2A2EBAE8BBD1B6CE31B6850 /* Project object */;
+}
