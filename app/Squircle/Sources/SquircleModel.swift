@@ -20,7 +20,8 @@ final class SquircleModel: ObservableObject {
     @Published private(set) var providers: [JSONValue] = []
     @Published private(set) var devices: JSONValue = .null
     @Published private(set) var requests: [JSONValue] = []
-    @Published var modelSelection: JSONValue = .null
+    @Published private(set) var modelSelection: JSONValue = .null
+    private var pendingModelSelections: [String:JSONValue] = [:]
     var hostName: String { configuration?.t3URL.host ?? "Your Mac" }
     let configuration: AppConfiguration?
     let gateway: T3Gateway?
@@ -110,20 +111,34 @@ final class SquircleModel: ObservableObject {
     func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
     func selectSession(_ id: String) async {
-        guard let gateway else { return }
         selectedSessionID = id; messages = []; requests = []; state = T3ThreadState()
+        if let pending = pendingModelSelections[id] { modelSelection = pending }
+        guard let gateway else { return }
         await gateway.unsubscribe(threadSubscription); threadSubscription = nil
         do {
             threadSubscription = try await gateway.subscribe("orchestration.subscribeThread", .from(["threadId":id])) { [weak self] item in
                 guard let self, selectedSessionID == id else { return }
-                state.consume(item); messages = state.messages; requests = state.pendingRequests
-                isRunning = ["running","starting"].contains(state.thread["session"]["status"].string ?? "")
-                if state.thread["modelSelection"] != .null { modelSelection = state.thread["modelSelection"] }
-                status = isRunning ? "Working" : "Connected"
-                if let last = state.thread["session"]["lastError"].string { error = last }
+                consumeThread(item)
             }
             error = nil
         } catch { self.error = error.localizedDescription }
+    }
+    func chooseModel(_ selection: JSONValue) {
+        modelSelection = selection
+        if let id = selectedSessionID { pendingModelSelections[id] = selection }
+    }
+    func consumeThread(_ item: JSONValue) {
+        state.consume(item); messages = state.messages; requests = state.pendingRequests
+        isRunning = ["running","starting"].contains(state.thread["session"]["status"].string ?? "")
+        let saved = state.thread["modelSelection"]
+        if let id = selectedSessionID, let pending = pendingModelSelections[id] {
+            // Live activity still carries the previous server selection until T3
+            // accepts a turn with this choice. Preserve the composer's draft.
+            if saved == pending { pendingModelSelections.removeValue(forKey:id) }
+            modelSelection = pending
+        } else if saved != .null { modelSelection = saved }
+        status = isRunning ? "Working" : "Connected"
+        if let last = state.thread["session"]["lastError"].string { error = last }
     }
     private func dispatch(_ command: [String:Any]) async throws {
         guard let gateway else { throw ClientError.configuration }

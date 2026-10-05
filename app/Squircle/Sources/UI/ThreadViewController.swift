@@ -137,7 +137,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         let sheet = UIAlertController(title:provider["displayName"].string,message:nil,preferredStyle:.actionSheet)
         for m in provider["models"].array {
             sheet.addAction(UIAlertAction(title:m["name"].string ?? m["slug"].string,style:.default) { [weak self] _ in
-                self?.model.modelSelection = .from(["instanceId":provider["instanceId"].string ?? "","model":m["slug"].string ?? ""])
+                self?.model.chooseModel(.from(["instanceId":provider["instanceId"].string ?? "","model":m["slug"].string ?? ""]))
             })
         }
         sheet.addAction(UIAlertAction(title:"Cancel",style:.cancel)); show(sheet,from:agent)

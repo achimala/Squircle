@@ -2,6 +2,32 @@ import XCTest
 @testable import Squircle
 
 final class T3Tests: XCTestCase {
+    @MainActor
+    func testProviderChoiceSurvivesActivityReconnectAndThreadNavigation() async {
+        let model = SquircleModel(configuration:nil)
+        let codex = JSONValue.from(["instanceId":"codex","model":"gpt-6.1-sol"])
+        let claude = JSONValue.from(["instanceId":"claudeAgent","model":"claude-fable-5-1"])
+        func snapshot(_ selection:JSONValue, sequence:Int) -> JSONValue {
+            .from(["kind":"snapshot","snapshot":["snapshotSequence":sequence,"thread":["modelSelection":selection.foundation]]])
+        }
+        await model.selectSession("first")
+        model.consumeThread(snapshot(codex,sequence:1))
+        model.chooseModel(claude)
+        model.consumeThread(.from(["kind":"event","event":["sequence":2,"type":"thread.session-set","payload":["session":["status":"ready"]]]]))
+        XCTAssertEqual(model.modelSelection,claude)
+        model.consumeThread(snapshot(codex,sequence:3))
+        XCTAssertEqual(model.modelSelection,claude)
+        await model.selectSession("second")
+        model.consumeThread(snapshot(codex,sequence:4))
+        XCTAssertEqual(model.modelSelection,codex)
+        await model.selectSession("first")
+        model.consumeThread(snapshot(codex,sequence:5))
+        XCTAssertEqual(model.modelSelection,claude)
+        model.consumeThread(snapshot(claude,sequence:6))
+        // After T3 acknowledges the choice, future server changes are authoritative.
+        model.consumeThread(snapshot(codex,sequence:7))
+        XCTAssertEqual(model.modelSelection,codex)
+    }
     func testAVCCHandlesFragmentedAndCoalescedHTTPBytes() throws {
         let packets = Data([0,0,0,4,1,11,12,13, 0,0,0,3,2,21,22, 0,0,0,2,3,31])
         for split in 0...packets.count {

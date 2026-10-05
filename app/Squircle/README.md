@@ -44,8 +44,8 @@ xcodebuild -project app/Squircle/Squircle.xcodeproj -scheme Squircle \
 
 Live tests intentionally create clearly labelled verification threads in this
 repository's T3 project. They ask the selected provider to run `pwd` and return a
-marker, without editing files. Run the Claude test separately after subscription
-login is restored. The separate continuous-frame test requires a changing simulator surface and
+marker, without editing files. Claude subscription login and its real round trip were verified outside the
+agent sandbox on 2026-10-05. The separate continuous-frame test requires a changing simulator surface and
 `SQUIRCLE_VERIFY_STREAM_MOTION=1`; it skips by default. Run tests in a separate
 simulator from the streamed target: Xcode can reboot its runner, while T3 retains
 capture until its own `device.shutdown` is called. The isolated runner created
@@ -71,8 +71,14 @@ presentation. Physical-phone decoder creation requires hardware acceleration.
 Native pinch, exclusive input ownership and measured cellular latency/bandwidth
 remain unverified/unimplemented.
 
-Current signed build: **0.2.0 (13)**, job
-`073cf325-1bfa-4466-8de6-5f0531204934`. CoreDevice directly installed it on the
+Current signed build: **0.2.0 (14)**, job
+`99f5eb12-42fa-43a2-9edf-1f9558134da5`.
+Build 14 fixes provider selection being overwritten by live thread updates.
+Its selection regression and live Claude tool/reply tests passed; direct phone
+installation succeeded. Manual launch of build 14 remains pending.
+
+Build 13, job `073cf325-1bfa-4466-8de6-5f0531204934`:
+ CoreDevice directly installed it on the
 paired iPhone, and its manual-launch acknowledgement arrived. Nine targeted tests passed on the final source, with actual native
 H.264 rendering/touch checked separately. The user confirmed the phone experience works well; quantitative response latency
 remains unmeasured. See [migration evidence](../../docs/t3-native-migration.md).

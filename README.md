@@ -7,7 +7,7 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
-**2026-10-05: native T3 replacement implemented, version 0.2.0 (13).**
+**2026-10-05: native T3 replacement implemented, version 0.2.0 (14).**
 The active iPhone target no longer contains Hermes transport or worker-log polling.
 The independently installed Hermes and T3 were not changed.
 
@@ -38,8 +38,8 @@ physical-phone response latency remains outstanding.
 T3's host can retain a stale capture after a simulator reboot. Its supported
 shutdown/open API restored live capture; transport reconnection alone cannot
 identify a stale image on an otherwise valid idle connection. Do not auto-reboot
-an agent's simulator. Claude subscription login and complete physical-phone/crash
-recovery checks remain outstanding.
+an agent's simulator. Claude subscription login and a real T3 reply are verified in build 14’s source.
+Complete physical-phone/crash recovery checks remain outstanding.
 
 ## For development
 
@@ -82,3 +82,8 @@ See the evidence page for the scope of rendered transition checks.
 
 Start with [AGENTS.md](AGENTS.md). Historical Hermes validation describes earlier
 builds and is not evidence that this replacement passed those checks.
+
+**Build 14 provider correction:** local provider choices survive live events,
+reconnects and thread navigation until T3 acknowledges the choice. The targeted
+regression and live Claude tool/reply tests passed; signed build 14 was installed
+on the paired iPhone. Manual launch of build 14 remains pending.

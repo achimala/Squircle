@@ -306,3 +306,23 @@ and stopping testing. This is a successful manual phone check; quantitative
 phone input-to-visible latency and cellular bandwidth remain unmeasured.
 No new navigation geometry was introduced; the earlier rendered motion evidence
 is retained, without claiming another physical-phone visual audit.
+
+## Provider-selection correction: 2026-10-05, build 14
+
+Every thread subscription update copied the persisted model into the composer,
+which reset a local Claude choice to the thread’s previous Codex selection. The
+client now retains an explicit choice per thread until the server acknowledges
+it. Live activity, reconnect snapshots and navigating away/back preserve that
+choice; after acknowledgement, server changes become authoritative again.
+
+Two targeted native tests passed, zero failures, in
+`/tmp/squircle-provider-live-test.log`: selection regression across activity,
+reconnect and thread navigation; real Claude tool execution/reply and persisted
+history in thread `6157c318-6538-4ebb-b2bf-14330b211a71`.
+An initial sandboxed `claude auth status` incorrectly suggested signed-out state.
+Outside the sandbox, the installed CLI confirmed Claude Max subscription login,
+and T3 successfully executed the real turn. No login or server changes were needed.
+
+Signed 0.2.0 (14), job `99f5eb12-42fa-43a2-9edf-1f9558134da5`,
+was installed successfully on the paired iPhone with CoreDevice. Manual launch
+and the user’s phone check remain pending. No navigation geometry changed.
