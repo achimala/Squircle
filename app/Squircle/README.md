@@ -1,89 +1,78 @@
-# Squircle iPhone app
+# Native Squircle iPhone client
 
-A UIKit/Core Animation client for the user's independently installed Hermes.
-**Version 0.1.0 (9) source** is a first-principles redesign: one lit 3D stage
-shows every app on a real device with its actual published screenshot. Opening
-an app moves that same device to the top of its workspace (a flat list of real
-Hermes threads); a single interruptible spring drives SceneKit and UIKit, and
-the left-edge back gesture can grab, reverse or finish it at any frame. Builds
-and Add App are native sheets; close, back, Builds, New Thread, compose/send,
-approvals and the connection pill use Liquid Glass (iOS 26 APIs with material
-fallbacks). Light and dark appearance, Dynamic Type, Reduce Motion (no turning,
-receding or lift; short direct moves) and VoiceOver labels are supported. Apps
-without a capture show an honest dark "No screenshot yet" display.
+UIKit/Core Animation client for the user's existing stock **T3 Code 0.0.45**
+server. T3 owns agent processes, projects, threads, live activity and persistence.
+Squircle's Rust service owns builds, installation links, app metadata and launch
+diagnostics. The Hermes integration has been removed from the active target.
 
-Installed on the physical iPhone: **version 9**, verified by `devicectl` after
-installation from commit `564428f`. It adds live delegated Claude/Codex activity.
-The version 9 manual-launch acknowledgement remains pending. Native tool/question/heartbeat/reconnect tests and chat
-UI/relaunch tests pass on the simulator; opening/closing motion was inspected
-frame by frame. Physical-device motion is unmeasured. See
-[validation](../../docs/validation.md).
+## Personal connection
 
-Hermes retains conversation history; the Mac app catalog owns app names,
-summaries and preview artifacts. Local client state holds navigation, thread
-associations and active-run pointers for reconnecting. No coordinator,
-memory service or pairing backend is embedded.
+The ignored `.squircle/client-t3.json` supplies these keys:
 
-## Add an existing app
-
-Tap **+**, browse the Mac or paste an `.xcodeproj`/`.xcworkspace` path, choose
-the scheme and app name, then tap **Add**. The Mac saves the app identity and
-build recipe; no first CLI build is required. Import opens the app without
-building it. Use its builds sheet when ready; a real screenshot appears after
-capture or agent publication.
-
-This flow passed real Mac import, folder/scheme selection, error recovery and
-relaunch checks and is included in installed version 5. A missing signing team can appear as a warning
-without blocking import, but a successful device build still requires Xcode's
-signing setup. See the [CLI/API contract](../../docs/cli.md#import-an-existing-app).
-
-## Build
-
-The XcodeGen project uses Dreamslate team `2F26US4NAU` and bundle ID
-`ai.dreamslate.Squircle`. Generate with `xcodegen generate` in this directory.
-From the repository root, use the running Squircle service:
-
-```sh
-./target/release/squircle --data-dir "$PWD/.squircle" build start \
-  --project app/Squircle/Squircle.xcodeproj --scheme Squircle \
-  --export-options app/Squircle/ExportOptions.plist --json
+```json
+{
+  "t3_url": "https://your-existing-t3-origin",
+  "t3_token": "YOUR_PAIRED_T3_SESSION",
+  "squircle_url": "https://your-existing-build-origin",
+  "squircle_token": "YOUR_BUILD_SERVICE_CREDENTIAL",
+  "diagnostic_token": "YOUR_UPLOAD_CREDENTIAL"
+}
 ```
 
-The personal build reads `.squircle/client.json` during its build phase. That
-ignored file supplies `hermes_url`, `hermes_token`, `squircle_url`,
-`squircle_token`, `diagnostic_token`, and optional `agent_instructions`. It is
-already configured on this Mac. Values are copied into the signed app; they are
-not entered by the phone user or committed to Git. A different host needs its
-own configuration. The personal build also supplies the native Desktop URL, access/refresh credential
-and profile. Stock authentication and TLS stay enabled; renewed credentials go
-to the iOS Keychain. See [connection details](../../docs/hermes-client.md).
+Use T3's ordinary pairing CLI/token exchange, scoped to `orchestration:read
+orchestration:operate`. Do not borrow the desktop's session or mutate T3's
+SQLite store. The current paired session expires after 30 days; when it expires,
+create a new standard pairing and rebuild the personal client. Self-service
+pairing/refresh UI is not implemented yet. This personal build embeds private
+connection credentials; do not distribute its IPA to others.
 
-## Implementation
+The paired session is stored in the iPhone Keychain. HTTPS requests reject
+redirects. RPC and input WebSockets use freshly minted short-lived tickets.
+Tailscale is external and user-managed; the app does not install or configure it.
 
-- `HermesGateway.swift`, `HermesConversation.swift`, `HermesQuestionPanel.swift`:
-  stock Desktop WebSocket protocol, full tool details, requests, native controls,
-  replay and shared Desktop sessions. [Supported messages and limits](../../docs/hermes-client.md).
-- `HermesClient.swift`, `SquircleModel.swift`, `AppProject.swift`: Squircle
-  app/build/import APIs and a legacy chat adapter for older configurations.
-- `Sources/UI/DeviceStage.swift`: one `SCNView` for all devices; hardware geometry is
-  built once and flattened, each device only owns its display material. Renders on
-  change or while a gesture/transition is live; never idles continuously.
-- `StageLayout.swift` (pure gallery/workspace/transition poses), `SpringDriver.swift`
-  (retargetable spring, finger takeover), `ScreenshotBinding.swift` (PNG decode and
-  downsample off the main thread), `StudioViewController.swift` (gallery + navigation),
-  `WorkspaceViewController.swift`, `ThreadViewController.swift`, `BuildsViewController.swift`,
-  `AppImportViewController.swift`, `Theme.swift`. DEBUG-only `MotionAudit` and
-  `SQUIRCLE_SCRUB`/`SQUIRCLE_DEMO` hooks support frame capture; absent from Release.
-- `Tests/` and `UITests/`: 62 deterministic unit tests, two opt-in native Hermes
-  integration tests, navigation, rapid
-  interruption, Reduce Motion, import, Hermes round-trip, build, visual tour,
-  accessibility audit and comparable performance probes.
+## Build and validate
 
-Keep the Mac and external Tailscale connection available.
+```sh
+xcodegen generate --spec app/Squircle/project.yml
+xcodebuild -project app/Squircle/Squircle.xcodeproj -scheme Squircle \
+  -destination 'platform=iOS Simulator,id=YOUR_SEPARATE_TEST_RUNNER' \
+  -only-testing:SquircleTests -skip-testing:SquircleTests/T3LiveTests/testClaudeRoundTrip test
+./target/release/squircle --data-dir .squircle build start \
+  --project app/Squircle/Squircle.xcodeproj --scheme Squircle \
+  --export-options app/Squircle/ExportOptions.plist --allow-provisioning-updates --json
+```
 
-After changing an app's UI, capture and inspect its actual simulator screenshot.
-Use `squircle app list` to find the persistent app ID, `app update ID --summary
-TEXT` to record its current state, and `app preview ID --file PATH --caption
-TEXT` to publish the PNG independently of a build. See the [CLI contract](../../docs/cli.md#app-metadata-and-previews)
-for provenance and timestamp semantics. The user stopped the image-judge loop;
-verify the working capture, metadata and live-motion path instead.
+Live tests intentionally create clearly labelled verification threads in this
+repository's T3 project. They ask the selected provider to run `pwd` and return a
+marker, without editing files. Run the Claude test separately after subscription
+login is restored. The separate continuous-frame test requires a changing simulator surface and
+`SQUIRCLE_VERIFY_STREAM_MOTION=1`; it skips by default. Run tests in a separate
+simulator from the streamed target: Xcode can reboot its runner, while T3 retains
+capture until its own `device.shutdown` is called. The isolated runner created
+for this check is `35024ED8-E5BF-4DD7-9F25-DDEE9771EC44` (SquircleTransportTests).
+The stream soak verifies paired input/video recovery, duplicate start, cancelled
+startup and a quiet 31-second interval. Deterministic tests cover target validation,
+live delta replay, touch coordinates and preserved app/motion logic.
+
+`T3Gateway` implements Effect RPC; `T3ThreadState` reduces snapshots/events.
+`T3DeviceStream` owns one native H.264 connection and an input socket as a pair.
+Video starts before the input handshake; only interactive state enables touch.
+Decode is serial/off the UI thread with one newest frame waiting. A stopped stream
+cannot retain a live channel, and a channel owns its gesture queue. Background and
+navigation release the pair; returning reconnects the saved target. Hide remains
+hidden until explicitly chosen again. The simulator menu includes T3's supported
+restart for stale host captures; restarting closes its running apps. See
+[architecture](../../docs/architecture.md) for lifecycle states and boundaries.
+
+Video is AVCC H.264 over T3's authenticated HTTPS feed; touch uses WSS. There
+are no MJPEG playback, priming or fallback requests. VideoToolbox decodes one
+frame at a time off the main actor; only the newest decoded picture waits for
+presentation. Physical-phone decoder creation requires hardware acceleration.
+Native pinch, exclusive input ownership and measured cellular latency/bandwidth
+remain unverified/unimplemented.
+
+Current signed build: **0.2.0 (13)**, job
+`073cf325-1bfa-4466-8de6-5f0531204934`. CoreDevice directly installed it on the
+paired iPhone, and its manual-launch acknowledgement arrived. Nine targeted tests passed on the final source, with actual native
+H.264 rendering/touch checked separately. The user confirmed the phone experience works well; quantitative response latency
+remains unmeasured. See [migration evidence](../../docs/t3-native-migration.md).

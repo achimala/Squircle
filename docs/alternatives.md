@@ -1,6 +1,14 @@
 # Alternatives and why they are deferred
 
-Research snapshot: **2026-10-04**. These are architectural judgments from primary documentation and source, not performance benchmarks or validation of an end-to-end Mac/iPhone setup.
+Latest research: **2026-10-05**. The user's direct-agent/live-simulator request
+changes the recommendation to a trial of **stock T3 Code**, keeping the Squircle
+CLI for signed builds and installation. Its stable v0.0.45 device guide documents
+remote simulator streaming/control, including mobile access. See the
+[replacement plan](direct-agents-plan.md) for versioned sources, gaps and acceptance
+checks. The historical comparison below predates this direction; T3 and Paseo are
+no longer deferred merely because Hermes was previously selected.
+
+Historical research snapshot: **2026-10-04**. These are architectural judgments from primary documentation and source, not performance benchmarks or validation of an end-to-end Mac/iPhone setup.
 
 ## Accepted direction
 

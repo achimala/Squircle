@@ -1,6 +1,13 @@
 # Product decisions
 
-Status: accepted direction from the conversation, recorded 2026-10-04. Implementation choices remain provisional where marked.
+Status: the user changed the intended experience on **2026-10-05** to direct
+coding-agent selection, live work/simulator visibility, optional remote simulator
+interaction, and finished phone builds. Hermes coordination is no longer a
+requirement for the new path. The user accepted a fresh native client on stock T3,
+reusing the build/install core and useful motion code. [Migration](t3-native-migration.md),
+[research and trial](direct-agents-plan.md).
+The decisions below describe the previous direction and current implementation;
+the replacement has not been implemented or tested.
 
 ## Intended experience
 

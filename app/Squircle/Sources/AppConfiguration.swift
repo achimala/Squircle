@@ -1,61 +1,36 @@
 import Foundation
 
 struct AppConfiguration: Decodable {
-    let hermesURL: URL
-    let hermesToken: String
+    let t3URL: URL
+    let t3Token: String
     let squircleURL: URL
     let squircleToken: String
     let diagnosticToken: String
-    let agentInstructions: String?
-    let desktopURL: URL?
-    let desktopToken: String?
-    let desktopRefreshToken: String?
-    let hermesProfile: String
-
     enum CodingKeys: String, CodingKey {
-        case desktopRefreshToken = "hermes_desktop_refresh_token"
-        case desktopURL = "hermes_desktop_url", desktopToken = "hermes_desktop_token", hermesProfile = "hermes_profile"
-        case hermesURL = "hermes_url", hermesToken = "hermes_token"
+        case t3URL = "t3_url", t3Token = "t3_token"
         case squircleURL = "squircle_url", squircleToken = "squircle_token"
-        case diagnosticToken = "diagnostic_token", agentInstructions = "agent_instructions"
+        case diagnosticToken = "diagnostic_token"
     }
-
     init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        hermesURL = try Self.origin(values.decode(String.self, forKey: .hermesURL))
-        squircleURL = try Self.origin(values.decode(String.self, forKey: .squircleURL))
-        hermesToken = try Self.credential(values.decode(String.self, forKey: .hermesToken))
-        squircleToken = try Self.credential(values.decode(String.self, forKey: .squircleToken))
-        diagnosticToken = try Self.credential(values.decode(String.self, forKey: .diagnosticToken))
-        desktopURL = try values.decodeIfPresent(String.self, forKey: .desktopURL).map(Self.origin)
-        desktopToken = try values.decodeIfPresent(String.self, forKey: .desktopToken).map(Self.credential)
-        desktopRefreshToken = try values.decodeIfPresent(String.self, forKey: .desktopRefreshToken).map(Self.credential)
-        guard (desktopURL == nil) == (desktopToken == nil) else { throw ClientError.configuration }
-        hermesProfile = try values.decodeIfPresent(String.self, forKey: .hermesProfile) ?? "default"
-        agentInstructions = try values.decodeIfPresent(String.self, forKey: .agentInstructions)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        t3URL = try Self.origin(c.decode(String.self, forKey: .t3URL))
+        squircleURL = try Self.origin(c.decode(String.self, forKey: .squircleURL))
+        t3Token = try Self.credential(c.decode(String.self, forKey: .t3Token))
+        squircleToken = try Self.credential(c.decode(String.self, forKey: .squircleToken))
+        diagnosticToken = try Self.credential(c.decode(String.self, forKey: .diagnosticToken))
     }
-
-    static func load(bundle: Bundle = .main) throws -> AppConfiguration {
-        guard let url = bundle.url(forResource: "client", withExtension: "json") else {
-            throw ClientError.configuration
-        }
-        do { return try JSONDecoder().decode(Self.self, from: Data(contentsOf: url)) }
-        catch { throw ClientError.configuration }
+    static func load(bundle: Bundle = .main) throws -> Self {
+        guard let url = bundle.url(forResource: "client", withExtension: "json") else { throw ClientError.configuration }
+        return try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
     }
-
     private static func origin(_ text: String) throws -> URL {
-        guard let parts = URLComponents(string: text), parts.scheme == "https",
-              let host = parts.host, !host.isEmpty,
-              parts.user == nil, parts.password == nil, parts.query == nil,
-              parts.fragment == nil, parts.path.isEmpty || parts.path == "/",
-              let url = parts.url else { throw ClientError.configuration }
+        guard let c = URLComponents(string: text), c.scheme == "https", c.host != nil,
+              c.user == nil, c.password == nil, c.query == nil, c.fragment == nil,
+              c.path.isEmpty || c.path == "/", let url = c.url else { throw ClientError.configuration }
         return url
     }
-
     private static func credential(_ text: String) throws -> String {
-        guard !text.isEmpty, text.utf8.allSatisfy({ $0 > 32 && $0 < 127 }) else {
-            throw ClientError.configuration
-        }
+        guard !text.isEmpty, text.utf8.allSatisfy({ $0 > 32 && $0 < 127 }) else { throw ClientError.configuration }
         return text
     }
 }

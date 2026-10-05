@@ -153,7 +153,7 @@ final class BuildsViewController: UIViewController {
     private func createBuild() {
         guard !isSubmitting else { return }
         guard project.canBuild else {
-            let alert = UIAlertController(title: "No build recipe", message: "Ask Hermes in a thread to set up this app’s Xcode build.", preferredStyle: .alert)
+            let alert = UIAlertController(title: "No build recipe", message: "Ask the coding agent in a thread to set up this app’s Xcode build.", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "New Thread", style: .default) { [weak self] _ in self?.onNewThread?() })
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
             present(alert, animated: true)

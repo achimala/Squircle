@@ -2,7 +2,7 @@ import Combine
 import UIKit
 
 /// An app's workspace: its real device at the top of the stage, its name, and
-/// a flat list of actual Hermes threads. Builds live in a secondary sheet.
+/// a flat list of actual the coding agent threads. Builds live in a secondary sheet.
 /// The view is transparent; the device is rendered by the shared stage and
 /// follows this list's scroll position.
 @MainActor
@@ -351,7 +351,7 @@ final class ThreadRow: UIControl {
         let text = date.flatMap { $0.timeIntervalSince1970 > 0 ? Self.formatter.localizedString(for: $0, relativeTo: .now) : nil }
         if dateLabel.text != text { dateLabel.text = text }
         accessibilityLabel = [titleLabel.text, previewLabel.isHidden ? nil : previewLabel.text,
-                              running ? "Hermes is working" : nil, text]
+                              running ? "the coding agent is working" : nil, text]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 

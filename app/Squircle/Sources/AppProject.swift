@@ -152,123 +152,25 @@ struct AppProject: Identifiable, Equatable, Codable {
     }
 }
 
-/// Only app labels and associations are persisted. Build configuration comes
-/// from the Mac on refresh; all conversation content stays in Hermes.
-struct AppProjectCatalog: Codable {
-    struct Entry: Codable {
-        let id: String
-        var name: String
-        let createdAt: Date
-        var bundleID: String?
-        var buildKeys: Set<String>
-        var metadataID: String? = nil
-    }
-    private(set) var entries: [Entry]
-    private(set) var sessionProjects: [String: String] = [:]
-    private(set) var buildProjects: [String: String] = [:]
-    static let homeID = "squircle-home"
-
-    init() {
-        entries = [Entry(id: Self.homeID, name: "Squircle", createdAt: .distantPast, bundleID: nil, buildKeys: [])]
-    }
-
-    mutating func create(name: String, now: Date = .now) -> String {
-        let clean = name.split(whereSeparator: \.isNewline).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-        let id = UUID().uuidString.lowercased()
-        entries.append(Entry(id: id, name: clean.isEmpty ? "Untitled app" : String(clean.prefix(80)), createdAt: now, bundleID: nil, buildKeys: []))
-        return id
-    }
-
-    mutating func assign(sessionID: String, to projectID: String) {
-        guard entries.contains(where: { $0.id == projectID }) else { return }
-        sessionProjects[sessionID] = projectID
-    }
-
-    mutating func assign(buildID: String, to projectID: String) {
-        guard entries.contains(where: { $0.id == projectID }) else { return }
-        buildProjects[buildID] = projectID
-    }
-
-    mutating func reconcile(builds: [AppBuild], sessions: [ChatSession], metadata: [AppMetadata] = []) -> [AppProject] {
-        // Oldest first lets a later successful archive enrich its queued or
-        // failed predecessors without creating a second app card.
-        for build in builds.sorted(by: { $0.date < $1.date }) {
-            let knownID = buildProjects[build.id]
-            let index = entries.firstIndex(where: { $0.id == knownID }) ?? entries.firstIndex { entry in
-                if let key = build.request?.key, entry.buildKeys.contains(key) { return true }
-                if let bundle = build.bundleID, !bundle.isEmpty, entry.bundleID == bundle { return true }
-                return false
-            } ?? uniqueNamedEntry(build.title)
-            let entryIndex: Int
-            if let index { entryIndex = index }
-            else {
-                entries.append(Entry(id: UUID().uuidString.lowercased(), name: build.title, createdAt: build.date, bundleID: build.bundleID, buildKeys: []))
-                entryIndex = entries.count - 1
-            }
-            if let key = build.request?.key { entries[entryIndex].buildKeys.insert(key) }
-            if let bundle = build.bundleID, !bundle.isEmpty { entries[entryIndex].bundleID = bundle }
-            buildProjects[build.id] = entries[entryIndex].id
+/// T3 IDs own navigation and thread membership. The Mac catalog enriches the
+/// matching checkout without deriving identity from app names or chat titles.
+enum T3AppCatalog {
+    static func projects(shell:JSONValue,metadata:[AppMetadata],builds:[AppBuild]) -> [AppProject] {
+        let projects = shell["projects"].array.filter { $0["deletedAt"] == .null }
+        func owner(_ path:String) -> String? {
+            projects.filter {
+                let root = $0["workspaceRoot"].string ?? ""
+                return !root.isEmpty && (path == root || path.hasPrefix(root + "/"))
+            }.max { ($0["workspaceRoot"].string ?? "").count < ($1["workspaceRoot"].string ?? "").count }?["id"].string
         }
-        for record in metadata {
-            let index = entries.firstIndex { $0.metadataID == record.id }
-                ?? entries.firstIndex { $0.buildKeys.contains(record.buildKey) }
-                ?? entries.firstIndex { entry in
-                    guard let bundle = record.bundleID, !bundle.isEmpty else { return false }
-                    return entry.bundleID == bundle
-                }
-                ?? uniqueNamedEntry(record.name)
-            let entryIndex: Int
-            if let index { entryIndex = index }
-            else {
-                entries.append(Entry(id: UUID().uuidString.lowercased(), name: record.name,
-                                     createdAt: Date(timeIntervalSince1970: record.updatedAt),
-                                     bundleID: record.bundleID, buildKeys: []))
-                entryIndex = entries.count - 1
-            }
-            entries[entryIndex].metadataID = record.id
-            entries[entryIndex].name = record.name
-            entries[entryIndex].buildKeys.insert(record.buildKey)
-            if let bundle = record.bundleID, !bundle.isEmpty { entries[entryIndex].bundleID = bundle }
+        return projects.map { p in
+            let id = p["id"].string ?? ""
+            let record = metadata.first { owner($0.project) == id }
+            let related = builds.filter { $0.request.map { owner($0.project) == id } ?? false }
+            let request = record?.buildRequest ?? related.filter { $0.request?.mode == "archive" }.sorted { $0.date > $1.date }.first?.request
+            return AppProject(id:id,name:record?.name ?? p["title"].string ?? "App",subtitle:"",
+                bundleID:record?.bundleID,canBuild:request?.canSubmit ?? false,updatedAt:p["updatedAt"].date,
+                buildRequest:request,metadataID:record?.id,metadataPreview:record?.preview)
         }
-        for session in sessions where sessionProjects[session.id] == nil {
-            let title = session.title.lowercased()
-            let candidates = entries.filter { entry in
-                let name = entry.name.lowercased()
-                return title == name || title.hasPrefix(name + " ") || title.hasPrefix(name + ":") || title.hasPrefix(name + " ·")
-            }
-            sessionProjects[session.id] = candidates.count == 1 ? candidates[0].id : Self.homeID
-        }
-        return entries.map { entry in
-            let appBuilds = builds.filter { buildProjects[$0.id] == entry.id }.sorted { $0.date > $1.date }
-            let appSessions = sessions.filter { sessionProjects[$0.id] == entry.id }
-            let recipes = appBuilds.compactMap(\.request).filter(\.canSubmit)
-            // Device installation is the app's primary loop. A later simulator
-            // check must not replace a known archive/export configuration.
-            let record = metadata.first { $0.id == entry.metadataID }
-            // A registered Mac recipe is authoritative, including before the
-            // first build. Historical jobs only fill in legacy records.
-            let request = record?.buildRequest ?? recipes.first(where: { $0.mode == "archive" }) ?? recipes.first
-            let newest = ([entry.createdAt] + appBuilds.map(\.date) + appSessions.map(\.updatedAt)
-                          + (record.map { [Date(timeIntervalSince1970: $0.updatedAt)] } ?? [])).max() ?? entry.createdAt
-            let fallback = request.map { $0.mode == "archive" ? "Ready for your next build" : "Simulator build configured" }
-                ?? (appBuilds.isEmpty ? "Start with an idea" : "Builds and conversations")
-            let summary = record?.summary.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let subtitle = summary.isEmpty ? fallback : summary
-            return AppProject(id: entry.id, name: entry.name, subtitle: subtitle, bundleID: entry.bundleID,
-                              canBuild: request?.canSubmit == true, updatedAt: newest, buildRequest: request,
-                              metadataID: entry.metadataID, metadataPreview: record?.preview)
-        }.sorted { lhs, rhs in
-            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
-            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
-        }
-    }
-
-    private func uniqueNamedEntry(_ name: String) -> Int? {
-        let normalized = name.lowercased().filter { $0.isLetter || $0.isNumber }
-        let candidates = entries.indices.filter { entries[$0].name.lowercased().filter { $0.isLetter || $0.isNumber } == normalized }
-        // Name matching only attaches unconfigured local ideas (including the
-        // migration home); different known apps may share a display name.
-        guard candidates.count == 1, entries[candidates[0]].buildKeys.isEmpty, entries[candidates[0]].bundleID == nil else { return nil }
-        return candidates[0]
     }
 }

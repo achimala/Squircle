@@ -18,157 +18,42 @@ final class AppProjectTests: XCTestCase {
         return try JSONDecoder().decode(AppBuild.self, from: JSONSerialization.data(withJSONObject: json))
     }
 
-    func testQueuedArchivedAndImportedBuildsResolveToOneAppAndKeepAnotherSeparate() throws {
-        var catalog = AppProjectCatalog()
-        let builds = try [
-            build(id: "queued", title: "Atlas", path: "/src/Atlas.xcworkspace", state: "queued", date: 1),
-            build(id: "archive", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcworkspace", date: 2),
-            build(id: "imported", title: "Atlas", bundle: "test.atlas", date: 3),
-            build(id: "other", title: "Other", bundle: "test.other", path: "/src/Other.xcodeproj", date: 4)
-        ]
-        let projects = catalog.reconcile(builds: builds, sessions: [])
-        let atlas = try XCTUnwrap(projects.first { $0.name == "Atlas" })
-        XCTAssertEqual(projects.filter { $0.name == "Atlas" }.count, 1)
-        XCTAssertEqual(atlas.bundleID, "test.atlas")
-        XCTAssertTrue(atlas.canBuild)
-        XCTAssertEqual(atlas.buildRequest?.project, "/src/Atlas.xcworkspace")
-        XCTAssertEqual(catalog.buildProjects["queued"], atlas.id)
-        XCTAssertEqual(catalog.buildProjects["archive"], atlas.id)
-        XCTAssertEqual(catalog.buildProjects["imported"], atlas.id)
-        XCTAssertNotEqual(catalog.buildProjects["other"], atlas.id)
+    private func shell(_ rows:[[String:Any]]) -> JSONValue { .from(["projects":rows]) }
+    private func metadata(path:String,name:String = "Renamed app",request:AppBuildRequest? = nil) -> AppMetadata {
+        AppMetadata(id:"mac-app",name:name,project:path,scheme:"App",bundleID:"test.app",summary:"",updatedAt:10,preview:nil,buildRequest:request)
     }
-
-    func testLocalIdeaGainsARealRecipeAndExplicitThreadMappingSurvivesRestart() throws {
-        var catalog = AppProjectCatalog()
-        let id = catalog.create(name: "Mood Tracker")
-        var projects = catalog.reconcile(builds: [], sessions: [])
-        let idea = try XCTUnwrap(projects.first { $0.id == id })
-        XCTAssertFalse(idea.canBuild)
-        XCTAssertTrue(idea.agentContext.contains("No Xcode build configuration"))
-        catalog.assign(sessionID: "hermes-thread", to: id)
-        let actual = try build(id: "build", title: "MoodTracker", bundle: "test.mood", path: "/src/MoodTracker.xcodeproj")
-        let sessions = [ChatSession(id: "hermes-thread", title: "Design the empty state")]
-        projects = catalog.reconcile(builds: [actual], sessions: sessions)
-        let configured = try XCTUnwrap(projects.first { $0.id == id })
-        XCTAssertTrue(configured.canBuild)
-        XCTAssertEqual(configured.name, "Mood Tracker")
-        XCTAssertEqual(catalog.buildProjects["build"], id)
-        let bytes = try JSONEncoder().encode(catalog)
-        var restored = try JSONDecoder().decode(AppProjectCatalog.self, from: bytes)
-        _ = restored.reconcile(builds: [actual], sessions: sessions)
-        XCTAssertEqual(restored.sessionProjects["hermes-thread"], id)
-        XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("Design the empty state"), "Catalog persisted conversation content")
+    func testNamesNeverMoveT3ProjectOrThreadIdentity() {
+        let snapshot = shell([["id":"t3-one","title":"Old name","workspaceRoot":"/src/App"]])
+        let first = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/App.xcodeproj")],builds:[])
+        let renamed = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/App.xcodeproj",name:"New name")],builds:[])
+        XCTAssertEqual(first.first?.id,"t3-one"); XCTAssertEqual(renamed.first?.id,"t3-one")
+        XCTAssertEqual(renamed.first?.name,"New name"); XCTAssertFalse(first.first!.canBuild)
     }
-
-    func testExistingNamedChatsMigrateAndAmbiguousNamesStayInSquircle() throws {
-        var catalog = AppProjectCatalog()
-        let actual = try build(id: "atlas", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcodeproj")
-        let projects = catalog.reconcile(builds: [actual], sessions: [
-            ChatSession(id: "specific", title: "Atlas · Development"),
-            ChatSession(id: "unassigned", title: "An unrelated conversation")
-        ])
-        XCTAssertEqual(catalog.sessionProjects["specific"], projects.first { $0.name == "Atlas" }?.id)
-        XCTAssertEqual(catalog.sessionProjects["unassigned"], AppProjectCatalog.homeID)
+    func testNestedCheckoutOwnsItsRecipeAndSimilarPrefixesStaySeparate() throws {
+        let snapshot = shell([["id":"parent","title":"Parent","workspaceRoot":"/src/App"],
+            ["id":"nested","title":"Nested","workspaceRoot":"/src/App/Child"],
+            ["id":"other","title":"Other","workspaceRoot":"/src/AppTwo"]])
+        let b = try build(id:"b",title:"App",path:"/src/App/Child/App.xcodeproj")
+        let rows = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/Child/App.xcodeproj",request:b.request)],builds:[b])
+        XCTAssertNil(rows[0].metadataID); XCTAssertFalse(rows[0].canBuild)
+        XCTAssertEqual(rows[1].metadataID,"mac-app"); XCTAssertTrue(rows[1].canBuild)
+        XCTAssertNil(rows[2].metadataID); XCTAssertFalse(rows[2].canBuild)
     }
-
-    func testSameDisplayNameWithDifferentKnownBundleIdentifiersDoesNotMergeApps() throws {
-        var catalog = AppProjectCatalog()
-        let projects = catalog.reconcile(builds: try [
-            build(id: "a", title: "Demo", bundle: "test.demoA"),
-            build(id: "b", title: "Demo", bundle: "test.demoB", date: 11)
-        ], sessions: [])
-        XCTAssertEqual(projects.filter { $0.name == "Demo" }.count, 2)
-        XCTAssertNotEqual(catalog.buildProjects["a"], catalog.buildProjects["b"])
+    func testSimulatorJobsDoNotReplaceAnInstallableArchiveRecipe() throws {
+        let snapshot = shell([["id":"app","title":"App","workspaceRoot":"/src/App"]])
+        let archive = try build(id:"archive",title:"App",path:"/src/App/App.xcodeproj",date:10)
+        let sim = try build(id:"sim",title:"App",path:"/src/App/App.xcodeproj",date:20,mode:"simulator")
+        let row = T3AppCatalog.projects(shell:snapshot,metadata:[],builds:[archive,sim]).first!
+        XCTAssertTrue(row.canBuild); XCTAssertEqual(row.buildRequest?.mode,"archive")
+        let fresh = row.buildRequest!.freshSubmission(id:"new-request")
+        XCTAssertEqual(fresh.requestID,"new-request"); XCTAssertTrue(fresh.capturePreview)
     }
-
-    func testBuildRecipeContextAndFreshSubmissionKeepExactSettingsWithoutOldRequestID() throws {
-        let actual = try build(id: "build", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcworkspace")
-        let request = try XCTUnwrap(actual.request)
-        let fresh = request.freshSubmission(id: "new-request")
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(fresh)) as? [String: Any])
-        XCTAssertEqual(body["project"] as? String, "/src/Atlas.xcworkspace")
-        XCTAssertEqual(body["mode"] as? String, "archive")
-        XCTAssertEqual(body["request_id"] as? String, "new-request")
-        XCTAssertEqual(body["allow_provisioning_updates"] as? Bool, false)
-        XCTAssertFalse(request.capturePreview, "Legacy requests did not request a screenshot")
-        XCTAssertEqual(body["capture_preview"] as? Bool, true, "A fresh client build should capture its actual screen")
-        var catalog = AppProjectCatalog()
-        let project = try XCTUnwrap(catalog.reconcile(builds: [actual], sessions: []).first { $0.name == "Atlas" })
-        XCTAssertTrue(project.agentContext.contains("test.atlas"))
-        XCTAssertTrue(project.agentContext.contains("Atlas.xcworkspace"))
-        XCTAssertFalse(project.agentContext.contains("old-request"))
-    }
-
-    func testLaterSimulatorVerificationDoesNotReplaceAnInstallableArchiveRecipe() throws {
-        var catalog = AppProjectCatalog()
-        let archive = try build(id: "archive", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcodeproj", date: 1)
-        let simulator = try build(id: "simulator", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcodeproj", date: 2, mode: "simulator")
-        let project = try XCTUnwrap(catalog.reconcile(builds: [archive, simulator], sessions: []).first { $0.name == "Atlas" })
-        XCTAssertEqual(project.buildRequest?.mode, "archive")
-        XCTAssertTrue(project.canBuild)
-    }
-
-    func testMacMetadataUpdatesPreserveExistingProjectAndThreadIdentity() throws {
-        var catalog = AppProjectCatalog()
-        let actual = try build(id: "atlas-build", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcodeproj")
-        let original = try XCTUnwrap(catalog.reconcile(builds: [actual], sessions: []).first { $0.name == "Atlas" })
-        catalog.assign(sessionID: "atlas-thread", to: original.id)
-        let record = try JSONDecoder().decode(AppMetadata.self, from: Data(#"{"id":"app-atlas","name":"Atlas Maps","project":"/src/Atlas.xcodeproj","scheme":"Atlas","bundle_id":"test.atlas","summary":"Offline maps with saved places.","updated_at":1720000000,"preview":{"id":"screen-home","captured_at":1720000000,"build_id":"atlas-build","source_revision":"abc123","caption":"Saved places","source":"agent"}}"#.utf8))
-        let sessions = [ChatSession(id: "atlas-thread", title: "Atlas · Plan maps")]
-        let updated = try XCTUnwrap(catalog.reconcile(builds: [actual], sessions: sessions, metadata: [record]).first { $0.metadataID == record.id })
-        XCTAssertEqual(updated.id, original.id)
-        XCTAssertEqual(updated.name, "Atlas Maps")
-        XCTAssertEqual(updated.subtitle, record.summary)
-        XCTAssertEqual(updated.metadataPreview?.id, "screen-home")
-        XCTAssertEqual(catalog.sessionProjects["atlas-thread"], original.id)
-        XCTAssertEqual(catalog.buildProjects["atlas-build"], original.id)
-        XCTAssertTrue(updated.canBuild)
-        XCTAssertTrue(updated.agentContext.contains("squircle app update app-atlas --summary"))
-        XCTAssertTrue(updated.agentContext.contains("squircle app preview app-atlas --file"))
-        var restored = try JSONDecoder().decode(AppProjectCatalog.self, from: JSONEncoder().encode(catalog))
-        let again = restored.reconcile(builds: [actual], sessions: sessions, metadata: [record])
-        XCTAssertEqual(again.first { $0.metadataID == record.id }?.id, original.id)
-        XCTAssertEqual(restored.sessionProjects["atlas-thread"], original.id)
-    }
-
-    func testMetadataWithoutABuildDoesNotInventAnArchiveRecipe() throws {
-        var catalog = AppProjectCatalog()
-        let localID = catalog.create(name: "Atlas")
-        let record = try JSONDecoder().decode(AppMetadata.self, from: Data(#"{"id":"app-atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"An app in development.","updated_at":1720000000}"#.utf8))
-        let projects = catalog.reconcile(builds: [], sessions: [], metadata: [record])
-        let app = try XCTUnwrap(projects.first { $0.metadataID == record.id })
-        XCTAssertEqual(app.id, localID)
-        XCTAssertEqual(app.subtitle, record.summary)
-        XCTAssertFalse(app.canBuild)
-        XCTAssertNil(app.buildRequest)
-        XCTAssertNil(app.metadataPreview)
-        XCTAssertNil(record.buildRequest, "Existing app records remain decodable without a recipe")
-    }
-
-    func testImportedMetadataRecipeEnablesFirstArchiveAndSurvivesRoundTrip() throws {
-        let record = try JSONDecoder().decode(AppMetadata.self, from: Data(#"{"id":"app-atlas","name":"Atlas","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"","updated_at":1720000000,"build_request":{"project":"/src/Atlas.xcodeproj","scheme":"Atlas","configuration":"Release","mode":"archive","export_options":"/store/apps/atlas/ExportOptions.plist"}}"#.utf8))
-        XCTAssertEqual(try JSONDecoder().decode(AppMetadata.self, from: JSONEncoder().encode(record)), record)
-        var catalog = AppProjectCatalog()
-        let app = try XCTUnwrap(catalog.reconcile(builds: [], sessions: [], metadata: [record]).first { $0.metadataID == record.id })
-        XCTAssertTrue(app.canBuild)
-        XCTAssertEqual(app.buildRequest?.mode, "archive")
-        XCTAssertEqual(app.buildRequest?.exportOptions, "/store/apps/atlas/ExportOptions.plist")
-        XCTAssertTrue(app.agentContext.contains("Known Xcode build configuration"))
-        XCTAssertTrue(app.agentContext.contains("ExportOptions.plist"))
-        XCTAssertFalse(app.agentContext.contains("No Xcode build configuration"))
-    }
-
-    func testMacRecipeOverridesNewerHistoricalSettingsAndKeepsThreadIdentity() throws {
-        var catalog = AppProjectCatalog()
-        let old = try build(id: "old", title: "Atlas", bundle: "test.atlas", path: "/src/Atlas.xcodeproj", date: 200)
-        let original = try XCTUnwrap(catalog.reconcile(builds: [old], sessions: []).first { $0.name == "Atlas" })
-        catalog.assign(sessionID: "thread", to: original.id)
-        let record = try JSONDecoder().decode(AppMetadata.self, from: Data(#"{"id":"app-atlas","name":"Atlas Renamed","project":"/src/Atlas.xcodeproj","scheme":"Atlas","summary":"","updated_at":100,"build_request":{"project":"/src/Atlas.xcodeproj","scheme":"Atlas","configuration":"Beta","mode":"archive","export_options":"/store/current.plist"}}"#.utf8))
-        let app = try XCTUnwrap(catalog.reconcile(builds: [old], sessions: [], metadata: [record]).first { $0.metadataID == record.id })
-        XCTAssertEqual(app.id, original.id)
-        XCTAssertEqual(catalog.sessionProjects["thread"], original.id)
-        XCTAssertEqual(app.buildRequest?.configuration, "Beta")
-        XCTAssertEqual(app.buildRequest?.exportOptions, "/store/current.plist")
-        XCTAssertTrue(app.canBuild)
+    func testImportedMacRecipeOverridesHistoricalBuildSettingsAndDeletedProjectsDisappear() throws {
+        let snapshot = shell([["id":"app","title":"App","workspaceRoot":"/src/App"],
+            ["id":"deleted","title":"Deleted","workspaceRoot":"/src/Deleted","deletedAt":"2026-10-05T10:00:00.000Z"]])
+        let old = try build(id:"old",title:"App",path:"/src/App/App.xcodeproj",scheme:"Old")
+        let imported = try build(id:"import",title:"App",path:"/src/App/App.xcodeproj",scheme:"Current")
+        let rows = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/App.xcodeproj",request:imported.request)],builds:[old])
+        XCTAssertEqual(rows.count,1); XCTAssertEqual(rows.first?.buildRequest?.scheme,"Current")
     }
 }

@@ -281,6 +281,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
             }
             if pose.visible { poses[project.id] = pose }
             if let item = items[project.id] {
+                // Every frame derives every title pose. An app that was opened
+                // previously must not retain its old workspace transform.
+                item.titleLabel.transform = .identity
                 let fade = (1 - abs(offset) * 1.4).clamped()
                 item.titleLabel.alpha = fade
                 item.layer.zPosition = 10 - abs(offset)
@@ -510,11 +513,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
         guard let workspace, presentedViewController == nil, phase == .workspace else { return }
         Theme.selectionHaptic()
         let controller = ThreadViewController(model: model, project: workspace.project, sessionID: sessionID)
-        controller.modalPresentationStyle = .fullScreen
-        controller.preferredTransition = .zoom { [weak workspace, weak model] _ in
+        let navigation = UINavigationController(rootViewController: controller)
+        navigation.modalPresentationStyle = .fullScreen
+        navigation.preferredTransition = .zoom { [weak workspace, weak model] _ in
             workspace?.zoomSource(for: model?.selectedSessionID ?? sessionID)
         }
-        present(controller, animated: true)
+        present(navigation, animated: true)
     }
 
     private func presentBuilds() {
