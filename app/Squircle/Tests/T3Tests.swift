@@ -3,30 +3,118 @@ import XCTest
 
 final class T3Tests: XCTestCase {
     @MainActor
-    func testProviderChoiceSurvivesActivityReconnectAndThreadNavigation() async {
+    func testApprovalModeDefaultsAndSurvivesReconnectAndNavigation() async {
         let model = SquircleModel(configuration:nil)
-        let codex = JSONValue.from(["instanceId":"codex","model":"gpt-6.1-sol"])
-        let claude = JSONValue.from(["instanceId":"claudeAgent","model":"claude-fable-5-1"])
+        XCTAssertEqual(model.runtimeMode, .auto)
+        func snapshot(_ mode:T3RuntimeMode, sequence:Int) -> JSONValue {
+            .from(["kind":"snapshot","snapshot":["snapshotSequence":sequence,"thread":["runtimeMode":mode.rawValue]]])
+        }
+        await model.selectSession("first")
+        model.consumeThread(snapshot(.approvalRequired, sequence:1))
+        XCTAssertEqual(model.runtimeMode, .approvalRequired)
+        model.chooseRuntimeMode(.auto)
+        model.consumeThread(snapshot(.approvalRequired, sequence:2))
+        XCTAssertEqual(model.runtimeMode, .auto)
+        await model.selectSession("second")
+        model.consumeThread(snapshot(.fullAccess, sequence:3))
+        XCTAssertEqual(model.runtimeMode, .fullAccess)
+        await model.selectSession("first")
+        model.consumeThread(snapshot(.approvalRequired, sequence:4))
+        XCTAssertEqual(model.runtimeMode, .auto)
+        model.consumeThread(snapshot(.auto, sequence:5))
+        model.consumeThread(.from(["kind":"event","event":["sequence":6,"type":"thread.runtime-mode-set","payload":["runtimeMode":"auto-accept-edits"]]]))
+        XCTAssertEqual(model.runtimeMode, .autoAcceptEdits)
+        await model.beginDraft()
+        XCTAssertEqual(model.runtimeMode, .auto)
+    }
+    @MainActor
+    func testRejectedApprovalModeChangeRestoresSelection() async {
+        let model = SquircleModel(configuration:nil)
+        await model.selectSession("existing")
+        model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["runtimeMode":"approval-required"]]]))
+        await model.setRuntimeMode(.fullAccess)
+        XCTAssertEqual(model.runtimeMode, .approvalRequired)
+        XCTAssertNotNil(model.error)
+        await model.beginDraft()
+        await model.setRuntimeMode(.autoAcceptEdits)
+        XCTAssertEqual(model.runtimeMode, .autoAcceptEdits)
+    }
+    private var modelConfig: JSONValue {
+        .from(["providers":[
+            ["instanceId":"codex","displayName":"Codex","enabled":true,"status":"ready","models":[
+                ["slug":"sol","name":"Sol","isDefault":true], ["slug":"astra","name":"Astra"]]],
+            ["instanceId":"claudeAgent","displayName":"Claude","enabled":true,"status":"ready","models":[["slug":"fable","name":"Fable","isDefault":true]]],
+            ["instanceId":"offline","enabled":true,"status":"error","models":[["slug":"bad"]]],
+            ["instanceId":"disabled","enabled":false,"status":"ready","models":[["slug":"bad"]]],
+            ["instanceId":"empty","enabled":true,"status":"ready","models":[["name":"Missing slug"]]]
+        ]])
+    }
+    @MainActor
+    func testExistingThreadOnlyAllowsItsProviderAndPreservesModelChoice() async {
+        let model = SquircleModel(configuration:nil, preferences:UserDefaults(suiteName:UUID().uuidString)!)
+        model.consumeConfig(modelConfig)
+        let codex = JSONValue.from(["instanceId":"codex","model":"sol"])
+        let astra = JSONValue.from(["instanceId":"codex","model":"astra"])
+        let claude = JSONValue.from(["instanceId":"claudeAgent","model":"fable"])
         func snapshot(_ selection:JSONValue, sequence:Int) -> JSONValue {
             .from(["kind":"snapshot","snapshot":["snapshotSequence":sequence,"thread":["modelSelection":selection.foundation]]])
         }
         await model.selectSession("first")
+        XCTAssertTrue(model.availableModelSelections.isEmpty, "Do not offer other providers while the thread loads")
         model.consumeThread(snapshot(codex,sequence:1))
+        XCTAssertEqual(model.availableModelSelections.count,2)
         model.chooseModel(claude)
-        model.consumeThread(.from(["kind":"event","event":["sequence":2,"type":"thread.session-set","payload":["session":["status":"ready"]]]]))
-        XCTAssertEqual(model.modelSelection,claude)
-        model.consumeThread(snapshot(codex,sequence:3))
-        XCTAssertEqual(model.modelSelection,claude)
+        XCTAssertEqual(model.modelSelection,codex)
+        model.chooseModel(.from(["instanceId":"codex","model":"unknown"]))
+        XCTAssertEqual(model.modelSelection,codex)
+        model.chooseModel(astra)
+        model.consumeThread(snapshot(codex,sequence:2))
+        XCTAssertEqual(model.modelSelection,astra)
         await model.selectSession("second")
-        model.consumeThread(snapshot(codex,sequence:4))
-        XCTAssertEqual(model.modelSelection,codex)
+        model.consumeThread(snapshot(claude,sequence:3))
+        XCTAssertEqual(model.availableModelSelections,[claude])
         await model.selectSession("first")
-        model.consumeThread(snapshot(codex,sequence:5))
-        XCTAssertEqual(model.modelSelection,claude)
-        model.consumeThread(snapshot(claude,sequence:6))
-        // After T3 acknowledges the choice, future server changes are authoritative.
-        model.consumeThread(snapshot(codex,sequence:7))
+        model.consumeThread(snapshot(codex,sequence:4))
+        XCTAssertEqual(model.modelSelection,astra)
+        model.consumeThread(snapshot(astra,sequence:5))
+        model.consumeThread(snapshot(codex,sequence:6))
         XCTAssertEqual(model.modelSelection,codex)
+    }
+    @MainActor
+    func testDraftIsLocalUntilFirstNonemptySubmissionAndRemembersPreference() async {
+        let preferences = UserDefaults(suiteName:UUID().uuidString)!
+        var commands: [JSONValue] = []
+        let model = SquircleModel(configuration:nil, preferences:preferences, commandDispatch: { command in
+            commands.append(command); return .from(["status":"accepted"])
+        })
+        model.consumeConfig(modelConfig)
+        let claude = JSONValue.from(["instanceId":"claudeAgent","model":"fable"])
+        await model.selectSession("old-thread")
+        model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":[
+            "modelSelection":["instanceId":"codex","model":"sol"],
+            "messages":[["id":"old","role":"assistant","text":"Existing conversation"]]]]]))
+        await model.beginDraft()
+        XCTAssertNil(model.selectedSessionID)
+        XCTAssertTrue(model.messages.isEmpty)
+        XCTAssertEqual(model.providers.count,2)
+        XCTAssertEqual(model.availableModelSelections.count,3)
+        model.chooseModel(claude)
+        XCTAssertTrue(commands.isEmpty)
+        let project = AppProject(id:"project",name:"Example",subtitle:"",bundleID:nil,canBuild:false,updatedAt:.now)
+        await model.send("  \n",in:project)
+        XCTAssertTrue(commands.isEmpty)
+        XCTAssertNil(model.selectedSessionID)
+        await model.send("Hello",in:project)
+        XCTAssertEqual(commands.map { $0["type"].string! },["thread.create","thread.turn.start"])
+        XCTAssertEqual(commands[0]["threadId"],commands[1]["threadId"])
+        XCTAssertNotEqual(model.selectedSessionID,"old-thread")
+        XCTAssertEqual(commands[0]["modelSelection"],claude)
+        XCTAssertEqual(commands[1]["modelSelection"],claude)
+        await model.beginDraft()
+        XCTAssertEqual(model.modelSelection,claude)
+        let reopened = SquircleModel(configuration:nil,preferences:preferences)
+        reopened.consumeConfig(modelConfig)
+        XCTAssertEqual(reopened.modelSelection,claude)
     }
     func testAVCCHandlesFragmentedAndCoalescedHTTPBytes() throws {
         let packets = Data([0,0,0,4,1,11,12,13, 0,0,0,3,2,21,22, 0,0,0,2,3,31])
@@ -105,7 +193,9 @@ final class T3LiveTests: XCTestCase {
     }
     func testCodexRoundTrip() async throws { try await roundTrip(instance:"codex",model:"gpt-6.1-sol") }
     func testClaudeRoundTrip() async throws { try await roundTrip(instance:"claudeAgent",model:"claude-fable-5-1") }
-    private func roundTrip(instance:String,model:String) async throws {
+    func testAutoApprovalCodexRoundTrip() async throws { try await roundTrip(instance:"codex",model:"gpt-6.1-sol",runtimeMode:.auto) }
+    func testAutoApprovalClaudeRoundTrip() async throws { try await roundTrip(instance:"claudeAgent",model:"claude-fable-5-1",runtimeMode:.auto) }
+    private func roundTrip(instance:String,model:String,runtimeMode:T3RuntimeMode = .fullAccess) async throws {
         let g = try await gateway(); defer { g.disconnect() }
         let root = "/Users/anshu/Documents/ChatGPT/RemoteAppDev"
         let shell = try await g.http.json("/api/orchestration/shell")
@@ -120,7 +210,7 @@ final class T3LiveTests: XCTestCase {
         }
         let thread = UUID().uuidString.lowercased(), marker = "SQUIRCLE_T3_" + UUID().uuidString.prefix(8)
         try await dispatch(["type":"thread.create","threadId":thread,"projectId":project!,"title":"Native \(instance) verification",
-            "modelSelection":["instanceId":instance,"model":model],"runtimeMode":"full-access","interactionMode":"default","branch":NSNull(),"worktreePath":NSNull()])
+            "modelSelection":["instanceId":instance,"model":model],"runtimeMode":runtimeMode.rawValue,"interactionMode":"default","branch":NSNull(),"worktreePath":NSNull()])
         let complete = expectation(description:"Native agent reply and tool events")
         var state = T3ThreadState(); var fulfilled = false
         try await g.subscribe("orchestration.subscribeThread",.from(["threadId":thread])) { item in
@@ -131,12 +221,21 @@ final class T3LiveTests: XCTestCase {
                 fulfilled = true; XCTFail(error); complete.fulfill()
             } else if reply && tool && !fulfilled { fulfilled = true; complete.fulfill() }
         }
-        try await dispatch(["type":"thread.turn.start","threadId":thread,"message":["messageId":UUID().uuidString.lowercased(),"role":"user","text":"Verification only. Run pwd once, then reply exactly \(marker). Do not edit files or do other work.","attachments":[]],"modelSelection":["instanceId":instance,"model":model],"runtimeMode":"full-access","interactionMode":"default"])
+        try await dispatch(["type":"thread.turn.start","threadId":thread,"message":["messageId":UUID().uuidString.lowercased(),"role":"user","text":"Verification only. Run pwd once, then reply exactly \(marker). Do not edit files or do other work.","attachments":[]],"modelSelection":["instanceId":instance,"model":model],"runtimeMode":runtimeMode.rawValue,"interactionMode":"default"])
         await fulfillment(of:[complete],timeout:120)
         print("T3 native verification: \(instance), thread \(thread), \(state.messages.count) messages/activity rows")
         XCTAssertTrue(fulfilled)
         let stored = try await g.http.json("/api/orchestration/threads/\(thread)")
+        XCTAssertEqual(stored["thread"]["runtimeMode"].string, runtimeMode.rawValue)
+        XCTAssertTrue(state.pendingRequests.isEmpty)
         XCTAssertTrue(stored["thread"]["messages"].array.contains { $0["role"].string == "assistant" && $0["text"].string?.contains(marker) == true })
+        if runtimeMode == .auto {
+            for mode in T3RuntimeMode.allCases + [.auto] {
+                try await dispatch(["type":"thread.runtime-mode.set","threadId":thread,"runtimeMode":mode.rawValue])
+                let updated = try await g.http.json("/api/orchestration/threads/\(thread)")
+                XCTAssertEqual(updated["thread"]["runtimeMode"].string, mode.rawValue)
+            }
+        }
     }
     func testNativeSimulatorFrame() async throws {
         try await simulatorFrames(required:1)

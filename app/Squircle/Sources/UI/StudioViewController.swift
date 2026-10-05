@@ -421,7 +421,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         beginMotion("thread.open")
         updateInteractivity()
         spring.animate(to: 1)
-        if sessionID == nil { controller.focusComposer() }
     }
 
     func closeThread() {

@@ -11,6 +11,59 @@ final class StudioUITests: XCTestCase {
     }
 
     @MainActor
+    func testNewThreadAfterExistingThreadStaysAnEmptyDraft() throws {
+        app.launchEnvironment = ["SQUIRCLE_APP":"Squircle"]
+        app.launch()
+        requireHittable(element("project.hero"),timeout:35)
+        selectProject(named:"Squircle")
+        pullList(from:0.80,to:0.40)
+        let row = elements("thread.row").firstMatch
+        requireHittable(row)
+        row.tap()
+        waitForThread()
+        element("thread.close").tap()
+        waitForThreadDismissal()
+        element("thread.new").tap()
+        waitForThread()
+        requireHittable(element("draft.models"))
+        XCTAssertTrue(app.staticTexts["New thread"].exists)
+        XCTAssertTrue(app.staticTexts["What’s next?"].exists)
+        XCTAssertFalse(element("thread.messages").exists)
+        capture("New thread — quick models")
+        let choices = app.buttons.matching(NSPredicate(format:"identifier BEGINSWITH %@","draft.model."))
+        XCTAssertGreaterThan(choices.count,0)
+        choices.element(boundBy:choices.count - 1).tap()
+        XCTAssertFalse(element("thread.messages").exists)
+        element("thread.close").tap()
+        waitForThreadDismissal()
+        element("thread.new").tap()
+        requireHittable(element("draft.models"))
+        XCTAssertTrue(app.staticTexts["New thread"].exists)
+        XCTAssertFalse(element("thread.messages").exists)
+    }
+
+    @MainActor
+    func testDraftApprovalOptions() {
+        app.launchEnvironment = ["SQUIRCLE_APP":"Squircle", "SQUIRCLE_SCRUB":"1", "SQUIRCLE_DRAFT":"1"]
+        app.launch()
+        let agent = element("thread.agent")
+        requireHittable(agent, timeout:35)
+        XCTAssertTrue(agent.label.hasSuffix(" · Auto"))
+        agent.tap()
+        for title in ["Ask", "Auto edits", "Auto", "Full access"] {
+            XCTAssertTrue(app.buttons[title].waitForExistence(timeout:5))
+        }
+        capture("Approval mode options")
+        app.buttons["Auto edits"].tap()
+        let changed = XCTNSPredicateExpectation(predicate:NSPredicate(format:"label ENDSWITH %@", " · Auto edits"), object:agent)
+        XCTAssertEqual(XCTWaiter.wait(for:[changed], timeout:5), .completed)
+        agent.tap()
+        app.buttons["Auto"].tap()
+        let restored = XCTNSPredicateExpectation(predicate:NSPredicate(format:"label ENDSWITH %@", " · Auto"), object:agent)
+        XCTAssertEqual(XCTWaiter.wait(for:[restored], timeout:5), .completed)
+    }
+
+    @MainActor
     func testBrowseMacProjects() throws {
         let folder = "/Users/anshu/Documents/ChatGPT/RemoteAppDev/examples/SquircleProbe"
         app.launch()

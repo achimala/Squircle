@@ -21,6 +21,8 @@ final class SquircleModel: ObservableObject {
     @Published private(set) var devices: JSONValue = .null
     @Published private(set) var requests: [JSONValue] = []
     @Published private(set) var modelSelection: JSONValue = .null
+    @Published private(set) var runtimeMode: T3RuntimeMode = .auto
+    private var pendingRuntimeModes: [String:T3RuntimeMode] = [:]
     private var pendingModelSelections: [String:JSONValue] = [:]
     var hostName: String { configuration?.t3URL.host ?? "Your Mac" }
     let configuration: AppConfiguration?
@@ -35,8 +37,63 @@ final class SquircleModel: ObservableObject {
     private var previewCache: [String:Data] = [:]
     private var launchReported = false
     private var sessionProjects: [String:String] = [:]
+    private var submitting = false
+    private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
+    private let preferences: UserDefaults
+    private static let preferredModelKey = "squircle.t3.preferredModel"
 
-    init(configuration: AppConfiguration? = try? AppConfiguration.load()) {
+    /// Once a thread has an agent session, T3 cannot migrate it to another provider.
+    var availableModelProviders: [JSONValue] {
+        guard selectedSessionID != nil else { return providers }
+        let instance = state.thread["session"]["providerInstanceId"].string
+            ?? state.thread["modelSelection"]["instanceId"].string
+            ?? sessions.first(where: { $0.id == selectedSessionID })?.modelSelection["instanceId"].string
+        guard let instance else { return [] }
+        return providers.filter { $0["instanceId"].string == instance }
+    }
+    var availableModelSelections: [JSONValue] {
+        availableModelProviders.flatMap { provider in
+            provider["models"].array.map { .from(["instanceId": provider["instanceId"].string!, "model": $0["slug"].string!]) }
+        }
+    }
+    var quickModelSelections: [JSONValue] {
+        var choices: [JSONValue] = []
+        if isValidModel(modelSelection) { choices.append(modelSelection) }
+        for provider in availableModelProviders {
+            if let option = provider["models"].array.first(where: { $0["isDefault"].bool }) ?? provider["models"].array.first {
+                let selection = JSONValue.from(["instanceId":provider["instanceId"].string!,"model":option["slug"].string!])
+                if !choices.contains(where: { sameModel($0, selection) }) { choices.append(selection) }
+            }
+        }
+        return Array(choices.prefix(4))
+    }
+    private func sameModel(_ lhs: JSONValue, _ rhs: JSONValue) -> Bool {
+        lhs["instanceId"] == rhs["instanceId"] && lhs["model"] == rhs["model"]
+    }
+    private func isValidModel(_ selection: JSONValue) -> Bool {
+        availableModelSelections.contains { sameModel($0, selection) }
+    }
+    func consumeConfig(_ config: JSONValue) {
+        providers = config["providers"].array.filter {
+            $0["enabled"].bool && $0["status"].string == "ready" && !($0["instanceId"].string ?? "").isEmpty
+        }.map { provider in
+            var value = provider.object
+            value["models"] = .array(provider["models"].array.filter { !($0["slug"].string ?? "").isEmpty })
+            return .object(value)
+        }.filter { !$0["models"].array.isEmpty }
+        if selectedSessionID == nil { restorePreferredModel() }
+    }
+    private func restorePreferredModel() {
+        if let data = preferences.data(forKey: Self.preferredModelKey),
+           let saved = try? JSONDecoder().decode(JSONValue.self, from: data), isValidModel(saved) {
+            modelSelection = saved
+        } else { modelSelection = quickModelSelections.first ?? availableModelSelections.first ?? .null }
+    }
+
+    init(configuration: AppConfiguration? = try? AppConfiguration.load(), preferences: UserDefaults = .standard,
+         commandDispatch: ((JSONValue) async throws -> JSONValue)? = nil) {
+        self.preferences = preferences
+        self.commandDispatch = commandDispatch
         self.configuration = configuration
         client = configuration.map { SquircleClient(configuration:$0) }
         gateway = configuration.map(T3Gateway.init(configuration:))
@@ -60,11 +117,7 @@ final class SquircleModel: ObservableObject {
             if !connected {
                 try await gateway.connect()
                 let config = try await gateway.call("server.getConfig")
-                providers = config["providers"].array.filter { $0["enabled"].bool && $0["status"].string == "ready" }
-                if modelSelection == .null, let first = providers.first {
-                    let model = first["models"].array.first(where: { $0["isDefault"].bool }) ?? first["models"].array.first ?? .null
-                    modelSelection = .from(["instanceId":first["instanceId"].string ?? "codex","model":model["slug"].string ?? ""])
-                }
+                consumeConfig(config)
                 devices = try await gateway.call("device.list")
                 try await gateway.subscribe("orchestration.subscribeShell") { [weak self] in self?.consumeShell($0) }
                 try await gateway.subscribe("subscribeDeviceState") { [weak self] in self?.devices = $0 }
@@ -114,15 +167,20 @@ final class SquircleModel: ObservableObject {
     func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
     func selectSession(_ id: String) async {
-        selectedSessionID = id; messages = []; requests = []; state = T3ThreadState()
+        selectedSessionID = id; messages = []; requests = []; state = T3ThreadState(); isRunning = false
+        runtimeMode = pendingRuntimeModes[id] ?? .auto
         if let pending = pendingModelSelections[id] { modelSelection = pending }
         guard let gateway else { return }
-        await gateway.unsubscribe(threadSubscription); threadSubscription = nil
+        let previousSubscription = threadSubscription; threadSubscription = nil
+        await gateway.unsubscribe(previousSubscription)
+        guard selectedSessionID == id else { return }
         do {
-            threadSubscription = try await gateway.subscribe("orchestration.subscribeThread", .from(["threadId":id])) { [weak self] item in
+            let subscription = try await gateway.subscribe("orchestration.subscribeThread", .from(["threadId":id])) { [weak self] item in
                 guard let self, selectedSessionID == id else { return }
                 consumeThread(item)
             }
+            guard selectedSessionID == id else { await gateway.unsubscribe(subscription); return }
+            threadSubscription = subscription
             error = nil
         } catch { self.error = error.localizedDescription }
     }
@@ -130,7 +188,10 @@ final class SquircleModel: ObservableObject {
     /// created by its first message, so abandoned drafts leave nothing behind.
     func beginDraft() async {
         selectedSessionID = nil; messages = []; requests = []; state = T3ThreadState(); isRunning = false; error = nil
-        await gateway?.unsubscribe(threadSubscription); threadSubscription = nil
+        runtimeMode = .auto
+        restorePreferredModel()
+        let previousSubscription = threadSubscription; threadSubscription = nil
+        await gateway?.unsubscribe(previousSubscription)
     }
     /// "Claude · Fable 5.1" for a T3 model selection.
     func agentName(for selection: JSONValue) -> String {
@@ -144,8 +205,28 @@ final class SquircleModel: ObservableObject {
         return name.hasPrefix(maker) || maker.isEmpty ? name : name.isEmpty ? maker : maker + " · " + name
     }
     func chooseModel(_ selection: JSONValue) {
+        guard !isRunning, !submitting, isValidModel(selection) else { return }
         modelSelection = selection
+        if let data = try? JSONEncoder().encode(selection) { preferences.set(data, forKey: Self.preferredModelKey) }
         if let id = selectedSessionID { pendingModelSelections[id] = selection }
+    }
+    func chooseRuntimeMode(_ mode: T3RuntimeMode) {
+        runtimeMode = mode
+        if let id = selectedSessionID { pendingRuntimeModes[id] = mode }
+    }
+    func setRuntimeMode(_ mode: T3RuntimeMode) async {
+        let previous = runtimeMode
+        chooseRuntimeMode(mode)
+        guard let id = selectedSessionID else { return }
+        do {
+            try await dispatch(["type":"thread.runtime-mode.set","threadId":id,"runtimeMode":mode.rawValue])
+        } catch {
+            if pendingRuntimeModes[id] == mode {
+                pendingRuntimeModes.removeValue(forKey:id)
+                if selectedSessionID == id { runtimeMode = previous }
+            }
+            self.error = error.localizedDescription
+        }
     }
     func consumeThread(_ item: JSONValue) {
         state.consume(item); messages = state.messages; requests = state.pendingRequests
@@ -157,27 +238,38 @@ final class SquircleModel: ObservableObject {
             if saved == pending { pendingModelSelections.removeValue(forKey:id) }
             modelSelection = pending
         } else if saved != .null { modelSelection = saved }
+        let savedMode = state.thread["runtimeMode"].string.flatMap(T3RuntimeMode.init(rawValue:))
+        if let id = selectedSessionID, let pending = pendingRuntimeModes[id] {
+            if savedMode == pending { pendingRuntimeModes.removeValue(forKey:id) }
+            runtimeMode = pending
+        } else { runtimeMode = savedMode ?? .auto }
         status = isRunning ? "Working" : "Connected"
         if let last = state.thread["session"]["lastError"].string { error = last }
     }
     private func dispatch(_ command: [String:Any]) async throws {
-        guard let gateway else { throw ClientError.configuration }
         var c = command; c["commandId"] = UUID().uuidString.lowercased()
         c["createdAt"] = ISO8601DateFormatter().string(from:.now)
-        let result = try await gateway.call("orchestration.dispatchCommand",.from(c))
+        let result: JSONValue
+        if let commandDispatch { result = try await commandDispatch(.from(c)) }
+        else if let gateway { result = try await gateway.call("orchestration.dispatchCommand",.from(c)) }
+        else { throw ClientError.configuration }
         if result["status"].string == "rejected" { throw ClientError.backend("T3",0,result.formatted) }
     }
-    func createSession(in project: AppProject, title: String? = nil) async {
+    private func createSession(in project: AppProject, title: String? = nil) async {
         let id = UUID().uuidString.lowercased()
         do {
             try await dispatch(["type":"thread.create","threadId":id,"projectId":project.id,"title":title ?? "New thread",
-                "modelSelection":modelSelection.foundation,"runtimeMode":"approval-required","interactionMode":"default",
+                "modelSelection":modelSelection.foundation,"runtimeMode":runtimeMode.rawValue,"interactionMode":"default",
                 "branch":NSNull(),"worktreePath":NSNull()])
+            pendingRuntimeModes[id] = runtimeMode
             sessionProjects[id] = project.id; await selectSession(id)
         } catch { self.error = error.localizedDescription }
     }
     func send(_ text: String, in project: AppProject) async {
-        guard !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { return }
+        guard !submitting, !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { return }
+        guard isValidModel(modelSelection) else { error = "Choose an available model."; return }
+        submitting = true
+        defer { submitting = false }
         error = nil
         if selectedSessionID == nil { await createSession(in:project) }
         guard let id = selectedSessionID, error == nil else { return }
@@ -188,7 +280,7 @@ final class SquircleModel: ObservableObject {
             }
             try await dispatch(["type":"thread.turn.start","threadId":id,
                 "message":["messageId":UUID().uuidString.lowercased(),"role":"user","text":message,"attachments":[]],
-                "modelSelection":modelSelection.foundation,"runtimeMode":state.thread["runtimeMode"].string ?? "approval-required",
+                "modelSelection":modelSelection.foundation,"runtimeMode":runtimeMode.rawValue,
                 "interactionMode":"default","titleSeed":String(text.prefix(120))])
             isRunning = true; status = "Working"
         } catch { self.error = error.localizedDescription }

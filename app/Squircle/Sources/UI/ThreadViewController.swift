@@ -17,6 +17,11 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     private let model: SquircleModel
     private weak var stage: DeviceStage?
     private var sessionID: String?
+    private var selectionReady = false
+    private var sending = false
+    private let draftScroll = UIScrollView()
+    private let draftOptions = FlowView()
+    private var renderedDraftChoices: [JSONValue] = []
     private var subscriptions = Set<AnyCancellable>()
 
     private let back = Theme.glassButton(symbol: "chevron.left", identifier: "thread.close", accessibilityLabel: "Back to threads")
@@ -116,6 +121,27 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         fade.startPoint = CGPoint(x: 0.5, y: 0)
         clip.layer.mask = fade
         clip.addSubview(table)
+        draftScroll.backgroundColor = .clear
+        draftScroll.keyboardDismissMode = .interactive
+        draftScroll.showsVerticalScrollIndicator = false
+        draftScroll.accessibilityIdentifier = "thread.draft"
+        // Nothing has been said yet: the app's device stands large above, and
+        // the prompt and model chips sit right on top of the composer.
+        let heading = Theme.label("What’s next?", Theme.font(.title1, 28, .bold), lines: 2)
+        [heading, draftOptions].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; draftScroll.addSubview($0) }
+        let content = draftScroll.contentLayoutGuide, frame = draftScroll.frameLayoutGuide
+        NSLayoutConstraint.activate([
+            content.widthAnchor.constraint(equalTo: frame.widthAnchor),
+            content.heightAnchor.constraint(greaterThanOrEqualTo: frame.heightAnchor),
+            heading.topAnchor.constraint(greaterThanOrEqualTo: content.topAnchor, constant: 20),
+            heading.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            heading.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            draftOptions.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 16),
+            draftOptions.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            draftOptions.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            draftOptions.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -4)
+        ])
+        clip.addSubview(draftScroll)
         view.addSubview(clip)
 
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -158,7 +184,8 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
 
         requestDetail.lineBreakMode = .byTruncatingTail
         requestButtons.spacing = 8
-        requestButtons.distribution = .fillEqually
+        requestButtons.axis = .vertical
+        requestButtons.distribution = .fill
         let requestStack = UIStackView(arrangedSubviews: [requestTitle, requestDetail, requestButtons])
         requestStack.axis = .vertical
         requestStack.spacing = 6
@@ -194,7 +221,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
             bottom.edge = .bottom
             composer.addInteraction(bottom)
         }
-        view.accessibilityElements = [back, titleLabel, agent, deviceTouch, home, simulator, divider, table, request, notice, composer]
+        view.accessibilityElements = [back, titleLabel, agent, deviceTouch, home, simulator, divider, draftScroll, table, request, notice, composer]
 
         detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84)
         detent.onChange = { [weak self] _ in self?.layoutStage() }
@@ -213,10 +240,12 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
 
         renderSimulatorControls(interactive: false)
         model.selectProject(project)
-        if sessionID != nil { detent.set(CGFloat(UserDefaults.standard.double(forKey: Self.detentKey)).clamped()) }
+        detent.set(sessionID == nil ? 1 : CGFloat(UserDefaults.standard.double(forKey: Self.detentKey)).clamped())
+        let requestedSessionID = sessionID
         Task { [weak self] in
             guard let self else { return }
-            if let sessionID { await model.selectSession(sessionID) } else { await model.beginDraft() }
+            if let requestedSessionID { await model.selectSession(requestedSessionID) } else { await model.beginDraft() }
+            selectionReady = true
             render()
         }
         render()
@@ -250,6 +279,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         fade.endPoint = CGPoint(x: 0.5, y: min(1, 14 / max(1, clip.bounds.height)))
         CATransaction.commit()
         let floor = request.isHidden ? (notice.isHidden ? composer.frame.minY : notice.frame.minY) : request.frame.minY
+        draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - clipTop - 8))
         let insets = UIEdgeInsets(top: clipTop - chatTop + 8, left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
             let pinned = pinToBottom
@@ -332,7 +362,21 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
 
     private func render() {
         guard isViewLoaded else { return }
-        if sessionID == nil { sessionID = model.selectedSessionID }
+        guard selectionReady else {
+            titleLabel.text = sessionID == nil ? "New thread" : ""
+            agent.isEnabled = false
+            composer.send.isEnabled = false
+            table.isHidden = true
+            draftScroll.isHidden = true
+            return
+        }
+        composer.send.isEnabled = !sending
+        draftScroll.isHidden = sessionID != nil
+        table.isHidden = sessionID == nil
+        view.accessibilityElements = [back, titleLabel, agent, deviceTouch, home, simulator, divider,
+                                      sessionID == nil ? draftScroll : table, request, notice, composer]
+        simulator.isEnabled = sessionID != nil
+        renderDraft()
         let session = model.sessions.first { $0.id == sessionID }
         let title = session?.displayTitle(in: project) ?? "New thread"
         if titleLabel.text != title { titleLabel.text = title }
@@ -351,21 +395,75 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     private func renderAgent() {
-        let name = model.agentName(for: model.modelSelection)
+        let name = model.agentName(for: model.modelSelection) + " · " + model.runtimeMode.title
         if agent.configuration?.title != name {
             agent.configuration?.attributedTitle = AttributedString(name, attributes: AttributeContainer([.font: Theme.font(.footnote, 13, .medium)]))
         }
-        agent.isEnabled = !model.isRunning
-        agent.menu = UIMenu(children: model.providers.map { provider in
+        agent.isEnabled = true
+        let providers = model.availableModelProviders.map { provider in
             UIMenu(title: provider["displayName"].string ?? "Agent", options: .displayInline, children: provider["models"].array.map { option in
                 let selection = JSONValue.from(["instanceId": provider["instanceId"].string ?? "", "model": option["slug"].string ?? ""])
                 return UIAction(title: option["name"].string ?? option["slug"].string ?? "Model",
                                 subtitle: provider["displayName"].string,
+                                attributes: model.isRunning || sending ? .disabled : [],
                                 state: selection == model.modelSelection ? .on : .off) { [weak self] _ in
                     self?.model.chooseModel(selection)
                 }
             })
+        }
+        let approvals = UIMenu(title: "Approvals", options: .displayInline, children: T3RuntimeMode.allCases.map { mode in
+            UIAction(title: mode.title, state: mode == model.runtimeMode ? .on : .off) { [weak self] _ in
+                Task { await self?.model.setRuntimeMode(mode) }
+            }
         })
+        agent.menu = UIMenu(children: [approvals] + providers)
+    }
+
+    private func renderDraft() {
+        guard sessionID == nil else { return }
+        let choices = model.quickModelSelections
+        // Keep the selected control and valid defaults immediately available.
+        let renderedChoices = choices + [model.modelSelection]
+        guard renderedChoices != renderedDraftChoices else { return }
+        renderedDraftChoices = renderedChoices
+        draftOptions.subviews.forEach { $0.removeFromSuperview() }
+        let current = model.modelSelection
+        func chip(_ title: String, symbol: String?, prominent: Bool, identifier: String) -> UIButton {
+            let button = Theme.glassButton(symbol: symbol, title: title, prominent: prominent, identifier: identifier)
+            button.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12, weight: .bold)
+            button.configuration?.imagePadding = 6
+            button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 16)
+            button.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+                var attributes = attributes; attributes.font = Theme.font(.subheadline, 15, .semibold); return attributes
+            }
+            return button
+        }
+        for selection in choices {
+            let selected = selection["instanceId"] == current["instanceId"] && selection["model"] == current["model"]
+            let button = chip(model.agentName(for: selection), symbol: selected ? "checkmark" : nil, prominent: selected,
+                              identifier: "draft.model.\(selection["instanceId"].string ?? "").\(selection["model"].string ?? "")")
+            button.accessibilityTraits = selected ? [.button, .selected] : .button
+            button.addAction(UIAction { [weak self] _ in
+                Theme.selectionHaptic()
+                self?.model.chooseModel(selection)
+                self?.render()
+            }, for: .touchUpInside)
+            draftOptions.addSubview(button)
+        }
+        let more = chip("More", symbol: "ellipsis", prominent: false, identifier: "draft.models")
+        more.accessibilityLabel = "All models"
+        more.showsMenuAsPrimaryAction = true
+        more.menu = UIMenu(children: model.availableModelProviders.map { provider in
+            UIMenu(title: provider["displayName"].string ?? "", options: .displayInline, children: provider["models"].array.map { option in
+                let selection = JSONValue.from(["instanceId":provider["instanceId"].string!,"model":option["slug"].string!])
+                return UIAction(title: option["name"].string ?? option["slug"].string!,
+                                state: selection["instanceId"] == current["instanceId"] && selection["model"] == current["model"] ? .on : .off) { [weak self] _ in
+                    self?.model.chooseModel(selection)
+                    self?.render()
+                }
+            })
+        })
+        draftOptions.addSubview(more)
     }
 
     private func renderSend() {
@@ -487,17 +585,23 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     // MARK: Composer and requests
 
     private func send() {
+        guard selectionReady, !sending else { return }
         let text = composer.text
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if model.isRunning { Task { await model.stop() } }
             return
         }
+        sending = true
+        composer.send.isEnabled = false
         Theme.openHaptic()
         composer.text = ""
         pinToBottom = true
         Task { [weak self] in
             guard let self else { return }
             await model.send(text, in: project)
+            sessionID = model.selectedSessionID
+            sending = false
+            render()
             // A message the Mac did not accept goes back into the field.
             if model.error != nil, composer.text.isEmpty { composer.text = text }
         }
@@ -516,8 +620,11 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
             let detail = payload["detail"].string ?? ""
             requestDetail.text = detail
             requestDetail.isHidden = detail.isEmpty
-            func button(_ title: String, prominent: Bool, action: @escaping () -> Void) {
+            func button(_ title: String, warning: String? = nil, prominent: Bool, action: @escaping () -> Void) {
                 let button = Theme.glassButton(title: title, prominent: prominent, identifier: "thread.request.\(title)")
+                button.configuration?.subtitle = warning
+                button.configuration?.titleLineBreakMode = .byWordWrapping
+                button.configuration?.subtitleLineBreakMode = .byWordWrapping
                 button.addAction(UIAction { _ in Theme.selectionHaptic(); action() }, for: .touchUpInside)
                 requestButtons.addArrangedSubview(button)
             }
@@ -530,7 +637,8 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
                 button("Allow", prominent: true) { [weak self] in Task { await self?.model.respond(to: current, decision: "accept") } }
             } else {
                 for option in payload["options"].array {
-                    button(option["label"].string ?? "Choose", prominent: option["decision"].string == "accept") { [weak self] in
+                    button(option["label"].string ?? "Choose", warning: option["warning"].string,
+                           prominent: ["accept", "acceptForSession", "acceptAlways"].contains(option["decision"].string ?? "")) { [weak self] in
                         Task { await self?.model.respond(to: current, decision: option["decision"].string) }
                     }
                 }
@@ -585,8 +693,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     private func open(_ device: JSONValue) {
         Task { [weak self] in
             guard let self else { return }
-            // A simulator belongs to a T3 thread; a draft becomes one first.
-            if model.selectedSessionID == nil { await model.createSession(in: project) }
+            guard selectionReady, sessionID != nil else { return }
             guard let target = await model.openDevice(device) else { return }
             pausePreview()
             previewState = .paused(target)
@@ -610,6 +717,7 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     }
 
     private func reconcilePreview() {
+        guard selectionReady, sessionID != nil else { return }
         guard UIApplication.shared.applicationState == .active, view.window != nil, parent != nil else { return }
         let target: SimulatorTarget?
         switch previewState {

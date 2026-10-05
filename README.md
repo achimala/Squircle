@@ -7,6 +7,29 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-05: in-app install and New Thread layout, version 0.3.0 (18).**
+Install in Builds now opens the build's `itms-services` link directly, so iOS's
+own install prompt appears over Squircle; Safari and the Mac's install page are
+no longer in the path. iOS still requires that one system confirmation. New
+Thread opens with the device at half size showing the app, and the prompt and
+wrapping model chips sit directly above the composer. Ten native tests and the
+two draft UI tests passed; signed build 18 is ready, not installed on the phone.
+See [build 18 evidence](docs/t3-native-migration.md#2026-10-05-in-app-install-and-new-thread-layout-030-18).
+
+**2026-10-05: draft and model picker fixes, version 0.3.0 (17).** New Thread
+opens a local empty draft after visiting another conversation; T3 creation happens
+only on the first nonempty submission. Model shortcuts remember your preference,
+and existing threads offer only models from their established provider. Ten
+native tests and two UI regressions passed; the rendered draft capture is published
+in the Mac app catalog. Signed build 17 is ready, not installed on the phone.
+See [draft evidence](docs/t3-native-migration.md#2026-10-05-draft-and-model-picker-fixes-030-17).
+
+**2026-10-05: approval controls, version 0.3.0 (16).** New threads default to
+Auto. The agent menu exposes all four T3 approval modes; provider-supplied
+approval choices and warnings are displayed inline. Native tests, menu interaction,
+and real Codex/Claude Auto turns passed. Signed build 16 was installed and opened
+on the paired iPhone at the user's request. See [approval evidence](docs/t3-native-migration.md#2026-10-05-approval-controls-030-16).
+
 **2026-10-05: ground-up interface redesign, version 0.3.0 (15).** The T3
 transport, build service and credentials are unchanged from build 14.
 

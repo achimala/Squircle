@@ -370,3 +370,104 @@ to reach.
 - Import, signed-build, reduced-motion, visual-tour and accessibility UI tests
   were rewritten for the new structure but not re-run. Live T3 round-trip tests
   were not re-run.
+
+## 2026-10-05 approval controls, 0.3.0 (16)
+
+User requested T3 approval options with Auto as the default. New drafts and
+threads now use the stock `auto` runtime mode for creation and turn start;
+existing threads retain their authoritative saved mode. The agent menu puts
+Ask (`approval-required`), Auto edits (`auto-accept-edits`), Auto (`auto`) and
+Full access (`full-access`) first, with the current mode checkmarked and shown
+under the thread title. Changes use `thread.runtime-mode.set`; a local choice
+survives stale snapshots and navigation until T3 acknowledges it. A rejected
+change restores the previous choice and reports the error. Approval controls
+remain available during execution; provider/model changes remain disabled then.
+
+Approval prompts display T3's supplied option labels, decisions and warnings in
+a vertical stack, including session/always acceptance when offered. User-input
+questions still require answers. There is no client-side blanket acceptance or
+server/provider configuration change. Contract reference:
+[stock 0.0.45 orchestration](https://github.com/pingdotgg/t3code/blob/v0.0.45/packages/contracts/src/orchestration.ts).
+
+Evidence: nine deterministic T3 tests and the actual draft menu interaction test
+passed on final source (`/tmp/squircle-approval-release-check.log`). Both Codex
+and Claude executed `pwd` and returned the requested marker in Auto, with no
+pending requests; each verification thread persisted all four runtime mode
+changes through T3's standard command API (`/tmp/squircle-approval-final-tests.log`).
+Threads: Codex `dc054872-c5a1-4351-9be0-f6354d44a6b1`, Claude
+`ef798f6c-cf3f-4315-ae5c-a8c0ed47b087`. This verifies that small read-only turn,
+not provider behavior for every potentially sensitive command.
+
+The rendered native menu was inspected and published to catalog app
+`5f9b0650-b20b-4cd6-bcf2-a57574cab08c`, preview
+`3aacecec-a290-4074-b110-9ba668b964bf`. No motion geometry changed.
+Signed build 16 succeeded: job `93cbab47-9aee-425c-b460-40597f7a140f`.
+Automatic approval review rejected installation-link creation because external
+access to the private IPA was not explicitly authorized; no link was created.
+The user then explicitly requested running the app on their phone. CoreDevice
+installed build 16 on the connected physical iPhone 17 Pro Max and successfully
+opened `ai.dreamslate.Squircle` with `device process launch`. No debugger was used.
+The build service confirmed `launch_observed: true` for this job.
+Physical-phone approval interaction and user experience remain unchecked.
+
+
+## 2026-10-05 draft and model picker fixes, 0.3.0 (17)
+
+New Thread previously adopted `selectedSessionID` during its initial render,
+before its asynchronous draft reset. That also changed the ID read by the reset
+task, causing it to reopen the existing thread. The controller now captures the
+requested navigation target, waits for selection before rendering conversation
+state, and adopts a created ID only after submission. Stale subscription handles
+are discarded if selection changes during subscription startup.
+
+Opening a simulator no longer creates a thread from a draft. `createSession` is
+private to the send flow, empty submissions are ignored, and duplicate concurrent
+submission is guarded. New drafts show flat model shortcuts for the saved preference
+and ready providers' defaults, with an All models menu. Tapping the composer opens
+the keyboard; opening the draft leaves the shortcuts visible. Preferences are
+validated against the current T3 catalog. Existing threads expose only models
+from their established provider instance; unknown/loading identity offers no model
+changes. The same validation rejects invalid choices outside the UI. Approval
+controls remain available.
+
+Evidence: ten deterministic native T3 tests and UI tests
+`testNewThreadAfterExistingThreadStaysAnEmptyDraft` and `testDraftApprovalOptions`
+passed (`/tmp/squircle-draft-tests.log`, iOS 27.0). Native command capture checks
+zero writes before nonempty submission and exactly thread.create followed by
+thread.turn.start using the same new ID and selected model. UI verification visits
+an existing thread, opens an empty draft, chooses a shortcut, abandons it, and
+reopens another empty draft. The initial UI run caught keyboard occlusion; the
+final run passed after removing automatic focus.
+
+The actual rendered draft was inspected and published to catalog app
+`5f9b0650-b20b-4cd6-bcf2-a57574cab08c`, preview
+`499dd5eb-3ec5-4b51-9f5b-994ffe5aedfe`. This verifies the resting layout; transition
+geometry was unchanged and no new frame-by-frame motion claim is made.
+Signed build 17 succeeded, job `69a6b926-42e3-4cfe-b400-708476e27438`.
+Phone installation/interaction and new live provider turns were not exercised
+in this pass.
+
+## 2026-10-05 in-app install and New Thread layout, 0.3.0 (18)
+
+The user reported installs bouncing through Safari and needing a second tap.
+The client opened the install-link reply's `page_url` (the Mac's HTTPS page);
+it now opens the same reply's `install_url` (`itms-services`) directly, after
+checking that its manifest URL is HTTPS on the configured Squircle host and port.
+iOS then shows its own install confirmation over the app. That confirmation is
+an OS requirement for ad-hoc installs and cannot be removed; installing a new
+Squircle build still terminates the running copy. No server change.
+
+New Thread: the device opens at the half detent with the app's real screen; the
+mid-screen radio list, "Model" caption and repeated app name are gone. "What's
+next?" and glass model chips (selected one prominent, then More for the full
+menu) sit directly above the composer and wrap rather than scroll, so every
+choice stays reachable.
+
+Evidence: ten native T3 tests (plus stage-motion and live T3 tests) and UI tests
+`testNewThreadAfterExistingThreadStaysAnEmptyDraft` and `testDraftApprovalOptions`
+passed on iOS 27.0 simulator. A first run failed because More scrolled off-screen
+in a single horizontal row; the wrapping layout fixed it. The rendered draft was
+inspected and published to the catalog. Build 18's install link was checked to
+carry an `itms-services` URL whose manifest is on the configured host and port.
+Signed build 18 succeeded, job `d9f84f42-2113-441a-b9c0-9f41b9e68ca2`. Not yet
+checked on the phone: the direct install prompt itself.

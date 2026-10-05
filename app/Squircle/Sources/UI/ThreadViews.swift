@@ -461,3 +461,32 @@ final class ThreadRow: UIControl {
         }
     }
 }
+
+/// Lays its subviews out left to right at their natural size, wrapping onto
+/// new lines, so every choice stays on screen.
+final class FlowView: UIView {
+    var spacing: CGFloat = 8 { didSet { invalidateIntrinsicContentSize(); setNeedsLayout() } }
+    private var measuredHeight: CGFloat = 0
+
+    private func frames(for width: CGFloat) -> [CGRect] {
+        var x: CGFloat = 0, y: CGFloat = 0, line: CGFloat = 0
+        return subviews.map { view in
+            let size = view.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
+            let w = min(size.width, width)
+            if x > 0, x + w > width { x = 0; y += line + spacing; line = 0 }
+            defer { x += w + spacing; line = max(line, size.height) }
+            return CGRect(x: x, y: y, width: w, height: size.height)
+        }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let frames = frames(for: bounds.width)
+        zip(subviews, frames).forEach { $0.frame = $1 }
+        let height = frames.map(\.maxY).max() ?? 0
+        if height != measuredHeight { measuredHeight = height; invalidateIntrinsicContentSize() }
+    }
+
+    override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: measuredHeight) }
+    override func didAddSubview(_ subview: UIView) { super.didAddSubview(subview); setNeedsLayout() }
+}

@@ -85,8 +85,26 @@ presentation. Physical-phone decoder creation requires hardware acceleration.
 Native pinch, exclusive input ownership and measured cellular latency/bandwidth
 remain unverified/unimplemented.
 
-Current source: **0.3.0 (15)**, the interface redesign; signed job
-`0dbb4c79-6a83-4dad-a070-bef12b1d1d87`. Previous signed build: 0.2.0 (14), job
+Current source: **0.3.0 (18)**. Install opens the build's `itms-services` link
+directly (no Safari page); New Thread shows the device at half size with wrapping
+model chips above the composer. Signed job `d9f84f42-2113-441a-b9c0-9f41b9e68ca2`
+succeeded; not installed on the phone. Build 17 added local drafts and valid
+model picker fixes.
+New Thread keeps the keyboard closed until the composer is tapped, presents
+preferred/default model shortcuts, and creates its T3 thread only on first send.
+Existing conversations restrict model changes to their established provider.
+Ten native tests and two UI regressions passed; the draft capture is published in
+the Mac catalog. See [draft evidence](../../docs/t3-native-migration.md#2026-10-05-draft-and-model-picker-fixes-030-17).
+
+Previous source: **0.3.0 (16)**, approval controls; signed job
+`93cbab47-9aee-425c-b460-40597f7a140f`, installed and opened on the paired iPhone
+with CoreDevice at the user's explicit request. New threads default
+to Auto; the agent menu offers Ask, Auto edits, Auto and Full access. Existing
+threads retain their saved mode until changed. Native regression/menu tests and
+real Auto turns through both providers passed; see
+[approval evidence](../../docs/t3-native-migration.md#2026-10-05-approval-controls-030-16).
+Previous interface redesign: build 15, job `0dbb4c79-6a83-4dad-a070-bef12b1d1d87`.
+Previous signed build: 0.2.0 (14), job
 `99f5eb12-42fa-43a2-9edf-1f9558134da5`.
 Build 14 fixes provider selection being overwritten by live thread updates.
 Its selection regression and live Claude tool/reply tests passed; direct phone

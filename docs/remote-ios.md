@@ -12,7 +12,7 @@ Tailscale is installed and managed externally by users. The product consumes the
 
 Squircle's Rust CLI and Axum service manage Xcode build jobs, retained artifacts/logs, expiring installation URLs and diagnostics. Control and diagnostic uploads use separate bearer tokens. The service generates the installation page, XML manifest and IPA download routes; **a configured public URL does not enable TLS**. Trusted HTTPS must be supplied separately through the user's network setup.
 
-The intended device sequence is: open the expiring page → confirm installation → manually launch → report the build ID → send logs → crash → relaunch and upload the report. Install URLs use `itms-services` and scoped tickets, without requiring installer bearer headers or browser cookies. Creating a link or downloading an IPA does not confirm installation; `launch_observed` records an app-reported launch only.
+The intended device sequence is: tap Install in the app (it opens the expiring `itms-services` link directly; the HTTPS page remains for other browsers) → confirm installation → manually launch → report the build ID → send logs → crash → relaunch and upload the report. Install URLs use `itms-services` and scoped tickets, without requiring installer bearer headers or browser cookies. Creating a link or downloading an IPA does not confirm installation; `launch_observed` records an app-reported launch only.
 
 HTTP contract tests cover token separation, imported IPA byte preservation, manifest metadata, expired/invalid tickets, diagnostic retries/conflicts and launch observation. These are local API tests, not a physical installation test. Imported IPAs are explicitly marked as having unverified signatures.
 
@@ -36,3 +36,26 @@ Keep the original build attribution and [matching dSYM UUIDs](https://developer.
 - Receive logs, recover buffered events after reconnection, then crash/relaunch/upload and symbolicate the report.
 
 [Apple documents registered-device distribution](https://developer.apple.com/help/account/provisioning-profiles/create-an-ad-hoc-provisioning-profile/) and [wireless manifest mechanics in an enterprise context](https://support.apple.com/en-euro/guide/deployment/depce7cefc4d/1/web/1.0). This phone's cellular/Tailscale route was verified separately by actual installation. TestFlight remains a fallback; it is not required for the current flow.
+
+
+## 2026-10-05 Install button HTTP 400 repair
+
+The running build service had been started as `squircle --data-dir .squircle
+serve` without `--public-url`. Build 17 already had an exported signed IPA;
+`POST /v1/builds/{id}/install-link` returned `invalid_request` with the explicit
+missing-public-URL error. The iPhone client displayed the HTTP status only.
+
+Restarted the idle Squircle service with its existing HTTPS origin from
+`.squircle/client-t3.json` (`squircle_url`) passed as `--public-url`. The listener
+stays on loopback; no T3, Hermes, TLS or Tailscale configuration changed. Future
+manual service starts must retain this flag:
+
+```sh
+./target/release/squircle --data-dir .squircle serve --public-url https://YOUR-EXISTING-SQUIRCLE-ORIGIN
+```
+
+Verification through the configured HTTPS origin: install-link POST, install page,
+iOS manifest and IPA download all returned 200. The manifest identifies
+`ai.dreamslate.Squircle`, build 17; the downloaded IPA's SHA-256 matches the
+exported IPA byte for byte. Job `69a6b926-42e3-4cfe-b400-708476e27438`.
+This checks delivery, not subsequent installation or launch on the phone.

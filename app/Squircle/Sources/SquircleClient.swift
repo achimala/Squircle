@@ -86,15 +86,20 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         guard reply.ok else { throw ClientError.response("Squircle") }
         return reply.data.job
     }
+    /// The `itms-services` link itself, so iOS shows its install prompt over
+    /// Squircle instead of detouring through the Mac's install page in Safari.
     func installURL(buildID: String) async throws -> URL {
-        struct Reply: Decodable { struct Links: Decodable { let page_url: String }; let ok: Bool; let data: Links }
+        struct Reply: Decodable { struct Links: Decodable { let install_url: String }; let ok: Bool; let data: Links }
         var request = try request(["v1", "builds", buildID, "install-link"])
         request.httpMethod = "POST"
         request.httpBody = Data("{\"ttl_seconds\":3600}".utf8)
         let reply: Reply = try await perform(request, service: "Squircle")
-        guard reply.ok, let url = URL(string: reply.data.page_url), url.scheme == "https",
-              url.host == configuration.squircleURL.host, url.port == configuration.squircleURL.port,
-              url.user == nil, url.password == nil else { throw ClientError.response("Squircle") }
+        guard reply.ok, let url = URL(string: reply.data.install_url), url.scheme == "itms-services",
+              let manifest = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                  .first(where: { $0.name == "url" })?.value.flatMap(URL.init(string:)),
+              manifest.scheme == "https", manifest.host == configuration.squircleURL.host,
+              manifest.port == configuration.squircleURL.port, manifest.user == nil, manifest.password == nil
+        else { throw ClientError.response("Squircle") }
         return url
     }
 
