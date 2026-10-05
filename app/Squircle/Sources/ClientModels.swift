@@ -18,7 +18,7 @@ struct ChatSession: Identifiable, Equatable {
 }
 
 struct ChatMessage: Identifiable, Equatable {
-    let id: String
+    var id: String
     /// "user", "assistant", "thinking" (reasoning summary) or "tool".
     let role: String
     var content: String
@@ -33,6 +33,8 @@ struct ChatMessage: Identifiable, Equatable {
     var step: AgentStep?
     /// Screenshots this step returned, held in `StepImages` under `id`.
     var imageCount = 0
+    /// A recording published into the thread with `squircle media add`.
+    var videoID: String?
 }
 
 struct AppBuild: Identifiable, Decodable, Equatable {
@@ -116,6 +118,7 @@ enum JSONValue: Codable, Equatable {
     }
     var bool: Bool { if case .bool(let v) = self { return v }; return false }
     var int: Int? { if case .number(let v) = self { return Int(v) }; return nil }
+    var double: Double? { if case .number(let v) = self { return v }; return nil }
     var formatted: String {
         if let string { return string }
         if self == .null { return "" }

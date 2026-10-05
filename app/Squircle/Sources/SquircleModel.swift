@@ -1,5 +1,7 @@
+import AVFoundation
 import Combine
 import Foundation
+import UIKit
 
 @MainActor
 final class SquircleModel: ObservableObject {
@@ -41,6 +43,7 @@ final class SquircleModel: ObservableObject {
     private var stepDetails: Task<Void,Never>?
     private var stepDetailsSince: String?
     private var stepDetailsCount = -1
+    private var media: [JSONValue] = []
     private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
     private let preferences: UserDefaults
     private static let preferredModelKey = "squircle.t3.preferredModel"
@@ -171,7 +174,7 @@ final class SquircleModel: ObservableObject {
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
     func selectSession(_ id: String) async {
         selectedSessionID = id; messages = []; requests = []; state = T3ThreadState(); isRunning = false
-        stepDetails?.cancel(); stepDetailsSince = nil; stepDetailsCount = -1
+        stepDetails?.cancel(); stepDetailsSince = nil; stepDetailsCount = -1; media = []
         runtimeMode = pendingRuntimeModes[id] ?? .auto
         if let pending = pendingModelSelections[id] { modelSelection = pending }
         guard let gateway else { return }
@@ -233,7 +236,7 @@ final class SquircleModel: ObservableObject {
         }
     }
     func consumeThread(_ item: JSONValue) {
-        state.consume(item); messages = state.messages; requests = state.pendingRequests
+        state.consume(item); messages = conversation(); requests = state.pendingRequests
         if state.activityCount != stepDetailsCount { stepDetailsCount = state.activityCount; scheduleStepDetails() }
         isRunning = state.isRunning
         let saved = state.thread["modelSelection"]
@@ -280,8 +283,12 @@ final class SquircleModel: ObservableObject {
         guard let id = selectedSessionID, error == nil else { return }
         do {
             var message = text
+            let instructions = squircleInstructions(for: project, threadID: id)
             if state.thread["messages"].array.isEmpty {
-                message += "\n\n" + project.agentContext + "\nFor signed builds/install links use /Users/anshu/Documents/ChatGPT/RemoteAppDev/target/release/squircle --data-dir /Users/anshu/Documents/ChatGPT/RemoteAppDev/.squircle. Run help workflow for the documented commands. This app is a native client of T3; T3 manages this thread."
+                message += "\n\n" + project.agentContext + "\nFor signed builds/install links use /Users/anshu/Documents/ChatGPT/RemoteAppDev/target/release/squircle --data-dir /Users/anshu/Documents/ChatGPT/RemoteAppDev/.squircle. Run help workflow for the documented commands. This app is a native client of T3; T3 manages this thread.\n" + instructions
+            } else if !state.thread["messages"].array.contains(where: { ($0["text"].string ?? "").contains("Squircle shows this thread on the user's iPhone") }) {
+                // Threads started before these instructions existed get them once.
+                message += AppProject.contextMarker + project.name + ".\n" + instructions
             }
             try await dispatch(["type":"thread.turn.start","threadId":id,
                 "message":["messageId":UUID().uuidString.lowercased(),"role":"user","text":message,"attachments":[]],
@@ -298,8 +305,13 @@ final class SquircleModel: ObservableObject {
         stepDetails = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
             guard let self, !Task.isCancelled else { return }
+            async let published = try? client.threadMedia(threadID: id)
             guard let steps = try? await client.threadSteps(threadID: id, since: stepDetailsSince),
                   !Task.isCancelled, selectedSessionID == id else { return }
+            if let published = await published, published != media, selectedSessionID == id {
+                media = published
+                messages = conversation()
+            }
             guard !steps.isEmpty else { return }
             for step in steps {
                 guard let key = step["id"].string else { continue }
@@ -308,15 +320,67 @@ final class SquircleModel: ObservableObject {
                 state.details[key] = .object(merged)
                 if let at = step["updated_at"].string, at > (stepDetailsSince ?? "") { stepDetailsSince = at }
             }
-            messages = state.messages
+            messages = conversation()
         }
+    }
+    /// T3's conversation with the thread's published recordings in time order.
+    private func conversation() -> [ChatMessage] {
+        let rows = state.messages
+        guard !media.isEmpty else { return rows }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let clips = media.compactMap { item -> ChatMessage? in
+            guard let id = item["id"].string, let seconds = item["created_at"].double else { return nil }
+            let caption = item["caption"].string.flatMap { $0.isEmpty ? nil : $0 }
+            let video = item["kind"].string == "video"
+            var message = ChatMessage(id: "media:" + id, role: "tool", content: caption ?? (video ? "Recording" : "Image"),
+                                      symbol: video ? "record.circle" : "photo",
+                                      createdAt: formatter.string(from: Date(timeIntervalSince1970: seconds)))
+            message.step = AgentStep(kind: .device, title: message.content, symbol: message.symbol)
+            message.imageCount = 1
+            message.videoID = video ? id : nil
+            return message
+        }
+        return (rows + clips).enumerated().sorted { a, b in
+            let x = a.element.createdAt, y = b.element.createdAt
+            return x == y || x.isEmpty || y.isEmpty ? a.offset < b.offset : x < y
+        }.map(\.element)
+    }
+    /// A recording's file on the phone, downloading it once; its first frame
+    /// becomes the gallery picture.
+    func loadVideo(_ stepID: String) async -> URL? {
+        if let url = StepVideos.url(for: stepID) { return url }
+        let id = String(stepID.dropFirst("media:".count))
+        guard let client, let thread = selectedSessionID,
+              let data = try? await client.mediaFile(threadID: thread, id: id) else { return nil }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(id + ".mp4")
+        guard (try? data.write(to: url)) != nil else { return nil }
+        StepVideos.set(url, for: stepID)
+        return url
     }
     func loadStepImage(_ stepID: String, index: Int) async -> Data? {
         if let data = StepImages.data(for: stepID, index: index) { return data }
+        if stepID.hasPrefix("media:") {
+            let message = messages.first { $0.id == stepID }
+            var data: Data?
+            if message?.videoID != nil, let url = await loadVideo(stepID) {
+                data = await Self.poster(of: url)
+            } else if let client, let thread = selectedSessionID {
+                data = try? await client.mediaFile(threadID: thread, id: String(stepID.dropFirst("media:".count)))
+            }
+            if let data { StepImages.set(data, for: stepID, index: index) }
+            return data
+        }
         guard let client, let thread = selectedSessionID,
               let data = try? await client.stepImage(threadID: thread, callID: stepID, index: index) else { return nil }
         StepImages.set(data, for: stepID, index: index)
         return data
+    }
+    nonisolated static func poster(of url: URL) async -> Data? {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        guard let image = try? await generator.image(at: .zero).image else { return nil }
+        return UIImage(cgImage: image).jpegData(compressionQuality: 0.85)
     }
     func stop() async {
         guard let id = selectedSessionID else { return }
@@ -348,6 +412,30 @@ final class SquircleModel: ObservableObject {
             sessions.append(opened); inventory["sessions"] = .array(sessions); devices = .object(inventory)
             return target
         } catch { self.error = error.localizedDescription; return nil }
+    }
+    /// The simulator this app's agents should use: the one last used for it,
+    /// one named after it, or any booted iPhone simulator.
+    func simulator(for project: AppProject) -> JSONValue? {
+        let simulators = devices["devices"].array.filter { $0["platform"].string == "ios" && !$0["physical"].bool }
+        if let saved = preferences.string(forKey: "squircle.simulator." + project.id),
+           let match = simulators.first(where: { $0["id"].string == saved }) { return match }
+        if let named = simulators.first(where: { ($0["name"].string ?? "").localizedCaseInsensitiveContains(project.name) }) { return named }
+        return simulators.first { $0["booted"].bool } ?? simulators.first
+    }
+    func rememberSimulator(_ deviceID: String, for project: AppProject) {
+        preferences.set(deviceID, forKey: "squircle.simulator." + project.id)
+    }
+    /// Tells the agent it is being watched in Squircle and how to show its
+    /// work there: the simulator, screenshots and recordings.
+    func squircleInstructions(for project: AppProject, threadID: String) -> String {
+        let cli = "/Users/anshu/Documents/ChatGPT/RemoteAppDev/target/release/squircle --data-dir /Users/anshu/Documents/ChatGPT/RemoteAppDev/.squircle"
+        var device = "Call device_list, then device_open for an iOS simulator"
+        if let simulator = simulator(for: project), let id = simulator["id"].string {
+            device = "Call device_open with deviceId \(id) and hostId \(simulator["hostId"].string ?? "local") (\(simulator["name"].string ?? "this app's simulator"), this app's simulator)"
+        }
+        return """
+        Squircle shows this thread on the user's iPhone with the simulator live on a 3D device. Whenever you run, check or demonstrate the app in a simulator, use T3's device tools so the user watches it happen: \(device), then drive it with the agent-device command device_open returns. Use device_screenshot to look at the screen; those screenshots appear in the conversation. To show a flow, record it: agent-device record start /tmp/NAME.mp4 --scope device (with the --config and --session flags device_open gave you), perform the flow, agent-device record stop, then publish the clip into this thread with \(cli) media add --thread \(threadID) --file /tmp/NAME.mp4 --caption 'What it shows'.
+        """
     }
     var activeDevice: JSONValue? {
         devices["sessions"].array.filter { $0["threadId"].string == selectedSessionID }

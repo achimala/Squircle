@@ -14,7 +14,7 @@ struct StageLayout: Equatable {
 
     static let topBarHeight: CGFloat = 52
     static let bottomBarHeight: CGFloat = 52
-    static let dockHeight: CGFloat = 76
+    static let dockHeight: CGFloat = 58
     static let dividerHeight: CGFloat = 26
 
     // MARK: Home
@@ -72,12 +72,12 @@ struct StageLayout: Equatable {
 
     // MARK: Thread
 
-    var threadBarBottom: CGFloat { safe.top + 4 + 44 }
     var splitPhoneHeight: CGFloat { (size.height * 0.40).rounded() }
-    /// Conversation-first: the device docks beside the title.
-    var chatDivider: CGFloat { safe.top + 6 + Self.dockHeight + 8 }
+    /// Conversation-first: the device docks in the top corner, opposite the
+    /// back button. There is no title bar.
+    var chatDivider: CGFloat { safe.top + 4 + Self.dockHeight + 6 }
     /// Device and conversation share the screen.
-    var splitDivider: CGFloat { threadBarBottom + 10 + splitPhoneHeight + 24 }
+    var splitDivider: CGFloat { safe.top + 8 + splitPhoneHeight + 24 }
 
     /// Divider position for a continuous detent: 0 chat, 1 split, 2 device.
     /// `limit` is the lowest the divider may sit (just above the composer).
@@ -95,12 +95,12 @@ struct StageLayout: Equatable {
         return device > split ? 1 + (y - split) / (device - split) : 1
     }
 
-    /// The device fills the region between the title bar and the divider.
+    /// The device fills the region between the top of the screen and the divider.
     func threadPose(divider y: CGFloat) -> PhonePose {
         let raw = ((y - chatDivider) / 150).clamped()
         let t = raw * raw * (3 - 2 * raw)
-        let top = CGFloat.lerp(safe.top + 6, threadBarBottom + 10, t)
-        let gap = CGFloat.lerp(8, 24, t)
+        let top = CGFloat.lerp(safe.top + 4, safe.top + 8, t)
+        let gap = CGFloat.lerp(6, 24, t)
         let region = max(40, y - gap - top)
         let height = min(region, (size.width - 40) / PhonePose.aspect)
         let dockX = size.width - 18 - Self.dockHeight * PhonePose.aspect / 2

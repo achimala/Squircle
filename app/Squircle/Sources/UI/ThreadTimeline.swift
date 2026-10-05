@@ -33,6 +33,7 @@ struct Shot: Equatable {
     let step: String
     let index: Int
     let title: String
+    var video = false
 }
 
 /// What the agent is doing this moment.
@@ -45,6 +46,8 @@ struct LiveStatus: Equatable {
 /// its answer. Work in progress shows its latest note and newest steps; a
 /// finished turn folds its work into a summary line, keeping screenshots.
 enum ThreadItem: Equatable {
+    /// The thread's title, scrolling with the conversation.
+    case header(String)
     case user(ChatMessage)
     case answer(ChatMessage)
     case note(ChatMessage)
@@ -58,6 +61,7 @@ enum ThreadItem: Equatable {
 
     var id: String {
         switch self {
+        case .header: return "header"
         case .user(let message), .answer(let message): return message.id
         case .note(let message): return "note:" + message.id
         case .thought(let message): return message.id
@@ -112,6 +116,10 @@ enum ThreadItem: Equatable {
     /// Latest note, the newest few steps after it, and every screenshot.
     private static func liveRows(turn: String, work: [ChatMessage], expanded: Bool) -> [ThreadItem] {
         if expanded { return [.earlier(turn: turn, count: 0)] + allRows(work) }
+        // The step running right now is the live line's headline; it joins
+        // the rail when it finishes.
+        var work = work
+        if let last = work.last, last.role == "tool", last.isStreaming { work.removeLast() }
         let noteIndex = work.lastIndex { $0.role == "assistant" }
         let afterNote = work.indices.filter { $0 > (noteIndex ?? -1) && work[$0].role == "tool" }
         let shown = Set(afterNote.suffix(liveWindow))
@@ -148,7 +156,9 @@ enum ThreadItem: Equatable {
     }
 
     private static func gallery(_ id: String, _ steps: [ChatMessage]) -> [ThreadItem] {
-        let shots = steps.flatMap { step in (0..<step.imageCount).map { Shot(step: step.id, index: $0, title: step.content) } }
+        let shots = steps.flatMap { step in
+            (0..<step.imageCount).map { Shot(step: step.id, index: $0, title: step.content, video: step.videoID != nil) }
+        }
         return shots.isEmpty ? [] : [.gallery(id: id, shots: shots)]
     }
 

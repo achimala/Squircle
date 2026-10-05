@@ -105,10 +105,33 @@ enum Commands {
         #[arg(long, help = "Retained .dSYM bundle; Xcode matches its binary UUID")]
         dsym: PathBuf,
     },
+    /// Publish a recording or image into a T3 thread so Squircle shows it inline.
+    Media {
+        #[command(subcommand)]
+        command: MediaCommand,
+    },
     /// Submit a JSON diagnostic fixture; useful for checking the phone-to-Mac contract.
     Diagnostics {
         #[command(subcommand)]
         command: DiagnosticCommand,
+    },
+}
+#[derive(Subcommand)]
+enum MediaCommand {
+    /// Copy an mp4/mov/png/jpg into the thread's media; the phone shows it in the conversation.
+    #[command(after_help = "Record a simulator flow first, for example with T3's agent-device: record start /tmp/demo.mp4 --scope device … record stop.")]
+    Add {
+        #[arg(long, help = "T3 thread ID shown in the agent's instructions")]
+        thread: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, help = "One line saying what the clip shows")]
+        caption: Option<String>,
+    },
+    /// List media published into a thread.
+    List {
+        #[arg(long)]
+        thread: String,
     },
 }
 #[derive(Subcommand)]
@@ -419,7 +442,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -685,6 +708,16 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             success(
                 json!({"report":output,"frames_verified":false,"note":"Tool completed; inspect application frames to confirm resolution and matching symbols."}),
             )
+        }
+        Commands::Media { command } => {
+            let root = root(cli)?;
+            match command {
+                MediaCommand::Add { thread, file, caption } => {
+                    let media = squircle::media::add(&root, thread, file, caption.as_deref())?;
+                    success(json!({"id":media.id,"thread_id":media.thread_id,"kind":media.kind,"caption":media.caption,"bytes":media.bytes,"next":"The clip appears in the thread on the phone within a few seconds."}))
+                }
+                MediaCommand::List { thread } => success(json!({"media":squircle::media::list(&root, thread)?})),
+            }
         }
         Commands::Diagnostics {
             command: DiagnosticCommand::Send { file },

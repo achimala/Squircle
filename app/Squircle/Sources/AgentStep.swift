@@ -173,6 +173,13 @@ struct StepDiff: Equatable {
 
 /// Screenshot pixels steps returned, fetched from the Mac on demand and kept
 /// outside message values so comparing conversations stays cheap.
+/// Downloaded recordings, kept as local files for AVFoundation.
+enum StepVideos {
+    nonisolated(unsafe) private static var files: [String: URL] = [:]
+    static func url(for id: String) -> URL? { files[id] }
+    static func set(_ url: URL, for id: String) { files[id] = url }
+}
+
 enum StepImages {
     nonisolated(unsafe) private static var store: [String: Data] = [:]
     static func data(for id: String, index: Int) -> Data? { store["\(id)#\(index)"] }

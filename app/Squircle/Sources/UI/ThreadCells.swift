@@ -1,3 +1,4 @@
+import AVFoundation
 import UIKit
 
 /// Text with a band of light sweeping across it while something is live.
@@ -90,6 +91,27 @@ class TimelineCell: UITableViewCell {
             self.contentView.alpha = pressed ? 0.5 : 1
         }
     }
+}
+
+/// The thread's title at the top of its conversation.
+final class HeaderCell: TimelineCell {
+    private let title = Theme.label("", Theme.font(.title2, 24, .bold), lines: 3)
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        title.accessibilityTraits = .header
+        title.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(title)
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            title.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+            title.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            title.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
+        ])
+        accessibilityIdentifier = "thread.title"
+    }
+
+    func configure(_ text: String) { title.text = text }
 }
 
 /// Text a person or the agent wrote. Yours sits in a bubble at the trailing
@@ -202,7 +224,7 @@ final class StepCell: TimelineCell {
         title.text = step.content
         title.font = literal ? Theme.font(.footnote, 13, .regular, monospaced: true) : Theme.font(.subheadline, 15)
         title.numberOfLines = literal ? 1 : 2
-        title.textColor = step.failed ? Theme.failure : .secondaryLabel
+        title.textColor = .secondaryLabel
         title.isShimmering = step.isStreaming
         icon.image = UIImage(systemName: step.failed ? "exclamationmark" : step.symbol.isEmpty ? "wrench.and.screwdriver" : step.symbol)
         icon.tintColor = step.failed ? Theme.failure : step.isStreaming ? Theme.accent : .secondaryLabel
@@ -276,7 +298,7 @@ final class StepCell: TimelineCell {
 final class GalleryCell: TimelineCell {
     static let height: CGFloat = 188
     var onTap: ((Shot) -> Void)?
-    private let scroll = UIScrollView()
+    private let scroll = GalleryScrollView()
     private let row = UIStackView()
     private var shots: [Shot] = []
     private static let cache = NSCache<NSString, UIImage>()
@@ -318,15 +340,41 @@ final class GalleryCell: TimelineCell {
 
     func configure(_ shots: [Shot], indent: CGFloat) {
         scroll.contentInset = UIEdgeInsets(top: 0, left: indent, bottom: 0, right: 20)
+        // Newest first, so the row rests at its start and a swipe right there
+        // still means "back".
+        let shots = Array(shots.reversed())
         if shots != self.shots {
-            let fresh = shots.count > self.shots.count && !self.shots.isEmpty
+            let added = Set(shots.map { "\($0.step)#\($0.index)" }).subtracting(self.shots.map { "\($0.step)#\($0.index)" })
+            let animate = !self.shots.isEmpty && window != nil && !Motion.reduced
             self.shots = shots
             row.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            for shot in shots { row.addArrangedSubview(ShotView(shot: shot) { [weak self] in self?.onTap?($0) }) }
-            if fresh { scroll.setContentOffset(CGPoint(x: max(-indent, row.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width - scroll.bounds.width + 20), y: 0), animated: true) }
-            else { scroll.contentOffset.x = -indent }
+            for shot in shots {
+                let view = ShotView(shot: shot) { [weak self] in self?.onTap?($0) }
+                row.addArrangedSubview(view)
+                if animate, added.contains("\(shot.step)#\(shot.index)") {
+                    view.alpha = 0
+                    view.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+                    UIView.animate(withDuration: 0.7, delay: 0.1, usingSpringWithDamping: 0.7, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
+                        view.alpha = 1
+                        view.transform = .identity
+                    }
+                }
+            }
+            scroll.setContentOffset(CGPoint(x: -indent, y: 0), animated: animate)
         }
         for case let view as ShotView in row.arrangedSubviews { view.update() }
+    }
+}
+
+/// Leaves a rightward swipe to the thread's back gesture once there is
+/// nothing further left to scroll to.
+final class GalleryScrollView: UIScrollView {
+    override func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+        if gesture === panGestureRecognizer {
+            let velocity = panGestureRecognizer.velocity(in: self)
+            if velocity.x > 0, abs(velocity.x) > abs(velocity.y), contentOffset.x <= -contentInset.left + 1 { return false }
+        }
+        return super.gestureRecognizerShouldBegin(gesture)
     }
 }
 
@@ -337,6 +385,11 @@ final class ShotView: UIControl {
     private let shadow = UIView()
     private var width: NSLayoutConstraint!
     private let action: (Shot) -> Void
+    /// Recordings play inline, muted and looping, inside the frame.
+    private var player: AVQueuePlayer?
+    private var looper: AVPlayerLooper?
+    private let playerLayer = AVPlayerLayer()
+    private let badge = UIImageView(image: UIImage(systemName: "play.fill"))
 
     init(shot: Shot, action: @escaping (Shot) -> Void) {
         self.shot = shot
@@ -354,14 +407,26 @@ final class ShotView: UIControl {
         shadow.layer.shadowOpacity = 0.16
         shadow.layer.shadowRadius = 12
         shadow.layer.shadowOffset = CGSize(width: 0, height: 7)
-        [shadow, image].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
+        playerLayer.videoGravity = .resizeAspectFill
+        image.layer.addSublayer(playerLayer)
+        badge.tintColor = .white
+        badge.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        badge.contentMode = .center
+        badge.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        badge.layer.cornerRadius = 12
+        badge.isHidden = !shot.video
+        badge.isUserInteractionEnabled = false
+        [shadow, image, badge].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
         width = widthAnchor.constraint(equalToConstant: GalleryCell.height * 0.46)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: GalleryCell.height), width,
             image.topAnchor.constraint(equalTo: topAnchor), image.bottomAnchor.constraint(equalTo: bottomAnchor),
             image.leadingAnchor.constraint(equalTo: leadingAnchor), image.trailingAnchor.constraint(equalTo: trailingAnchor),
             shadow.topAnchor.constraint(equalTo: topAnchor), shadow.bottomAnchor.constraint(equalTo: bottomAnchor),
-            shadow.leadingAnchor.constraint(equalTo: leadingAnchor), shadow.trailingAnchor.constraint(equalTo: trailingAnchor)
+            shadow.leadingAnchor.constraint(equalTo: leadingAnchor), shadow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            badge.widthAnchor.constraint(equalToConstant: 24), badge.heightAnchor.constraint(equalToConstant: 24),
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            badge.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8)
         ])
         addAction(UIAction { [weak self] _ in guard let self else { return }; Theme.selectionHaptic(); self.action(self.shot) }, for: .touchUpInside)
         isAccessibilityElement = true
@@ -375,6 +440,7 @@ final class ShotView: UIControl {
     required init?(coder: NSCoder) { fatalError() }
 
     func update() {
+        startPlaybackIfReady()
         guard let picture = GalleryCell.image(for: shot), image.image !== picture else { return }
         let ratio = picture.size.width / max(1, picture.size.height)
         width.constant = min(320, max(64, GalleryCell.height * ratio))
@@ -389,6 +455,27 @@ final class ShotView: UIControl {
     override func layoutSubviews() {
         super.layoutSubviews()
         shadow.layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: image.layer.cornerRadius).cgPath
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        playerLayer.frame = image.bounds
+        CATransaction.commit()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { player?.pause() } else { startPlaybackIfReady() }
+    }
+
+    private func startPlaybackIfReady() {
+        guard shot.video, window != nil, !Motion.reduced else { return }
+        if let player { player.play(); return }
+        guard let url = StepVideos.url(for: shot.step) else { return }
+        let queue = AVQueuePlayer()
+        queue.isMuted = true
+        queue.preventsDisplaySleepDuringVideoPlayback = false
+        looper = AVPlayerLooper(player: queue, templateItem: AVPlayerItem(url: url))
+        playerLayer.player = queue
+        player = queue
+        queue.play()
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -447,6 +534,22 @@ final class SummaryCell: TimelineCell {
         accessibilityIdentifier = "thread.summary"
     }
 
+    /// A ring of light leaves the pill: the turn just finished.
+    func celebrate() {
+        let effect = EffectView()
+        effect.mode = .ripple
+        effect.cornerRadius = 19
+        effect.inset = 60
+        effect.frame = glass.frame.insetBy(dx: -60, dy: -60)
+        contentView.insertSubview(effect, belowSubview: glass)
+        effect.layoutIfNeeded()
+        effect.ripple { effect.removeFromSuperview() }
+        glass.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+        UIView.animate(withDuration: 0.7, delay: 0, usingSpringWithDamping: 0.55, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
+            self.glass.transform = .identity
+        }
+    }
+
     func configure(_ summary: TurnSummary) {
         icon.image = UIImage(systemName: "checkmark.circle.fill")
         icon.tintColor = Theme.accent
@@ -461,8 +564,8 @@ final class SummaryCell: TimelineCell {
 /// What the agent is doing now: a glass capsule with a living edge.
 final class LiveCell: TimelineCell {
     let glass = Theme.glassSurface(cornerRadius: 22)
-    /// Behind the glass; the Metal edge light draws here.
-    let glowHost = UIView()
+    /// Behind the glass: the Metal edge light.
+    let glowHost = EffectView()
     private let mark = UIView()
     let headline = ShimmerLabel()
     private let elapsed = UILabel()
@@ -481,7 +584,8 @@ final class LiveCell: TimelineCell {
         elapsed.textColor = .tertiaryLabel
         elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
         elapsed.setContentHuggingPriority(.required, for: .horizontal)
-        glowHost.isUserInteractionEnabled = false
+        glowHost.cornerRadius = 22
+        glowHost.inset = 18
         [glowHost, glass].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         [mark, headline, elapsed].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         NSLayoutConstraint.activate([
@@ -535,6 +639,7 @@ final class LiveCell: TimelineCell {
         timer?.invalidate()
         timer = nil
         animateMark()
+        glowHost.setActive(window != nil)
         guard window != nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }

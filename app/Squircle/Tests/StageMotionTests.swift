@@ -171,8 +171,8 @@ final class StageMotionTests: XCTestCase {
         XCTAssertTrue(messages[3].isStreaming)
         XCTAssertEqual(state.pendingRequests.count, 1)
         let items = ThreadItem.items(messages: messages, running: state.isRunning)
-        XCTAssertEqual(items.map(\.id), ["u", "a", "b", "live"], "Your message, the steps on one rail, then the live line.")
-        if case .step(_, let first, let last) = items[1] { XCTAssertTrue(first); XCTAssertFalse(last) } else { XCTFail() }
+        XCTAssertEqual(items.map(\.id), ["u", "a", "live"], "The running step is the live line, not a row.")
+        if case .step(_, let first, let last) = items[1] { XCTAssertTrue(first); XCTAssertTrue(last) } else { XCTFail() }
         XCTAssertEqual(items.last, .live(LiveStatus(headline: "Searched for “heroTop”", started: ThreadItem.date("2026-10-05T10:00:00.000Z"))))
     }
 

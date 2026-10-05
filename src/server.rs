@@ -158,6 +158,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/builds/{id}/install-link", post(create_link))
         .route("/v1/builds/{id}/diagnostics", get(diagnostics))
         .route("/v1/t3/threads/{thread}/steps", get(t3_steps))
+        .route("/v1/t3/threads/{thread}/media", get(thread_media))
+        .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
         .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
         .route("/v1/import", post(import))
         .route("/v1/diagnostics", post(ingest))
@@ -734,6 +736,52 @@ async fn t3_steps(
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?;
     Ok(Json(success(steps)))
+}
+
+/// Recordings and images agents published into a thread (`squircle media add`).
+async fn thread_media(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(thread): Path<String>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let root = state.store.lock().unwrap().root.clone();
+    let items = crate::media::list(&root, &thread).map_err(ApiError::bad)?;
+    let items: Vec<Value> = items
+        .into_iter()
+        .map(|m| json!({"id":m.id,"kind":m.kind,"caption":m.caption,"content_type":m.content_type,"bytes":m.bytes,"created_at":m.created_at}))
+        .collect();
+    Ok(Json(success(json!({"thread_id":thread,"media":items}))))
+}
+
+async fn thread_media_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((thread, id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    auth(&state, &headers, false)?;
+    let root = state.store.lock().unwrap().root.clone();
+    let media = crate::media::get(&root, &thread, &id).map_err(ApiError::missing)?;
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&media.file)
+        .await
+        .map_err(ApiError::missing)?;
+    let metadata = file.metadata().await.map_err(ApiError::internal)?;
+    if !metadata.is_file() {
+        return Err(ApiError::internal("Invalid media file"));
+    }
+    let mut response = (
+        private_headers(),
+        [(header::CONTENT_TYPE, media.content_type.clone())],
+        Body::from_stream(ReaderStream::new(file)),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, metadata.len().to_string().parse().unwrap());
+    Ok(response)
 }
 
 async fn t3_step_image(

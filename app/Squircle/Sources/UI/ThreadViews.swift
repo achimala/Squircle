@@ -7,6 +7,12 @@ final class Composer: UIView, UITextViewDelegate {
     var onChange: (() -> Void)?
     let input = UITextView()
     let send = Theme.glassButton(symbol: "arrow.up", prominent: true, identifier: "thread.send", accessibilityLabel: "Send message")
+    /// The agent and approval menu, at the field's leading edge.
+    let accessory = UIButton(configuration: .plain())
+    var placeholderText: String {
+        get { placeholder.text ?? "" }
+        set { if placeholder.text != newValue { placeholder.text = newValue } }
+    }
     private let glass = Theme.glassSurface(cornerRadius: 24, interactive: true)
     private let placeholder = Theme.label("", Theme.font(.body, 17), color: .placeholderText)
     private var height: NSLayoutConstraint!
@@ -29,14 +35,20 @@ final class Composer: UIView, UITextViewDelegate {
         send.addAction(UIAction { [weak self] _ in self?.onSend?() }, for: .touchUpInside)
         glass.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glass)
-        [input, placeholder, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
+        accessory.configuration?.image = UIImage(systemName: "sparkles", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold))
+        accessory.configuration?.baseForegroundColor = .secondaryLabel
+        accessory.configuration?.contentInsets = .zero
+        [input, placeholder, send, accessory].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         height = input.heightAnchor.constraint(equalToConstant: 48)
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
             input.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
             input.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
-            input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
+            accessory.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
+            accessory.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
+            accessory.widthAnchor.constraint(equalToConstant: 36), accessory.heightAnchor.constraint(equalToConstant: 36),
+            input.leadingAnchor.constraint(equalTo: accessory.trailingAnchor, constant: -6),
             input.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -4),
             height,
             placeholder.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 17),
@@ -50,6 +62,13 @@ final class Composer: UIView, UITextViewDelegate {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Where the first line of typed text begins, in `view`'s coordinates.
+    func textOrigin(in view: UIView) -> CGPoint {
+        let origin = CGPoint(x: input.textContainerInset.left + input.textContainer.lineFragmentPadding,
+                             y: input.textContainerInset.top - input.contentOffset.y)
+        return input.convert(origin, to: view)
+    }
 
     func textViewDidChange(_ textView: UITextView) {
         placeholder.isHidden = !textView.text.isEmpty

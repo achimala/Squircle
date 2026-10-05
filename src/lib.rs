@@ -1,5 +1,6 @@
 pub mod apps;
 pub mod artifact;
+pub mod media;
 pub mod model;
 pub mod preview;
 pub mod projects;

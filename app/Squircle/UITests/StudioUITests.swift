@@ -26,7 +26,6 @@ final class StudioUITests: XCTestCase {
         element("thread.new").tap()
         waitForThread()
         requireHittable(element("draft.models"))
-        XCTAssertTrue(app.staticTexts["New thread"].exists)
         XCTAssertTrue(app.staticTexts["What’s next?"].exists)
         XCTAssertFalse(element("thread.messages").exists)
         capture("New thread — quick models")
@@ -38,7 +37,7 @@ final class StudioUITests: XCTestCase {
         waitForThreadDismissal()
         element("thread.new").tap()
         requireHittable(element("draft.models"))
-        XCTAssertTrue(app.staticTexts["New thread"].exists)
+        XCTAssertTrue(app.staticTexts["What’s next?"].exists)
         XCTAssertFalse(element("thread.messages").exists)
     }
 
