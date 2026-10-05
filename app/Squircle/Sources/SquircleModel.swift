@@ -38,6 +38,9 @@ final class SquircleModel: ObservableObject {
     private var launchReported = false
     private var sessionProjects: [String:String] = [:]
     private var submitting = false
+    private var stepDetails: Task<Void,Never>?
+    private var stepDetailsSince: String?
+    private var stepDetailsCount = -1
     private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
     private let preferences: UserDefaults
     private static let preferredModelKey = "squircle.t3.preferredModel"
@@ -168,6 +171,7 @@ final class SquircleModel: ObservableObject {
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
     func selectSession(_ id: String) async {
         selectedSessionID = id; messages = []; requests = []; state = T3ThreadState(); isRunning = false
+        stepDetails?.cancel(); stepDetailsSince = nil; stepDetailsCount = -1
         runtimeMode = pendingRuntimeModes[id] ?? .auto
         if let pending = pendingModelSelections[id] { modelSelection = pending }
         guard let gateway else { return }
@@ -230,6 +234,7 @@ final class SquircleModel: ObservableObject {
     }
     func consumeThread(_ item: JSONValue) {
         state.consume(item); messages = state.messages; requests = state.pendingRequests
+        if state.activityCount != stepDetailsCount { stepDetailsCount = state.activityCount; scheduleStepDetails() }
         isRunning = state.isRunning
         let saved = state.thread["modelSelection"]
         if let id = selectedSessionID, let pending = pendingModelSelections[id] {
@@ -284,6 +289,34 @@ final class SquircleModel: ObservableObject {
                 "interactionMode":"default","titleSeed":String(text.prefix(120))])
             isRunning = true; status = "Working"
         } catch { self.error = error.localizedDescription }
+    }
+    /// T3 streams tool calls without their inputs or screenshots; the Mac
+    /// fills those in shortly after each new activity.
+    private func scheduleStepDetails() {
+        guard let client, let id = selectedSessionID else { return }
+        stepDetails?.cancel()
+        stepDetails = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard let self, !Task.isCancelled else { return }
+            guard let steps = try? await client.threadSteps(threadID: id, since: stepDetailsSince),
+                  !Task.isCancelled, selectedSessionID == id else { return }
+            guard !steps.isEmpty else { return }
+            for step in steps {
+                guard let key = step["id"].string else { continue }
+                var merged = state.details[key]?.object ?? [:]
+                for (field, value) in step.object { merged[field] = value }
+                state.details[key] = .object(merged)
+                if let at = step["updated_at"].string, at > (stepDetailsSince ?? "") { stepDetailsSince = at }
+            }
+            messages = state.messages
+        }
+    }
+    func loadStepImage(_ stepID: String, index: Int) async -> Data? {
+        if let data = StepImages.data(for: stepID, index: index) { return data }
+        guard let client, let thread = selectedSessionID,
+              let data = try? await client.stepImage(threadID: thread, callID: stepID, index: index) else { return nil }
+        StepImages.set(data, for: stepID, index: index)
+        return data
     }
     func stop() async {
         guard let id = selectedSessionID else { return }

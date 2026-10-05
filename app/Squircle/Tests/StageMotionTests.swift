@@ -144,7 +144,8 @@ final class StageMotionTests: XCTestCase {
         var state = T3ThreadState()
         func tool(_ id: String, _ kind: String, call: String, status: String, at second: Int, detail: String) -> [String: Any] {
             ["id": id, "kind": kind, "tone": "tool", "summary": "Tool call", "createdAt": "2026-10-05T10:00:0\(second).000Z",
-             "payload": ["itemType": "dynamic_tool_call", "toolCallId": call, "status": status, "detail": detail, "data": ["toolName": "Read"]]]
+             "payload": ["itemType": "dynamic_tool_call", "toolCallId": call, "status": status, "detail": detail,
+                         "data": ["toolName": String(detail.prefix { $0 != ":" })]]]
         }
         state.consume(.from(["kind": "snapshot", "snapshot": ["snapshotSequence": 1, "thread": [
             "session": ["status": "running"],
@@ -164,15 +165,55 @@ final class StageMotionTests: XCTestCase {
         ]]]))
         let messages = state.messages
         XCTAssertEqual(messages.map(\.role), ["user", "thinking", "tool", "tool"])
-        XCTAssertEqual(messages[2].content, "Read Sources/Home.swift")
+        XCTAssertEqual(messages[2].content, "Read Home.swift")
         XCTAssertFalse(messages[2].isStreaming, "A late update never reopens a completed step.")
-        XCTAssertEqual(messages[3].content, "Grep heroTop")
+        XCTAssertEqual(messages[3].content, "Searched for “heroTop”")
         XCTAssertTrue(messages[3].isStreaming)
         XCTAssertEqual(state.pendingRequests.count, 1)
         let items = ThreadItem.items(messages: messages, running: state.isRunning)
-        XCTAssertEqual(items.count, 4, "User, thought, one block of steps, working.")
-        if case .steps(_, let steps) = items[2] { XCTAssertEqual(steps.count, 2) } else { XCTFail("Steps should share one row") }
-        XCTAssertEqual(items.last, .working)
+        XCTAssertEqual(items.map(\.id), ["u", "a", "b", "live"], "Your message, the steps on one rail, then the live line.")
+        if case .step(_, let first, let last) = items[1] { XCTAssertTrue(first); XCTAssertFalse(last) } else { XCTFail() }
+        XCTAssertEqual(items.last, .live(LiveStatus(headline: "Searched for “heroTop”", started: ThreadItem.date("2026-10-05T10:00:00.000Z"))))
+    }
+
+    func testFinishedTurnFoldsWorkKeepsScreenshotsAndAnswer() {
+        func message(_ id: String, _ role: String, _ text: String, _ second: Int) -> ChatMessage {
+            ChatMessage(id: id, role: role, content: text, createdAt: "2026-10-05T10:0\(second / 60):\(String(format: "%02d", second % 60)).000Z")
+        }
+        var shot = message("shot", "tool", "Looked at the simulator", 20)
+        shot.imageCount = 1
+        var edit = message("edit", "tool", "Edited Theme.swift", 30)
+        edit.step = AgentStep(kind: .edit, title: "Edited Theme.swift", symbol: "pencil.line", added: 3, removed: 1,
+                              diff: StepDiff(path: "/a/Theme.swift", old: "a", new: "b"))
+        let messages = [message("u", "user", "Make it shine", 0), message("t", "thinking", "Plan", 5),
+                        message("n", "assistant", "Looking at the screen.", 10), shot, edit,
+                        message("answer", "assistant", "Done.", 95)]
+        let folded = ThreadItem.items(messages: messages, running: false)
+        XCTAssertEqual(folded.map(\.id), ["u", "summary:u", "gallery:u", "answer"])
+        guard case .summary(let summary) = folded[1] else { return XCTFail() }
+        XCTAssertEqual(summary.title, "Worked for 1m 35s")
+        XCTAssertEqual(summary.detail, "2 steps · 1 file changed")
+        let open = ThreadItem.items(messages: messages, running: false, expanded: ["u"])
+        XCTAssertEqual(open.map(\.id), ["u", "summary:u", "t", "note:n", "shot", "gallery:shot", "edit", "answer"])
+        let live = ThreadItem.items(messages: Array(messages.dropLast()), running: true)
+        XCTAssertEqual(live.map(\.id), ["u", "note:n", "shot", "gallery:shot", "edit", "live"],
+                       "While working the latest note leads its steps.")
+    }
+
+    func testStepsReadAsSentencesAndHideAppContext() {
+        func activity(_ tool: String, _ input: [String: Any]) -> JSONValue {
+            .from(["kind": "tool.completed", "payload": ["itemType": "dynamic_tool_call", "data": ["toolName": tool, "input": input]]])
+        }
+        XCTAssertEqual(AgentStep.describe(activity("Bash", ["command": "cd /x && make", "description": "build the app"])).title, "Build the app")
+        XCTAssertEqual(AgentStep.describe(activity("Bash", ["command": "cd /x && make test"])).title, "make test")
+        let edit = AgentStep.describe(activity("Edit", ["file_path": "/x/Theme.swift", "old_string": "a\nb", "new_string": "a\nc\nd"]))
+        XCTAssertEqual(edit.title, "Edited Theme.swift")
+        XCTAssertEqual([edit.added, edit.removed], [2, 1])
+        XCTAssertEqual(AgentStep.describe(activity("mcp__t3-code__device_screenshot", [:])).title, "Looked at the simulator")
+        XCTAssertTrue(AgentStep.describe(activity("ToolSearch", ["query": "x"])).hidden)
+        XCTAssertEqual(AgentStep.humanCommand("/bin/zsh -lc 'cd /x && git status'"), "git status")
+        XCTAssertEqual(T3ThreadState.spoken("Fix it" + AppProject.contextMarker + "Squircle. Keep work…"), "Fix it")
+        XCTAssertEqual(StepDetailViewController.lineDiff(["a", "b"], ["a", "c"]), [.same("a"), .added("c"), .removed("b")])
     }
 
     func testAmbientColorComesFromSaturatedPixelsOnly() {

@@ -157,6 +157,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/builds/{id}/preview", get(download_preview).post(capture_preview))
         .route("/v1/builds/{id}/install-link", post(create_link))
         .route("/v1/builds/{id}/diagnostics", get(diagnostics))
+        .route("/v1/t3/threads/{thread}/steps", get(t3_steps))
+        .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
         .route("/v1/import", post(import))
         .route("/v1/diagnostics", post(ingest))
         .route("/install/{token}", get(install_page))
@@ -713,6 +715,38 @@ async fn publish_app_preview(
 #[derive(Deserialize)]
 struct PreviewVersion {
     version: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StepsQuery {
+    since: Option<String>,
+}
+
+/// Tool-call details T3 omits from its client stream; see `t3steps`.
+async fn t3_steps(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(thread): Path<String>,
+    Query(query): Query<StepsQuery>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let steps = crate::t3steps::steps(&thread, query.since.as_deref())
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    Ok(Json(success(steps)))
+}
+
+async fn t3_step_image(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((thread, call, index)): Path<(String, String, usize)>,
+) -> ApiResult<Response> {
+    auth(&state, &headers, false)?;
+    let image = crate::t3steps::image(&thread, &call, index)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?
+        .ok_or_else(|| ApiError::missing("No such image"))?;
+    Ok((private_headers(), Json(success(image))).into_response())
 }
 
 async fn app_preview(

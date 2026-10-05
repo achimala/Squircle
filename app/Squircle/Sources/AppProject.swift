@@ -134,6 +134,9 @@ struct AppProject: Identifiable, Equatable, Codable {
         self.metadataID = metadataID; self.metadataPreview = metadataPreview
     }
 
+    /// Starts the context appended to a thread's first message; the
+    /// conversation hides everything from here on.
+    static let contextMarker = "\n\nThis conversation belongs to the app "
     var agentContext: String {
         var lines = ["This conversation belongs to the app \(name). Keep work and app-specific decisions scoped to this app."]
         if let bundleID { lines.append("Known bundle identifier: \(bundleID).") }

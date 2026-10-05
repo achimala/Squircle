@@ -4,6 +4,9 @@ import Foundation
 struct T3ThreadState {
     private(set) var sequence = -1
     private(set) var thread: JSONValue = .null
+    /// Inputs and screenshot counts from the Mac, keyed by tool call.
+    var details: [String: JSONValue] = [:]
+    var activityCount: Int { thread["activities"].array.count }
     mutating func consume(_ item: JSONValue) {
         if item["kind"].string == "snapshot" {
             let snapshot = item["snapshot"]
@@ -50,7 +53,7 @@ struct T3ThreadState {
             let reasoning = m["role"].string == "system" && id.hasPrefix("reasoning:")
             guard reasoning || m["role"].string != "system" else { return nil }
             return (m["createdAt"].string ?? "", ChatMessage(id: id, role: reasoning ? "thinking" : m["role"].string ?? "assistant",
-                content: m["text"].string ?? "", isStreaming: m["streaming"].bool))
+                content: Self.spoken(m["text"].string ?? ""), isStreaming: m["streaming"].bool, createdAt: m["createdAt"].string ?? ""))
         }
         let running = isRunning
         var steps: [String: Int] = [:]
@@ -64,15 +67,26 @@ struct T3ThreadState {
                           p["data"]["rawOutput"]["content"].string].compactMap { $0 }.first
             let detail = [p["data"]["command"].string ?? p["data"]["item"]["command"].string ?? p["detail"].string, output]
                 .compactMap { $0 }.joined(separator: "\n\n")
-            let (label, symbol) = Self.describe(a)
+            let extra = details[key]
+            let described = AgentStep.describe(extra.map { Self.enrich(a, with: $0) } ?? a)
+            if described.hidden { continue }
             let finished = kind.hasSuffix(".completed") || kind.hasSuffix(".failed") || p["status"].string == "completed"
-            var step = ChatMessage(id: key, role: "tool", content: label, isStreaming: running && !finished,
+            let images = extra?["images"].int ?? 0
+            var step = ChatMessage(id: key, role: "tool", content: described.title, isStreaming: running && !finished,
                                    detail: detail.isEmpty ? p.formatted : detail, activity: kind,
-                                   failed: a["tone"].string == "error" || p["status"].string == "failed", symbol: symbol)
+                                   failed: a["tone"].string == "error" || p["status"].string == "failed", symbol: described.symbol,
+                                   createdAt: a["createdAt"].string ?? "", step: described, imageCount: images)
             if let index = steps[key] {
                 // Updates may arrive after completion; a finished step stays finished.
                 if !rows[index].1.isStreaming { step.isStreaming = false; step.activity = rows[index].1.activity }
                 if step.detail.count < rows[index].1.detail.count { step.detail = rows[index].1.detail }
+                step.createdAt = rows[index].1.createdAt
+                step.imageCount = max(step.imageCount, rows[index].1.imageCount)
+                // Some events carry the tool's full input and others only a
+                // raw command; keep whichever describes the step best.
+                if let earlier = rows[index].1.step, let current = step.step, earlier.richness > current.richness {
+                    step.step = earlier; step.content = earlier.title; step.symbol = earlier.symbol
+                }
                 rows[index].1 = step
             } else {
                 steps[key] = rows.count
@@ -81,48 +95,18 @@ struct T3ThreadState {
         }
         return rows.sorted { $0.0 < $1.0 }.map(\.1)
     }
-    /// A short human line and symbol for one tool activity.
-    static func describe(_ activity: JSONValue) -> (String, String) {
-        let p = activity["payload"], data = p["data"]
-        let tool = data["toolName"].string ?? ""
-        let detail = p["detail"].string ?? ""
-        if let command = data["command"].string ?? data["item"]["command"].string { return (command, "terminal") }
-        if p["itemType"].string == "command_execution" {
-            return (detail.hasPrefix("Bash: ") ? String(detail.dropFirst(6)) : detail, "terminal")
-        }
-        if (activity["kind"].string ?? "").hasPrefix("task.") {
-            return (p["title"].string ?? p["detail"].string ?? activity["summary"].string ?? "Task", "gearshape.2")
-        }
-        let symbol: String
-        switch tool {
-        case "Read": symbol = p["itemType"].string == "image_view" ? "photo" : "doc.text"
-        case "Edit", "Write", "MultiEdit", "NotebookEdit": symbol = "pencil.line"
-        case "Grep", "Glob", "ToolSearch": symbol = "magnifyingglass"
-        case "Bash": symbol = "terminal"
-        case "Agent", "Task": symbol = "person.2"
-        case "WebFetch", "WebSearch": symbol = "globe"
-        default:
-            switch p["itemType"].string {
-            case "file_change": symbol = "pencil.line"
-            case "web_search": symbol = "globe"
-            case "image_view": symbol = "photo"
-            default: symbol = "wrench.and.screwdriver"
-            }
-        }
-        func short(_ path: String) -> String { path.split(separator: "/").suffix(2).joined(separator: "/") }
-        if let path = data["imagePath"].string { return ("View " + short(path), symbol) }
-        // Claude tools arrive as "Name: {json arguments}".
-        if let colon = detail.range(of: ": "), let json = try? JSONDecoder().decode(JSONValue.self, from: Data(detail[colon.upperBound...].utf8)),
-           !json.object.isEmpty || detail.hasSuffix("{}") {
-            let name = String(detail[..<colon.lowerBound]).replacingOccurrences(of: "mcp__", with: "").replacingOccurrences(of: "__", with: " · ")
-            if let path = json["file_path"].string ?? json["path"].string ?? json["notebook_path"].string { return (name + " " + short(path), symbol) }
-            for key in ["pattern", "query", "description", "command", "url", "skill", "prompt"] {
-                if let value = json[key].string { return (name + " " + value, symbol) }
-            }
-            return (name, symbol)
-        }
-        if !detail.isEmpty { return (detail, symbol) }
-        return (p["title"].string ?? activity["summary"].string ?? activity["kind"].string ?? "Activity", symbol)
+    /// Puts the Mac's copy of a tool call's input back into its activity.
+    static func enrich(_ activity: JSONValue, with extra: JSONValue) -> JSONValue {
+        var a = activity.object, payload = activity["payload"].object, data = activity["payload"]["data"].object
+        if extra["input"] != .null { data["input"] = extra["input"] }
+        if let tool = extra["tool"].string, data["toolName"] == nil { data["toolName"] = .string(tool) }
+        payload["data"] = .object(data); a["payload"] = .object(payload)
+        return .object(a)
+    }
+    /// What the person typed, without the app context Squircle sends after it.
+    static func spoken(_ text: String) -> String {
+        guard let range = text.range(of: AppProject.contextMarker) else { return text }
+        return String(text[..<range.lowerBound])
     }
     var pendingRequests: [JSONValue] {
         let activities = thread["activities"].array

@@ -103,6 +103,22 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return url
     }
 
+    /// Tool-call inputs and screenshot counts T3 leaves out of its stream.
+    func threadSteps(threadID: String, since: String?) async throws -> [JSONValue] {
+        struct Reply: Decodable { let ok: Bool; let data: JSONValue }
+        let reply: Reply = try await get(["v1", "t3", "threads", threadID, "steps"],
+                                         query: since.map { [URLQueryItem(name: "since", value: $0)] } ?? [])
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data["steps"].array
+    }
+
+    func stepImage(threadID: String, callID: String, index: Int) async throws -> Data {
+        struct Reply: Decodable { let ok: Bool; let data: JSONValue }
+        let reply: Reply = try await get(["v1", "t3", "threads", threadID, "steps", callID, "images", String(index)])
+        guard reply.ok, let data = reply.data["data"].string.flatMap({ Data(base64Encoded: $0) }) else { throw ClientError.response("Squircle") }
+        return data
+    }
+
     func fetchBuildPreview(id: String) async throws -> Data {
         try await fetchPNG(["v1", "builds", id, "preview"])
     }

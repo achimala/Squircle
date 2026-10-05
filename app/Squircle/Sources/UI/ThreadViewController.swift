@@ -7,7 +7,7 @@ import UIKit
 /// three detents; the device always fills the space above it and shows the
 /// thread's live simulator when one is open.
 @MainActor
-final class ThreadViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate {
+final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestureRecognizerDelegate {
     let project: AppProject
     var onBack: (() -> Void)?
     /// The divider moved; the stage should re-pose the device.
@@ -45,6 +45,8 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
     private var renderedRequestID: String?
 
     private var items: [ThreadItem] = []
+    private var itemsByID: [String: ThreadItem] = [:]
+    private var dataSource: UITableViewDiffableDataSource<Int, String>!
     private var rendered: [String: (source: String, text: NSAttributedString)] = [:]
     private var expanded = Set<String>()
     private var pinToBottom = true
@@ -110,12 +112,20 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         table.keyboardDismissMode = .interactive
         table.showsVerticalScrollIndicator = false
         table.contentInsetAdjustmentBehavior = .never
-        table.dataSource = self
         table.delegate = self
-        table.estimatedRowHeight = 80
+        table.estimatedRowHeight = 60
         table.register(MessageCell.self, forCellReuseIdentifier: "message")
-        table.register(StepsCell.self, forCellReuseIdentifier: "steps")
-        table.register(WorkingCell.self, forCellReuseIdentifier: "working")
+        table.register(StepCell.self, forCellReuseIdentifier: "step")
+        table.register(GalleryCell.self, forCellReuseIdentifier: "gallery")
+        table.register(SummaryCell.self, forCellReuseIdentifier: "summary")
+        table.register(LiveCell.self, forCellReuseIdentifier: "live")
+        dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] table, indexPath, id in
+            guard let self, let item = itemsByID[id] else { return UITableViewCell() }
+            let cell = table.dequeueReusableCell(withIdentifier: Self.reuseIdentifier(for: item), for: indexPath)
+            configure(cell, with: item)
+            return cell
+        }
+        dataSource.defaultRowAnimation = .fade
         table.accessibilityIdentifier = "thread.messages"
         fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
         fade.startPoint = CGPoint(x: 0.5, y: 0)
@@ -476,33 +486,74 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         }
     }
 
-    private func renderItems() {
-        let next = ThreadItem.items(messages: model.messages, running: model.isRunning)
-        guard next != items else { return }
-        let sameRows = next.map(\.id) == items.map(\.id)
-        let changed = sameRows ? next.indices.filter { next[$0] != items[$0] } : []
-        items = next
-        if sameRows {
-            // Streaming: refresh only the rows whose text grew, then let the
-            // table re-measure them without reloading anything else.
-            UIView.performWithoutAnimation {
-                for index in changed {
-                    if let cell = table.cellForRow(at: IndexPath(row: index, section: 0)) { configure(cell, with: next[index]) }
-                }
-                table.beginUpdates()
-                table.endUpdates()
-            }
-        } else {
-            table.reloadData()
-            table.layoutIfNeeded()
+    private static func reuseIdentifier(for item: ThreadItem) -> String {
+        switch item {
+        case .user, .answer, .note, .thought: return "message"
+        case .step, .earlier: return "step"
+        case .gallery: return "gallery"
+        case .summary: return "summary"
+        case .live: return "live"
         }
-        if pinToBottom { scrollToBottom() }
     }
 
-    private func scrollToBottom() {
+    private func renderItems(animated: Bool = false) {
+        let next = ThreadItem.items(messages: model.messages, running: model.isRunning, expanded: expanded)
+        guard next != items else { return }
+        let previous = itemsByID
+        let first = items.isEmpty
+        // A turn finishing folds its steps away; let the table animate that.
+        let folding = animated || (previous["live"] != nil && !next.contains { $0.id == "live" })
+        items = next
+        itemsByID = [:]
+        var ids: [String] = []
+        for item in next where itemsByID[item.id] == nil { itemsByID[item.id] = item; ids.append(item.id) }
+        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
+        snapshot.appendSections([0])
+        snapshot.appendItems(ids)
+        let changed = ids.filter { previous[$0] != nil && previous[$0] != itemsByID[$0] }
+        snapshot.reconfigureItems(changed)
+        let inserted = first ? [] : ids.filter { previous[$0] == nil }
+        if folding {
+            dataSource.apply(snapshot, animatingDifferences: true)
+        } else {
+            UIView.performWithoutAnimation {
+                dataSource.apply(snapshot, animatingDifferences: false)
+                table.layoutIfNeeded()
+            }
+        }
+        if pinToBottom { scrollToBottom(animated: !first && (!inserted.isEmpty || folding)) }
+        if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
+    }
+
+    /// New rows rise into place and come into focus, one after another.
+    private func animateEntrance(of ids: [String]) {
+        guard !Motion.reduced else { return }
         table.layoutIfNeeded()
-        let bottom = table.contentSize.height + table.contentInset.bottom - table.bounds.height
-        table.contentOffset.y = max(-table.contentInset.top, bottom)
+        for (order, id) in ids.enumerated() {
+            guard let index = dataSource.indexPath(for: id), let cell = table.cellForRow(at: index) else { continue }
+            let view = cell.contentView
+            view.alpha = 0
+            view.transform = CGAffineTransform(translationX: 0, y: 16).scaledBy(x: 0.97, y: 0.97)
+            UIView.animate(withDuration: 0.6, delay: Double(order) * 0.05, usingSpringWithDamping: 0.82, initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState]) {
+                view.alpha = 1
+                view.transform = .identity
+            }
+        }
+    }
+
+    private func scrollToBottom(animated: Bool = false) {
+        table.layoutIfNeeded()
+        let bottom = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
+        guard abs(table.contentOffset.y - bottom) > 0.5 else { return }
+        if animated, !Motion.reduced {
+            UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState]) {
+                self.table.contentOffset.y = bottom
+            }
+        } else {
+            table.contentOffset.y = bottom
+        }
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -511,75 +562,110 @@ final class ThreadViewController: UIViewController, UITableViewDataSource, UITab
         pinToBottom = bottom - scrollView.contentOffset.y < 60
     }
 
-    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { items.count }
-
-    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let item = items[indexPath.row]
-        let identifier: String
-        switch item { case .message: identifier = "message"; case .steps: identifier = "steps"; case .working: identifier = "working" }
-        let cell = tableView.dequeueReusableCell(withIdentifier: identifier, for: indexPath)
-        configure(cell, with: item)
-        return cell
-    }
-
     private func configure(_ cell: UITableViewCell, with item: ThreadItem) {
         switch item {
-        case .message(let message):
-            (cell as? MessageCell)?.configure(message, rendered: text(for: message), expanded: expanded.contains(message.id))
-        case .steps(let id, let steps):
-            guard let cell = cell as? StepsCell else { return }
-            cell.configure(steps, expanded: expanded.contains(id))
-            cell.onSelect = { [weak self] step in self?.showDetail(step) }
-            cell.onExpand = { [weak self] in self?.toggle(id) }
-        case .working:
-            (cell as? WorkingCell)?.animate()
+        case .user(let message):
+            (cell as? MessageCell)?.configure(message, style: .user, rendered: text(for: message, style: .user), expanded: true)
+        case .answer(let message):
+            (cell as? MessageCell)?.configure(message, style: .answer, rendered: text(for: message, style: .answer), expanded: true)
+        case .note(let message):
+            (cell as? MessageCell)?.configure(message, style: .note, rendered: text(for: message, style: .note), expanded: expanded.contains(message.id))
+        case .thought(let message):
+            (cell as? MessageCell)?.configure(message, style: .thought, rendered: text(for: message, style: .thought), expanded: expanded.contains(message.id))
+        case .step(let message, let first, let last):
+            (cell as? StepCell)?.configure(message, first: first, last: last)
+        case .earlier(_, let count):
+            (cell as? StepCell)?.configureEarlier(count: count, expanded: count == 0)
+        case .gallery(let id, let shots):
+            guard let cell = cell as? GalleryCell else { return }
+            cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? 56 : 20)
+            cell.onTap = { [weak self] shot in self?.showImage(shot) }
+            for shot in shots where GalleryCell.image(for: shot) == nil { loadImage(shot, item: id) }
+        case .summary(let summary):
+            (cell as? SummaryCell)?.configure(summary)
+        case .live(let status):
+            (cell as? LiveCell)?.configure(status)
         }
     }
 
-    private func text(for message: ChatMessage) -> NSAttributedString {
-        if let cached = rendered[message.id], cached.source == message.content { return cached.text }
+    private func text(for message: ChatMessage, style: MessageCell.Style) -> NSAttributedString {
+        let key = message.id + "\(style)"
+        if let cached = rendered[key], cached.source == message.content { return cached.text }
         let text: NSAttributedString
-        switch message.role {
-        case "user":
+        switch style {
+        case .user:
             text = NSAttributedString(string: message.content, attributes: [.font: Theme.font(.body, 17), .foregroundColor: UIColor.label])
-        case "thinking":
+        case .note, .thought:
             text = Markdown.render(message.content, font: Theme.font(.subheadline, 15), color: .secondaryLabel)
-        default:
+        case .answer:
             text = Markdown.render(message.content, font: Theme.font(.body, 17), color: message.failed ? Theme.failure : .label)
         }
-        rendered[message.id] = (message.content, text)
+        rendered[key] = (message.content, text)
         return text
     }
 
+    private func tappable(_ item: ThreadItem?) -> Bool {
+        switch item {
+        case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
+        case .earlier, .summary, .note, .thought: return true
+        default: return false
+        }
+    }
+
+    func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
+        tappable(dataSource.itemIdentifier(for: indexPath).flatMap { itemsByID[$0] })
+    }
+    func tableView(_ tableView: UITableView, didHighlightRowAt indexPath: IndexPath) {
+        (tableView.cellForRow(at: indexPath) as? TimelineCell)?.setPressed(true)
+    }
+    func tableView(_ tableView: UITableView, didUnhighlightRowAt indexPath: IndexPath) {
+        (tableView.cellForRow(at: indexPath) as? TimelineCell)?.setPressed(false)
+    }
+
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        if case .message(let message) = items[indexPath.row], message.role == "thinking" { toggle(message.id) }
+        guard let id = dataSource.itemIdentifier(for: indexPath), let item = itemsByID[id] else { return }
+        switch item {
+        case .step(let message, _, _): showDetail(message)
+        case .earlier(let turn, _): toggle(turn)
+        case .summary(let summary): toggle(summary.turn)
+        case .note(let message), .thought(let message): toggle(message.id)
+        default: break
+        }
     }
 
     private func toggle(_ id: String) {
+        Theme.selectionHaptic()
         if !expanded.insert(id).inserted { expanded.remove(id) }
-        guard let index = items.firstIndex(where: { $0.id == id || $0.id == "steps:" + id }),
-              let cell = table.cellForRow(at: IndexPath(row: index, section: 0)) else { return }
-        configure(cell, with: items[index])
-        table.beginUpdates()
-        table.endUpdates()
+        let keepBottom = pinToBottom
+        pinToBottom = false
+        renderItems(animated: true)
+        pinToBottom = keepBottom
     }
 
     private func showDetail(_ step: ChatMessage) {
-        guard !step.detail.isEmpty, presentedViewController == nil else { return }
-        let detail = UIViewController()
-        let text = UITextView()
-        text.isEditable = false
-        text.backgroundColor = .clear
-        text.font = Theme.font(.footnote, 13, monospaced: true)
-        text.text = step.detail
-        text.textContainerInset = UIEdgeInsets(top: 28, left: 16, bottom: 30, right: 16)
-        text.accessibilityIdentifier = "thread.step.detail"
-        detail.view = text
-        if let sheet = detail.sheetPresentationController {
-            sheet.detents = [.medium(), .large()]
-            sheet.prefersGrabberVisible = true
+        guard presentedViewController == nil else { return }
+        present(StepDetailViewController(step: step), animated: true)
+    }
+
+    private var loadingImages = Set<String>()
+    private func loadImage(_ shot: Shot, item: String) {
+        let key = "\(shot.step)#\(shot.index)"
+        guard loadingImages.insert(key).inserted else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let data = await model.loadStepImage(shot.step, index: shot.index)
+            loadingImages.remove(key)
+            guard data != nil, dataSource.indexPath(for: item) != nil else { return }
+            var snapshot = dataSource.snapshot()
+            snapshot.reconfigureItems([item])
+            await dataSource.apply(snapshot, animatingDifferences: false)
         }
-        present(detail, animated: true)
+    }
+
+    private func showImage(_ shot: Shot) {
+        guard presentedViewController == nil else { return }
+        guard let data = StepImages.data(for: shot.step, index: shot.index), let image = UIImage(data: data) else { return }
+        present(ImageViewController(image: image, title: shot.title), animated: true)
     }
 
     // MARK: Composer and requests

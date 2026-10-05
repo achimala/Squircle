@@ -6,4 +6,5 @@ pub mod projects;
 pub mod server;
 pub mod store;
 pub mod symbolicate;
+pub mod t3steps;
 pub mod xcode;

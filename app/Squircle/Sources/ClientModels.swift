@@ -28,6 +28,11 @@ struct ChatMessage: Identifiable, Equatable {
     var failed = false
     /// SF Symbol for a tool step.
     var symbol: String = ""
+    var createdAt = ""
+    /// What a tool step did, in words; nil for text.
+    var step: AgentStep?
+    /// Screenshots this step returned, held in `StepImages` under `id`.
+    var imageCount = 0
 }
 
 struct AppBuild: Identifiable, Decodable, Equatable {
