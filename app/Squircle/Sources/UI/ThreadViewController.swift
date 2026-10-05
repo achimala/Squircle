@@ -48,6 +48,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private let requestDetail = Theme.label("", Theme.font(.footnote, 12.5, monospaced: true), color: .secondaryLabel, lines: 4)
     private let requestButtons = UIStackView()
     private var renderedRequestID: String?
+    /// Progress through the agent's questions in the current request.
+    private var questionIndex = 0
+    private var questionAnswers: [String: Any] = [:]
+    private var questionPicks: [String] = []
 
     /// A message on its way to the Mac, shown before T3 echoes it back.
     private var pendingSend: (id: String, text: String, known: Set<String>)?
@@ -549,7 +553,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
                 table.layoutIfNeeded()
             }
         }
-        if pinToBottom { scrollToBottom(animated: !first && (!inserted.isEmpty || folding)) }
+        // A message in flight scrolls the conversation on its own spring.
+        if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && (!inserted.isEmpty || folding)) }
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
         if previous["live"] != nil, itemsByID["live"] == nil, let finished = next.last(where: { if case .summary = $0 { return true }; return false }) {
             celebrate(finished.id)
@@ -780,6 +785,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let source = composer.textOrigin(in: view)
         let local = "local:" + UUID().uuidString
         pendingSend = (local, text, Set(model.messages.filter { $0.role == "user" }.map(\.id)))
+        flyingID = Motion.reduced ? nil : local
         composer.text = ""
         pinToBottom = true
         render()
@@ -798,38 +804,36 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         }
     }
 
-    /// Your words lift out of the field and settle into their bubble.
+    /// Your words lift out of the field and settle into their bubble while
+    /// the conversation makes room, all on one spring.
     private func flySend(id: String, from source: CGPoint) {
         view.layoutIfNeeded()
-        table.layoutIfNeeded()
+        let start = table.contentOffset.y
         scrollToBottom()
+        let end = table.contentOffset.y
         guard !Motion.reduced, let index = dataSource.indexPath(for: id),
-              let cell = table.cellForRow(at: index) as? MessageCell else { return }
+              let cell = table.cellForRow(at: index) as? MessageCell else { flyingID = nil; return }
+        // Measure the finished bubble, then photograph it to fly.
+        cell.contentView.alpha = 1
         cell.layoutIfNeeded()
         let bubble = cell.bubble.convert(cell.bubble.bounds, to: view)
-        let textFrame = cell.text.convert(cell.text.bounds, to: view)
-            .inset(by: cell.text.textContainerInset)
-        flyingID = id
+        let textFrame = cell.text.convert(cell.text.bounds, to: view).inset(by: cell.text.textContainerInset)
+        let flyer = cell.contentView.resizableSnapshotView(from: cell.bubble.frame, afterScreenUpdates: true,
+                                                           withCapInsets: .zero) ?? UIView()
         cell.contentView.alpha = 0
-        let flyer = UIView(frame: bubble)
-        flyer.backgroundColor = Theme.userBubble
-        flyer.layer.cornerRadius = cell.bubble.layer.cornerRadius
-        flyer.layer.cornerCurve = .continuous
-        let label = UILabel(frame: textFrame.offsetBy(dx: -bubble.minX, dy: -bubble.minY))
-        label.numberOfLines = 0
-        label.attributedText = cell.text.attributedText
-        flyer.addSubview(label)
+        flyer.frame = bubble
         view.insertSubview(flyer, belowSubview: composer)
-        // Start where the text sat in the field, still mostly transparent.
-        let start = CGPoint(x: source.x - (textFrame.minX - bubble.minX) + bubble.width / 2,
-                            y: source.y - (textFrame.minY - bubble.minY) + bubble.height / 2)
-        flyer.center = start
-        flyer.backgroundColor = Theme.userBubble.withAlphaComponent(0)
-        flyer.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
-        let animator = UIViewPropertyAnimator(duration: 0.62, dampingRatio: 0.76) {
+        // Start with its text where the text sat in the field.
+        flyer.center = CGPoint(x: source.x - (textFrame.minX - bubble.minX) + bubble.width / 2,
+                               y: source.y - (textFrame.minY - bubble.minY) + bubble.height / 2)
+        flyer.alpha = 0.7
+        flyer.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+        table.contentOffset.y = start
+        let animator = UIViewPropertyAnimator(duration: 0.6, dampingRatio: 0.78) {
             flyer.center = CGPoint(x: bubble.midX, y: bubble.midY)
             flyer.transform = .identity
-            flyer.backgroundColor = Theme.userBubble
+            flyer.alpha = 1
+            self.table.contentOffset.y = end
         }
         animator.addCompletion { [weak self] _ in
             flyer.removeFromSuperview()
@@ -840,64 +844,158 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         animator.startAnimation()
     }
 
+    private var debugRequest: JSONValue?
     private func renderRequest() {
-        let current = model.requests.first
+        let current = debugRequest ?? model.requests.first
         let id = current?["id"].string
         guard id != renderedRequestID else { return }
+        let appearing = renderedRequestID == nil && current != nil
         renderedRequestID = id
+        questionIndex = 0
+        questionAnswers = [:]
+        questionPicks = []
         request.isHidden = current == nil
-        requestButtons.arrangedSubviews.forEach { $0.removeFromSuperview() }
         if let current {
-            let payload = current["payload"]
-            requestTitle.text = current["summary"].string ?? "The agent needs your response"
-            let detail = payload["detail"].string ?? ""
-            requestDetail.text = detail
-            requestDetail.isHidden = detail.isEmpty
-            func button(_ title: String, warning: String? = nil, prominent: Bool, action: @escaping () -> Void) {
-                let button = Theme.glassButton(title: title, prominent: prominent, identifier: "thread.request.\(title)")
-                button.configuration?.subtitle = warning
-                button.configuration?.titleLineBreakMode = .byWordWrapping
-                button.configuration?.subtitleLineBreakMode = .byWordWrapping
-                button.addAction(UIAction { _ in Theme.selectionHaptic(); action() }, for: .touchUpInside)
-                requestButtons.addArrangedSubview(button)
-            }
-            if (current["kind"].string ?? "").contains("user-input") {
-                button("Answer", prominent: true) { [weak self] in
-                    self?.askQuestions(current, questions: payload["questions"].array, index: 0, answers: [:])
-                }
-            } else if payload["options"].array.isEmpty {
-                button("Decline", prominent: false) { [weak self] in Task { await self?.model.respond(to: current, decision: "decline") } }
-                button("Allow", prominent: true) { [weak self] in Task { await self?.model.respond(to: current, decision: "accept") } }
-            } else {
-                for option in payload["options"].array {
-                    button(option["label"].string ?? "Choose", warning: option["warning"].string,
-                           prominent: ["accept", "acceptForSession", "acceptAlways"].contains(option["decision"].string ?? "")) { [weak self] in
-                        Task { await self?.model.respond(to: current, decision: option["decision"].string) }
-                    }
+            if (current["kind"].string ?? "").contains("user-input") { renderQuestion(current) } else { renderApproval(current) }
+        }
+        view.setNeedsLayout()
+        guard appearing, !Motion.reduced else { return }
+        // The card rises out of the message field.
+        view.layoutIfNeeded()
+        request.alpha = 0
+        request.transform = CGAffineTransform(translationX: 0, y: 40).scaledBy(x: 0.94, y: 0.94)
+        UIView.animate(withDuration: 0.65, delay: 0, usingSpringWithDamping: 0.78, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
+            self.request.alpha = 1
+            self.request.transform = .identity
+        }
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    }
+
+    private func requestButton(_ title: String, subtitle: String? = nil, prominent: Bool, leading: Bool = false,
+                               action: @escaping () -> Void) -> UIButton {
+        let button = Theme.glassButton(title: title, prominent: prominent, identifier: "thread.request.\(title)")
+        button.configuration?.subtitle = subtitle
+        button.configuration?.titleLineBreakMode = .byWordWrapping
+        button.configuration?.subtitleLineBreakMode = .byTruncatingTail
+        button.configuration?.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes; attributes.font = Theme.font(.footnote, 13); return attributes
+        }
+        if leading {
+            button.configuration?.titleAlignment = .leading
+            button.contentHorizontalAlignment = .leading
+        }
+        button.addAction(UIAction { _ in Theme.selectionHaptic(); action() }, for: .touchUpInside)
+        requestButtons.addArrangedSubview(button)
+        return button
+    }
+
+    private func renderApproval(_ current: JSONValue) {
+        requestButtons.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let payload = current["payload"]
+        requestTitle.text = current["summary"].string ?? "The agent needs your response"
+        let detail = payload["detail"].string ?? ""
+        if let stack = requestTitle.superview as? UIStackView {
+            stack.insertArrangedSubview(requestDetail, at: 1)
+            stack.setCustomSpacing(6, after: requestTitle)
+            stack.setCustomSpacing(12, after: requestDetail)
+        }
+        requestDetail.font = Theme.font(.footnote, 12.5, monospaced: true)
+        requestDetail.textColor = .secondaryLabel
+        requestDetail.text = detail
+        requestDetail.isHidden = detail.isEmpty
+        if payload["options"].array.isEmpty {
+            _ = requestButton("Decline", prominent: false) { [weak self] in Task { await self?.model.respond(to: current, decision: "decline") } }
+            _ = requestButton("Allow", prominent: true) { [weak self] in Task { await self?.model.respond(to: current, decision: "accept") } }
+        } else {
+            for option in payload["options"].array {
+                _ = requestButton(option["label"].string ?? "Choose", subtitle: option["warning"].string,
+                                  prominent: ["accept", "acceptForSession", "acceptAlways"].contains(option["decision"].string ?? "")) { [weak self] in
+                    Task { await self?.model.respond(to: current, decision: option["decision"].string) }
                 }
             }
         }
-        view.setNeedsLayout()
     }
 
-    private func askQuestions(_ request: JSONValue, questions: [JSONValue], index: Int, answers: [String: Any]) {
-        guard index < questions.count else { Task { await model.respond(to: request, answers: answers) }; return }
-        let question = questions[index]
+    /// One of the agent's questions at a time, answered by tapping a choice
+    /// or typing; the card slides to the next question.
+    private func renderQuestion(_ current: JSONValue, advancing: Bool = false) {
+        let questions = current["payload"]["questions"].array
+        guard questionIndex < questions.count else {
+            let answers = questionAnswers
+            requestButtons.arrangedSubviews.forEach { $0.isUserInteractionEnabled = false }
+            Task { await model.respond(to: current, answers: answers) }
+            return
+        }
+        if advancing, !Motion.reduced {
+            let slide = CATransition()
+            slide.type = .push
+            slide.subtype = .fromRight
+            slide.duration = 0.35
+            slide.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            request.contentView.layer.add(slide, forKey: "question")
+        }
+        requestButtons.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let question = questions[questionIndex]
         let id = question["id"].string ?? question["header"].string ?? "answer"
-        let alert = UIAlertController(title: question["header"].string ?? "Agent question", message: question["question"].string, preferredStyle: .alert)
-        alert.addTextField { $0.placeholder = "Your answer" }
-        func answer(_ text: String) {
-            var updated = answers
-            updated[id] = text
-            askQuestions(request, questions: questions, index: index + 1, answers: updated)
+        let multiple = question["multiSelect"].bool
+        var caption = (question["header"].string ?? "Question").uppercased()
+        if questions.count > 1 { caption += "  ·  \(questionIndex + 1) OF \(questions.count)" }
+        if let stack = requestTitle.superview as? UIStackView {
+            stack.insertArrangedSubview(requestDetail, at: 0)
+            stack.setCustomSpacing(4, after: requestDetail)
+            stack.setCustomSpacing(14, after: requestTitle)
+        }
+        requestDetail.font = Theme.font(.caption1, 12, .semibold)
+        requestDetail.textColor = Theme.accent
+        requestDetail.text = caption
+        requestDetail.isHidden = false
+        requestTitle.text = question["question"].string ?? "The agent has a question"
+        func answer(_ value: String) {
+            questionAnswers[id] = value
+            questionPicks = []
+            questionIndex += 1
+            renderQuestion(current, advancing: true)
+            view.setNeedsLayout()
+            UIView.animate(withDuration: 0.4) { self.view.layoutIfNeeded() }
         }
         for option in question["options"].array {
             let label = option["label"].string ?? option.string ?? "Option"
-            alert.addAction(UIAlertAction(title: label, style: .default) { _ in answer(option["value"].string ?? label) })
+            let picked = questionPicks.contains(label)
+            _ = requestButton(label, subtitle: option["description"].string, prominent: picked, leading: true) { [weak self] in
+                guard let self else { return }
+                guard multiple else { answer(option["value"].string ?? label); return }
+                if let index = questionPicks.firstIndex(of: label) { questionPicks.remove(at: index) } else { questionPicks.append(label) }
+                renderQuestion(current)
+            }
         }
-        alert.addAction(UIAlertAction(title: "Send answer", style: .default) { [weak alert] _ in answer(alert?.textFields?.first?.text ?? "") })
-        alert.addAction(UIAlertAction(title: "Later", style: .cancel))
-        present(alert, animated: true)
+        let field = UITextField()
+        field.placeholder = "Something else…"
+        field.font = Theme.font(.body, 16)
+        field.returnKeyType = .send
+        field.accessibilityIdentifier = "thread.request.other"
+        field.addAction(UIAction { [weak field] _ in
+            let text = field?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !text.isEmpty { field?.resignFirstResponder(); answer(multiple ? (self.questionPicks + [text]).joined(separator: ", ") : text) }
+        }, for: .editingDidEndOnExit)
+        let wrap = UIView()
+        wrap.backgroundColor = .tertiarySystemFill
+        wrap.layer.cornerRadius = 20
+        wrap.layer.cornerCurve = .continuous
+        field.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(field)
+        NSLayoutConstraint.activate([
+            wrap.heightAnchor.constraint(equalToConstant: 44),
+            field.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 16),
+            field.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -16),
+            field.centerYAnchor.constraint(equalTo: wrap.centerYAnchor)
+        ])
+        requestButtons.addArrangedSubview(wrap)
+        if multiple {
+            let next = requestButton(questionIndex == questions.count - 1 ? "Send" : "Next", prominent: true) {
+                answer(self.questionPicks.joined(separator: ", "))
+            }
+            next.isEnabled = !questionPicks.isEmpty
+        }
     }
 
     // MARK: Simulator
@@ -1031,6 +1129,29 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     }
 
     #if DEBUG
+    /// Verification only: a sample agent question, never sent to T3.
+    func debugShowQuestion() {
+        debugRequest = .from(["id": "debug-question", "kind": "user-input.requested", "payload": ["requestId": "debug", "questions": [
+            ["id": "effects", "header": "Effects", "question": "How bold should the glass effects be?", "multiSelect": false, "options": [
+                ["label": "Bold and flashy", "description": "Flowing spectrum glow, shimmer and ripples"],
+                ["label": "Calm", "description": "Soft shimmer, restrained glow"]]],
+            ["id": "media", "header": "Media", "question": "What should appear inline?", "multiSelect": true, "options": [
+                ["label": "Screenshots"], ["label": "Recordings"], ["label": "Diffs"]]]]]])
+        renderRequest()
+    }
+    /// Verification only: the send animation without dispatching to T3.
+    func debugFlySend(_ text: String) {
+        composer.text = text
+        view.layoutIfNeeded()
+        let source = composer.textOrigin(in: view)
+        let local = "local:debug"
+        pendingSend = (local, text, Set(model.messages.filter { $0.role == "user" }.map(\.id)))
+        flyingID = local
+        composer.text = ""
+        pinToBottom = true
+        render()
+        flySend(id: local, from: source)
+    }
     func debugSetDetent(_ value: CGFloat) {
         view.layoutIfNeeded()
         detent.set(value)

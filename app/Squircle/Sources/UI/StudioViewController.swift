@@ -120,6 +120,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             spring.stop()
             phase = .dragging
             if let detent = value("SQUIRCLE_DETENT") { thread?.debugSetDetent(detent) }
+            if environment["SQUIRCLE_DEMO_QUESTION"] == "1" { thread?.debugShowQuestion() }
+            if let text = environment["SQUIRCLE_DEMO_SEND"] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    // Slow motion for frame-by-frame review of the flight.
+                    if let slow = value("SQUIRCLE_SLOW") { self?.view.window?.layer.speed = Float(1 / slow) }
+                    self?.thread?.debugFlySend(text)
+                }
+            }
             spring.set(scrub)
             if scrub >= 1 { phase = .opening; spring.animate(to: 1) }
         }
