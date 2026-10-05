@@ -85,7 +85,11 @@ presentation. Physical-phone decoder creation requires hardware acceleration.
 Native pinch, exclusive input ownership and measured cellular latency/bandwidth
 remain unverified/unimplemented.
 
-Current source: **0.3.0 (18)**. Install opens the build's `itms-services` link
+Current source: **0.3.0 (19)**, thread redesign: header-less thread, readable
+agent steps with inline screenshots and recordings, Metal glow, iMessage-style
+send, inline question card, simulator that follows the agent. See
+[thread redesign](../../docs/t3-native-migration.md#2026-10-05-thread-redesign-030-19).
+Build 18: Install opens the build's `itms-services` link
 directly (no Safari page); New Thread shows the device at half size with wrapping
 model chips above the composer. Signed job `d9f84f42-2113-441a-b9c0-9f41b9e68ca2`
 succeeded; not installed on the phone. Build 17 added local drafts and valid

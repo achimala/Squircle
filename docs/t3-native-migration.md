@@ -471,3 +471,52 @@ inspected and published to the catalog. Build 18's install link was checked to
 carry an `itms-services` URL whose manifest is on the configured host and port.
 Signed build 18 succeeded, job `d9f84f42-2113-441a-b9c0-9f41b9e68ca2`. Not yet
 checked on the phone: the direct install prompt itself.
+
+## 2026-10-05 thread redesign, 0.3.0 (19)
+
+User request: comprehensible agent work, fluid motion, prominent glass and
+shader effects; the agent should drive the simulator visibly, with inline
+screenshots and recordings; no header; iMessage-like send; jump to bottom;
+better agent questions. Decisions: handwritten Metal (SwiftUI never drives
+layout), collapse finished turns but no single glass blob per turn, diffs one
+tap away, effects bold for now.
+
+**Data.** T3 0.0.45 projects every activity before sending it to clients
+(`projectActivityPayload`): tool `input`, edit text and result images are
+dropped, and snapshots keep only the latest 500 activities. The Squircle
+service therefore adds `GET /v1/t3/threads/{id}/steps` (and
+`…/steps/{call}/images/{n}`), reading `projection_thread_activities` from
+`~/.t3/userdata/state.sqlite` with `/usr/bin/sqlite3 -readonly`; identifiers are
+validated before interpolation. T3 itself is unmodified. During a running
+command its description is not yet stored, so the live line shows the
+humanised command until the step completes.
+
+**Timeline.** Turns split at your messages. While running: the latest note,
+the newest four steps on a rail (the running one is the live pill's headline),
+earlier steps folded with their screenshots in a sideways gallery. Finished:
+a glass "Worked for 6m 12s · 23 steps · 4 files changed" pill, screenshots kept,
+then the answer. Rows enter with a spring; the summary ripples and a success
+haptic plays when a turn ends. Galleries show newest first so a swipe right
+still goes back.
+
+**Simulator and media.** When T3 reports a device session for the thread, the
+device rises to half and goes live; it settles when the agent closes it.
+Squircle tells agents (once per thread, hidden in the conversation) which
+simulator to open and how to record; `squircle media add` stores clips under
+`.squircle/threads/<id>/media/` and `GET /v1/t3/threads/{id}/media[/{id}]`
+serves them. Clips loop muted inline and play full screen on tap.
+
+**Evidence (simulator, iOS 27.0).** 13 stage/timeline and 10 T3 unit tests
+pass; 74 Rust tests pass. UI tests: both draft tests, navigation and motion,
+and reduced-motion navigation pass. `testRapidNavigationStaysConsistent` fails,
+and fails identically on the pre-redesign commit `043d5fc` (it opens the newest
+thread, this very long live one). End-to-end on this thread: opening a
+simulator from the agent made the device rise and stream live within a second;
+a `device_screenshot` appeared inline; an agent-device recording published with
+`squircle media add` played inline. The send flight was checked frame by frame
+at 1/12 speed (one bubble, no duplicate text, conversation scrolls on the same
+spring). The Metal glow was checked in captures. **Not visually verified:** the
+completion ripple. Nothing was tested on the physical phone; frame rate and
+Metal cost there are unmeasured.
+Signed build 19 succeeded, job `9383b6be-0c88-476e-8cda-5c01bc176ccd`; its
+thread capture is published to the catalog. Not installed on the phone.

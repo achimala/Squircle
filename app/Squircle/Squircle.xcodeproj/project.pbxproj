@@ -40,7 +40,6 @@
 		EBB5E73877F124DDB564B2FB /* ThreadDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */; };
 		EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */; };
 		EF2030F39BE56875E731AD9A /* ThreadCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA04F2B838066131F83E73E4 /* ThreadCells.swift */; };
-		F85A4C17B104980ACA4E84C5 /* ScratchTour.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5402137285F33B077F450A97 /* ScratchTour.swift */; };
 		FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
 /* End PBXBuildFile section */
 
@@ -74,7 +73,6 @@
 		44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadDetail.swift; sourceTree = "<group>"; };
 		4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViews.swift; sourceTree = "<group>"; };
 		52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientModels.swift; sourceTree = "<group>"; };
-		5402137285F33B077F450A97 /* ScratchTour.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScratchTour.swift; sourceTree = "<group>"; };
 		55EBD92CDB5C2E9B0B01AE78 /* EffectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EffectView.swift; sourceTree = "<group>"; };
 		5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioUITests.swift; sourceTree = "<group>"; };
 		5DF796323376B17E9A5610B5 /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
@@ -179,7 +177,6 @@
 			isa = PBXGroup;
 			children = (
 				374818EF24FCE5A3AF15700A /* PerformanceUITests.swift */,
-				5402137285F33B077F450A97 /* ScratchTour.swift */,
 				5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */,
 			);
 			path = UITests;
@@ -335,7 +332,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				058BD3318E055882F53BD862 /* PerformanceUITests.swift in Sources */,
-				F85A4C17B104980ACA4E84C5 /* ScratchTour.swift in Sources */,
 				EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -488,7 +484,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 19;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -566,7 +562,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 18;
+				CURRENT_PROJECT_VERSION = 19;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

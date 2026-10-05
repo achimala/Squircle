@@ -39,6 +39,8 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `app preview ID --file PATH` | Publish a real PNG as the app's latest immutable preview artifact |
 | `preview capture BUILD_ID --simulator UUID` | Build-associated capture on an explicitly selected simulator |
 | `install-link ID --ttl-seconds 3600` | Expiring HTML page, manifest and IPA URLs |
+| `media add --thread T3_ID --file PATH --caption TEXT` | Publish an mp4/mov/png/jpg into a T3 thread; Squircle shows it inline |
+| `media list --thread T3_ID` | Media published into that thread |
 | `logs ID --since N --limit N` | Persisted diagnostic events, record cursor |
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
 | `symbolicate --report PATH --dsym PATH` | Local Xcode symbolication attempt for Apple-text reports |

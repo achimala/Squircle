@@ -7,6 +7,18 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-05: thread redesign, version 0.3.0 (19).** No title bar: the
+conversation starts under a floating back button and the docked device. Agent
+work reads as sentences (a command's own description, "Edited Theme.swift
++12 −3") on a shimmering rail, the running step is a live glass pill, and a
+finished turn folds into a "Worked for…" pill. Screenshots the agent takes and
+clips it records appear inline; diffs and output are one tap away. Handwritten
+Metal draws a flowing spectrum around the live pill and message field.
+Sending lifts your words into their bubble; a glass button jumps to the latest
+message; agent questions are an inline card. When the agent opens a simulator
+through T3 the device rises and goes live by itself. Signed build 19 is ready,
+not installed. See [thread redesign](docs/t3-native-migration.md#2026-10-05-thread-redesign-030-19).
+
 **2026-10-05: in-app install and New Thread layout, version 0.3.0 (18).**
 Install in Builds now opens the build's `itms-services` link directly, so iOS's
 own install prompt appears over Squircle; Safari and the Mac's install page are
