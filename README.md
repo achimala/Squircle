@@ -7,18 +7,30 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
-**2026-10-05: native T3 replacement implemented, version 0.2.0 (14).**
-The active iPhone target no longer contains Hermes transport or worker-log polling.
-The independently installed Hermes and T3 were not changed.
+**2026-10-05: ground-up interface redesign, version 0.3.0 (15).** The T3
+transport, build service and credentials are unchanged from build 14.
 
-- Existing T3 projects/threads, live message and tool events, provider/model
-  choice, new threads, stop and approval/question responses.
-- Preserved 3D app picker, spatial navigation, actual screenshots and secondary
-  signed-builds sheet.
-- One native H.264 preview and paired input connection. Input enables only after
-  video and the HID handshake succeed. Failures reconnect both resources;
-  hiding, leaving the thread and backgrounding release them. Returning restores
-  the selected target. An explicit restart uses T3's own capture-aware API.
+- **Home:** a carousel of large 3D devices showing each app's real screenshot,
+  lit by that screenshot's own color. The app's threads start beneath its name;
+  scrolling them up shrinks the device, tapping the device toggles it back.
+  New Thread and Builds stay at the bottom. Threads show live Working / Needs
+  you state from T3.
+- **Thread:** slides in while the same device travels to it. A divider moves
+  the device among docked (beside the title), half and full; it always fills
+  the space above the conversation. Swipe right anywhere to go back.
+- **Simulator:** the thread's live H.264 picture is drawn on the 3D device
+  itself and touches on its display go to the simulator. No separate panel.
+- **Conversation:** Markdown answers, the agent's thoughts, tool calls merged
+  into one line each and grouped, inline approvals, a growing glass composer,
+  agent/model menu under the title. A new thread is created by its first message.
+
+Verified in the simulator for this source: 22 deterministic tests, and real
+gesture UI tests for carousel, list pull, device tap, divider drags, cancelled
+and completed back swipes and rapid interruptions. Live simulator video on the
+3D device and its touch mapping were checked there too. **Not yet checked on
+the physical phone:** feel and frame rate, tilt parallax (needs a gyroscope),
+hardware BGRA decode, and touch on the live device. See
+[the redesign record](docs/t3-native-migration.md#2026-10-05-redesign-030-15).
 
 **Verified for build 13:** nine targeted native tests passed, including 180 decoded
 H.264 frames with 125 changing pictures, six forced input disconnects, startup

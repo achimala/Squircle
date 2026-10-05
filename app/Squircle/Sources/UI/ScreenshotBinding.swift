@@ -10,6 +10,8 @@ final class ScreenshotBinding {
     private weak var stage: DeviceStage?
     private var sourceKey = ""
     private var loading: Task<Void, Never>?
+    /// Called after the device's screen or ambient color changes.
+    var onChange: (() -> Void)?
     /// Long edge in pixels; the gallery device never displays more than this.
     nonisolated static let maximumPixelHeight: CGFloat = 1500
 
@@ -33,6 +35,8 @@ final class ScreenshotBinding {
         loading?.cancel()
         guard key != "missing" else {
             stage?.setScreen(.missing, for: id)
+            stage?.setAmbientColor(nil, for: id)
+            onChange?()
             return
         }
         // Keep the previous capture visible until its replacement is ready.
@@ -47,7 +51,11 @@ final class ScreenshotBinding {
                 let image = await Self.decode(data)
                 guard let self, !Task.isCancelled, self.sourceKey == key else { return }
                 guard let image else { throw CocoaError(.fileReadCorruptFile) }
+                let color = await Task.detached { Theme.characteristicColor(of: image) }.value
+                guard !Task.isCancelled, self.sourceKey == key else { return }
                 self.stage?.setScreen(.image(image), for: self.id)
+                self.stage?.setAmbientColor(color, for: self.id)
+                self.onChange?()
             } catch {
                 guard let self, !Task.isCancelled, self.sourceKey == key else { return }
                 self.stage?.setScreen(.unavailable, for: self.id)

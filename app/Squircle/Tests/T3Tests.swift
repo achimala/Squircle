@@ -166,11 +166,11 @@ final class T3LiveTests: XCTestCase {
             count += 1
             if required > 1 {
                 CVPixelBufferLockBaseAddress(buffer,.readOnly)
-                if let pixels = CVPixelBufferGetBaseAddressOfPlane(buffer,0)?.assumingMemoryBound(to:UInt8.self) {
-                    let width = CVPixelBufferGetWidthOfPlane(buffer,0), height = CVPixelBufferGetHeightOfPlane(buffer,0)
-                    let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer,0)
+                if let pixels = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to:UInt8.self) {
+                    let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+                    let stride = CVPixelBufferGetBytesPerRow(buffer)
                     var signature: UInt64 = 0
-                    for y in 1..<16 { for x in 1..<16 { signature = signature &* 31 &+ UInt64(pixels[(height*y/16)*stride + width*x/16]) } }
+                    for y in 1..<16 { for x in 1..<16 { signature = signature &* 31 &+ UInt64(pixels[(height*y/16)*stride + (width*x/16)*4 + 1]) } }
                     if let previousSignature, signature != previousSignature { changes += 1 }
                     previousSignature = signature
                 }

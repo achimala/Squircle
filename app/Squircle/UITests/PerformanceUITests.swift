@@ -51,9 +51,10 @@ final class PerformanceUITests: XCTestCase {
             picker.swipeRight(velocity: .fast)
             Thread.sleep(forTimeInterval: 0.8)
             XCTAssertTrue(waitHittable(hero, timeout: 10))
+            // Device gives way to the thread list, then returns.
             hero.tap()
-            XCTAssertTrue(waitHittable(element("thread.new"), timeout: 15))
-            element("project.back").tap()
+            Thread.sleep(forTimeInterval: 0.6)
+            hero.tap()
             XCTAssertTrue(waitHittable(hero, timeout: 15))
         }
     }

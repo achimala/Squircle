@@ -326,3 +326,47 @@ and T3 successfully executed the real turn. No login or server changes were need
 Signed 0.2.0 (14), job `99f5eb12-42fa-43a2-9edf-1f9558134da5`,
 was installed successfully on the paired iPhone with CoreDevice. Manual launch
 and the user’s phone check remain pending. No navigation geometry changed.
+
+## 2026-10-05 redesign, 0.3.0 (15)
+
+User request: a total rethink — gestures fought, motion was not fluid, the 3D
+device had little presence, threads were basic, the simulator was ugly and hard
+to reach.
+
+**What changed**
+
+- Removed the workspace screen, the full-screen zoom-presented thread (its
+  system dismiss gestures competed with scrolling and simulator touches) and
+  the flat `AVSampleBufferDisplayLayer` simulator panel.
+- Home and its thread lists are native scroll views; the thread transition and
+  the divider are each one interruptible spring. Back is a rightward pan
+  anywhere in the thread; the conversation's scroll waits for it to fail, and
+  it never begins on the live device or divider.
+- The simulator picture is a Metal texture on the 3D display. The decoder now
+  outputs 32BGRA instead of NV12. Input is unchanged (same T3 socket/protocol).
+- Tool activities are merged per `toolCallId`; approval, context-window,
+  runtime-warning and checkpoint bookkeeping no longer appear as rows.
+  Reasoning summaries appear as collapsed thoughts.
+- Threads are created on first send instead of on opening New Thread.
+
+**Evidence (iOS 27.0 simulator, this source)**
+
+- 22 unit tests passed (layout, springs, conversation grouping, ambient color,
+  existing T3/AVCC/catalog tests).
+- UI tests `testNavigationAndMotion` and `testRapidNavigationStaysConsistent`
+  passed with real gestures.
+- Held frames of the thread transition at 25/50/75 %, list expansion, all three
+  detents, and dark mode were captured and inspected. Live video from a booted
+  simulator rendered on the device with correct color; scene hit-testing
+  returned top-left ≈ (0.07, 0.04), center ≈ (0.51, 0.50), bottom-right ≈
+  (0.94, 0.96), nil outside the display.
+
+**Not verified**
+
+- Anything on the physical iPhone: frame rate, feel, tilt parallax, hardware
+  BGRA decoding, latency, and a real finger driving the simulator through the
+  3D device. Simulator touch delivery end to end was not exercised in this pass
+  (only the coordinate mapping).
+- Import, signed-build, reduced-motion, visual-tour and accessibility UI tests
+  were rewritten for the new structure but not re-run. Live T3 round-trip tests
+  were not re-run.

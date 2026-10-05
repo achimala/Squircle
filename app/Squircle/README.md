@@ -54,6 +54,20 @@ The stream soak verifies paired input/video recovery, duplicate start, cancelled
 startup and a quiet 31-second interval. Deterministic tests cover target validation,
 live delta replay, touch coordinates and preserved app/motion logic.
 
+## Interface (0.3.0)
+
+`StudioViewController` owns one `DeviceStage` (SceneKit) and Home: a paging
+carousel of `AppPage` lists. `StageLayout` is the single source of geometry: the
+device fills the space above the content, on Home (above the app name, shrinking
+as the list scrolls) and in a thread (above the divider). `ThreadViewController`
+is a child on the same stage with three divider detents; `ThreadViews.swift`
+holds conversation rows, composer and the device touch surface; `Markdown.swift`
+renders agent text. Decoded simulator pictures are BGRA pixel buffers wrapped as
+Metal textures on the device's display material; touches are mapped by
+hit-testing the scene, so any pose is exact. DEBUG-only `SQUIRCLE_APP`,
+`SQUIRCLE_EXPAND`, `SQUIRCLE_SCRUB`, `SQUIRCLE_DETENT`, `SQUIRCLE_THREAD` hold
+real states still for captures.
+
 `T3Gateway` implements Effect RPC; `T3ThreadState` reduces snapshots/events.
 `T3DeviceStream` owns one native H.264 connection and an input socket as a pair.
 Video starts before the input handshake; only interactive state enables touch.
@@ -71,7 +85,8 @@ presentation. Physical-phone decoder creation requires hardware acceleration.
 Native pinch, exclusive input ownership and measured cellular latency/bandwidth
 remain unverified/unimplemented.
 
-Current signed build: **0.2.0 (14)**, job
+Current source: **0.3.0 (15)**, the interface redesign; signed job
+`0dbb4c79-6a83-4dad-a070-bef12b1d1d87`. Previous signed build: 0.2.0 (14), job
 `99f5eb12-42fa-43a2-9edf-1f9558134da5`.
 Build 14 fixes provider selection being overwritten by live thread updates.
 Its selection regression and live Claude tool/reply tests passed; direct phone

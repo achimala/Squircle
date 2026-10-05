@@ -1,31 +1,33 @@
 import Foundation
 
-struct ChatSession: Identifiable, Decodable, Equatable {
+struct ChatSession: Identifiable, Equatable {
+    /// What a thread is doing right now, from T3's live shell.
+    enum Phase: Equatable { case idle, working, needsYou }
     let id: String
     let title: String
     let preview: String
     let updatedAt: Date
-    let messageCount: Int
+    var phase = Phase.idle
+    var modelSelection = JSONValue.null
 
-    init(id: String, title: String, preview: String = "", updatedAt: Date = .now, messageCount: Int = 0) {
+    init(id: String, title: String, preview: String = "", updatedAt: Date = .now,
+         phase: Phase = .idle, modelSelection: JSONValue = .null) {
         self.id = id; self.title = title; self.preview = preview
-        self.updatedAt = updatedAt; self.messageCount = messageCount
+        self.updatedAt = updatedAt; self.phase = phase; self.modelSelection = modelSelection
     }
-
-
 }
 
 struct ChatMessage: Identifiable, Equatable {
     let id: String
+    /// "user", "assistant", "thinking" (reasoning summary) or "tool".
     let role: String
     var content: String
     var isStreaming = false
-    var tools: [String] = []
     var detail: String = ""
     var activity: String?
     var failed = false
-    var childSessionID: String?
-    var traceFiles: [String] = []
+    /// SF Symbol for a tool step.
+    var symbol: String = ""
 }
 
 struct AppBuild: Identifiable, Decodable, Equatable {

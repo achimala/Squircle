@@ -80,7 +80,6 @@ final class StudioUITests: XCTestCase {
         requireHittable(element("project.builds"))
         capture("15 — Imported app threads")
         assertImportedAppCanBuild()
-        element("project.back").tap()
         requireHittable(element("project.hero"))
         XCTAssertEqual(element("project.hero").label, name)
         XCTAssertEqual(element("project.hero").value as? String, originalID, "Reimporting preserves the app's picker and thread identity.")
@@ -90,11 +89,9 @@ final class StudioUITests: XCTestCase {
         app.launch()
         selectProject(named: name)
         XCTAssertEqual(element("project.hero").value as? String, originalID, "The same app identity survives relaunch.")
-        element("project.hero").tap()
         requireHittable(element("thread.new"))
         assertImportedAppCanBuild()
         capture("17 — Imported app after relaunch")
-        element("project.back").tap()
         requireHittable(element("project.hero"))
         XCTAssertEqual(registeredHeroes(named: name).count, originalCopies)
     }
@@ -128,47 +125,71 @@ final class StudioUITests: XCTestCase {
         let hero = element("project.hero")
         requireHittable(hero, timeout: 35)
         let firstApp = hero.label
-        capture("01 — App picker")
+        capture("01 — Home")
         let picker = app.scrollViews["app.picker"]
         picker.swipeLeft(velocity: .slow)
         if !waitForHeroChange(from: firstApp) {
             picker.swipeRight(velocity: .slow)
-            XCTAssertTrue(waitForHeroChange(from: firstApp), "The live picker should include another registered app.")
+            XCTAssertTrue(waitForHeroChange(from: firstApp), "The live carousel should include another registered app.")
         }
         capture("01b — Another app")
-        selectProject(named: firstApp)
-        openProject(named: "Squircle")
-        capture("02 — App threads")
-
-        // A short physical edge drag, held still before release, should cancel.
-        // The endpoint stays below the gesture's distance threshold; the hold
-        // avoids accidentally finishing through release velocity.
-        edgeDrag(to: 0.18)
-        requireHittable(element("project.builds"))
-        requireHittable(element("thread.new"))
-        capture("02b — Cancelled edge gesture")
-        edgeDrag(to: 0.82)
-        requireHittable(element("project.hero"))
-        XCTAssertFalse(element("project.builds").exists)
-        openProject(named: "Squircle")
+        selectProject(named: "Squircle")
 
         // A fresh installation can legitimately have no mapped thread yet.
-        // In that case create an empty real thread, close it, then navigate the
-        // persisted thread row exactly as an existing user would.
+        // In that case create one real thread, then navigate it as a user would.
         let firstThread = elements("thread.row").firstMatch
         if !firstThread.waitForExistence(timeout: 5) {
             element("thread.new").tap()
             waitForThread()
+            app.textViews["thread.input"].typeText("Verification only. Reply OK and do nothing else.")
+            element("thread.send").tap()
+            XCTAssertTrue(app.cells["thread.message.user"].waitForExistence(timeout: 30))
             element("thread.close").tap()
             waitForThreadDismissal()
         }
-        XCTAssertTrue(firstThread.waitForExistence(timeout: 20), "The workspace should show its real T3 thread.")
-        reveal(firstThread)
+        XCTAssertTrue(firstThread.waitForExistence(timeout: 20), "Home should show the app's real T3 threads.")
+
+        // Pulling the list up makes the device give way; tapping it returns.
+        let heroHeight = hero.frame.height
+        pullList(from: 0.80, to: 0.40)
+        waitUntil("The device shrinks to make room for threads.") { hero.frame.height < heroHeight * 0.8 }
+        capture("02 — Threads")
+        hero.tap()
+        waitUntil("Tapping the device restores the hero.") { hero.frame.height > heroHeight * 0.95 }
+
+        pullList(from: 0.80, to: 0.40)
+        requireHittable(firstThread)
         firstThread.tap()
         waitForThread()
-        capture("03 — Existing thread sheet")
-        element("thread.close").tap()
+        capture("03 — Thread")
+
+        // The divider moves the device among docked, half and full.
+        let divider = element("thread.divider")
+        requireHittable(divider)
+        let screen = app.coordinate(withNormalizedOffset: .zero)
+        func dragDivider(toY fraction: CGFloat) {
+            let start = screen.withOffset(CGVector(dx: divider.frame.midX, dy: divider.frame.midY))
+            start.press(forDuration: 0.05, thenDragTo: screen.withOffset(CGVector(dx: divider.frame.midX, dy: app.frame.height * fraction)),
+                        withVelocity: .slow, thenHoldForDuration: 0.2)
+        }
+        dragDivider(toY: 0.95)
+        waitUntil("Dragging to the bottom makes the device full size.") { divider.value as? String == "Full" }
+        capture("03b — Device full")
+        dragDivider(toY: 0.55)
+        waitUntil("The middle detent shares the screen.") { divider.value as? String == "Half" }
+        capture("03c — Device half")
+        dragDivider(toY: 0.05)
+        waitUntil("Dragging to the top docks the device.") { divider.value as? String == "Docked" }
+        element("simulator.surface").tap()
+        waitUntil("Tapping the docked device brings it forward.") { divider.value as? String == "Half" }
+
+        // A short back swipe, held still before release, cancels. A long one returns Home.
+        backDrag(to: 0.18)
+        requireHittable(element("thread.close"))
+        capture("03d — Cancelled back swipe")
+        backDrag(to: 0.85)
         waitForThreadDismissal()
+        requireRestingHome()
 
         element("project.builds").tap()
         requireHittable(element("builds.close"))
@@ -177,65 +198,58 @@ final class StudioUITests: XCTestCase {
         element("builds.close").tap()
         let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("builds.close"))
         XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 15), .completed)
-        requireHittable(element("project.back"))
-        element("project.back").tap()
-        requireHittable(element("project.hero"))
-        XCTAssertFalse(element("project.builds").exists)
-        capture("05 — Returned to picker")
+        requireRestingHome()
+        capture("05 — Returned Home")
     }
 
     /// Interrupts transitions mid-flight with raw coordinate taps and fast
-    /// edge drags, then requires one coherent resting screen. Read-only.
+    /// drags, then requires one coherent resting screen. Read-only.
     @MainActor
     func testRapidNavigationStaysConsistent() throws {
         app.launch()
         let hero = element("project.hero")
         requireHittable(hero, timeout: 35)
+        selectProject(named: "Squircle")
+        let row = elements("thread.row").firstMatch
+        guard row.waitForExistence(timeout: 10) else { throw XCTSkip("Needs one existing thread") }
+        pullList(from: 0.80, to: 0.40)
+        requireHittable(row)
         let origin = app.coordinate(withNormalizedOffset: .zero)
-        // Absolute points: the hero element is intentionally absent while
-        // the workspace is open, so it cannot anchor these taps.
-        let heroFrame = hero.frame
-        let heroPoint = origin.withOffset(CGVector(dx: heroFrame.midX, dy: heroFrame.midY))
+        let rowPoint = origin.withOffset(CGVector(dx: row.frame.midX, dy: row.frame.midY))
         let backPoint = origin.withOffset(CGVector(dx: 38, dy: app.windows.firstMatch.frame.minY + 90))
 
         // Open then immediately go back, before the open transition settles.
         for _ in 0..<4 {
-            heroPoint.tap()
+            rowPoint.tap()
             backPoint.tap()
         }
-        requireRestingGallery()
+        waitForThreadDismissal()
 
-        // Rapid open/close cycles through the real controls.
-        for _ in 0..<3 {
-            requireHittable(hero)
-            hero.tap()
-            requireHittable(element("project.back"))
-            element("project.back").tap()
-        }
-        requireRestingGallery()
-
-        // Fast edge drags: a short flick still closes; an aborted drag restores.
-        hero.tap()
-        requireHittable(element("thread.new"))
-        let start = origin.withOffset(CGVector(dx: 2, dy: app.frame.height * 0.5))
-        start.press(forDuration: 0.02, thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.3, dy: app.frame.height * 0.5)),
+        // A fast flick still closes; an aborted drag restores the thread.
+        row.tap()
+        waitForThread()
+        let start = origin.withOffset(CGVector(dx: app.frame.width * 0.3, dy: app.frame.height * 0.7))
+        start.press(forDuration: 0.02, thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.6, dy: app.frame.height * 0.7)),
                     withVelocity: .fast, thenHoldForDuration: 0)
-        requireRestingGallery()
-        hero.tap()
-        requireHittable(element("thread.new"))
-        edgeDrag(to: 0.12)
-        requireHittable(element("thread.new"))
-        requireHittable(element("project.builds"))
-        XCTAssertFalse(element("project.hero").exists, "The gallery stays hidden behind a resting workspace.")
-        // The cancelled drag left a resting workspace; leave it normally.
-        element("project.back").tap()
-        requireRestingGallery()
+        waitForThreadDismissal()
+        row.tap()
+        waitForThread()
+        backDrag(to: 0.12)
+        requireHittable(element("thread.close"))
+        XCTAssertFalse(element("project.hero").exists, "Home stays hidden behind a resting thread.")
+        // Scrolling the conversation vertically must never start a back swipe.
+        app.tables["thread.messages"].swipeDown(velocity: .fast)
+        app.tables["thread.messages"].swipeUp(velocity: .fast)
+        requireHittable(element("thread.close"))
+        element("thread.close").tap()
+        waitForThreadDismissal()
 
-        // Quick picker flicks settle on exactly one centered app.
+        // Quick carousel flicks settle on exactly one centered app.
+        hero.tap()
         let picker = app.scrollViews["app.picker"]
         for _ in 0..<3 { picker.swipeLeft(velocity: .fast) }
         for _ in 0..<3 { picker.swipeRight(velocity: .fast) }
-        requireRestingGallery()
+        requireRestingHome()
         XCTAssertEqual(elements("project.hero").count, 1)
         capture("20 — After rapid navigation")
         XCTAssertEqual(app.state, .runningForeground)
@@ -250,26 +264,24 @@ final class StudioUITests: XCTestCase {
         let hero = element("project.hero")
         requireHittable(hero, timeout: 35)
         let first = hero.label
-        capture("21 — Reduced motion gallery")
+        capture("21 — Reduced motion Home")
         app.scrollViews["app.picker"].swipeLeft(velocity: .slow)
         if !waitForHeroChange(from: first) {
             app.scrollViews["app.picker"].swipeRight(velocity: .slow)
             XCTAssertTrue(waitForHeroChange(from: first))
         }
-        selectProject(named: first)
-        hero.tap()
-        requireHittable(element("thread.new"))
-        requireHittable(element("project.builds"))
-        capture("22 — Reduced motion workspace")
-        element("project.builds").tap()
-        requireHittable(element("builds.close"))
-        capture("23 — Reduced motion builds")
-        element("builds.close").tap()
-        let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("builds.close"))
-        XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 15), .completed)
-        edgeDrag(to: 0.82)
-        requireRestingGallery()
-        XCTAssertEqual(element("project.hero").label, first)
+        selectProject(named: "Squircle")
+        let row = elements("thread.row").firstMatch
+        guard row.waitForExistence(timeout: 10) else { throw XCTSkip("Needs one existing thread") }
+        pullList(from: 0.80, to: 0.40)
+        requireHittable(row)
+        capture("22 — Reduced motion threads")
+        row.tap()
+        waitForThread()
+        capture("23 — Reduced motion thread")
+        backDrag(to: 0.85)
+        waitForThreadDismissal()
+        requireRestingHome()
     }
 
     /// Read-only: visits every screen and captures it after it settles.
@@ -281,26 +293,21 @@ final class StudioUITests: XCTestCase {
         let hero = element("project.hero")
         requireHittable(hero, timeout: 35)
         Thread.sleep(forTimeInterval: 3) // Real screenshots finish loading.
-        capture(prefix + "30 — Gallery")
+        capture(prefix + "30 — Home")
         let picker = app.scrollViews["app.picker"]
         let first = hero.label
         picker.swipeLeft(velocity: .slow)
         _ = waitForHeroChange(from: first)
         Thread.sleep(forTimeInterval: 1)
-        capture(prefix + "31 — Gallery next app")
+        capture(prefix + "31 — Home next app")
         selectProject(named: "Squircle")
-        hero.tap()
-        requireHittable(element("thread.new"))
         Thread.sleep(forTimeInterval: 1)
-        capture(prefix + "32 — Workspace")
-        app.scrollViews["workspace.threads"].swipeUp(velocity: .slow)
+        capture(prefix + "32 — Squircle")
+        pullList(from: 0.80, to: 0.40)
         Thread.sleep(forTimeInterval: 1.5)
-        capture(prefix + "33 — Workspace scrolled")
-        app.scrollViews["workspace.threads"].swipeDown(velocity: .fast)
-        Thread.sleep(forTimeInterval: 1.5)
+        capture(prefix + "33 — Threads")
         let row = elements("thread.row").firstMatch
         if row.waitForExistence(timeout: 10) {
-            reveal(row)
             row.tap()
             waitForThread()
             Thread.sleep(forTimeInterval: 2)
@@ -312,15 +319,10 @@ final class StudioUITests: XCTestCase {
         requireHittable(element("builds.close"))
         Thread.sleep(forTimeInterval: 1.5)
         capture(prefix + "35 — Builds")
-        let top = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.47))
-        top.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)))
-        Thread.sleep(forTimeInterval: 1.5)
-        capture(prefix + "36 — Builds expanded")
         element("builds.close").tap()
         let closed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("builds.close"))
         XCTAssertEqual(XCTWaiter.wait(for: [closed], timeout: 15), .completed)
-        element("project.back").tap()
-        requireRestingGallery()
+        requireRestingHome()
         element("project.add").tap()
         requireHittable(element("import.path"), timeout: 25)
         Thread.sleep(forTimeInterval: 2)
@@ -338,14 +340,12 @@ final class StudioUITests: XCTestCase {
         app.launch()
         let hero = element("project.hero")
         requireHittable(hero, timeout: 35)
-        try audit("gallery")
         selectProject(named: "Squircle")
-        hero.tap()
-        requireHittable(element("thread.new"))
-        try audit("workspace")
+        try audit("home")
         let row = elements("thread.row").firstMatch
         if row.waitForExistence(timeout: 10) {
-            reveal(row)
+            pullList(from: 0.80, to: 0.40)
+            try audit("threads")
             row.tap()
             waitForThread()
             try audit("thread")
@@ -367,18 +367,33 @@ final class StudioUITests: XCTestCase {
     }
 
     @MainActor
-    private func requireRestingGallery(file: StaticString = #filePath, line: UInt = #line) {
+    private func requireRestingHome(file: StaticString = #filePath, line: UInt = #line) {
         requireHittable(element("project.hero"), timeout: 15, file: file, line: line)
-        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("project.builds"))
-        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 10), .completed, "No workspace may remain behind the gallery.", file: file, line: line)
+        let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("thread.close"))
+        XCTAssertEqual(XCTWaiter.wait(for: [gone], timeout: 10), .completed, "No thread may remain over Home.", file: file, line: line)
         XCTAssertTrue(element("project.add").isHittable, file: file, line: line)
     }
 
+    /// Every app's threads and New Thread are on Home; selecting is opening.
     @MainActor
     private func openProject(named name: String) {
         selectProject(named: name)
-        element("project.hero").tap()
         requireHittable(element("thread.new"))
+    }
+
+    /// Vertical drag on the centered app's list, in screen fractions.
+    @MainActor
+    private func pullList(from: CGFloat, to: CGFloat) {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: from))
+        start.press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: to)),
+                    withVelocity: .slow, thenHoldForDuration: 0.1)
+    }
+
+    @MainActor
+    private func waitUntil(_ message: String, timeout: TimeInterval = 8, file: StaticString = #filePath, line: UInt = #line,
+                           _ condition: @escaping () -> Bool) {
+        let met = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [met], timeout: timeout), .completed, message, file: file, line: line)
     }
 
     @MainActor
@@ -432,7 +447,7 @@ final class StudioUITests: XCTestCase {
         element("builds.close").tap()
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element("builds.close"))
         XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 15), .completed)
-        requireHittable(element("project.back"))
+        requireHittable(element("thread.new"))
     }
 
     @MainActor
@@ -460,11 +475,12 @@ final class StudioUITests: XCTestCase {
         return XCTWaiter.wait(for: [changed], timeout: 2) == .completed
     }
 
+    /// A rightward drag across the conversation, well away from the screen edge.
     @MainActor
-    private func edgeDrag(to fraction: CGFloat) {
+    private func backDrag(to fraction: CGFloat) {
         let origin = app.coordinate(withNormalizedOffset: .zero)
-        let start = origin.withOffset(CGVector(dx: 2, dy: app.frame.height * 0.48))
-        let end = origin.withOffset(CGVector(dx: app.frame.width * fraction, dy: app.frame.height * 0.48))
+        let start = origin.withOffset(CGVector(dx: app.frame.width * 0.12, dy: app.frame.height * 0.72))
+        let end = origin.withOffset(CGVector(dx: app.frame.width * (0.12 + fraction), dy: app.frame.height * 0.72))
         start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
     }
 

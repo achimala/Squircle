@@ -1,5 +1,7 @@
 import UIKit
 import SceneKit
+import CoreVideo
+import Metal
 import simd
 
 /// Where one device stands, expressed in the stage view's points so UIKit
@@ -56,6 +58,18 @@ final class DeviceStage: UIView {
     private var phones: [String: StagePhone] = [:]
     private var liveReasons = Set<String>()
 
+    private var textureCache: CVMetalTextureCache?
+    private var ambients: [String: UIColor] = [:]
+
+    private var ambientMix: (from: UIColor?, to: UIColor?, t: CGFloat) = (nil, nil, 0)
+
+    /// Tints the light behind the devices, blending between two apps' colors
+    /// while the carousel is between them. Nil is the neutral studio glow.
+    func setAmbient(from: UIColor?, to: UIColor?, mix: CGFloat) {
+        guard ambientMix.from != from || ambientMix.to != to || abs(ambientMix.t - mix) > 0.004 else { return }
+        ambientMix = (from, to, mix)
+        updateGlowColor()
+    }
     var glowCenter = CGPoint.zero { didSet { if glowCenter != oldValue { layoutGlow() } } }
     var glowRadius: CGFloat = 300 { didSet { if glowRadius != oldValue { layoutGlow() } } }
 
@@ -137,8 +151,49 @@ final class DeviceStage: UIView {
 
     func screen(for id: String) -> PhoneScreen { phones[id]?.screen ?? .off }
 
+    /// The characteristic color of an app's published screenshot, if it has one.
+    func ambientColor(for id: String) -> UIColor? { ambients[id] }
+    func setAmbientColor(_ color: UIColor?, for id: String) { ambients[id] = color }
+
+    // MARK: Live display
+
+    /// Shows a decoded simulator picture on the device's display, in the scene.
+    func setLiveFrame(_ buffer: CVPixelBuffer, for id: String) {
+        guard let phone = phones[id], let device = sceneView.device ?? MTLCreateSystemDefaultDevice() else { return }
+        if textureCache == nil { CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache) }
+        guard let textureCache else { return }
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        var wrapped: CVMetalTexture?
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, buffer, nil, .bgra8Unorm_srgb,
+                                                  width, height, 0, &wrapped)
+        guard let wrapped, let texture = CVMetalTextureGetTexture(wrapped), height > 0 else { return }
+        phone.setLive(texture, backing: wrapped, aspect: CGFloat(width) / CGFloat(height))
+        sceneView.setNeedsDisplay()
+    }
+
+    /// Returns the display to the published screenshot.
+    func endLive(for id: String) {
+        guard let phone = phones[id], phone.isLive else { return }
+        phone.setScreen(phone.screen)
+        sceneView.setNeedsDisplay()
+    }
+
+    func isLive(_ id: String) -> Bool { phones[id]?.isLive ?? false }
+
+    /// Maps a point in this view to the picture shown on a device's display:
+    /// normalized source coordinates with the origin at the top left. Exact
+    /// for any pose because the scene itself is hit-tested.
+    func displayPoint(at point: CGPoint, for id: String) -> CGPoint? {
+        guard let phone = phones[id], !phone.root.isHidden else { return nil }
+        let hit = sceneView.hitTest(point, options: [.rootNode: phone.displayNode, .ignoreHiddenNodes: true]).first
+        guard let uv = hit?.textureCoordinates(withMappingChannel: 0) else { return nil }
+        let crop = phone.display.diffuse.contentsTransform
+        return CGPoint(x: CGFloat(crop.m41) + uv.x * CGFloat(crop.m11), y: CGFloat(crop.m42) + uv.y * CGFloat(crop.m22))
+    }
+
     func setScreen(_ screen: PhoneScreen, for id: String) {
         guard let phone = phones[id], phone.screen != screen else { return }
+        if phone.isLive { phone.remember(screen); return }
         phone.setScreen(screen)
         sceneView.setNeedsDisplay()
     }
@@ -206,11 +261,30 @@ final class DeviceStage: UIView {
         CATransaction.setDisableActions(true)
         backdrop.colors = [Theme.backdropTop.resolvedColor(with: trait).cgColor,
                            Theme.backdropBottom.resolvedColor(with: trait).cgColor]
-        let glowColor = Theme.backdropGlow.resolvedColor(with: trait)
-        glow.colors = [glowColor.cgColor, glowColor.withAlphaComponent(0).cgColor]
+        updateGlowColor()
         CATransaction.commit()
         PhoneAssets.contactMaterial.transparency = trait.userInterfaceStyle == .dark ? 1 : 0.85
         sceneView.setNeedsDisplay()
+    }
+
+    private func updateGlowColor() {
+        let trait = traitCollection
+        let dark = trait.userInterfaceStyle == .dark
+        func resolve(_ color: UIColor?) -> [CGFloat] {
+            let glow = Theme.glow(for: color ?? Theme.accent.resolvedColor(with: trait), dark: dark)
+                .withAlphaComponent(color == nil ? (dark ? 0.30 : 0.42) : (dark ? 0.50 : 0.85))
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            glow.getRed(&r, green: &g, blue: &b, alpha: &a)
+            return [r, g, b, a]
+        }
+        let a = resolve(ambientMix.from), b = resolve(ambientMix.to), t = ambientMix.t.clamped()
+        let c = zip(a, b).map { CGFloat.lerp($0, $1, t) }
+        let color = UIColor(red: c[0], green: c[1], blue: c[2], alpha: c[3])
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        glow.colors = [color.cgColor, color.withAlphaComponent(c[3] * 0.45).cgColor, color.withAlphaComponent(0).cgColor]
+        glow.locations = [0, 0.45, 1]
+        CATransaction.commit()
     }
 
     private func buildStudio() {
@@ -266,8 +340,11 @@ private final class StagePhone {
     let root = SCNNode()
     let shadow = SCNNode()
     let display = SCNMaterial()
+    let displayNode: SCNNode
     var pose: PhonePose?
     private(set) var screen: PhoneScreen = .off
+    private(set) var isLive = false
+    private var liveBacking: CVMetalTexture?
 
     init() {
         root.addChildNode(PhoneAssets.body.clone())
@@ -277,7 +354,7 @@ private final class StagePhone {
         display.diffuse.minificationFilter = .linear
         display.diffuse.mipFilter = .linear
         geometry.firstMaterial = display
-        let displayNode = SCNNode(geometry: geometry)
+        displayNode = SCNNode(geometry: geometry)
         displayNode.position.z = 0.240
         displayNode.castsShadow = false
         root.addChildNode(displayNode)
@@ -287,8 +364,23 @@ private final class StagePhone {
         setScreen(.off)
     }
 
+    /// A screenshot published while live is shown once the stream ends.
+    func remember(_ next: PhoneScreen) { screen = next }
+
+    func setLive(_ texture: MTLTexture, backing: CVMetalTexture, aspect: CGFloat) {
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        display.diffuse.contents = texture
+        display.diffuse.contentsTransform = PhoneAssets.crop(sourceAspect: aspect)
+        SCNTransaction.commit()
+        liveBacking = backing
+        isLive = true
+    }
+
     func setScreen(_ next: PhoneScreen) {
         screen = next
+        isLive = false
+        liveBacking = nil
         SCNTransaction.begin()
         SCNTransaction.disableActions = true
         let contents: Any

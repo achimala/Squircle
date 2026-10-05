@@ -1,5 +1,5 @@
 import UIKit
-import AVFoundation
+import CoreMedia
 import VideoToolbox
 
 struct SimulatorTarget: Equatable {
@@ -72,7 +72,7 @@ private final class SimulatorH264Decoder {
             #if !targetEnvironment(simulator)
             specification[kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder as String] = true
             #endif
-            let attributes: [String:Any] = [kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+            let attributes: [String:Any] = [kCVPixelBufferPixelFormatTypeKey as String:kCVPixelFormatType_32BGRA,
                 kCVPixelBufferIOSurfacePropertiesKey as String:[:],kCVPixelBufferMetalCompatibilityKey as String:true]
             let created = VTDecompressionSessionCreate(allocator:kCFAllocatorDefault,formatDescription:format,
                 decoderSpecification:specification as CFDictionary,imageBufferAttributes:attributes as CFDictionary,
@@ -359,45 +359,19 @@ final class T3DeviceStream {
     }
     #endif
 }
-final class SimulatorSurface: UIView {
-    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
-    private var display: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
-    var stream: T3DeviceStream?
-    private var orientation = "portrait"
-    private var size = CGSize(width:440,height:956)
-    private var imageFormat: CMVideoFormatDescription?
-    private var lastPoint: CGPoint?
-    override init(frame: CGRect) {
-        super.init(frame:frame); backgroundColor = .black; display.videoGravity = .resizeAspect
-        accessibilityIdentifier = "simulator.surface"; accessibilityLabel = "Live simulator. Touch to interact."
-        isMultipleTouchEnabled = false
-    }
-    required init?(coder:NSCoder) { fatalError() }
-    func screen(_ config: JSONValue) { orientation = config["orientation"].string ?? "portrait" }
-    func frame(_ buffer: CVPixelBuffer) {
-        if display.sampleBufferRenderer.status == .failed { display.sampleBufferRenderer.flush() }
-        // Drop an already-decoded picture rather than build a display backlog.
-        guard display.sampleBufferRenderer.isReadyForMoreMediaData else { return }
-        let dimensions = CGSize(width:CVPixelBufferGetWidth(buffer),height:CVPixelBufferGetHeight(buffer))
-        if size != dimensions || imageFormat == nil {
-            size = dimensions; CMVideoFormatDescriptionCreateForImageBuffer(allocator:kCFAllocatorDefault,imageBuffer:buffer,formatDescriptionOut:&imageFormat)
-        }
-        guard let imageFormat else { return }
-        var timing = CMSampleTimingInfo(duration:.invalid,presentationTimeStamp:.zero,decodeTimeStamp:.invalid)
-        var sample: CMSampleBuffer?
-        guard CMSampleBufferCreateReadyWithImageBuffer(allocator:kCFAllocatorDefault,imageBuffer:buffer,formatDescription:imageFormat,
-            sampleTiming:&timing,sampleBufferOut:&sample) == noErr, let sample else { return }
-        if let array = CMSampleBufferGetSampleAttachmentsArray(sample,createIfNecessary:true) {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(array,0),to:CFMutableDictionary.self)
-            CFDictionarySetValue(dict,Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-        display.sampleBufferRenderer.enqueue(sample)
-    }
+/// Coordinate mapping between a displayed simulator picture and T3's input
+/// contract. The picture itself is drawn on the 3D device by `DeviceStage`.
+enum SimulatorSurface {
+    /// Aspect-fit placement of a `size` picture inside `bounds`.
     static func point(_ point: CGPoint, bounds: CGRect, size: CGSize, orientation: String) -> CGPoint? {
         let scale = min(bounds.width/size.width,bounds.height/size.height)
         let rect = CGRect(x:(bounds.width-size.width*scale)/2,y:(bounds.height-size.height*scale)/2,width:size.width*scale,height:size.height*scale)
         guard rect.contains(point) else { return nil }
-        let x = (point.x-rect.minX)/rect.width, y = (point.y-rect.minY)/rect.height
+        return input(CGPoint(x:(point.x-rect.minX)/rect.width,y:(point.y-rect.minY)/rect.height),size:size,orientation:orientation)
+    }
+    /// `picture` is normalized within the framebuffer, origin top left.
+    static func input(_ picture: CGPoint, size: CGSize, orientation: String) -> CGPoint {
+        let x = picture.x, y = picture.y
         // The upstream input contract uses portrait coordinates for portrait framebuffers.
         if size.width < size.height {
             switch orientation { case "landscape_left": return CGPoint(x:y,y:1-x)
@@ -407,16 +381,4 @@ final class SimulatorSurface: UIView {
         }
         return CGPoint(x:x,y:y)
     }
-    private func touch(_ touches:Set<UITouch>,phase:String) {
-        guard let touch = touches.first else { return }
-        let mapped = Self.point(touch.location(in:self),bounds:bounds,size:size,orientation:orientation)
-        guard let point = mapped ?? (phase == "end" ? lastPoint : nil) else { return }
-        lastPoint = phase == "end" ? nil : point
-        // The channel owns gesture order. Queued events never cross reconnects.
-        stream?.touch(phase,point:point)
-    }
-    override func touchesBegan(_ touches:Set<UITouch>,with event:UIEvent?) { touch(touches,phase:"begin") }
-    override func touchesMoved(_ touches:Set<UITouch>,with event:UIEvent?) { touch(touches,phase:"move") }
-    override func touchesEnded(_ touches:Set<UITouch>,with event:UIEvent?) { touch(touches,phase:"end") }
-    override func touchesCancelled(_ touches:Set<UITouch>,with event:UIEvent?) { touch(touches,phase:"end") }
 }

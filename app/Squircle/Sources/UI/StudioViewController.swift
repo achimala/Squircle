@@ -1,34 +1,42 @@
 import Combine
+import CoreMotion
 import UIKit
 
-/// The root: one lit stage with every app's real device. Opening an app moves
-/// that device to the top of its workspace in the same 3D scene; a single
-/// spring drives the scene and UIKit so back is interruptible at any frame.
+/// The root: one lit stage holding every app's real device. Home is a carousel
+/// of those devices; each app's threads scroll up from beneath its name and
+/// the device makes room. Opening a thread slides the conversation in while
+/// the same device travels to it. Scroll views and one spring drive the scene,
+/// so every move follows the finger and can be reversed at any frame.
 @MainActor
-final class StudioViewController: UIViewController, UIScrollViewDelegate {
+final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGestureRecognizerDelegate {
     let model: SquircleModel
     private let stage = DeviceStage()
+    /// Everything that slides away when a thread opens.
+    private let home = UIView()
     private let picker = UIScrollView()
-    private let topBar = UIView()
-    private let connection = Theme.glassButton(title: "Connecting", identifier: "connection.status")
+    /// Fades lists out above the bottom controls.
+    private let pagesClip = UIView()
+    private let pagesFade = CAGradientLayer()
+    private let connection = Theme.glassButton(symbol: "macbook", identifier: "connection.status", accessibilityLabel: "Mac connection")
     private let add = Theme.glassButton(symbol: "plus", identifier: "project.add", accessibilityLabel: "Add app")
-    private let pages = UIPageControl()
+    private let compose = Theme.glassButton(symbol: "square.and.pencil", title: "New Thread", prominent: true, identifier: "thread.new")
+    private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "project.builds", accessibilityLabel: "Builds")
     private let spring = SpringDriver()
-    private var items: [String: GalleryItem] = [:]
+    private let motion = CMMotionManager()
+    private var pages: [String: AppPage] = [:]
     private var bindings: [String: ScreenshotBinding] = [:]
     private var projects: [AppProject] = []
     private var selectedID: String?
-    private var pendingOpenID: String?
     private var deferredRender = false
-    private var isPaging = false
     private var subscriptions = Set<AnyCancellable>()
     private var laidOut: StageLayout?
-    private(set) var workspace: WorkspaceViewController?
-    private var edgePan: UIScreenEdgePanGestureRecognizer?
+    private(set) var thread: ThreadViewController?
     private var dragStart: CGFloat = 0
+    private var tilt = CGPoint.zero
+    private var tiltRest: CGPoint?
 
-    private enum Phase { case gallery, opening, workspace, closing, dragging }
-    private var phase = Phase.gallery
+    private enum Phase { case home, opening, thread, closing, dragging }
+    private var phase = Phase.home
 
     init(model: SquircleModel) {
         self.model = model
@@ -41,44 +49,27 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        #if DEBUG
-        let started = CACurrentMediaTime()
-        #endif
         view.backgroundColor = Theme.backdropBottom
         view.addSubview(stage)
-        #if DEBUG
-        MotionAudit.shared.note("stage.build", values: ["ms": (CACurrentMediaTime() - started) * 1000])
-        #endif
+        view.addSubview(home)
 
         picker.delegate = self
+        picker.isPagingEnabled = true
         picker.showsHorizontalScrollIndicator = false
         picker.showsVerticalScrollIndicator = false
-        picker.decelerationRate = .fast
         picker.contentInsetAdjustmentBehavior = .never
         picker.alwaysBounceHorizontal = true
-        picker.alwaysBounceVertical = false
-        picker.clipsToBounds = false
+        picker.isDirectionalLockEnabled = true
         picker.accessibilityIdentifier = "app.picker"
-        view.addSubview(picker)
-
-        topBar.addSubview(connection)
-        topBar.addSubview(add)
-        view.addSubview(topBar)
+        pagesFade.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+        pagesClip.layer.mask = pagesFade
+        pagesClip.addSubview(picker)
+        home.addSubview(pagesClip)
+        [connection, add, compose, builds].forEach(home.addSubview)
         connection.showsMenuAsPrimaryAction = true
-        connection.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes
-            attributes.font = Theme.font(.subheadline, 15, .semibold)
-            return attributes
-        }
-        connection.configuration?.titleLineBreakMode = .byTruncatingTail
         add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
-
-        pages.hidesForSinglePage = true
-        pages.backgroundStyle = .minimal
-        pages.pageIndicatorTintColor = UIColor.label.withAlphaComponent(0.18)
-        pages.currentPageIndicatorTintColor = .label
-        pages.addAction(UIAction { [weak self] _ in self?.scrollToPage(self?.pages.currentPage ?? 0) }, for: .valueChanged)
-        view.addSubview(pages)
+        compose.addAction(UIAction { [weak self] _ in self?.openThread(nil) }, for: .touchUpInside)
+        builds.addAction(UIAction { [weak self] _ in self?.presentBuilds() }, for: .touchUpInside)
 
         spring.onChange = { [weak self] _ in self?.applyScene() }
         spring.onRest = { [weak self] value in self?.springRested(at: value) }
@@ -99,6 +90,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        startTilt()
         #if DEBUG
         MotionAudit.shared.note("gallery.visible", values: ["since_launch_ms": (CACurrentMediaTime() - SquircleApp.launchedAt) * 1000])
         startVerificationHooks()
@@ -106,30 +98,38 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
     }
 
     #if DEBUG
-    /// Verification only (never in Release): `SQUIRCLE_SCRUB=0.35` holds the
-    /// real open transition at that progress for a screen capture, optionally
-    /// with `SQUIRCLE_SCRUB_SCROLL`; `SQUIRCLE_DEMO=1` loops open/close so
-    /// motion can be recorded without a UI-test runner loading the simulator.
+    /// Verification only (never in Release). Holds real, finger-driven states
+    /// still for a screen capture: `SQUIRCLE_EXPAND` (0…1 of a list's travel),
+    /// `SQUIRCLE_SCRUB` (0…1 of the thread transition) and `SQUIRCLE_DETENT`
+    /// (0…2 of the thread's divider). `SQUIRCLE_DEMO=1` loops open/close.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
-        if let value = environment["SQUIRCLE_SCRUB"].flatMap(Double.init) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-                guard let self, let id = selectedID else { return }
-                open(id)
-                spring.stop()
-                phase = .dragging
-                if let scroll = environment["SQUIRCLE_SCRUB_SCROLL"].flatMap(Double.init) {
-                    workspace?.debugScroll(to: CGFloat(scroll))
-                }
-                spring.set(CGFloat(value))
-                stage.setLive(false, reason: "transition")
+        func value(_ key: String) -> CGFloat? { environment[key].flatMap(Double.init).map { CGFloat($0) } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            guard let self else { return }
+            if let name = environment["SQUIRCLE_APP"], let index = projects.firstIndex(where: { $0.name == name }) {
+                picker.contentOffset.x = CGFloat(index) * view.bounds.width
+                settle()
             }
+            guard let id = selectedID, let page = pages[id] else { return }
+            if let expand = value("SQUIRCLE_EXPAND") { page.contentOffset.y = layout.expandedOffset * expand }
+            guard let scrub = value("SQUIRCLE_SCRUB") else { return }
+            let sessions = model.sessions(for: page.project)
+            let named = environment["SQUIRCLE_THREAD"].flatMap { title in sessions.first { $0.title == title } }
+            openThread(environment["SQUIRCLE_DRAFT"] == "1" ? nil : (named ?? sessions.first)?.id)
+            spring.stop()
+            phase = .dragging
+            if let detent = value("SQUIRCLE_DETENT") { thread?.debugSetDetent(detent) }
+            spring.set(scrub)
+            if scrub >= 1 { phase = .opening; spring.animate(to: 1) }
         }
         if environment["SQUIRCLE_DEMO"] == "1" {
             func cycle() {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                     guard let self else { return }
-                    if phase == .gallery, let id = selectedID { open(id) } else if phase == .workspace { close() }
+                    if phase == .home, let id = selectedID, let page = pages[id] {
+                        openThread(model.sessions(for: page.project).first?.id)
+                    } else if phase == .thread { closeThread() }
                     cycle()
                 }
             }
@@ -142,22 +142,27 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
         super.viewDidLayoutSubviews()
         let bounds = view.bounds
         stage.frame = bounds
+        home.place(in: bounds)
+        pagesClip.frame = bounds
         picker.frame = bounds
-        let safe = view.safeAreaInsets
-        topBar.place(in: CGRect(x: 16, y: safe.top + 4, width: bounds.width - 32, height: StageLayout.topBarHeight))
-        let connectionSize = connection.sizeThatFits(CGSize(width: bounds.width - 120, height: 44))
-        connection.frame = CGRect(x: 0, y: 4, width: min(bounds.width - 120, ceil(connectionSize.width) + 6),
-                                  height: max(44, ceil(connectionSize.height)))
-        add.frame = CGRect(x: topBar.bounds.width - 44, y: 4, width: 44, height: 44)
-        pages.place(in: CGRect(x: 20, y: bounds.height - safe.bottom - StageLayout.pageControlHeight,
-                               width: bounds.width - 40, height: StageLayout.pageControlHeight))
-        workspace?.view.frame = bounds
+        thread?.view.place(in: bounds)
         let current = makeLayout()
         if current != laidOut {
             laidOut = current
-            layoutItems()
-            picker.contentOffset.x = CGFloat(selectedIndex) * current.pitch
+            layoutPages()
+            picker.contentOffset.x = CGFloat(selectedIndex) * bounds.width
         }
+        let safe = view.safeAreaInsets
+        connection.frame = CGRect(x: 16, y: safe.top + 4, width: 44, height: 44)
+        add.frame = CGRect(x: bounds.width - 60, y: safe.top + 4, width: 44, height: 44)
+        let barTop = current.bottomBarTop, barHeight = StageLayout.bottomBarHeight
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pagesFade.frame = bounds
+        pagesFade.locations = [0, NSNumber(value: (barTop - 34) / bounds.height), NSNumber(value: (barTop - 2) / bounds.height)]
+        CATransaction.commit()
+        builds.frame = CGRect(x: bounds.width - 16 - barHeight, y: barTop, width: barHeight, height: barHeight)
+        compose.frame = CGRect(x: 16, y: barTop, width: builds.frame.minX - 26, height: barHeight)
         applyScene()
     }
 
@@ -167,71 +172,68 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
     }
 
     private func makeLayout() -> StageLayout {
-        let font = Theme.appNameFont()
-        let titleHeight = ceil(font.lineHeight * 2 + 4)
-        return StageLayout(size: view.bounds.size, safe: view.safeAreaInsets, titleHeight: titleHeight,
-                           reducedMotion: Motion.reduced)
+        StageLayout(size: view.bounds.size, safe: view.safeAreaInsets, titleHeight: ceil(Theme.appNameFont().lineHeight),
+                    reducedMotion: Motion.reduced)
     }
 
     private var layout: StageLayout { laidOut ?? makeLayout() }
     private var selectedIndex: Int { projects.firstIndex { $0.id == selectedID } ?? 0 }
+    private var selectedProject: AppProject? { projects.first { $0.id == selectedID } }
 
     // MARK: Model
 
     private func render() {
         let next = model.projects
         let changed = next.map(\.id) != projects.map(\.id)
-        if changed && (picker.isTracking || picker.isDecelerating || isPaging) {
+        if changed && (picker.isTracking || picker.isDecelerating) {
             deferredRender = true
-            for project in next { items[project.id]?.update(project: project) }
             return
         }
         projects = next
-        if let open = workspace?.project.id { selectedID = open }
-        if !projects.contains(where: { $0.id == selectedID }) { selectedID = projects.first?.id }
+        if let open = thread?.project.id { selectedID = open }
+        if !projects.isEmpty, !projects.contains(where: { $0.id == selectedID }) { selectedID = projects.first?.id }
         let ids = Set(projects.map(\.id))
-        for id in Array(items.keys) where !ids.contains(id) {
-            items.removeValue(forKey: id)?.removeFromSuperview()
+        for id in Array(pages.keys) where !ids.contains(id) {
+            pages.removeValue(forKey: id)?.removeFromSuperview()
             bindings[id] = nil
         }
         stage.sync(ids: projects.map(\.id))
         for project in projects {
-            if let item = items[project.id] { item.update(project: project) }
-            else {
-                let item = GalleryItem(project: project)
-                item.onPage = { [weak self] direction in self?.scrollToPage(self.map { $0.selectedIndex + direction } ?? 0) }
-                item.addAction(UIAction { [weak self] _ in self?.tapped(project.id) }, for: .touchUpInside)
-                items[project.id] = item
-                picker.addSubview(item)
-            }
-            let binding = bindings[project.id] ?? ScreenshotBinding(id: project.id, stage: stage)
+            let page = pages[project.id] ?? {
+                let page = AppPage(project: project)
+                page.onScroll = { [weak self] in self?.applyScene() }
+                page.onMoving = { [weak self] moving in self?.stage.setLive(moving, reason: "list") }
+                page.onOpenThread = { [weak self] id in self?.openThread(id) }
+                page.onPage = { [weak self] direction in self?.scrollToPage((self?.selectedIndex ?? 0) + direction) }
+                pages[project.id] = page
+                picker.addSubview(page)
+                return page
+            }()
+            page.update(project: project, sessions: model.sessions(for: project), agentName: model.agentName(for:),
+                        loading: model.isLoading, error: model.error)
+            let binding = bindings[project.id] ?? {
+                let binding = ScreenshotBinding(id: project.id, stage: stage)
+                binding.onChange = { [weak self] in self?.applyScene() }
+                return binding
+            }()
             bindings[project.id] = binding
             binding.update(model: model, project: project)
         }
-        pages.numberOfPages = projects.count
-        renderConnection()
+        renderControls()
         if changed && laidOut != nil {
-            layoutItems()
-            picker.contentOffset.x = CGFloat(selectedIndex) * layout.pitch
+            layoutPages()
+            picker.contentOffset.x = CGFloat(selectedIndex) * view.bounds.width
         }
         applyScene()
     }
 
-    private func renderConnection() {
-        var config = connection.configuration
-        let host = model.hostName.split(separator: ".").first.map(String.init) ?? model.hostName
+    private func renderControls() {
         let offline = !model.connected && !model.isLoading
-        let title = model.connected ? host : (offline ? "Offline" : "Connecting")
-        let tint: UIColor = model.connected ? Theme.success : (offline ? Theme.warning : .secondaryLabel)
-        if config?.title != title || config?.image == nil || connection.accessibilityValue != title {
-            config?.title = title
-            config?.image = UIImage(systemName: "circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 8))?
-                .withTintColor(tint, renderingMode: .alwaysOriginal)
-            config?.imagePadding = 8
-            connection.configuration = config
-            connection.accessibilityLabel = "Mac connection"
-            connection.accessibilityValue = title
-            view.setNeedsLayout()
+        let state = model.connected ? "Connected" : (offline ? "Offline" : "Connecting")
+        if connection.accessibilityValue != state {
+            connection.accessibilityValue = state
+            let tint: UIColor = model.connected ? Theme.success : (offline ? Theme.warning : .secondaryLabel)
+            connection.configuration?.image = UIImage(systemName: "macbook")?.withTintColor(tint, renderingMode: .alwaysOriginal)
         }
         let detail = model.error ?? (model.connected ? "Connected to \(model.hostName)" : model.status)
         connection.menu = UIMenu(title: detail, children: [
@@ -239,108 +241,106 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
                 Task { await self?.model.refresh() }
             }
         ])
+        let project = selectedProject
+        compose.isEnabled = project != nil
+        let building = project.map { project in
+            model.buildingProjectIDs.contains(project.id)
+                || model.builds(for: project).contains { $0.status == "queued" || $0.status == "running" }
+        } ?? false
+        if builds.configuration?.showsActivityIndicator != building {
+            builds.configuration?.showsActivityIndicator = building
+            builds.accessibilityValue = building ? "Building" : nil
+        }
     }
 
-    private func layoutItems() {
+    private func layoutPages() {
         let layout = self.layout
-        let width = view.bounds.width
-        picker.contentSize = CGSize(width: width + CGFloat(max(0, projects.count - 1)) * layout.pitch, height: view.bounds.height)
-        let phoneHeight = layout.galleryPhoneHeight
-        let phoneWidth = phoneHeight * PhonePose.aspect
-        let titleWidth = width - 48
-        let top = layout.galleryPhoneCenterY - phoneHeight / 2
-        let height = layout.galleryTitleCenterY + layout.titleHeight / 2 - top
+        let size = view.bounds.size
+        picker.contentSize = CGSize(width: size.width * CGFloat(max(1, projects.count)), height: size.height)
         for (index, project) in projects.enumerated() {
-            guard let item = items[project.id] else { continue }
-            let centerX = CGFloat(index) * layout.pitch + width / 2
-            item.place(in: CGRect(x: centerX - titleWidth / 2, y: top, width: titleWidth, height: height))
-            item.layoutContent(phoneSize: CGSize(width: phoneWidth, height: phoneHeight),
-                               titleCenterY: layout.galleryTitleCenterY - top, titleHeight: layout.titleHeight)
+            guard let page = pages[project.id] else { continue }
+            page.frame = CGRect(x: CGFloat(index) * size.width, y: 0, width: size.width, height: size.height)
+            page.layout = layout
         }
     }
 
     // MARK: Scene
 
-    /// Pushes the current scroll position, transition progress and workspace
-    /// scroll into every layer. Called per frame only while something moves.
+    /// Pushes carousel position, every list's scroll, the thread transition
+    /// and its divider into every layer. Called only while something moves.
     private func applyScene() {
-        guard view.bounds.width > 0 else { return }
+        let width = view.bounds.width
+        guard width > 0 else { return }
         let layout = self.layout
         let progress = spring.value
-        let position = picker.contentOffset.x / layout.pitch
-        let scroll = workspace?.scrollOffset ?? 0
+        let position = picker.contentOffset.x / width
+        let lower = max(0, min(projects.count - 1, Int(floor(position))))
+        let upper = min(projects.count - 1, lower + 1)
+        let fraction = (position - CGFloat(lower)).clamped()
+        func expansion(_ index: Int) -> CGFloat {
+            projects.indices.contains(index) ? layout.expansion(scroll: pages[projects[index].id]?.offset ?? 0) : 0
+        }
+        // Neighbors stand a full page apart once a list is being read.
+        let spread = CGFloat.lerp(expansion(lower), expansion(upper), fraction)
+        let nearest = max(0, min(projects.count - 1, Int(position.rounded())))
         var poses: [String: PhonePose] = [:]
-        let nearest = layout.page(for: picker.contentOffset.x, count: projects.count)
+        var focus: PhonePose?
         for (index, project) in projects.enumerated() {
+            guard let page = pages[project.id] else { continue }
             let offset = CGFloat(index) - position
-            let pose: PhonePose
-            if project.id == selectedID && progress > 0.0001 {
-                pose = layout.transitionPose(galleryOffset: offset, scroll: scroll, progress: progress)
-            } else {
-                pose = progress > 0.0001 ? layout.neighborPose(offset: offset, progress: progress) : layout.galleryPose(offset: offset)
+            page.isHidden = abs(offset) >= 1.5
+            let scroll = page.offset
+            var pose = layout.homePose(offset: offset, scroll: scroll, spread: spread)
+            let calm = (1 - layout.expansion(scroll: scroll)) * (1 - progress.clamped())
+            if !layout.reducedMotion {
+                pose.yaw += tilt.x * calm
+                pose.pitch += tilt.y * calm
             }
+            // The name stays beneath its device, which stands closer than a page.
+            page.nameShift = pose.center.x - (width / 2 + offset * width)
+            page.setHero(CGRect(x: pose.center.x - offset * width - pose.height * PhonePose.aspect / 2,
+                                y: pose.center.y - pose.height / 2, width: pose.height * PhonePose.aspect, height: pose.height),
+                         centered: index == nearest, expanded: scroll > layout.expandedOffset * 0.5)
+            if progress > 0.0001 {
+                if project.id == thread?.project.id, let thread {
+                    pose = layout.transitionPose(from: pose, to: thread.pose, progress: progress)
+                } else {
+                    let direction: CGFloat = offset < 0 ? -1 : 1
+                    pose = layout.homePose(offset: offset + direction * progress.clamped() * 1.5, scroll: scroll, spread: spread)
+                }
+            }
+            if index == nearest { focus = pose }
             if pose.visible { poses[project.id] = pose }
-            if let item = items[project.id] {
-                // Every frame derives every title pose. An app that was opened
-                // previously must not retain its old workspace transform.
-                item.titleLabel.transform = .identity
-                let fade = (1 - abs(offset) * 1.4).clamped()
-                item.titleLabel.alpha = fade
-                item.layer.zPosition = 10 - abs(offset)
-                item.setCentered(index == nearest)
-            }
         }
         stage.apply(poses)
-
-        let galleryCenter = CGPoint(x: view.bounds.width / 2, y: layout.galleryPhoneCenterY)
-        let workspaceCenter = layout.workspacePose(scroll: scroll).center
-        let p = progress.clamped()
-        stage.glowCenter = CGPoint(x: galleryCenter.x, y: .lerp(galleryCenter.y, workspaceCenter.y, p))
-        stage.glowRadius = .lerp(layout.galleryPhoneHeight * 0.85, layout.workspacePhoneHeight * 0.95, p)
-
-        // Gallery controls leave in the first half; workspace controls arrive
-        // in the second, so the two sets never cross the status bar together.
-        let exit = (progress * 2).clamped(0, 1.1)
-        topBar.transform = CGAffineTransform(translationX: 0, y: -(view.safeAreaInsets.top + 80) * exit)
-        pages.transform = CGAffineTransform(translationX: 0, y: (view.safeAreaInsets.bottom + 80) * exit)
-
-        // The centered app name travels into the workspace title position.
-        if let id = selectedID, let item = items[id] {
-            if progress > 0.0001, let workspace {
-                // `center` excludes the transform, so this is the resting spot.
-                let startCenter = item.convert(item.titleLabel.center, to: view)
-                let end = workspace.titleCenter(in: view)
-                item.titleLabel.transform = CGAffineTransform(translationX: (end.x - startCenter.x) * progress,
-                                                              y: (end.y - startCenter.y) * progress)
-                item.titleLabel.alpha = 1
-            } else {
-                item.titleLabel.transform = .identity
-            }
+        if let focus {
+            stage.glowCenter = focus.center
+            stage.glowRadius = max(120, focus.height * 0.95)
         }
-        workspace?.setReveal(progress)
+        if !projects.isEmpty {
+            stage.setAmbient(from: stage.ambientColor(for: projects[lower].id), to: stage.ambientColor(for: projects[upper].id), mix: fraction)
+        }
+        if projects.indices.contains(nearest), projects[nearest].id != selectedID, thread == nil {
+            selectedID = projects[nearest].id
+            Theme.selectionHaptic()
+            renderControls()
+        }
+
+        // A push: Home leaves to the left as the conversation arrives from the
+        // right. The device belongs to both, so it travels on its own.
+        home.transform = CGAffineTransform(translationX: -width * progress, y: 0)
+        thread?.view.transform = CGAffineTransform(translationX: width * (1 - progress), y: 0)
     }
 
-    // MARK: Picker
+    // MARK: Carousel
 
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard scrollView === picker else { return }
-        applyScene()
-    }
+    func scrollViewDidScroll(_ scrollView: UIScrollView) { applyScene() }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        pendingOpenID = nil
-        isPaging = false
         stage.setLive(true, reason: "picker")
         #if DEBUG
         MotionAudit.shared.begin("gallery.scroll", duration: 1.4)
         #endif
-    }
-
-    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint,
-                                   targetContentOffset: UnsafeMutablePointer<CGPoint>) {
-        let index = layout.targetPage(currentX: scrollView.contentOffset.x, projectedX: targetContentOffset.pointee.x,
-                                      velocityX: velocity.x, count: projects.count)
-        targetContentOffset.pointee.x = CGFloat(index) * layout.pitch
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -348,24 +348,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { settle() }
-
-    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
-        settle()
-        if let id = pendingOpenID {
-            pendingOpenID = nil
-            open(id)
-        }
-    }
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { settle() }
 
     private func settle() {
-        guard !projects.isEmpty else { return }
-        isPaging = false
         stage.setLive(false, reason: "picker")
-        let index = layout.page(for: picker.contentOffset.x, count: projects.count)
-        if selectedID != projects[index].id { Theme.selectionHaptic() }
-        selectedID = projects[index].id
-        pages.currentPage = index
         applyScene()
+        if let selectedProject { model.selectProject(selectedProject) }
+        // A list left behind returns to its hero for the next visit.
+        for (id, page) in pages where id != selectedID && page.offset != 0 { page.contentOffset.y = 0 }
         if deferredRender {
             deferredRender = false
             render()
@@ -373,76 +363,86 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
     }
 
     private func scrollToPage(_ page: Int) {
-        guard !projects.isEmpty, phase == .gallery else { return }
-        let index = max(0, min(projects.count - 1, page))
-        pages.currentPage = index
-        let target = CGFloat(index) * layout.pitch
-        guard abs(picker.contentOffset.x - target) > 1 else { settle(); return }
-        isPaging = true
+        guard !projects.isEmpty, phase == .home else { return }
+        let target = CGFloat(max(0, min(projects.count - 1, page))) * view.bounds.width
+        guard abs(picker.contentOffset.x - target) > 1 else { return }
         stage.setLive(true, reason: "picker")
         picker.setContentOffset(CGPoint(x: target, y: 0), animated: !Motion.reduced)
         if Motion.reduced { settle() }
     }
 
-    private func tapped(_ id: String) {
-        guard phase == .gallery, let index = projects.firstIndex(where: { $0.id == id }) else { return }
-        let target = CGFloat(index) * layout.pitch
-        if abs(picker.contentOffset.x - target) > 1 { scrollToPage(index) }
-        else { selectedID = id; open(id) }
+    // MARK: Device tilt
+
+    /// The hero turns a little against the hand holding the phone, so it reads
+    /// as an object in space. Renders only when the hand actually moves.
+    private func startTilt() {
+        guard motion.isDeviceMotionAvailable, !motion.isDeviceMotionActive else { return }
+        motion.deviceMotionUpdateInterval = 1.0 / 30
+        motion.startDeviceMotionUpdates(to: .main) { [weak self] data, _ in
+            MainActor.assumeIsolated {
+                guard let self, let attitude = data?.attitude, self.phase == .home, !Motion.reduced else { return }
+                let now = CGPoint(x: attitude.roll, y: attitude.pitch)
+                var rest = self.tiltRest ?? now
+                func delta(_ a: CGFloat, _ b: CGFloat) -> CGFloat { atan2(sin(a - b), cos(a - b)) }
+                // The resting attitude follows slowly, so any grip is neutral.
+                rest.x += delta(now.x, rest.x) * 0.03
+                rest.y += delta(now.y, rest.y) * 0.03
+                self.tiltRest = rest
+                let next = CGPoint(x: (-delta(now.x, rest.x) * 0.55).clamped(-0.22, 0.22),
+                                   y: (-delta(now.y, rest.y) * 0.35).clamped(-0.10, 0.10))
+                guard abs(next.x - self.tilt.x) > 0.002 || abs(next.y - self.tilt.y) > 0.002 else { return }
+                self.tilt = next
+                self.applyScene()
+            }
+        }
     }
 
-    // MARK: Navigation
+    // MARK: Threads
 
-    private func open(_ id: String) {
-        if workspace?.project.id == id, phase == .closing || phase == .opening {
-            phase = .opening
-            spring.animate(to: 1)
-            return
-        }
-        guard phase == .gallery, presentedViewController == nil,
-              let project = projects.first(where: { $0.id == id }) else { return }
+    private func openThread(_ sessionID: String?) {
+        guard phase == .home, presentedViewController == nil, let project = selectedProject else { return }
         Theme.openHaptic()
         model.selectProject(project)
-        selectedID = id
-        let workspace = WorkspaceViewController(model: model, project: project)
-        workspace.onBack = { [weak self] in self?.close() }
-        workspace.onScroll = { [weak self] in self?.applyScene() }
-        workspace.onOpenThread = { [weak self] sessionID in self?.presentThread(sessionID) }
-        workspace.onOpenBuilds = { [weak self] in self?.presentBuilds() }
-        workspace.layoutProvider = { [weak self] in self?.layout }
-        addChild(workspace)
-        workspace.view.frame = view.bounds
-        view.addSubview(workspace.view)
-        workspace.didMove(toParent: self)
-        workspace.view.layoutIfNeeded()
-        let edge = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(edgePanned(_:)))
-        edge.edges = .left
-        workspace.view.addGestureRecognizer(edge)
-        edgePan = edge
-        self.workspace = workspace
+        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage)
+        controller.layoutProvider = { [weak self] in self?.layout }
+        controller.onBack = { [weak self] in self?.closeThread() }
+        controller.onGeometry = { [weak self] in self?.applyScene() }
+        thread = controller
+        addChild(controller)
+        controller.view.frame = view.bounds
+        controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
+        view.addSubview(controller.view)
+        controller.didMove(toParent: self)
+        controller.view.layoutIfNeeded()
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(backPanned(_:)))
+        pan.delegate = self
+        controller.view.addGestureRecognizer(pan)
         phase = .opening
-        beginMotion("workspace.open")
+        beginMotion("thread.open")
         updateInteractivity()
         spring.animate(to: 1)
+        if sessionID == nil { controller.focusComposer() }
     }
 
-    func close() {
-        guard workspace != nil, presentedViewController == nil, phase != .gallery else { return }
+    func closeThread() {
+        guard thread != nil, presentedViewController == nil, phase != .home else { return }
+        view.endEditing(true)
         phase = .closing
-        beginMotion("workspace.close")
+        beginMotion("thread.close")
         updateInteractivity()
         spring.animate(to: 0)
     }
 
-    @objc private func edgePanned(_ gesture: UIScreenEdgePanGestureRecognizer) {
+    /// Swipe right anywhere in a thread to go back, following the finger.
+    @objc private func backPanned(_ gesture: UIPanGestureRecognizer) {
         let width = max(1, view.bounds.width)
         switch gesture.state {
         case .began:
-            guard workspace != nil, presentedViewController == nil, phase != .gallery else { return }
+            guard thread != nil, phase != .home else { return }
             dragStart = spring.value
             spring.stop()
             phase = .dragging
-            beginMotion("workspace.drag")
+            beginMotion("thread.drag")
             updateInteractivity()
         case .changed:
             guard phase == .dragging else { return }
@@ -450,16 +450,29 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
         case .ended, .cancelled, .failed:
             guard phase == .dragging else { return }
             let velocity = -gesture.velocity(in: view).x / width
-            let projected = spring.value + velocity * 0.18
-            let closing = gesture.state == .ended && projected < 0.5
+            let closing = gesture.state == .ended && spring.value + velocity * 0.18 < 0.5
             #if DEBUG
-            MotionAudit.shared.note("edge", values: ["progress": spring.value, "velocity": velocity, "closing": closing])
+            MotionAudit.shared.note("back", values: ["progress": spring.value, "velocity": velocity, "closing": closing])
             #endif
+            if closing { view.endEditing(true) }
             phase = closing ? .closing : .opening
             updateInteractivity()
             spring.animate(to: closing ? 0 : 1, initialVelocity: velocity)
         default: break
         }
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer, let thread, presentedViewController == nil else { return false }
+        let velocity = pan.velocity(in: view)
+        return velocity.x > 0 && velocity.x > abs(velocity.y) * 1.3 && thread.allowsBackSwipe(at: pan.location(in: thread.view))
+    }
+
+    /// The conversation's own scrolling waits until a touch is known not to be
+    /// a back swipe, so the two never move together.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        otherGestureRecognizer is UIPanGestureRecognizer && otherGestureRecognizer.view is UIScrollView
     }
 
     private func beginMotion(_ name: String) {
@@ -472,61 +485,42 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
     private func springRested(at value: CGFloat) {
         stage.setLive(false, reason: "transition")
         if value >= 1, phase == .opening {
-            phase = .workspace
+            phase = .thread
             updateInteractivity()
-            UIAccessibility.post(notification: .screenChanged, argument: workspace?.accessibilityFocus)
+            UIAccessibility.post(notification: .screenChanged, argument: thread?.view)
         } else if value <= 0, phase == .closing {
-            if let workspace {
-                workspace.willMove(toParent: nil)
-                workspace.view.removeFromSuperview()
-                workspace.removeFromParent()
+            if let thread {
+                thread.pausePreview()
+                stage.endLive(for: thread.project.id)
+                thread.willMove(toParent: nil)
+                thread.view.removeFromSuperview()
+                thread.removeFromParent()
             }
-            workspace = nil
-            edgePan = nil
-            phase = .gallery
+            thread = nil
+            phase = .home
             applyScene()
             updateInteractivity()
-            UIAccessibility.post(notification: .screenChanged, argument: selectedID.flatMap { items[$0] })
+            UIAccessibility.post(notification: .screenChanged, argument: selectedID.flatMap { pages[$0]?.hero })
         }
     }
 
     /// Only the resting screen is interactive and visible to VoiceOver/UI tests.
     private func updateInteractivity() {
-        let gallery = phase == .gallery
-        let resting = phase == .workspace
-        picker.isUserInteractionEnabled = gallery
-        topBar.isUserInteractionEnabled = gallery
-        pages.isUserInteractionEnabled = gallery
-        picker.accessibilityElementsHidden = !gallery
-        topBar.accessibilityElementsHidden = !gallery
-        pages.accessibilityElementsHidden = !gallery
-        // Hidden at rest so the gallery costs nothing behind the workspace.
-        picker.isHidden = resting
-        pages.isHidden = resting
-        topBar.isHidden = resting
-        workspace?.setResting(resting)
+        home.isUserInteractionEnabled = phase == .home
+        home.accessibilityElementsHidden = phase != .home
+        // Hidden at rest so Home costs nothing behind a conversation.
+        home.isHidden = phase == .thread
+        thread?.view.accessibilityElementsHidden = phase != .thread
     }
 
     // MARK: Sheets
 
-    private func presentThread(_ sessionID: String?) {
-        guard let workspace, presentedViewController == nil, phase == .workspace else { return }
-        Theme.selectionHaptic()
-        let controller = ThreadViewController(model: model, project: workspace.project, sessionID: sessionID)
-        let navigation = UINavigationController(rootViewController: controller)
-        navigation.modalPresentationStyle = .fullScreen
-        navigation.preferredTransition = .zoom { [weak workspace, weak model] _ in
-            workspace?.zoomSource(for: model?.selectedSessionID ?? sessionID)
-        }
-        present(navigation, animated: true)
-    }
-
     private func presentBuilds() {
-        guard let workspace, presentedViewController == nil, phase == .workspace else { return }
+        guard let project = selectedProject, presentedViewController == nil, phase == .home else { return }
         Theme.selectionHaptic()
-        let controller = BuildsViewController(model: model, project: workspace.project)
+        let controller = BuildsViewController(model: model, project: project)
         controller.onNewThread = { [weak self, weak controller] in
-            controller?.dismiss(animated: true) { self?.presentThread(nil) }
+            controller?.dismiss(animated: true) { self?.openThread(nil) }
         }
         controller.modalPresentationStyle = .pageSheet
         if let sheet = controller.sheetPresentationController {
@@ -538,103 +532,176 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate {
     }
 
     private func presentImport() {
-        guard phase == .gallery, presentedViewController == nil else { return }
+        guard phase == .home, presentedViewController == nil else { return }
         let importer = AppImportNavigationController(model: model)
         importer.onImport = { [weak self, weak importer] project in
             importer?.dismiss(animated: true) {
                 guard let self else { return }
                 self.render()
                 guard let index = self.projects.firstIndex(where: { $0.id == project.id }) else { return }
-                let target = CGFloat(index) * self.layout.pitch
-                if abs(self.picker.contentOffset.x - target) > 1, !Motion.reduced {
-                    self.pendingOpenID = project.id
-                    self.scrollToPage(index)
-                } else {
-                    self.picker.contentOffset.x = target
-                    self.settle()
-                    self.open(project.id)
-                }
+                self.scrollToPage(index)
             }
         }
         present(importer, animated: true)
     }
 
     override func accessibilityPerformEscape() -> Bool {
-        guard phase == .workspace else { return false }
-        close()
+        guard phase == .thread else { return false }
+        closeThread()
         return true
     }
 }
 
-/// The tappable, accessible stand-in for one device on the stage. The device
-/// itself is rendered by SceneKit behind it; this view carries the name.
+/// One app on Home: its name beneath the device and its threads beneath that.
+/// The device is rendered by the shared stage behind this transparent list and
+/// shrinks to make room as the list scrolls up.
 @MainActor
-final class GalleryItem: UIControl {
-    var onPage: ((Int) -> Void)?
+final class AppPage: UIScrollView, UIScrollViewDelegate {
     private(set) var project: AppProject
-    let titleLabel = Theme.label("", Theme.appNameFont(), lines: 2)
-    private var phoneRect = CGRect.zero
+    var onScroll: (() -> Void)?
+    var onMoving: ((Bool) -> Void)?
+    var onOpenThread: ((String) -> Void)?
+    var onPage: ((Int) -> Void)?
+    var layout: StageLayout? { didSet { if layout != oldValue { arrange() } } }
+    /// Tappable, accessible stand-in for the device.
+    let hero = UIControl()
+    private let nameLabel = Theme.label("", Theme.appNameFont())
+    private let rows = UIStackView()
+    private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
+    private var rowViews: [String: ThreadRow] = [:]
+    private var renderedOrder: [String] = []
+
+    /// Distance scrolled from the resting hero position.
+    var offset: CGFloat { contentOffset.y }
+    var nameShift: CGFloat = 0 {
+        didSet { if nameShift != oldValue { nameLabel.transform = CGAffineTransform(translationX: nameShift, y: 0) } }
+    }
 
     init(project: AppProject) {
         self.project = project
         super.init(frame: .zero)
-        clipsToBounds = false
-        titleLabel.textAlignment = .center
-        titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.isAccessibilityElement = false
-        titleLabel.isUserInteractionEnabled = false
-        addSubview(titleLabel)
-        isAccessibilityElement = true
-        accessibilityCustomActions = [
+        delegate = self
+        alwaysBounceVertical = true
+        showsVerticalScrollIndicator = false
+        contentInsetAdjustmentBehavior = .never
+        decelerationRate = .normal
+        accessibilityIdentifier = "workspace.threads"
+        nameLabel.textAlignment = .center
+        nameLabel.adjustsFontSizeToFitWidth = true
+        nameLabel.minimumScaleFactor = 0.6
+        nameLabel.accessibilityTraits = .header
+        rows.axis = .vertical
+        notice.textAlignment = .center
+        hero.isAccessibilityElement = true
+        hero.accessibilityCustomActions = [
             UIAccessibilityCustomAction(name: "Previous app") { [weak self] _ in self?.onPage?(-1); return true },
             UIAccessibilityCustomAction(name: "Next app") { [weak self] _ in self?.onPage?(1); return true }
         ]
-        update(project: project)
-        setCentered(false)
+        hero.addAction(UIAction { [weak self] _ in self?.toggle() }, for: .touchUpInside)
+        [hero, nameLabel, rows, notice].forEach(addSubview)
+        if #available(iOS 26.0, *) {
+            topEdgeEffect.style = .soft
+            bottomEdgeEffect.style = .soft
+        }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(project: AppProject) {
+    func update(project: AppProject, sessions: [ChatSession], agentName: (JSONValue) -> String, loading: Bool, error: String?) {
         self.project = project
-        if titleLabel.text != project.name { titleLabel.text = project.name }
-        accessibilityLabel = project.name
-        accessibilityValue = project.id
-    }
-
-    func setCentered(_ centered: Bool) {
-        let identifier = centered ? "project.hero" : "project.picker.\(project.id)"
-        guard accessibilityIdentifier != identifier else { return }
-        accessibilityIdentifier = identifier
-        accessibilityTraits = centered ? [.button, .selected] : .button
-        accessibilityHint = centered ? "Opens threads and builds" : "Shows this app"
-    }
-
-    func layoutContent(phoneSize: CGSize, titleCenterY: CGFloat, titleHeight: CGFloat) {
-        phoneRect = CGRect(x: (bounds.width - phoneSize.width) / 2, y: 0, width: phoneSize.width, height: phoneSize.height)
-        titleLabel.transform = .identity
-        titleLabel.place(in: CGRect(x: 0, y: titleCenterY - titleHeight / 2, width: bounds.width, height: titleHeight))
-    }
-
-    override var accessibilityFrame: CGRect {
-        get { UIAccessibility.convertToScreenCoordinates(phoneRect.isEmpty ? bounds : phoneRect, in: self) }
-        set { super.accessibilityFrame = newValue }
-    }
-
-    /// Only the device and its name are tappable, so a neighbor's visible
-    /// edge receives its own taps.
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        let text = titleLabel.textRect(forBounds: titleLabel.bounds, limitedToNumberOfLines: 2)
-        let textFrame = CGRect(x: titleLabel.frame.minX + text.minX, y: titleLabel.frame.minY + text.minY,
-                               width: text.width, height: text.height)
-        return phoneRect.contains(point) || textFrame.insetBy(dx: -12, dy: -8).contains(point)
-    }
-
-    override var isHighlighted: Bool {
-        didSet {
-            guard isHighlighted != oldValue else { return }
-            UIView.animate(withDuration: 0.16) { self.titleLabel.alpha = self.isHighlighted ? 0.6 : 1 }
+        if nameLabel.text != project.name { nameLabel.text = project.name }
+        hero.accessibilityLabel = project.name
+        hero.accessibilityValue = project.id
+        let ids = sessions.map(\.id)
+        for id in Array(rowViews.keys) where !ids.contains(id) { rowViews.removeValue(forKey: id)?.removeFromSuperview() }
+        for session in sessions {
+            let row = rowViews[session.id] ?? {
+                let row = ThreadRow(sessionID: session.id)
+                row.addAction(UIAction { [weak self] _ in self?.onOpenThread?(session.id) }, for: .touchUpInside)
+                rowViews[session.id] = row
+                return row
+            }()
+            row.configure(title: session.displayTitle(in: project), agent: agentName(session.modelSelection),
+                          date: session.updatedAt, phase: session.phase)
         }
+        let message: String? = sessions.isEmpty ? (error ?? (loading ? "Loading threads…" : "No threads yet")) : nil
+        let changed = ids != renderedOrder || notice.text != message
+        if ids != renderedOrder {
+            renderedOrder = ids
+            rows.arrangedSubviews.forEach { rows.removeArrangedSubview($0) }
+            for (index, id) in ids.enumerated() {
+                guard let row = rowViews[id] else { continue }
+                rows.addArrangedSubview(row)
+                row.showsSeparator = index < ids.count - 1
+            }
+        }
+        notice.text = message
+        notice.isHidden = message == nil
+        notice.textColor = error == nil ? .secondaryLabel : Theme.failure
+        notice.accessibilityIdentifier = error == nil ? "workspace.empty" : "workspace.error"
+        if changed { arrange() }
     }
+
+    private func arrange() {
+        guard let layout, bounds.width > 0 else { return }
+        let width = bounds.width
+        nameLabel.transform = .identity
+        nameLabel.frame = CGRect(x: 28, y: layout.nameTop, width: width - 56, height: layout.titleHeight)
+        nameLabel.transform = CGAffineTransform(translationX: nameShift, y: 0)
+        let rowsTop = nameLabel.frame.maxY + 14
+        let rowsHeight = renderedOrder.isEmpty ? 0
+            : rows.systemLayoutSizeFitting(CGSize(width: width - 24, height: 0), withHorizontalFittingPriority: .required,
+                                           verticalFittingPriority: .fittingSizeLevel).height
+        rows.frame = CGRect(x: 12, y: rowsTop, width: width - 24, height: rowsHeight)
+        let noticeHeight = notice.isHidden ? 0 : notice.sizeThatFits(CGSize(width: width - 64, height: .greatestFiniteMagnitude)).height
+        notice.frame = CGRect(x: 32, y: rowsTop + 6, width: width - 64, height: noticeHeight)
+        let bottom = bounds.height - layout.bottomBarTop + 12
+        contentInset.bottom = bottom
+        let natural = rowsTop + rowsHeight + noticeHeight
+        // Any app with threads can be pulled up to its reading position.
+        contentSize = CGSize(width: width, height: renderedOrder.isEmpty ? natural
+                             : max(natural, bounds.height - bottom + layout.expandedOffset))
+    }
+
+    override var frame: CGRect {
+        didSet { if frame.size != oldValue.size { arrange() } }
+    }
+
+    /// `rect` is the device's outline in this page's visible coordinates.
+    func setHero(_ rect: CGRect, centered: Bool, expanded: Bool) {
+        hero.frame = rect.offsetBy(dx: 0, dy: contentOffset.y)
+        let identifier = centered ? "project.hero" : "project.picker.\(project.id)"
+        if hero.accessibilityIdentifier != identifier {
+            hero.accessibilityIdentifier = identifier
+            hero.accessibilityTraits = centered ? [.button, .selected] : .button
+        }
+        hero.accessibilityHint = expanded ? "Shows the device" : "Shows threads"
+    }
+
+    /// Tapping the device moves between hero and reading positions.
+    private func toggle() {
+        guard let layout, !renderedOrder.isEmpty else { return }
+        Theme.selectionHaptic()
+        onMoving?(true)
+        let target = offset > layout.expandedOffset * 0.5 ? 0 : layout.expandedOffset
+        setContentOffset(CGPoint(x: 0, y: target), animated: !Motion.reduced)
+        if Motion.reduced { onMoving?(false) }
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) { onScroll?() }
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { onMoving?(true) }
+
+    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint,
+                                   targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        guard let layout, !renderedOrder.isEmpty else { return }
+        targetContentOffset.pointee.y = layout.restingOffset(current: offset, projected: targetContentOffset.pointee.y, velocity: velocity.y)
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { onMoving?(false) }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { onMoving?(false) }
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { onMoving?(false) }
 }

@@ -13,6 +13,7 @@
 		261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */; };
 		2FBB59AD4C1AE916730CEA4C /* SpringDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */; };
 		38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
+		3B375023CFEB927A141C090E /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF796323376B17E9A5610B5 /* Markdown.swift */; };
 		3B9BE6F5A38660FAB6765472 /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
 		418A84EAC572BD0535B5A81B /* T3DeviceStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */; };
 		45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
@@ -23,8 +24,8 @@
 		87D6E7B728B1986849DCC922 /* StageLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5F85DA67966D2090740EE5 /* StageLayout.swift */; };
 		9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
 		A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */; };
+		A48E1FCA693DC85CC567D780 /* ThreadViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */; };
 		AA83956C51857C3A127A8AB9 /* StudioViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */; };
-		B082B3E58EBF50C44166470A /* WorkspaceViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB106DA6DB124E287DDBB5E8 /* WorkspaceViewController.swift */; };
 		B33D4A9C782619416B5ABFD7 /* ClientModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */; };
 		B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613DF9097AAA330CB0F89A33 /* SquircleApp.swift */; };
 		B8F5D99583BEDB610EE58565 /* T3ThreadState.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBD483A8574350974655CD0C /* T3ThreadState.swift */; };
@@ -62,8 +63,10 @@
 		33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpringDriver.swift; sourceTree = "<group>"; };
 		374818EF24FCE5A3AF15700A /* PerformanceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceUITests.swift; sourceTree = "<group>"; };
 		37662310ACFA109B8C10D377 /* StageMotionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageMotionTests.swift; sourceTree = "<group>"; };
+		4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViews.swift; sourceTree = "<group>"; };
 		52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientModels.swift; sourceTree = "<group>"; };
 		5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioUITests.swift; sourceTree = "<group>"; };
+		5DF796323376B17E9A5610B5 /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
 		613DF9097AAA330CB0F89A33 /* SquircleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleApp.swift; sourceTree = "<group>"; };
 		6D09120CE693437EA02625DD /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
 		70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleClient.swift; sourceTree = "<group>"; };
@@ -78,7 +81,6 @@
 		DB495D800CF688C469BFF725 /* AppProjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProjectTests.swift; sourceTree = "<group>"; };
 		EBD483A8574350974655CD0C /* T3ThreadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3ThreadState.swift; sourceTree = "<group>"; };
 		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
-		FB106DA6DB124E287DDBB5E8 /* WorkspaceViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViewController.swift; sourceTree = "<group>"; };
 		FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppImportViewController.swift; sourceTree = "<group>"; };
 		FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3DeviceStream.swift; sourceTree = "<group>"; };
 		FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Tests.swift; sourceTree = "<group>"; };
@@ -120,6 +122,7 @@
 				FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */,
 				8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */,
 				1AE56C52866D21AD27A18697 /* DeviceStage.swift */,
+				5DF796323376B17E9A5610B5 /* Markdown.swift */,
 				9685CE2D9A277E148073C169 /* MotionAudit.swift */,
 				D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */,
 				33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */,
@@ -127,7 +130,7 @@
 				2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */,
 				9AA8EBB035561F94C3724C6D /* Theme.swift */,
 				2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */,
-				FB106DA6DB124E287DDBB5E8 /* WorkspaceViewController.swift */,
+				4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -322,6 +325,7 @@
 				6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */,
 				B33D4A9C782619416B5ABFD7 /* ClientModels.swift in Sources */,
 				C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */,
+				3B375023CFEB927A141C090E /* Markdown.swift in Sources */,
 				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
 				261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */,
 				2FBB59AD4C1AE916730CEA4C /* SpringDriver.swift in Sources */,
@@ -335,7 +339,7 @@
 				B8F5D99583BEDB610EE58565 /* T3ThreadState.swift in Sources */,
 				E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */,
 				FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */,
-				B082B3E58EBF50C44166470A /* WorkspaceViewController.swift in Sources */,
+				A48E1FCA693DC85CC567D780 /* ThreadViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -452,7 +456,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -466,7 +470,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -530,7 +534,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 14;
+				CURRENT_PROJECT_VERSION = 15;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -550,7 +554,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.3.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

@@ -99,7 +99,10 @@ final class SquircleModel: ObservableObject {
         }
         sessions = shell["threads"].array.filter { $0["deletedAt"] == .null && $0["archivedAt"] == .null }.map { t in
             if let id = t["id"].string { sessionProjects[id] = t["projectId"].string }
-            return ChatSession(id:t["id"].string ?? "",title:t["title"].string ?? "New thread",updatedAt:t["updatedAt"].date)
+            let working = ["running","starting"].contains(t["session"]["status"].string ?? "")
+            let phase: ChatSession.Phase = t["hasPendingApprovals"].bool || t["hasPendingUserInput"].bool ? .needsYou : working ? .working : .idle
+            return ChatSession(id:t["id"].string ?? "",title:t["title"].string ?? "New thread",updatedAt:t["updatedAt"].date,
+                               phase:phase,modelSelection:t["modelSelection"])
         }.sorted { $0.updatedAt > $1.updatedAt }
         reconcileProjects()
     }
@@ -123,13 +126,30 @@ final class SquircleModel: ObservableObject {
             error = nil
         } catch { self.error = error.localizedDescription }
     }
+    /// A new conversation that T3 has not been told about yet. The thread is
+    /// created by its first message, so abandoned drafts leave nothing behind.
+    func beginDraft() async {
+        selectedSessionID = nil; messages = []; requests = []; state = T3ThreadState(); isRunning = false; error = nil
+        await gateway?.unsubscribe(threadSubscription); threadSubscription = nil
+    }
+    /// "Claude · Fable 5.1" for a T3 model selection.
+    func agentName(for selection: JSONValue) -> String {
+        guard let provider = providers.first(where: { $0["instanceId"] == selection["instanceId"] }) else {
+            return selection["model"].string ?? "Agent"
+        }
+        let model = provider["models"].array.first { $0["slug"] == selection["model"] }
+        let name = model?["name"].string ?? selection["model"].string ?? ""
+        let maker = provider["displayName"].string ?? ""
+        // "Claude Fable 5.1" already says whose it is.
+        return name.hasPrefix(maker) || maker.isEmpty ? name : name.isEmpty ? maker : maker + " · " + name
+    }
     func chooseModel(_ selection: JSONValue) {
         modelSelection = selection
         if let id = selectedSessionID { pendingModelSelections[id] = selection }
     }
     func consumeThread(_ item: JSONValue) {
         state.consume(item); messages = state.messages; requests = state.pendingRequests
-        isRunning = ["running","starting"].contains(state.thread["session"]["status"].string ?? "")
+        isRunning = state.isRunning
         let saved = state.thread["modelSelection"]
         if let id = selectedSessionID, let pending = pendingModelSelections[id] {
             // Live activity still carries the previous server selection until T3
@@ -156,12 +176,14 @@ final class SquircleModel: ObservableObject {
             sessionProjects[id] = project.id; await selectSession(id)
         } catch { self.error = error.localizedDescription }
     }
-    func send(_ text: String) async {
-        guard let id = selectedSessionID, !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { return }
+    func send(_ text: String, in project: AppProject) async {
+        guard !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { return }
         error = nil
+        if selectedSessionID == nil { await createSession(in:project) }
+        guard let id = selectedSessionID, error == nil else { return }
         do {
             var message = text
-            if state.thread["messages"].array.isEmpty, let project = projects.first(where: { $0.id == selectedProjectID }) {
+            if state.thread["messages"].array.isEmpty {
                 message += "\n\n" + project.agentContext + "\nFor signed builds/install links use /Users/anshu/Documents/ChatGPT/RemoteAppDev/target/release/squircle --data-dir /Users/anshu/Documents/ChatGPT/RemoteAppDev/.squircle. Run help workflow for the documented commands. This app is a native client of T3; T3 manages this thread."
             }
             try await dispatch(["type":"thread.turn.start","threadId":id,
