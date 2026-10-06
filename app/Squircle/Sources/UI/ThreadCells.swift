@@ -718,105 +718,170 @@ final class LayoutView: UIView {
 /// the finished task slides up out of the capsule and the next slides in
 /// from below, clipped by the capsule's shape.
 final class LiveCell: TimelineCell {
-    private let glass = Theme.glassSurface(cornerRadius: 23)
-    /// Clips the sliding lines to the capsule.
-    private let track = LayoutView()
-    private var line = ShimmerLabel()
-    private var text: String?
-    private let mark = UIView()
-    private let elapsed = UILabel()
-    private var started: Date?
-    private var timer: Timer?
+    private let capsule = LiveCapsule()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        mark.backgroundColor = Theme.accent
-        mark.layer.cornerCurve = .continuous
-        mark.layer.cornerRadius = 4.5
-        elapsed.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
-        elapsed.textColor = .tertiaryLabel
-        elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
-        elapsed.setContentHuggingPriority(.required, for: .horizontal)
-        track.onLayout = { [weak self] in self?.placeLine() }
-        track.clipsToBounds = true
-        track.layer.cornerRadius = 23
-        track.layer.cornerCurve = .continuous
-        self.style(line)
-        glass.isUserInteractionEnabled = false
-        glass.contentView.clipsToBounds = true
-        glass.contentView.layer.cornerRadius = 23
-        glass.contentView.layer.cornerCurve = .continuous
-        glass.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(glass)
-        [track, mark, elapsed].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
+        capsule.isUserInteractionEnabled = false
+        capsule.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(capsule)
         NSLayoutConstraint.activate([
-            glass.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            glass.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
-            glass.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            glass.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            glass.heightAnchor.constraint(equalToConstant: 46),
-            mark.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 17),
-            mark.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
-            mark.widthAnchor.constraint(equalToConstant: 14), mark.heightAnchor.constraint(equalToConstant: 14),
-            track.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor),
-            track.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor),
-            track.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
-            track.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
-            elapsed.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -17),
-            elapsed.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor)
+            capsule.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            capsule.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
+            capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            capsule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
+            capsule.heightAnchor.constraint(equalToConstant: 46)
         ])
         accessibilityIdentifier = "thread.working"
         isAccessibilityElement = true
     }
 
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(_ status: LiveStatus) {
+        capsule.configure(headline: status.headline, started: status.started)
+        accessibilityLabel = status.headline
+    }
+}
+
+/// The live capsule: the app's mark turning while the agent works, the task
+/// in shimmering text that slides vertically as tasks change, and the time
+/// since the turn began. Sized by its owner; any height reads as a capsule.
+final class LiveCapsule: UIView {
+    enum Tone: Equatable { case idle, working, needsYou, done }
+    /// Drawn without its own glass when it already sits on glass.
+    private let glass: UIVisualEffectView?
+    /// Clips the sliding lines to the capsule.
+    private let track = LayoutView()
+    private var line = ShimmerLabel()
+    private(set) var headline: String?
+    private(set) var tone = Tone.idle
+    private let mark = UIView()
+    private let elapsed = UILabel()
+    private var started: Date?
+    private var timer: Timer?
+    var showsTime = true { didSet { setNeedsLayout() } }
+    var font = Theme.font(.subheadline, 15, .semibold) { didSet { line.font = font; setNeedsLayout() } }
+
+    init(glass: Bool = true) {
+        self.glass = glass ? Theme.glassSurface(cornerRadius: 23) : nil
+        super.init(frame: .zero)
+        mark.backgroundColor = Theme.accent
+        mark.layer.cornerCurve = .continuous
+        mark.layer.cornerRadius = 4.5
+        elapsed.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+        elapsed.textColor = .tertiaryLabel
+        track.onLayout = { [weak self] in self?.placeLine() }
+        track.clipsToBounds = true
+        track.layer.cornerCurve = .continuous
+        style(line)
+        let host: UIView
+        if let glass = self.glass {
+            glass.isUserInteractionEnabled = false
+            glass.contentView.clipsToBounds = true
+            glass.contentView.layer.cornerCurve = .continuous
+            addSubview(glass)
+            host = glass.contentView
+        } else {
+            host = self
+        }
+        [track, mark, elapsed].forEach(host.addSubview)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
     private func style(_ label: ShimmerLabel) {
-        label.font = Theme.font(.subheadline, 15, .semibold)
+        label.font = font
         label.textColor = .secondaryLabel
         label.numberOfLines = 1
-        label.isShimmering = true
+        label.isShimmering = tone == .working
         track.addSubview(label)
+    }
+
+    private var markSide: CGFloat { 14 }
+    private var inset: CGFloat { max(12, (bounds.height - markSide) / 2 + 1) }
+
+    /// The width that shows the whole headline, within `limit`.
+    func preferredWidth(limit: CGFloat, height: CGFloat) -> CGFloat {
+        let lead = max(12, (height - markSide) / 2 + 1)
+        guard let headline, !headline.isEmpty else { return height }
+        let text = ceil((headline as NSString).size(withAttributes: [.font: font]).width)
+        let time = showsTime && started != nil ? 52 : lead - 2
+        return min(limit, lead + markSide + 11 + text + time)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let radius = bounds.height / 2
+        if let glass {
+            glass.frame = bounds
+            Theme.setGlassCorner(glass, radius: radius)
+            glass.contentView.layer.cornerRadius = radius
+        }
+        track.frame = bounds
+        track.layer.cornerRadius = radius
+        mark.frame = CGRect(x: inset, y: (bounds.height - markSide) / 2, width: markSide, height: markSide)
+        elapsed.sizeToFit()
+        elapsed.isHidden = !showsTime || started == nil
+        elapsed.center = CGPoint(x: bounds.width - inset - 3 - elapsed.bounds.width / 2, y: bounds.height / 2)
+        placeLine()
     }
 
     /// Where a line rests: after the mark, short of the timer.
     private var restingFrame: CGRect {
-        CGRect(x: 43, y: 0, width: max(0, track.bounds.width - 43 - 66), height: track.bounds.height)
+        let x = mark.frame.maxX + 11
+        let end = elapsed.isHidden ? track.bounds.width - inset + 2 : elapsed.frame.minX - 8
+        return CGRect(x: x, y: 0, width: max(0, end - x), height: track.bounds.height)
     }
 
     private func placeLine() {
         if line.layer.animationKeys() == nil { line.frame = restingFrame }
     }
 
-    func configure(_ status: LiveStatus) {
-        started = status.started
+    func configure(headline next: String?, started: Date?, tone: Tone = .working) {
+        self.started = started
         tick()
-        accessibilityLabel = status.headline
-        guard status.headline != text else { return }
-        let first = text == nil
-        text = status.headline
-        guard !first, window != nil, !Motion.reduced, track.bounds.height > 0 else {
-            line.text = status.headline
+        if tone != self.tone {
+            self.tone = tone
+            mark.backgroundColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success : Theme.accent
+            line.isShimmering = tone == .working
+            line.textColor = tone == .needsYou ? Theme.warning : .secondaryLabel
+            animateMark()
+        }
+        guard next != headline else { return }
+        let first = headline == nil
+        headline = next
+        guard !first, next != nil, window != nil, !Motion.reduced, track.bounds.height > 0 else {
+            line.text = next
             setNeedsLayout()
             return
         }
         // The finished task slides up out of the capsule; the next slides in.
         let old = line
-        let next = ShimmerLabel()
-        style(next)
-        next.text = status.headline
-        line = next
+        let fresh = ShimmerLabel()
+        style(fresh)
+        fresh.textColor = line.textColor
+        fresh.text = next
+        line = fresh
         let rest = restingFrame, travel = track.bounds.height * 0.8
-        next.frame = rest.offsetBy(dx: 0, dy: travel)
+        fresh.frame = rest.offsetBy(dx: 0, dy: travel)
         UIView.animate(withDuration: 0.55, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0,
                        options: [.allowUserInteraction, .beginFromCurrentState]) {
             old.frame = rest.offsetBy(dx: 0, dy: -travel)
-            next.frame = rest
+            fresh.frame = rest
         } completion: { _ in old.removeFromSuperview() }
     }
 
     private func tick() {
         guard let started else { elapsed.text = nil; return }
         let seconds = max(0, Date.now.timeIntervalSince(started))
-        elapsed.text = String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+        let text = String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+        if elapsed.text != text {
+            elapsed.text = text
+            setNeedsLayout()
+        }
     }
 
     override func didMoveToWindow() {
@@ -830,10 +895,10 @@ final class LiveCell: TimelineCell {
         }
     }
 
-    /// The app's mark turning between circle and squircle.
+    /// The app's mark turning between circle and squircle while work runs.
     private func animateMark() {
         mark.layer.removeAllAnimations()
-        guard window != nil else { return }
+        guard window != nil, tone == .working else { return }
         if Motion.reduced {
             let fade = CABasicAnimation(keyPath: "opacity")
             fade.fromValue = 1; fade.toValue = 0.35; fade.duration = 0.9

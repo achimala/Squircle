@@ -30,6 +30,13 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         window.makeKeyAndVisible()
         self.window = window
         Task { await model.refresh() }
+        #if DEBUG
+        // Verification only: the debug overlay over Squircle, scoped to the
+        // app with this bundle ID, since it can't run injected in a simulator.
+        if let bundleID = ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_DEMO"], let configuration = model.configuration {
+            DispatchQueue.main.async { OverlayHost.shared.start(bundleID: bundleID, configuration: configuration) }
+        }
+        #endif
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {

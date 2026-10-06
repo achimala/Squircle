@@ -156,6 +156,15 @@ enum Theme {
         return view
     }
 
+    /// Rounds a glass surface made by `glassSurface` to a new radius.
+    static func setGlassCorner(_ view: UIVisualEffectView, radius: CGFloat) {
+        if #available(iOS 26.0, *) {
+            view.cornerConfiguration = .corners(radius: .fixed(radius))
+        } else {
+            view.layer.cornerRadius = radius
+        }
+    }
+
     /// Lets adjacent glass shapes blend and morph as one native group.
     static func glassGroup(spacing: CGFloat = 12) -> UIVisualEffectView {
         if #available(iOS 26.0, *) {

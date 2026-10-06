@@ -188,8 +188,8 @@ final class DeviceTouchView: UIView {
 final class ThreadRow: UIControl {
     let sessionID: String
     var showsSeparator = true { didSet { separator.isHidden = !showsSeparator } }
-    private let titleLabel = Theme.label("", Theme.font(.headline, 17, .semibold))
-    private let detailLabel = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel)
+    private let titleLabel: UILabel
+    private let detailLabel: UILabel
     private let dot = UIView()
     private let separator = UIView()
     private let highlight = UIView()
@@ -202,8 +202,12 @@ final class ThreadRow: UIControl {
         return formatter
     }()
 
-    init(sessionID: String) {
+    /// `compact` rows fit the debug overlay's card.
+    init(sessionID: String, compact: Bool = false) {
         self.sessionID = sessionID
+        titleLabel = Theme.label("", compact ? Theme.font(.subheadline, 15, .semibold) : Theme.font(.headline, 17, .semibold))
+        detailLabel = Theme.label("", compact ? Theme.font(.footnote, 13) : Theme.font(.subheadline, 15), color: .secondaryLabel)
+        let inset: CGFloat = compact ? 9 : 13
         super.init(frame: .zero)
         accessibilityIdentifier = "thread.row"
         accessibilityValue = sessionID
@@ -223,7 +227,7 @@ final class ThreadRow: UIControl {
         let content = UIStackView(arrangedSubviews: [titleLabel, detail])
         content.axis = .vertical
         content.alignment = .leading
-        content.spacing = 3
+        content.spacing = compact ? 1 : 3
         separator.backgroundColor = .separator
         [highlight, content, separator].forEach {
             $0.isUserInteractionEnabled = false
@@ -236,15 +240,15 @@ final class ThreadRow: UIControl {
             highlight.leadingAnchor.constraint(equalTo: leadingAnchor),
             highlight.trailingAnchor.constraint(equalTo: trailingAnchor),
             dot.widthAnchor.constraint(equalToConstant: 8), dot.heightAnchor.constraint(equalToConstant: 8),
-            content.topAnchor.constraint(equalTo: topAnchor, constant: 13),
-            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -13),
+            content.topAnchor.constraint(equalTo: topAnchor, constant: inset),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset),
             content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             separator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
             separator.bottomAnchor.constraint(equalTo: bottomAnchor),
             separator.heightAnchor.constraint(equalToConstant: 1 / max(1, traitCollection.displayScale)),
-            heightAnchor.constraint(greaterThanOrEqualToConstant: 64)
+            heightAnchor.constraint(greaterThanOrEqualToConstant: compact ? 50 : 64)
         ])
     }
 

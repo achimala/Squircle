@@ -67,6 +67,7 @@
 		EBB5E73877F124DDB564B2FB /* ThreadDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */; };
 		EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */; };
 		EF2030F39BE56875E731AD9A /* ThreadCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA04F2B838066131F83E73E4 /* ThreadCells.swift */; };
+		F9ABC01D7F49133520F5279F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
 		FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
 /* End PBXBuildFile section */
 
@@ -415,6 +416,7 @@
 				B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */,
 				9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */,
 				38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */,
+				F9ABC01D7F49133520F5279F /* SquircleOverlay.swift in Sources */,
 				87D6E7B728B1986849DCC922 /* StageLayout.swift in Sources */,
 				AA83956C51857C3A127A8AB9 /* StudioViewController.swift in Sources */,
 				418A84EAC572BD0535B5A81B /* T3DeviceStream.swift in Sources */,

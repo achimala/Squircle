@@ -685,3 +685,21 @@ shared the repo's T3 project) left the overlay with nothing to show. The overlay
 now creates its own app's T3 project the way Add app does (matched by bundle ID
 in the Mac catalog) and shows the error if that fails. Probe build
 `87ca3c4e-caa7-48bc-abad-47d89eb7b217` carries it. Not yet validated on the phone.
+
+**Redesign, compact glass overlay (user request, 2026-10-06):** the overlay had
+opened all of Squircle. Now one spring moves a glass surface among three rests.
+The **bubble** is the thread's live capsule: the turning mark and the step the
+agent is on, sliding vertically; orange "Needs you"; a soft beat and "Done" when
+a turn ends; a plain mark when idle. Drag it to either side. Tapping grows it
+into a **card** (draggable by its top, paper under the glass so it reads over
+any app): app name, Builds, full screen, minimize, the live capsule, compact
+thread rows and a "New thread" field. A row or the live capsule grows into the
+**full conversation**; back or the left-edge swipe shrinks it into the card,
+following the finger. In the overlay the conversation opens docked and the
+device appears only while the agent's simulator is live (you are already in
+the app). `LiveCapsule` is shared with the thread's live row. Debug builds of
+Squircle host the overlay for simulator checks with
+`SQUIRCLE_OVERLAY_DEMO=<bundle id>`. Verified frame by frame in the simulator
+(Squircle Debug, scoped to Squircle): all four transitions are continuous and
+the opened thread is kept. Probe build `561aa697-61e7-4bef-8134-e23931e2d0eb`
+carries it; not yet seen on the phone.

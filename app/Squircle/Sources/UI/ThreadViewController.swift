@@ -14,6 +14,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     /// The divider moved; the stage should re-pose the device.
     var onGeometry: (() -> Void)?
     var layoutProvider: (() -> StageLayout?)?
+    /// In the debug overlay you are already in the app: the thread opens
+    /// docked and the device shows only while its simulator is live.
+    var hidesIdleDevice = false
+    var hidesDevice: Bool { hidesIdleDevice && stream == nil }
 
     private let model: SquircleModel
     private weak var stage: DeviceStage?
@@ -311,7 +315,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
         renderSimulatorControls(interactive: false)
         model.selectProject(project)
-        detent.set(sessionID == nil ? 1 : CGFloat(UserDefaults.standard.double(forKey: Self.detentKey)).clamped())
+        detent.set(hidesIdleDevice ? 0 : sessionID == nil ? 1 : CGFloat(UserDefaults.standard.double(forKey: Self.detentKey)).clamped())
         let requestedSessionID = sessionID
         if let requestedSessionID {
             // Show what was last seen of this thread right away, at the bottom.
@@ -375,6 +379,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let phoneWidth = pose.height * PhonePose.aspect
         deviceTouch.frame = CGRect(x: pose.center.x - phoneWidth / 2, y: pose.center.y - pose.height / 2,
                                    width: phoneWidth, height: pose.height).insetBy(dx: -6, dy: -4)
+        deviceTouch.isHidden = hidesDevice
         // The simulator's buttons ride on the divider, either side of its grabber.
         for (button, x) in [(home, 20), (simulator, width - 56)] {
             button.transform = .identity
