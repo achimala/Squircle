@@ -560,3 +560,5 @@ lens hand-off (no size jump at its start, continuous overlap) and the liquid
 send (drop fused to the field with smooth fillets, then separated). Sticky
 summary pinning and tap-to-fold, the build card, the PiP hole, the scroll-edge
 blur and pickers were checked in captures. Not checked on the physical phone.
+Signed build 20 succeeded, job `28701013-3ca1-4c73-ae54-f173590384a2`; its
+capture is published to the catalog. Not installed on the phone.
