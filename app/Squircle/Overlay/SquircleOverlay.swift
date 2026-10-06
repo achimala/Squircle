@@ -72,6 +72,8 @@ final class OverlayController: UIViewController {
     private let icon = UIImageView(image: UIImage(systemName: "app.dashed"))
     private let text = Theme.label("", Theme.font(.footnote, 13, .semibold))
     private let panel = UIView()
+    /// Shown over the panel only when this app can't be opened.
+    private let problem = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
     private var studio: StudioViewController?
     private let spring = SpringDriver(value: 0)
     private var subscriptions = Set<AnyCancellable>()
@@ -97,6 +99,9 @@ final class OverlayController: UIViewController {
         panel.layer.cornerCurve = .continuous
         panel.isHidden = true
         view.addSubview(panel)
+        problem.textAlignment = .center
+        problem.isHidden = true
+        panel.addSubview(problem)
         view.addSubview(bubble)
         bubble.accessibilityIdentifier = "overlay.bubble"
         bubble.isAccessibilityElement = true
@@ -122,6 +127,7 @@ final class OverlayController: UIViewController {
         super.viewDidLayoutSubviews()
         panel.bounds = CGRect(origin: .zero, size: view.bounds.size)
         studio?.view.frame = panel.bounds
+        problem.frame = panel.bounds.insetBy(dx: 32, dy: 0)
         layoutBubble()
     }
 
@@ -155,6 +161,10 @@ final class OverlayController: UIViewController {
             dot.layer.removeAnimation(forKey: "pulse")
         }
         icon.tintColor = model.configuration == nil ? .tertiaryLabel : .label
+        let missing = model.projects.isEmpty && !model.isLoading
+        problem.text = missing ? (model.error ?? (model.connected ? "Opening this app in T3…" : model.status)) : nil
+        problem.isHidden = !missing
+        if missing { panel.bringSubviewToFront(problem) }
         bubble.accessibilityLabel = "Squircle"
         bubble.accessibilityValue = label ?? (model.connected ? "Idle" : model.status)
     }

@@ -679,3 +679,9 @@ independently of list order (the project nearest the workspace root, then the
 one T3's title names), and importing an app whose surrounding T3 project
 belongs to another app creates a T3 project for the app's own folder. Build
 `03aca239-90fe-4593-a525-c2da742ddbb8`; catalog regression test passes.
+
+**Fix, overlay never blank:** an app Squircle built but never added to T3 (Probe
+shared the repo's T3 project) left the overlay with nothing to show. The overlay
+now creates its own app's T3 project the way Add app does (matched by bundle ID
+in the Mac catalog) and shows the error if that fails. Probe build
+`87ca3c4e-caa7-48bc-abad-47d89eb7b217` carries it. Not yet validated on the phone.

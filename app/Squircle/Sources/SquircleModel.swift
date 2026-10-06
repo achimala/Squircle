@@ -181,6 +181,7 @@ final class SquircleModel: ObservableObject {
             async let listed = client.builds()
             async let metadata = client.fetchAppMetadata()
             builds = try await listed; appMetadata = try await metadata; reconcileProjects()
+            await ensureScopedProject()
             if !launchReported, let id = Bundle.main.object(forInfoDictionaryKey:"SquircleBuildID") as? String, UUID(uuidString:id) != nil {
                 try await client.reportLaunch(buildID:id,eventID:UUID().uuidString,timestamp:Int(Date.now.timeIntervalSince1970)); launchReported = true
             }
@@ -608,22 +609,40 @@ final class SquircleModel: ObservableObject {
     func importMacProject(project: String, scheme: String, name: String, configuration: String? = nil) async throws -> AppProject {
         guard let client else { throw ClientError.configuration }
         let record = try await client.importMacProject(project:project,scheme:scheme,name:name,configuration:configuration)
-        let root = URL(fileURLWithPath:project).deletingLastPathComponent().path
         appMetadata.removeAll { $0.id == record.id }; appMetadata.append(record)
-        // The app needs a T3 project of its own unless it already owns the
-        // workspace around it; another app may own that one.
-        let catalog = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
-        if !catalog.contains(where: { $0.metadataID == record.id }) {
-            if let taken = catalog.first(where: { app in
-                shell["projects"].array.contains { $0["id"].string == app.id && $0["workspaceRoot"].string == root }
-            }) {
-                throw ClientError.backend("T3", 409, "\(taken.name) already uses this folder in T3.")
-            }
-            try await dispatch(["type":"project.create","projectId":UUID().uuidString.lowercased(),"title":name,"workspaceRoot":root])
-        }
-        // HTTP shell gives an immediate authoritative result after the write.
-        if let gateway { shell = try await gateway.http.json("/api/orchestration/shell"); consumeShell(.from(["kind":"snapshot","snapshot":shell.foundation])) }
+        try await ensureOwnProject(record)
         guard let app = projects.first(where: { $0.metadataID == record.id }) else { throw ClientError.response("T3 app import") }
         return app
+    }
+    /// An app needs a T3 project of its own unless it already owns the
+    /// workspace around it; another app may own that one.
+    private func ensureOwnProject(_ record: AppMetadata) async throws {
+        let root = URL(fileURLWithPath:record.project).deletingLastPathComponent().path
+        let catalog = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
+        guard !catalog.contains(where: { $0.metadataID == record.id }) else { return }
+        if let taken = catalog.first(where: { app in
+            shell["projects"].array.contains { $0["id"].string == app.id && $0["workspaceRoot"].string == root }
+        }) {
+            throw ClientError.backend("T3", 409, "\(taken.name) already uses this folder in T3.")
+        }
+        try await dispatch(["type":"project.create","projectId":UUID().uuidString.lowercased(),"title":record.name,"workspaceRoot":root])
+        // HTTP shell gives an immediate authoritative result after the write.
+        if let gateway { shell = try await gateway.http.json("/api/orchestration/shell"); consumeShell(.from(["kind":"snapshot","snapshot":shell.foundation])) }
+    }
+    /// Inside an app's overlay, that app is always present: one Squircle
+    /// built but never gave a T3 project gets one, as Add app would.
+    private func ensureScopedProject() async {
+        guard let scopeBundleID, projects.isEmpty else { return }
+        guard let record = appMetadata.first(where: { $0.bundleID == scopeBundleID }) else {
+            error = "Squircle’s Mac catalog has no app with bundle ID \(scopeBundleID)."
+            return
+        }
+        do {
+            if shell["projects"] == .null, let gateway {
+                shell = try await gateway.http.json("/api/orchestration/shell")
+                consumeShell(.from(["kind":"snapshot","snapshot":shell.foundation]))
+            }
+            try await ensureOwnProject(record)
+        } catch { self.error = error.localizedDescription }
     }
 }
