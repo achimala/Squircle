@@ -589,3 +589,4 @@ reduced-motion UI tests pass. The send was checked frame by frame at 1/14
 speed. Back-swipe states were checked frozen at 35, 60 and 85 % for docked and
 half detents. The diff viewer opened a real 8-file turn diff from T3, scrolled
 and scrolled sideways with headers pinned. Not checked on the phone.
+Signed build 21 succeeded, job `ea489ca3-23f5-4275-8c95-ff26ccebd611`. Not installed on the phone.
