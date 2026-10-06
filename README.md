@@ -7,6 +7,13 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-06: in-app debug overlay, version 0.3.0 (24).** Device builds Squircle
+signs for other apps now carry a small injected overlay: a glass bubble showing
+that app's agent work that opens Squircle's own view of the app (threads, new
+thread, builds, live simulator). No project changes; never in App Store
+exports; `--no-overlay` opts out. Not yet validated on the phone. See
+[debug overlay](docs/t3-native-migration.md#2026-10-06-in-app-debug-overlay-030-24).
+
 **2026-10-06: diffs, version 0.3.0 (21).** Each finished turn that changed
 files shows a small pill ("8 files +81 −30") from T3's checkpoint; tapping it
 opens that turn's diff (`orchestration.getTurnDiff`) in a fast native viewer.

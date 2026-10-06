@@ -49,6 +49,8 @@ final class SquircleModel: ObservableObject {
     private var media: [JSONValue] { state.media }
     private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
     private let preferences: UserDefaults
+    /// Inside another app's debug overlay, only that app is shown.
+    let scopeBundleID: String?
     private static let preferredModelKey = "squircle.t3.preferredModel"
 
     /// Once a thread has an agent session, T3 cannot migrate it to another provider.
@@ -142,8 +144,9 @@ final class SquircleModel: ObservableObject {
     }
 
     init(configuration: AppConfiguration? = try? AppConfiguration.load(), preferences: UserDefaults = .standard,
-         commandDispatch: ((JSONValue) async throws -> JSONValue)? = nil) {
+         commandDispatch: ((JSONValue) async throws -> JSONValue)? = nil, scopeBundleID: String? = nil) {
         self.preferences = preferences
+        self.scopeBundleID = scopeBundleID
         self.commandDispatch = commandDispatch
         self.configuration = configuration
         client = configuration.map { SquircleClient(configuration:$0) }
@@ -214,6 +217,7 @@ final class SquircleModel: ObservableObject {
         // Most recently used first; apps never opened keep T3's order after them.
         let used = preferences.dictionary(forKey: Self.lastUsedKey) as? [String: Double] ?? [:]
         let catalog = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
+            .filter { scopeBundleID == nil || $0.bundleID == scopeBundleID }
         projects = catalog.enumerated().sorted { a, b in
             let x = used[a.element.id] ?? 0, y = used[b.element.id] ?? 0
             return x != y ? x > y : a.offset < b.offset
@@ -310,7 +314,7 @@ final class SquircleModel: ObservableObject {
     // MARK: Thread cache
 
     private nonisolated static var cacheDirectory: URL? {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("threads", isDirectory: true)
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("squircle-threads", isDirectory: true)
     }
     private nonisolated static func loadThread(_ id: String) -> T3ThreadState? {
         guard let url = cacheDirectory?.appendingPathComponent(id + ".json"), let data = try? Data(contentsOf: url) else { return nil }

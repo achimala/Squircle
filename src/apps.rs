@@ -540,6 +540,7 @@ mod tests {
                 allow_provisioning_updates: false,
                 capture_preview: true,
                 request_id: None,
+                no_overlay: false,
             }),
             output: Some(BuildOutput {
                 preview_path: None,

@@ -31,6 +31,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private var subscriptions = Set<AnyCancellable>()
     private var laidOut: StageLayout?
     private(set) var thread: ThreadViewController?
+    /// Set before the view loads when hosted by the debug overlay: the
+    /// top-right control closes the overlay instead of adding an app.
+    var onClose: (() -> Void)?
     private var dragStart: CGFloat = 0
     private var tilt = CGPoint.zero
     private var tiltRest: CGPoint?
@@ -68,7 +71,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         home.addSubview(pagesClip)
         [connection, add, compose, builds].forEach(home.addSubview)
         connection.showsMenuAsPrimaryAction = true
-        add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
+        if onClose != nil {
+            add.configuration?.image = UIImage(systemName: "xmark")
+            add.accessibilityLabel = "Close"
+            add.accessibilityIdentifier = "overlay.close"
+            add.addAction(UIAction { [weak self] _ in self?.onClose?() }, for: .touchUpInside)
+        } else {
+            add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
+        }
         compose.addAction(UIAction { [weak self] _ in self?.openThread(nil) }, for: .touchUpInside)
         builds.addAction(UIAction { [weak self] _ in self?.presentBuilds() }, for: .touchUpInside)
 
@@ -93,7 +103,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         super.viewDidAppear(animated)
         startTilt()
         #if DEBUG
+        #if !SQUIRCLE_OVERLAY
         MotionAudit.shared.note("gallery.visible", values: ["since_launch_ms": (CACurrentMediaTime() - SquircleApp.launchedAt) * 1000])
+        #endif
         startVerificationHooks()
         #endif
     }

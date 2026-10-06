@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 struct AppConfiguration: Decodable {
     let t3URL: URL
@@ -21,7 +22,48 @@ struct AppConfiguration: Decodable {
     }
     static func load(bundle: Bundle = .main) throws -> Self {
         guard let url = bundle.url(forResource: "client", withExtension: "json") else { throw ClientError.configuration }
-        return try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
+        let data = try Data(contentsOf: url)
+        let configuration = try JSONDecoder().decode(Self.self, from: data)
+        Shared.store(data)
+        return configuration
+    }
+
+    /// Squircle leaves its paired connection in a team-shared Keychain group,
+    /// so the debug overlay Squircle injects into apps it builds reaches the
+    /// same Mac with no setup (user decision, 2026-10-06).
+    enum Shared {
+        private static let service = "ai.dreamslate.squircle.shared.client"
+        /// Team ID from the installed profile. App Store builds have none.
+        static let teamID: String? = {
+            guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+                  let data = try? Data(contentsOf: url),
+                  let start = data.range(of: Data("<?xml".utf8)),
+                  let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
+                  let plist = try? PropertyListSerialization.propertyList(from: data[start.lowerBound..<end.upperBound], format: nil),
+                  let teams = (plist as? [String: Any])?["TeamIdentifier"] as? [String] else { return nil }
+            return teams.first
+        }()
+        private static var query: [String: Any]? {
+            teamID.map { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                          kSecAttrAccount as String: "client.json",
+                          kSecAttrAccessGroup as String: "\($0).ai.dreamslate.squircle.shared"] }
+        }
+        static func store(_ data: Data) {
+            guard let query else { return }
+            var item = query
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            SecItemDelete(query as CFDictionary); SecItemAdd(item as CFDictionary, nil)
+        }
+        static func load() throws -> AppConfiguration {
+            guard var query else { throw ClientError.configuration }
+            query[kSecReturnData as String] = true
+            var result: CFTypeRef?
+            guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else {
+                throw ClientError.configuration
+            }
+            return try JSONDecoder().decode(AppConfiguration.self, from: data)
+        }
     }
     private static func origin(_ text: String) throws -> URL {
         guard let c = URLComponents(string: text), c.scheme == "https", c.host != nil,

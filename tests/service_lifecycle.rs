@@ -119,6 +119,7 @@ fn fixture_job(root: &Path, state: BuildState) -> Job {
             allow_provisioning_updates: false,
             capture_preview: false,
             request_id: None,
+            no_overlay: false,
         }),
         output: None,
         error: if matches!(

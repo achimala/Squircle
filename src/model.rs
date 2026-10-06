@@ -23,6 +23,9 @@ pub struct BuildRequest {
     #[serde(default)]
     pub capture_preview: bool,
     pub request_id: Option<String>,
+    /// Device builds get the Squircle debug overlay unless this is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_overlay: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

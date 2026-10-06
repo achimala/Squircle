@@ -632,3 +632,42 @@ reduced-motion UI tests pass. Re-entry captured every 150 ms: the thread
 appears at the bottom and does not move. Pill slide and pulse checked in slow
 motion; send ends pinned with the live pill visible.
 Signed build 23 succeeded, job `b98771f0-439e-4e8a-abc9-107ba1293aca`. Not installed on the phone.
+
+## 2026-10-06 in-app debug overlay, 0.3.0 (24)
+
+User request: iterate on an app from inside that app, with no developer effort and
+nothing in App Store builds. **Decision (user, 2026-10-06):** inject instead of
+asking projects to link a package, and share Squircle's paired connection through
+the Keychain.
+
+- **Framework.** `SquircleOverlay.framework` (target in `app/Squircle/project.yml`)
+  compiles Squircle's own `Sources/` minus `SquircleApp.swift`, plus `Overlay/`.
+  No code is duplicated. A C constructor starts it on load. It attaches a
+  passthrough window holding a draggable glass bubble: a pulsing dot and the
+  title of a working thread, orange when the agent needs you. Tapping springs
+  open Squircle's Studio scoped to the host's bundle ID (threads, new thread,
+  builds with Install, live simulator device); the top-right control closes it.
+- **Injection.** After `archive` and before `exportArchive`, the CLI
+  (`src/overlay.rs`) builds the framework once per source hash into
+  `.squircle/overlay/<hash>/`, copies it into the app, adds a weak
+  `LC_LOAD_WEAK_DYLIB` in the header padding, adds the
+  `<team>.ai.dreamslate.squircle.shared` Keychain group to the app's entitlements
+  (its own group stays first) and re-signs. The export then signs it like any
+  embedded framework. Default on; `build start --no-overlay` (or
+  `"no_overlay": true`) leaves it out.
+- **Never in production.** Injection happens only for `development`, `debugging`,
+  `ad-hoc` and `release-testing` exports, never for Squircle itself or simulator
+  builds. At runtime the overlay requires an `embedded.mobileprovision`, which
+  App Store builds lack.
+- **Credential.** Squircle (which now has the shared group) writes its `client.json`
+  to the Keychain item `ai.dreamslate.squircle.shared.client`
+  (this-device-only). The overlay reads only that and stays off without it.
+  Accepted risk: any code inside a test app, including third-party SDKs, could
+  read the full T3 token on that phone.
+
+Evidence (Xcode 27.1, iOS SDK 27.1): Squircle Probe build `6b8961c0-697a-4932-bfa5-8ac521bcea96`
+exported with the overlay; `codesign --verify --deep --strict` passes; the
+export re-signed the framework with Apple Distribution (2F26US4NAU); entitlements
+list both Keychain groups. Overlay binary 1.4 MB; the IPA grew from 165 KB to 776 KB.
+Squircle build `1bd05d40-3585-4341-ac0a-86572806af82` carries the shared group.
+**Not yet validated:** overlay launch and use on the phone.

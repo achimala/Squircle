@@ -12,7 +12,10 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use tokio::{process::Command, sync::watch, time::Instant};
 
-use crate::model::{BuildMode, BuildOutput, BuildRequest};
+use crate::{
+    model::{BuildMode, BuildOutput, BuildRequest},
+    overlay,
+};
 
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
@@ -61,6 +64,22 @@ pub async fn run(
             );
             let args = build_args(request, &project, &job_dir)?;
             run_command(&args, &log, None, deadline, cancel.clone()).await?;
+            let archived = exactly_one(
+                children_with_extension(&archive.join("Products/Applications"), "app", true)?,
+                "archived application",
+            )?;
+            let bundle_id = read_app_metadata(&archived, &request.scheme)?.bundle_id;
+            let overlay = !request.no_overlay
+                && overlay::allowed_method(&export_method(&options)?)
+                && !overlay::skips_bundle(&bundle_id);
+            if overlay {
+                let data_root = job_dir
+                    .parent()
+                    .and_then(Path::parent)
+                    .context("job directory is not inside a Squircle data directory")?;
+                let framework = overlay::framework(data_root, &log, deadline, cancel.clone()).await?;
+                overlay::inject(&archived, &framework, &log).await?;
+            }
             let args = export_args(
                 &archive,
                 &export,
@@ -221,6 +240,15 @@ fn export_args(
     args
 }
 
+fn export_method(options: &Path) -> Result<String> {
+    Ok(plist::Value::from_file(options)?
+        .as_dictionary()
+        .and_then(|d| d.get("method"))
+        .and_then(plist::Value::as_string)
+        .unwrap_or("development")
+        .to_owned())
+}
+
 fn validate_export_options(path: &Path) -> Result<Vec<u8>> {
     const MAX_BYTES: u64 = 1024 * 1024;
     let file = OpenOptions::new()
@@ -283,7 +311,7 @@ impl Drop for ProcessGroup {
     }
 }
 
-async fn run_command(
+pub(crate) async fn run_command(
     args: &[OsString],
     log_path: &Path,
     stdout_path: Option<&Path>,
@@ -481,6 +509,7 @@ mod tests {
             allow_provisioning_updates: false,
             capture_preview: false,
             request_id: None,
+            no_overlay: false,
         }
     }
 

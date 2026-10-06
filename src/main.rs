@@ -175,6 +175,11 @@ enum BuildCommand {
             help = "Capture simulator pixels after building; service needs SQUIRCLE_SIMULATOR_ID. Preview failure preserves the IPA."
         )]
         preview: bool,
+        #[arg(
+            long,
+            help = "Leave out the Squircle debug overlay that device builds otherwise carry (never in App Store exports)"
+        )]
+        no_overlay: bool,
     },
     /// List persisted build records, newest first.
     List,
@@ -506,6 +511,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 request_id,
                 allow_provisioning_updates,
                 preview,
+                no_overlay,
             } => {
                 let request = BuildRequest {
                     project: project.canonicalize()?,
@@ -522,6 +528,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                     request_id: request_id.clone(),
                     allow_provisioning_updates: *allow_provisioning_updates,
                     capture_preview: *preview,
+                    no_overlay: *no_overlay,
                 };
                 post(cli, "/v1/builds", serde_json::to_value(request)?).await?
             }

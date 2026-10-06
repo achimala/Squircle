@@ -15,6 +15,8 @@ Read [README.md](README.md), then only the linked detail relevant to the task. D
 - Select existing Claude Code or Codex providers through T3 with subscription authentication. Use T3's normalized live state/events instead of polling delegated agent logs. T3 strips tool inputs and result images from client streams, so the Squircle service reads T3's `state.sqlite` read-only for those details only; never write to it. On this Mac use `/Users/anshu/.local/bin/codex`; the Homebrew binary is stale.
 - Start simulator playback with T3's authenticated H.264 feed, native iOS decoding and its existing input protocol; decoded pictures are drawn on the 3D device's display. No MJPEG playback, priming request or fallback. Measure latency before adding a separately authenticated streaming component; never expose the raw device hub. T3's iOS tuning and WebRTC endpoints are not exposed by the installed 0.0.45 proxy.
 
+- **2026-10-06 (user decision):** device builds Squircle signs for other apps get an injected debug overlay (Squircle's own sources as `SquircleOverlay.framework`, added between archive and export). The overlay reads Squircle's paired connection from a team-shared Keychain group; the user accepted that risk. It is never in App Store exports or simulator builds. No fallback credentials. See [debug overlay](docs/t3-native-migration.md#2026-10-06-in-app-debug-overlay-030-24).
+
 ## Documentation discipline
 
 User instructions take precedence. Label proposals and unknowns; do not turn a researched capability into a tested fact. Record evidence and versions when a milestone is actually validated. Update the relevant detail page when a decision changes; keep this entry point short.

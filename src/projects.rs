@@ -474,6 +474,7 @@ pub fn import_inspected(store: &Store, inspection: &Inspection, name: &str) -> R
             allow_provisioning_updates: true,
             capture_preview: true,
             request_id: None,
+            no_overlay: false,
         },
     )
 }
