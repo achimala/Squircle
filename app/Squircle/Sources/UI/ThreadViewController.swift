@@ -145,6 +145,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         table.register(GalleryCell.self, forCellReuseIdentifier: "gallery")
         table.register(SummaryCell.self, forCellReuseIdentifier: "summary")
         table.register(LiveCell.self, forCellReuseIdentifier: "live")
+        table.register(BuildCell.self, forCellReuseIdentifier: "build")
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] table, indexPath, id in
             guard let self, let item = itemsByID[id] else { return UITableViewCell() }
             let cell = table.dequeueReusableCell(withIdentifier: Self.reuseIdentifier(for: item), for: indexPath)
@@ -503,12 +504,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .gallery: return "gallery"
         case .summary: return "summary"
         case .live: return "live"
+        case .build: return "build"
         }
     }
 
     private func renderItems(animated: Bool = false) {
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
-        let next = header + ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded)
+        let next = header + ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
+                                             builds: model.builds(for: project))
         guard next != items else { return }
         let previous = itemsByID
         let first = items.isEmpty
@@ -704,6 +707,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             (cell as? SummaryCell)?.configure(summary)
         case .live(let status):
             (cell as? LiveCell)?.configure(status)
+        case .build(let build, _):
+            guard let cell = cell as? BuildCell else { return }
+            cell.configure(build, installing: installingBuild == build.id)
+            cell.onInstall = { [weak self] build in self?.install(build) }
         }
     }
 
@@ -755,6 +762,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .gallery: return GalleryCell.height + 20
         case .summary: return 54
         case .live: return 72
+        case .build: return 74
         case nil: return 60
         }
     }
@@ -787,6 +795,23 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         pinToBottom = false
         renderItems(animated: true)
         pinToBottom = keepBottom
+    }
+
+    private var installingBuild: String?
+    /// Opens iOS's own install prompt for a build, right from the conversation.
+    private func install(_ build: AppBuild) {
+        guard installingBuild == nil else { return }
+        installingBuild = build.id
+        renderItems()
+        Task { [weak self] in
+            guard let self else { return }
+            if let url = await model.installURL(for: build) { _ = await UIApplication.shared.open(url) }
+            installingBuild = nil
+            var snapshot = dataSource.snapshot()
+            let ids = snapshot.itemIdentifiers.filter { $0.hasSuffix(build.id) }
+            snapshot.reconfigureItems(ids)
+            await dataSource.apply(snapshot, animatingDifferences: false)
+        }
     }
 
     private func showDetail(_ step: ChatMessage) {

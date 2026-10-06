@@ -57,6 +57,8 @@ enum ThreadItem: Equatable {
     /// Screenshots side by side, scrolling sideways.
     case gallery(id: String, shots: [Shot])
     case summary(TurnSummary)
+    /// A build the agent made or mentioned in this turn, installable here.
+    case build(AppBuild, turn: String)
     case live(LiveStatus)
 
     var id: String {
@@ -69,6 +71,7 @@ enum ThreadItem: Equatable {
         case .earlier(let turn, _): return "earlier:" + turn
         case .gallery(let id, _): return id
         case .summary(let summary): return "summary:" + summary.turn
+        case .build(let build, let turn): return "build:\(turn):\(build.id)"
         case .live: return "live"
         }
     }
@@ -76,7 +79,8 @@ enum ThreadItem: Equatable {
     /// Steps kept in view while a turn is running.
     static let liveWindow = 4
 
-    static func items(messages: [ChatMessage], running: Bool, expanded: Set<String> = [], now: Date = .now) -> [ThreadItem] {
+    static func items(messages: [ChatMessage], running: Bool, expanded: Set<String> = [], builds: [AppBuild] = [],
+                      now: Date = .now) -> [ThreadItem] {
         // Split into turns at each of your messages.
         var turns: [(user: ChatMessage?, rest: [ChatMessage])] = []
         for message in messages {
@@ -106,6 +110,7 @@ enum ThreadItem: Equatable {
                 items += open ? allRows(work) : gallery("gallery:" + id, work)
             }
             if let answer { items.append(.answer(answer)) }
+            items += mentionedBuilds(in: rest, builds: builds).map { .build($0, turn: id) }
             if live {
                 items.append(.live(LiveStatus(headline: headline(work: work, answer: answer), started: turn.user.flatMap { date($0.createdAt) })))
             }
@@ -160,6 +165,25 @@ enum ThreadItem: Equatable {
             (0..<step.imageCount).map { Shot(step: step.id, index: $0, title: step.content, video: step.videoID != nil) }
         }
         return shots.isEmpty ? [] : [.gallery(id: id, shots: shots)]
+    }
+
+    /// Builds whose job IDs appear in what the agent ran or wrote this turn,
+    /// in the order first mentioned.
+    static func mentionedBuilds(in messages: [ChatMessage], builds: [AppBuild]) -> [AppBuild] {
+        guard !builds.isEmpty else { return [] }
+        let known = Dictionary(builds.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
+        var seen = Set<String>(), found: [AppBuild] = []
+        for message in messages {
+            let text = message.content + "\n" + message.detail
+            var range = text.startIndex..<text.endIndex
+            while let match = text.range(of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
+                                          options: .regularExpression, range: range) {
+                let id = text[match].lowercased()
+                if let build = known[id], seen.insert(id).inserted { found.append(build) }
+                range = match.upperBound..<text.endIndex
+            }
+        }
+        return found
     }
 
     private static func headline(work: [ChatMessage], answer: ChatMessage?) -> String {

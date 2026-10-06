@@ -491,6 +491,82 @@ final class ShotView: UIControl {
     }
 }
 
+/// A build in the conversation: what it is, where it stands, and Install.
+final class BuildCell: TimelineCell {
+    var onInstall: ((AppBuild) -> Void)?
+    private var build: AppBuild?
+    private let glass = Theme.glassSurface(cornerRadius: 22)
+    private let icon = UIImageView()
+    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let titleLabel = Theme.label("", Theme.font(.subheadline, 15, .semibold))
+    private let detailLabel = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel)
+    private let install = Theme.glassButton(symbol: "arrow.down.circle.fill", title: "Install", prominent: true, identifier: "thread.build.install")
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        icon.contentMode = .center
+        spinner.hidesWhenStopped = true
+        install.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 14)
+        install.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes; attributes.font = Theme.font(.subheadline, 15, .semibold); return attributes
+        }
+        install.setContentCompressionResistancePriority(.required, for: .horizontal)
+        install.setContentHuggingPriority(.required, for: .horizontal)
+        install.addAction(UIAction { [weak self] _ in
+            guard let self, let build else { return }
+            Theme.selectionHaptic()
+            onInstall?(build)
+        }, for: .touchUpInside)
+        let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
+        text.axis = .vertical
+        text.spacing = 2
+        text.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let glyph = UIView()
+        [icon, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glyph.addSubview($0) }
+        let row = UIStackView(arrangedSubviews: [glyph, text, install])
+        row.spacing = 12
+        row.alignment = .center
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        row.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(glass)
+        glass.contentView.addSubview(row)
+        NSLayoutConstraint.activate([
+            glass.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
+            glass.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+            glass.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            glass.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
+            row.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: 10),
+            row.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -10),
+            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 14),
+            row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -10),
+            glyph.widthAnchor.constraint(equalToConstant: 30), glyph.heightAnchor.constraint(equalToConstant: 30),
+            icon.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), icon.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
+            spinner.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: glyph.centerYAnchor)
+        ])
+        accessibilityIdentifier = "thread.build"
+    }
+
+    func configure(_ build: AppBuild, installing: Bool) {
+        self.build = build
+        titleLabel.text = build.version.isEmpty ? build.title : build.title + " " + build.version
+        let detail: String
+        switch build.status {
+        case "queued": detail = "Queued"; icon.image = UIImage(systemName: "clock"); icon.tintColor = .secondaryLabel
+        case "running": detail = "Building"; icon.image = nil
+        case "succeeded": detail = "Ready to install"; icon.image = UIImage(systemName: "app.badge.checkmark"); icon.tintColor = Theme.accent
+        case "failed": detail = "Build failed"; icon.image = UIImage(systemName: "xmark.octagon"); icon.tintColor = Theme.failure
+        default: detail = BuildRow.statusText(for: build); icon.image = UIImage(systemName: "hammer"); icon.tintColor = .secondaryLabel
+        }
+        detailLabel.text = detail
+        if build.status == "running" { spinner.startAnimating() } else { spinner.stopAnimating() }
+        install.isHidden = !build.canInstall
+        install.isEnabled = !installing
+        install.configuration?.showsActivityIndicator = installing
+        isAccessibilityElement = false
+    }
+}
+
 /// A finished turn's work, folded into one glass line.
 final class SummaryCell: TimelineCell {
     private let glass = Theme.glassSurface(cornerRadius: 19, interactive: true)

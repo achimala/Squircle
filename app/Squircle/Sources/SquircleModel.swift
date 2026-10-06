@@ -328,7 +328,7 @@ final class SquircleModel: ObservableObject {
             let instructions = squircleInstructions(for: project, threadID: id)
             if state.thread["messages"].array.isEmpty {
                 message += "\n\n" + project.agentContext + "\nFor signed builds/install links use /Users/anshu/Documents/ChatGPT/RemoteAppDev/target/release/squircle --data-dir /Users/anshu/Documents/ChatGPT/RemoteAppDev/.squircle. Run help workflow for the documented commands. This app is a native client of T3; T3 manages this thread.\n" + instructions
-            } else if !state.thread["messages"].array.contains(where: { ($0["text"].string ?? "").contains("Squircle shows this thread on the user's iPhone") }) {
+            } else if !state.thread["messages"].array.contains(where: { ($0["text"].string ?? "").contains("Squircle shows it with an Install button") }) {
                 // Threads started before these instructions existed get them once.
                 message += AppProject.contextMarker + project.name + ".\n" + instructions
             }
@@ -476,7 +476,7 @@ final class SquircleModel: ObservableObject {
             device = "Call device_open with deviceId \(id) and hostId \(simulator["hostId"].string ?? "local") (\(simulator["name"].string ?? "this app's simulator"), this app's simulator)"
         }
         return """
-        Squircle shows this thread on the user's iPhone with the simulator live on a 3D device. Whenever you run, check or demonstrate the app in a simulator, use T3's device tools so the user watches it happen: \(device), then drive it with the agent-device command device_open returns. Use device_screenshot to look at the screen; those screenshots appear in the conversation. To show a flow, record it: agent-device record start /tmp/NAME.mp4 --scope device (with the --config and --session flags device_open gave you), perform the flow, agent-device record stop, then publish the clip into this thread with \(cli) media add --thread \(threadID) --file /tmp/NAME.mp4 --caption 'What it shows'.
+        Squircle shows this thread on the user's iPhone with the simulator live on a 3D device. Whenever you run, check or demonstrate the app in a simulator, use T3's device tools so the user watches it happen: \(device), then drive it with the agent-device command device_open returns. Use device_screenshot to look at the screen; those screenshots appear in the conversation. To show a flow, record it: agent-device record start /tmp/NAME.mp4 --scope device (with the --config and --session flags device_open gave you), perform the flow, agent-device record stop, then publish the clip into this thread with \(cli) media add --thread \(threadID) --file /tmp/NAME.mp4 --caption 'What it shows'. When you make a signed build for the user, include its build job ID in your final reply; Squircle shows it with an Install button.
         """
     }
     var activeDevice: JSONValue? {

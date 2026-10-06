@@ -7,6 +7,15 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-06: glass and flow, version 0.3.0 (20).** The conversation runs
+full height with the docked device floating as a PiP. The live state is a
+glass loupe: a handwritten Metal lens bends each finished task out through the
+glass edge as the next rises in. Your message pinches off the field as liquid
+glass into a glass bubble. Model and approval pickers sit above the field;
+builds the agent mentions appear inline with Install; an expanded turn's
+summary pins while you read inside it. Back is a left-edge swipe. See
+[glass and flow](docs/t3-native-migration.md#2026-10-06-glass-and-flow-030-20).
+
 **2026-10-05: thread redesign, version 0.3.0 (19).** No title bar: the
 conversation starts under a floating back button and the docked device. Agent
 work reads as sentences (a command's own description, "Edited Theme.swift

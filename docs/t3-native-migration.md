@@ -520,3 +520,43 @@ completion ripple. Nothing was tested on the physical phone; frame rate and
 Metal cost there are unmeasured.
 Signed build 19 succeeded, job `9383b6be-0c88-476e-8cda-5c01bc176ccd`; its
 thread capture is published to the catalog. Not installed on the phone.
+
+## 2026-10-06 glass and flow, 0.3.0 (20)
+
+User feedback on build 19, all addressed:
+
+- **Builds in chat.** Any build job ID the agent ran or wrote in a turn that
+  matches a Squircle build shows after the answer as a glass card with live
+  status and Install (the direct `itms-services` prompt). Agents are told to
+  put the build ID in their final reply.
+- **History doesn't animate.** Galleries animate only shots added to the same
+  gallery while visible; cached pictures never cross-fade.
+- **Sticky turn header.** An expanded turn's summary pins to the top while
+  you scroll inside it, pushed away by the turn's end; tap folds it.
+- **Header-less.** Docked, the conversation runs to the top under the back
+  button with the system scroll-edge blur; the device floats above the text
+  as a PiP (a hole in the conversation's mask).
+- **Back** is a left-edge swipe only.
+- **Paragraph spacing** in agent answers.
+- **Pickers.** Separate model and approval glass capsules above the field;
+  menus build when opened, so live updates no longer reset them; short model
+  names, sorted by version then size.
+- **Glass, not rainbow.** The spectrum glow is removed. The live state is a
+  glass loupe with a slow sheen; a Metal lens (`lensFragment`) hands each task
+  over: the old line is compressed toward the glass edge, drawn in, split
+  slightly by colour and faded as it rises out, while the next rises in. Text
+  is crisp at rest (text actually behind the glass was blurred unreadable).
+  The finished-turn ripple is white light.
+- **Liquid send.** The message field's glass and the new message share a
+  `UIGlassContainerEffect`: the message is born as a drop at the send button,
+  swells while still joined to the field, and separates into a tinted glass
+  bubble. User messages are tinted glass.
+- **No jumps.** Structural changes during a turn animate; measured row
+  heights are cached with per-type estimates.
+
+Evidence (simulator, iOS 27.0): unit tests and the draft, approval and
+navigation UI tests pass. Checked frame by frame with debug slow motion: the
+lens hand-off (no size jump at its start, continuous overlap) and the liquid
+send (drop fused to the field with smooth fillets, then separated). Sticky
+summary pinning and tap-to-fold, the build card, the PiP hole, the scroll-edge
+blur and pickers were checked in captures. Not checked on the physical phone.
