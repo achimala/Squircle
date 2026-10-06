@@ -118,7 +118,8 @@ final class HeaderCell: TimelineCell {
 /// edge; the answer fills the column; notes and thoughts are quieter.
 final class MessageCell: TimelineCell {
     enum Style { case user, answer, note, thought }
-    let bubble = UIView()
+    /// Your messages sit in tinted glass.
+    let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
     let text = UITextView()
     private var leading: NSLayoutConstraint!
     private var trailing: NSLayoutConstraint!
@@ -127,8 +128,6 @@ final class MessageCell: TimelineCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        bubble.layer.cornerRadius = 21
-        bubble.layer.cornerCurve = .continuous
         text.isEditable = false
         text.isScrollEnabled = false
         text.backgroundColor = .clear
@@ -161,7 +160,6 @@ final class MessageCell: TimelineCell {
         // Selecting text matters for answers; quieter rows are tapped to unfold.
         text.isUserInteractionEnabled = style == .answer || style == .user
         bubble.isHidden = !user
-        bubble.backgroundColor = Theme.userBubble
         leading.isActive = !user
         minimumLeading.isActive = user
         trailing.constant = user ? -35 : -20
@@ -560,14 +558,17 @@ final class SummaryCell: TimelineCell {
     }
 }
 
-/// What the agent is doing now: a glass capsule with a living edge.
+/// What the agent is doing now, in a glass loupe. When the agent moves on,
+/// the finished task rises out through the glass edge, bending as it goes
+/// (`LensView`), and the next one rises in; at rest the words are crisp.
 final class LiveCell: TimelineCell {
-    let glass = Theme.glassSurface(cornerRadius: 22)
-    /// Behind the glass: the Metal edge light.
-    let glowHost = EffectView()
+    private let glass = Theme.glassSurface(cornerRadius: 23)
+    private let line = ShimmerLabel()
+    private let lens = LensView()
+    private var text: String?
     private let mark = UIView()
-    let headline = ShimmerLabel()
     private let elapsed = UILabel()
+    private let sheen = CAGradientLayer()
     private var started: Date?
     private var timer: Timer?
 
@@ -576,55 +577,100 @@ final class LiveCell: TimelineCell {
         mark.backgroundColor = Theme.accent
         mark.layer.cornerCurve = .continuous
         mark.layer.cornerRadius = 4.5
-        headline.font = Theme.font(.subheadline, 15, .semibold)
-        headline.textColor = .secondaryLabel
-        headline.isShimmering = true
         elapsed.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
         elapsed.textColor = .tertiaryLabel
         elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
         elapsed.setContentHuggingPriority(.required, for: .horizontal)
-        glowHost.cornerRadius = 22
-        glowHost.inset = 18
-        [glowHost, glass].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
-        [mark, headline, elapsed].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
+        line.font = Theme.font(.subheadline, 15, .semibold)
+        line.textColor = .secondaryLabel
+        line.numberOfLines = 1
+        line.isShimmering = true
+        lens.isHidden = true
+        glass.isUserInteractionEnabled = false
+        // A slow band of light crossing the glass.
+        sheen.colors = [UIColor.white.withAlphaComponent(0).cgColor, UIColor.white.withAlphaComponent(0.5).cgColor,
+                        UIColor.white.withAlphaComponent(0).cgColor]
+        sheen.startPoint = CGPoint(x: 0, y: 0.3)
+        sheen.endPoint = CGPoint(x: 1, y: 0.7)
+        sheen.locations = [0.35, 0.5, 0.65]
+        glass.contentView.layer.addSublayer(sheen)
+        glass.contentView.clipsToBounds = true
+        glass.contentView.layer.cornerRadius = 23
+        glass.contentView.layer.cornerCurve = .continuous
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(glass)
+        [mark, line, lens, elapsed].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
             glass.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
             glass.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
             glass.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            glass.heightAnchor.constraint(equalToConstant: 44),
-            glowHost.topAnchor.constraint(equalTo: glass.topAnchor, constant: -18),
-            glowHost.bottomAnchor.constraint(equalTo: glass.bottomAnchor, constant: 18),
-            glowHost.leadingAnchor.constraint(equalTo: glass.leadingAnchor, constant: -18),
-            glowHost.trailingAnchor.constraint(equalTo: glass.trailingAnchor, constant: 18),
-            mark.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 16),
+            glass.heightAnchor.constraint(equalToConstant: 46),
+            mark.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 17),
             mark.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
             mark.widthAnchor.constraint(equalToConstant: 14), mark.heightAnchor.constraint(equalToConstant: 14),
-            headline.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 12),
-            headline.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
-            elapsed.leadingAnchor.constraint(greaterThanOrEqualTo: headline.trailingAnchor, constant: 10),
-            elapsed.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -16),
+            line.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 12),
+            line.trailingAnchor.constraint(lessThanOrEqualTo: elapsed.leadingAnchor, constant: -10),
+            line.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
+            lens.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 12),
+            // Fixed width, so a picture drawn for it is never stretched.
+            lens.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -72),
+            lens.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
+            lens.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
+            elapsed.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -17),
             elapsed.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor)
         ])
         accessibilityIdentifier = "thread.working"
         isAccessibilityElement = true
     }
 
-    func configure(_ status: LiveStatus) {
-        if headline.text != status.headline {
-            if headline.text != nil, window != nil, !Motion.reduced {
-                let push = CATransition()
-                push.type = .push
-                push.subtype = .fromTop
-                push.duration = 0.32
-                push.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
-                headline.layer.add(push, forKey: "headline")
-            }
-            headline.text = status.headline
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        sheen.frame = glass.contentView.bounds.insetBy(dx: -glass.bounds.width, dy: 0)
+        CATransaction.commit()
+        startSheen()
+    }
+
+    /// The line as the lens will see it: drawn at the lens's size, text
+    /// vertically centred where the label sits.
+    private func picture(of text: String) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = window?.screen.scale ?? traitCollection.displayScale
+        let size = lens.bounds.size
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            let attributes: [NSAttributedString.Key: Any] = [.font: line.font, .foregroundColor: UIColor.secondaryLabel.resolvedColor(with: traitCollection)]
+            let measured = (text as NSString).boundingRect(with: CGSize(width: .greatestFiniteMagnitude, height: size.height),
+                                                           options: [.usesLineFragmentOrigin], attributes: attributes, context: nil)
+            let style = NSMutableParagraphStyle()
+            style.lineBreakMode = .byTruncatingTail
+            var withStyle = attributes
+            withStyle[.paragraphStyle] = style
+            (text as NSString).draw(in: CGRect(x: 0, y: (size.height - measured.height) / 2, width: size.width, height: measured.height),
+                                    withAttributes: withStyle)
         }
+    }
+
+    func configure(_ status: LiveStatus) {
         started = status.started
         tick()
         accessibilityLabel = status.headline
+        guard status.headline != text else { return }
+        let previous = text
+        text = status.headline
+        guard let previous, window != nil, !Motion.reduced, lens.bounds.width > 1 else {
+            line.text = status.headline
+            return
+        }
+        let played = lens.play(from: picture(of: previous), to: picture(of: status.headline)) { [weak self] in
+            guard let self else { return }
+            line.text = text
+            line.isHidden = false
+            lens.isHidden = true
+        }
+        guard played else { line.text = status.headline; return }
+        line.isHidden = true
+        lens.isHidden = false
     }
 
     private func tick() {
@@ -638,11 +684,25 @@ final class LiveCell: TimelineCell {
         timer?.invalidate()
         timer = nil
         animateMark()
-        glowHost.setActive(window != nil)
+        startSheen()
         guard window != nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
+    }
+
+    private func startSheen() {
+        guard window != nil, !Motion.reduced, sheen.animation(forKey: "sheen") == nil, glass.bounds.width > 0 else { return }
+        let sweep = CABasicAnimation(keyPath: "transform.translation.x")
+        sweep.fromValue = -glass.bounds.width * 0.9
+        sweep.toValue = glass.bounds.width * 0.9
+        sweep.duration = 2.8
+        sweep.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        let group = CAAnimationGroup()
+        group.animations = [sweep]
+        group.duration = 4.2
+        group.repeatCount = .infinity
+        sheen.add(group, forKey: "sheen")
     }
 
     /// The app's mark turning between circle and squircle.

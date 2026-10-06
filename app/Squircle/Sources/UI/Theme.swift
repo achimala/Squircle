@@ -29,6 +29,12 @@ enum Theme {
             ? UIColor(red: 0.30, green: 0.30, blue: 0.36, alpha: 0.55)
             : UIColor(white: 1, alpha: 0.95)
     }
+    /// Tint for your messages' glass bubbles.
+    static let userGlass = UIColor { trait in
+        trait.userInterfaceStyle == .dark
+            ? UIColor(red: 0.45, green: 0.47, blue: 1.0, alpha: 0.30)
+            : UIColor(red: 0.42, green: 0.44, blue: 0.95, alpha: 0.16)
+    }
     static let userBubble = UIColor { trait in
         trait.userInterfaceStyle == .dark
             ? UIColor(red: 0.20, green: 0.21, blue: 0.30, alpha: 1)
@@ -130,11 +136,15 @@ enum Theme {
     }
 
     /// Glass surface for grouped interactive content (approvals, composer).
-    static func glassSurface(cornerRadius: CGFloat, interactive: Bool = false) -> UIVisualEffectView {
+    /// `clear` is the more transparent glass, for lensing text seen through it;
+    /// `tint` colours the glass itself.
+    static func glassSurface(cornerRadius: CGFloat, interactive: Bool = false, clear: Bool = false,
+                             tint: UIColor? = nil) -> UIVisualEffectView {
         let view: UIVisualEffectView
         if #available(iOS 26.0, *) {
-            let effect = UIGlassEffect(style: .regular)
+            let effect = UIGlassEffect(style: clear ? .clear : .regular)
             effect.isInteractive = interactive
+            effect.tintColor = tint
             view = UIVisualEffectView(effect: effect)
             view.cornerConfiguration = .corners(radius: .fixed(cornerRadius))
         } else {

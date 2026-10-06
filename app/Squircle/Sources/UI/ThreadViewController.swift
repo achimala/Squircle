@@ -28,8 +28,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private let pickers = PickerBar()
     private let jump = Theme.glassButton(symbol: "arrow.down", identifier: "thread.jump", accessibilityLabel: "Jump to latest")
     private var jumpShown = false
-    /// Light around the message field while the agent works.
-    private let composerGlow = EffectView()
     private let clip = UIView()
     private let fade = CAGradientLayer()
     /// Keeps the conversation out from under the docked device, so it floats
@@ -229,9 +227,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             scrollToBottom(animated: true)
             setJumpShown(false)
         }, for: .touchUpInside)
-        composerGlow.cornerRadius = 24
-        composerGlow.inset = 22
-        [request, notice, pickers, composerGlow, composer, jump].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        [request, notice, pickers, composer, jump].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
@@ -245,10 +241,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8),
-            composerGlow.topAnchor.constraint(equalTo: composer.topAnchor, constant: -22),
-            composerGlow.bottomAnchor.constraint(equalTo: composer.bottomAnchor, constant: 22),
-            composerGlow.leadingAnchor.constraint(equalTo: composer.leadingAnchor, constant: -22),
-            composerGlow.trailingAnchor.constraint(equalTo: composer.trailingAnchor, constant: 22),
             jump.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             jump.bottomAnchor.constraint(equalTo: pickers.topAnchor, constant: -10),
             jump.widthAnchor.constraint(equalToConstant: 42), jump.heightAnchor.constraint(equalToConstant: 42),
@@ -440,7 +432,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         threadTitle = session?.displayTitle(in: project) ?? ""
         renderAgent()
         renderSend()
-        composerGlow.setActive(model.isRunning, intensity: 0.75)
         renderRequest()
         let error = model.error ?? (model.connected ? nil : "Reconnecting…")
         if notice.text != error || notice.isHidden != (error == nil) {
@@ -522,7 +513,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let changed = ids.filter { previous[$0] != nil && previous[$0] != itemsByID[$0] }
         snapshot.reconfigureItems(changed)
         let inserted = first ? [] : ids.filter { previous[$0] == nil }
-        if folding {
+        let removed = previous.keys.filter { itemsByID[$0] == nil }.count
+        // Rows arriving or leaving while the agent works slide into place;
+        // only streaming text, which just grows, updates without animation.
+        let structural = !first && (!inserted.isEmpty || removed > 0) && inserted.count + removed <= 16 && !Motion.reduced
+        if folding || structural {
             dataSource.apply(snapshot, animatingDifferences: true)
         } else {
             UIView.performWithoutAnimation {
@@ -781,8 +776,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         }
     }
 
-    /// Your words lift out of the field and settle into their bubble while
-    /// the conversation makes room, all on one spring.
+    /// Your message pinches off the message field as a drop of glass and
+    /// settles into its bubble while the conversation makes room, all on one
+    /// spring. Field and drop share a Liquid Glass group, so the system draws
+    /// the liquid bridge between them as they part.
     private func flySend(id: String, from source: CGPoint) {
         view.layoutIfNeeded()
         let start = table.contentOffset.y
@@ -790,35 +787,52 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let end = table.contentOffset.y
         guard !Motion.reduced, let index = dataSource.indexPath(for: id),
               let cell = table.cellForRow(at: index) as? MessageCell else { flyingID = nil; return }
-        // Measure the finished bubble, then photograph it to fly.
-        cell.contentView.alpha = 1
         cell.layoutIfNeeded()
-        let bubble = cell.bubble.convert(cell.bubble.bounds, to: view)
-        let textFrame = cell.text.convert(cell.text.bounds, to: view).inset(by: cell.text.textContainerInset)
-        let flyer = cell.contentView.resizableSnapshotView(from: cell.bubble.frame, afterScreenUpdates: true,
-                                                           withCapInsets: .zero) ?? UIView()
+        let group = composer.group.contentView
+        let bubble = cell.bubble.convert(cell.bubble.bounds, to: group)
+        let textFrame = cell.text.convert(cell.text.bounds, to: group)
         cell.contentView.alpha = 0
-        flyer.frame = bubble
-        view.insertSubview(flyer, belowSubview: composer)
-        // Start with its text where the text sat in the field.
-        flyer.center = CGPoint(x: source.x - (textFrame.minX - bubble.minX) + bubble.width / 2,
-                               y: source.y - (textFrame.minY - bubble.minY) + bubble.height / 2)
-        flyer.alpha = 0.7
-        flyer.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
         table.contentOffset.y = start
-        let animator = UIViewPropertyAnimator(duration: 0.6, dampingRatio: 0.78) {
-            flyer.center = CGPoint(x: bubble.midX, y: bubble.midY)
-            flyer.transform = .identity
-            flyer.alpha = 1
+
+        let drop = Theme.glassSurface(cornerRadius: 18, tint: Theme.userGlass)
+        let words = UITextView()
+        words.isEditable = false
+        words.isScrollEnabled = false
+        words.backgroundColor = .clear
+        words.textContainer.lineFragmentPadding = 0
+        words.textContainerInset = cell.text.textContainerInset
+        words.attributedText = cell.text.attributedText
+        words.isUserInteractionEnabled = false
+        words.alpha = 0
+        drop.contentView.addSubview(words)
+        group.addSubview(drop)
+        // Born as a drop over the send button, inside the field's glass.
+        let seed = composer.send.convert(composer.send.bounds, to: group)
+        drop.frame = seed
+        words.frame = CGRect(x: textFrame.minX - bubble.minX, y: textFrame.minY - bubble.minY, width: textFrame.width, height: textFrame.height)
+        group.layoutIfNeeded()
+
+        let stretch = UIViewPropertyAnimator(duration: 0.22, curve: .easeIn) {
+            // Swell and start lifting: still joined to the field.
+            drop.frame = CGRect(x: bubble.maxX - min(bubble.width, 120), y: seed.minY - 26,
+                                width: min(bubble.width, 120), height: max(40, min(bubble.height, 48)))
+        }
+        let settle = UIViewPropertyAnimator(duration: 0.62, dampingRatio: 0.74) {
+            drop.frame = bubble
+            words.alpha = 1
             self.table.contentOffset.y = end
         }
-        animator.addCompletion { [weak self] _ in
-            flyer.removeFromSuperview()
+        if #available(iOS 26.0, *) {
+            settle.addAnimations { drop.cornerConfiguration = .corners(radius: .fixed(21)) }
+        }
+        stretch.addCompletion { _ in settle.startAnimation() }
+        settle.addCompletion { [weak self] _ in
+            drop.removeFromSuperview()
             guard let self else { return }
             if flyingID == id { flyingID = nil }
             if let index = dataSource.indexPath(for: id) { table.cellForRow(at: index)?.contentView.alpha = 1 }
         }
-        animator.startAnimation()
+        stretch.startAnimation()
     }
 
     private var debugRequest: JSONValue?
@@ -1128,6 +1142,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         pinToBottom = true
         render()
         flySend(id: local, from: source)
+    }
+    /// Verification only: hands the live line to a new task and back.
+    func debugLens() {
+        guard let cell = table.visibleCells.compactMap({ $0 as? LiveCell }).first else { return }
+        cell.configure(LiveStatus(headline: "Running the unit tests", started: nil))
     }
     func debugSetDetent(_ value: CGFloat) {
         view.layoutIfNeeded()

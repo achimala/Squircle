@@ -2,9 +2,8 @@ import Metal
 import QuartzCore
 import UIKit
 
-/// Light drawn around a glass control with handwritten Metal shaders
-/// (`Effects.metal`): a flowing spectrum on the outline while the agent works,
-/// or a ring of light leaving it when a turn finishes. The view is larger than
+/// Light drawn around a glass control with a handwritten Metal shader
+/// (`Effects.metal`): a ring of soft light leaving it when a turn finishes. The view is larger than
 /// the shape so the bloom can spill outside it; `inset` is that margin.
 @MainActor
 final class EffectView: UIView {
@@ -13,7 +12,7 @@ final class EffectView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
 
-    var mode = Mode.glow
+    var mode = Mode.ripple
     var inset: CGFloat = 18 { didSet { setNeedsLayout() } }
     var cornerRadius: CGFloat = 22
     /// Eased toward `targetIntensity` every frame so light fades in and out.
@@ -69,12 +68,6 @@ final class EffectView: UIView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
-
-    /// Turns the glow on or off; it fades rather than snapping.
-    func setActive(_ active: Bool, intensity: Float = 1) {
-        targetIntensity = active && !Motion.reduced ? intensity : 0
-        if targetIntensity > 0 || self.intensity > 0 { startLink() }
-    }
 
     /// One ripple, then `completion`.
     func ripple(completion: (() -> Void)? = nil) {

@@ -121,6 +121,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             phase = .dragging
             if let detent = value("SQUIRCLE_DETENT") { thread?.debugSetDetent(detent) }
             if environment["SQUIRCLE_DEMO_QUESTION"] == "1" { thread?.debugShowQuestion() }
+            if environment["SQUIRCLE_DEMO_LENS"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    LensView.slowMotion = value("SQUIRCLE_SLOW").map(Double.init) ?? 1
+                    self?.thread?.debugLens()
+                }
+            }
             if let text = environment["SQUIRCLE_DEMO_SEND"] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                     // Slow motion for frame-by-frame review of the flight.

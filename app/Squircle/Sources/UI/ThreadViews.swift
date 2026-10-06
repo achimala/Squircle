@@ -64,6 +64,9 @@ final class Composer: UIView, UITextViewDelegate {
         set { if placeholder.text != newValue { placeholder.text = newValue } }
     }
     private let glass = Theme.glassSurface(cornerRadius: 24, interactive: true)
+    /// The field's glass shares a Liquid Glass group with anything sent from
+    /// it, so a new message's bubble can pinch off the field as liquid.
+    let group = Theme.glassGroup(spacing: 22)
     private let placeholder = Theme.label("", Theme.font(.body, 17), color: .placeholderText)
     private var height: NSLayoutConstraint!
 
@@ -84,10 +87,16 @@ final class Composer: UIView, UITextViewDelegate {
         input.accessibilityLabel = "Message the coding agent"
         send.addAction(UIAction { [weak self] _ in self?.onSend?() }, for: .touchUpInside)
         glass.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(glass)
+        group.translatesAutoresizingMaskIntoConstraints = false
+        group.clipsToBounds = false
+        group.contentView.clipsToBounds = false
+        addSubview(group)
+        group.contentView.addSubview(glass)
         [input, placeholder, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         height = input.heightAnchor.constraint(equalToConstant: 48)
         NSLayoutConstraint.activate([
+            group.topAnchor.constraint(equalTo: topAnchor), group.bottomAnchor.constraint(equalTo: bottomAnchor),
+            group.leadingAnchor.constraint(equalTo: leadingAnchor), group.trailingAnchor.constraint(equalTo: trailingAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
             input.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
