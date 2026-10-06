@@ -58,6 +58,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private var aliases: [String: String] = [:]
     private var flyingID: String?
     private var showsConversation: Bool { sessionID != nil || pendingSend != nil }
+    /// An expanded turn's summary, pinned to the top while you read inside
+    /// that turn; tapping it folds the turn back up.
+    private let sticky = SummaryCell(style: .default, reuseIdentifier: nil)
+    private var stickyTurn: String?
+    /// Measured row heights, so long conversations keep their place while
+    /// rows above are measured, expanded or folded.
+    private var heights: [String: CGFloat] = [:]
     private var items: [ThreadItem] = []
     private var itemsByID: [String: ThreadItem] = [:]
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
@@ -171,6 +178,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             heading.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -4)
         ])
         clip.addSubview(draftScroll)
+        sticky.isHidden = true
+        sticky.accessibilityIdentifier = "thread.summary.sticky"
+        sticky.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(stickyTapped)))
+        clip.addSubview(sticky)
         view.addSubview(clip)
 
         pickers.model.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.modelMenu() ?? []) }])
@@ -528,6 +539,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         // A message in flight scrolls the conversation on its own spring.
         if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && (!inserted.isEmpty || folding)) }
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
+        updateSticky()
         if previous["live"] != nil, itemsByID["live"] == nil, let finished = next.last(where: { if case .summary = $0 { return true }; return false }) {
             celebrate(finished.id)
         }
@@ -607,10 +619,53 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        updateSticky()
         guard scrollView.isTracking || scrollView.isDecelerating else { return }
         let bottom = scrollView.contentSize.height + scrollView.contentInset.bottom - scrollView.bounds.height
         pinToBottom = bottom - scrollView.contentOffset.y < 60
         setJumpShown(bottom - scrollView.contentOffset.y > 320)
+    }
+
+    /// Finds the expanded turn under the top edge and pins its summary there,
+    /// pushed away by the end of that turn like a section header.
+    private func updateSticky() {
+        let top = table.contentOffset.y + table.contentInset.top
+        var pinned: (TurnSummary, CGFloat, CGFloat)?
+        for (index, item) in items.enumerated() {
+            guard case .summary(let summary) = item, summary.expanded,
+                  let path = dataSource.indexPath(for: item.id) else { continue }
+            let head = table.rectForRow(at: path)
+            guard head.minY < top else { continue }
+            // The turn ends at its answer or the next message.
+            let end = items[(index + 1)...].firstIndex { if case .answer = $0 { return true }; if case .user = $0 { return true }; return false }
+            let endY = end.flatMap { dataSource.indexPath(for: items[$0].id) }.map { table.rectForRow(at: $0).minY } ?? table.contentSize.height
+            guard endY > top + head.height * 0.5 else { continue }
+            pinned = (summary, min(top, endY - head.height), head.height)
+        }
+        guard let (summary, y, height) = pinned else {
+            sticky.isHidden = true
+            stickyTurn = nil
+            return
+        }
+        if stickyTurn != summary.turn {
+            stickyTurn = summary.turn
+            sticky.configure(summary)
+        }
+        sticky.isHidden = false
+        sticky.frame = table.convert(CGRect(x: 0, y: y, width: table.bounds.width, height: height), to: clip)
+    }
+
+    @objc private func stickyTapped() {
+        guard let turn = stickyTurn else { return }
+        let id = "summary:" + turn
+        toggle(turn)
+        // Land with the folded turn's summary at the top.
+        if let path = dataSource.indexPath(for: id) {
+            let target = table.rectForRow(at: path).minY - table.contentInset.top
+            UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0) {
+                self.table.contentOffset.y = max(-self.table.contentInset.top, target)
+            }
+        }
     }
 
     private func setJumpShown(_ shown: Bool) {
@@ -673,6 +728,34 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
         case .earlier, .summary, .note, .thought: return true
         default: return false
+        }
+    }
+
+    func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        if let id = dataSource.itemIdentifier(for: indexPath) { heights[id] = cell.bounds.height }
+    }
+    func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        if let id = dataSource.itemIdentifier(for: indexPath) { heights[id] = cell.bounds.height }
+    }
+    func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+        guard let id = dataSource.itemIdentifier(for: indexPath) else { return 60 }
+        if let known = heights[id] { return known }
+        let width = max(200, tableView.bounds.width - 40)
+        func lines(_ text: String, per: CGFloat) -> CGFloat {
+            text.split(separator: "\n", omittingEmptySubsequences: false)
+                .reduce(0) { $0 + max(1, ceil(CGFloat($1.count) * per / width)) }
+        }
+        switch itemsByID[id] {
+        case .header: return 44
+        case .user(let message): return lines(message.content, per: 9.2) * 22 + 42
+        case .answer(let message): return lines(message.content, per: 8.6) * 23 + 20
+        case .note(let message): return min(4, lines(message.content, per: 7.6)) * 20 + 12
+        case .thought: return 52
+        case .step, .earlier: return 36
+        case .gallery: return GalleryCell.height + 20
+        case .summary: return 54
+        case .live: return 72
+        case nil: return 60
         }
     }
 
