@@ -7,6 +7,14 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-06: diffs, version 0.3.0 (21).** Each finished turn that changed
+files shows a small pill ("8 files +81 −30") from T3's checkpoint; tapping it
+opens that turn's diff (`orchestration.getTurnDiff`) in a fast native viewer.
+Jump-to-latest sits at the right of the chip row and glides down. The back
+swipe keeps the travelling device clear of the conversation. The send drop
+carries no text, and message bubbles are solid again. See
+[diffs](docs/t3-native-migration.md#2026-10-06-diffs-and-a-clean-back-swipe-030-21).
+
 **2026-10-06: glass and flow, version 0.3.0 (20).** The conversation runs
 full height with the docked device floating as a PiP. The live state is a
 glass loupe: a handwritten Metal lens bends each finished task out through the

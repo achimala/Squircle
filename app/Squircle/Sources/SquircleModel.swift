@@ -22,6 +22,7 @@ final class SquircleModel: ObservableObject {
     @Published private(set) var providers: [JSONValue] = []
     @Published private(set) var devices: JSONValue = .null
     @Published private(set) var requests: [JSONValue] = []
+    @Published private(set) var changes: [TurnChanges] = []
     @Published private(set) var modelSelection: JSONValue = .null
     @Published private(set) var runtimeMode: T3RuntimeMode = .auto
     private var pendingRuntimeModes: [String:T3RuntimeMode] = [:]
@@ -216,7 +217,7 @@ final class SquircleModel: ObservableObject {
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
     func selectSession(_ id: String) async {
         selectedSessionID = id; messages = []; requests = []; state = T3ThreadState(); isRunning = false
-        stepDetails?.cancel(); stepDetailsSince = nil; stepDetailsCount = -1; media = []
+        stepDetails?.cancel(); stepDetailsSince = nil; stepDetailsCount = -1; media = []; changes = []
         runtimeMode = pendingRuntimeModes[id] ?? .auto
         if let pending = pendingModelSelections[id] { modelSelection = pending }
         guard let gateway else { return }
@@ -236,7 +237,7 @@ final class SquircleModel: ObservableObject {
     /// A new conversation that T3 has not been told about yet. The thread is
     /// created by its first message, so abandoned drafts leave nothing behind.
     func beginDraft() async {
-        selectedSessionID = nil; messages = []; requests = []; state = T3ThreadState(); isRunning = false; error = nil
+        selectedSessionID = nil; messages = []; requests = []; changes = []; state = T3ThreadState(); isRunning = false; error = nil
         runtimeMode = .auto
         restorePreferredModel()
         let previousSubscription = threadSubscription; threadSubscription = nil
@@ -279,6 +280,8 @@ final class SquircleModel: ObservableObject {
     }
     func consumeThread(_ item: JSONValue) {
         state.consume(item); messages = conversation(); requests = state.pendingRequests
+        let turnChanges = state.changes
+        if turnChanges != changes { changes = turnChanges }
         if state.activityCount != stepDetailsCount { stepDetailsCount = state.activityCount; scheduleStepDetails() }
         isRunning = state.isRunning
         let saved = state.thread["modelSelection"]
@@ -423,6 +426,15 @@ final class SquircleModel: ObservableObject {
         generator.appliesPreferredTrackTransform = true
         guard let image = try? await generator.image(at: .zero).image else { return nil }
         return UIImage(cgImage: image).jpegData(compressionQuality: 0.85)
+    }
+    /// One turn's unified diff, from T3's checkpoints.
+    func turnDiff(_ change: TurnChanges) async -> String? {
+        guard let gateway, let thread = selectedSessionID else { return nil }
+        do {
+            let result = try await gateway.call("orchestration.getTurnDiff", .from(["threadId": thread,
+                "fromTurnCount": max(0, change.count - 1), "toTurnCount": change.count]))
+            return result["diff"].string
+        } catch { self.error = error.localizedDescription; return nil }
     }
     func stop() async {
         guard let id = selectedSessionID else { return }

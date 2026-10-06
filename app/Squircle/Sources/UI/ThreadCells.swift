@@ -493,6 +493,55 @@ final class ShotView: UIControl {
     }
 }
 
+/// What a turn changed: a small glass pill with its size; opens the diff.
+final class ChangesCell: TimelineCell {
+    private let glass = Theme.glassSurface(cornerRadius: 17, interactive: true)
+    private let icon = UIImageView(image: UIImage(systemName: "chevron.left.forwardslash.chevron.right"))
+    private let label = Theme.label("", Theme.font(.subheadline, 14, .semibold))
+    private let stats = UILabel()
+    private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        icon.tintColor = .secondaryLabel
+        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        chevron.tintColor = .tertiaryLabel
+        stats.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        let row = UIStackView(arrangedSubviews: [icon, label, stats, chevron])
+        row.spacing = 7
+        row.alignment = .center
+        row.setCustomSpacing(10, after: stats)
+        row.isUserInteractionEnabled = false
+        glass.isUserInteractionEnabled = false
+        glass.translatesAutoresizingMaskIntoConstraints = false
+        row.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(glass)
+        glass.contentView.addSubview(row)
+        NSLayoutConstraint.activate([
+            glass.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            glass.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            glass.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            glass.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -14),
+            glass.heightAnchor.constraint(equalToConstant: 34),
+            row.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
+            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 13),
+            row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -13)
+        ])
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+        accessibilityIdentifier = "thread.changes"
+    }
+
+    func configure(_ changes: TurnChanges) {
+        label.text = "\(changes.files.count) file\(changes.files.count == 1 ? "" : "s")"
+        let text = NSMutableAttributedString(string: "+\(changes.additions)", attributes: [.foregroundColor: Theme.success])
+        text.append(NSAttributedString(string: " −\(changes.deletions)", attributes: [.foregroundColor: Theme.failure]))
+        stats.attributedText = text
+        accessibilityLabel = "Changes: \(label.text ?? ""), \(changes.additions) added, \(changes.deletions) removed"
+    }
+}
+
 /// A build in the conversation: what it is, where it stands, and Install.
 final class BuildCell: TimelineCell {
     var onInstall: ((AppBuild) -> Void)?

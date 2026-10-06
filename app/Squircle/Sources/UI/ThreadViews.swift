@@ -7,6 +7,8 @@ import UIKit
 final class PickerBar: UIView {
     let model = PickerBar.capsule(identifier: "thread.model")
     let approvals = PickerBar.capsule(identifier: "thread.approvals")
+    /// Jump to the latest message; sits at the row's trailing end.
+    let jump = Theme.glassButton(symbol: "arrow.down", identifier: "thread.jump", accessibilityLabel: "Jump to latest")
 
     private static func capsule(identifier: String) -> UIButton {
         let button = Theme.glassButton(identifier: identifier)
@@ -23,7 +25,9 @@ final class PickerBar: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        let row = UIStackView(arrangedSubviews: [model, approvals, UIView()])
+        jump.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+        jump.configuration?.contentInsets = .zero
+        let row = UIStackView(arrangedSubviews: [model, approvals, UIView(), jump])
         row.spacing = 8
         row.alignment = .center
         row.translatesAutoresizingMaskIntoConstraints = false
@@ -31,7 +35,8 @@ final class PickerBar: UIView {
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
             row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
-            model.heightAnchor.constraint(equalToConstant: 34), approvals.heightAnchor.constraint(equalToConstant: 34)
+            model.heightAnchor.constraint(equalToConstant: 34), approvals.heightAnchor.constraint(equalToConstant: 34),
+            jump.widthAnchor.constraint(equalToConstant: 34), jump.heightAnchor.constraint(equalToConstant: 34)
         ])
     }
 

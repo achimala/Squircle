@@ -562,3 +562,30 @@ summary pinning and tap-to-fold, the build card, the PiP hole, the scroll-edge
 blur and pickers were checked in captures. Not checked on the physical phone.
 Signed build 20 succeeded, job `28701013-3ca1-4c73-ae54-f173590384a2`; its
 capture is published to the catalog. Not installed on the phone.
+
+## 2026-10-06 diffs and a clean back swipe, 0.3.0 (21)
+
+- **Correction after user feedback on build 20:** the send drop showed the
+  message text spilling out of it (visible in the earlier slow-motion frames
+  and wrongly accepted), and the glass message bubbles and the pill's sheen
+  looked broken on the phone. The drop now carries no text and lands exactly
+  on the bubble, which fades in; bubbles are solid tinted; the sheen is gone.
+- **Diffs.** T3's thread snapshot carries a checkpoint per turn with changed
+  files and line counts, so each finished turn shows a pill without a request.
+  Tapping fetches `orchestration.getTurnDiff` (count − 1 → count). The viewer
+  parses on a background thread into flat lines; a plain table shows one
+  fixed-height, hand-laid-out row per line with sticky glass file headers
+  (tap to fold); long lines scroll sideways together. No third-party package.
+  Working-tree and last-commit diffs are not shown yet (T3's
+  `review.getDiffPreview` needs a write-scoped token).
+- **Jump to latest** is in the chip row's trailing end; the scroll is driven
+  by a spring every frame and glides the last screen from any distance.
+- **Back swipe.** Home passes the travelling device's frame to the thread,
+  which cuts the conversation away around it, so text and screenshots never
+  cover the device; the thread's floating controls fade as it leaves.
+
+Evidence (simulator): unit tests and the draft, approval, navigation and
+reduced-motion UI tests pass. The send was checked frame by frame at 1/14
+speed. Back-swipe states were checked frozen at 35, 60 and 85 % for docked and
+half detents. The diff viewer opened a real 8-file turn diff from T3, scrolled
+and scrolled sideways with headers pinned. Not checked on the phone.

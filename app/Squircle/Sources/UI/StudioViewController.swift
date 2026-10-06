@@ -318,6 +318,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if progress > 0.0001 {
                 if project.id == thread?.project.id, let thread {
                     pose = layout.transitionPose(from: pose, to: thread.pose, progress: progress)
+                    // While it travels the conversation keeps out of its way.
+                    let scale = 1 - pose.depth / max(1, pose.height * 4)
+                    let size = CGSize(width: pose.height * PhonePose.aspect * scale, height: pose.height * scale)
+                    thread.travelingDeviceFrame = progress < 0.999
+                        ? CGRect(x: pose.center.x - size.width / 2, y: pose.center.y - size.height / 2, width: size.width, height: size.height)
+                        : nil
                 } else {
                     let direction: CGFloat = offset < 0 ? -1 : 1
                     pose = layout.homePose(offset: offset + direction * progress.clamped() * 1.5, scroll: scroll, spread: spread)
@@ -343,6 +349,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         // A push: Home leaves to the left as the conversation arrives from the
         // right. The device belongs to both, so it travels on its own.
         home.transform = CGAffineTransform(translationX: -width * progress, y: 0)
+        thread?.setTransitionProgress(progress)
         thread?.view.transform = CGAffineTransform(translationX: width * (1 - progress), y: 0)
     }
 

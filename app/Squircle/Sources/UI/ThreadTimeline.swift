@@ -57,6 +57,8 @@ enum ThreadItem: Equatable {
     /// Screenshots side by side, scrolling sideways.
     case gallery(id: String, shots: [Shot])
     case summary(TurnSummary)
+    /// What the turn changed in the project; opens its diff.
+    case changes(TurnChanges, turn: String)
     /// A build the agent made or mentioned in this turn, installable here.
     case build(AppBuild, turn: String)
     case live(LiveStatus)
@@ -72,6 +74,7 @@ enum ThreadItem: Equatable {
         case .gallery(let id, _): return id
         case .summary(let summary): return "summary:" + summary.turn
         case .build(let build, let turn): return "build:\(turn):\(build.id)"
+        case .changes(_, let turn): return "changes:" + turn
         case .live: return "live"
         }
     }
@@ -80,7 +83,7 @@ enum ThreadItem: Equatable {
     static let liveWindow = 4
 
     static func items(messages: [ChatMessage], running: Bool, expanded: Set<String> = [], builds: [AppBuild] = [],
-                      now: Date = .now) -> [ThreadItem] {
+                      changes: [TurnChanges] = [], now: Date = .now) -> [ThreadItem] {
         // Split into turns at each of your messages.
         var turns: [(user: ChatMessage?, rest: [ChatMessage])] = []
         for message in messages {
@@ -110,6 +113,12 @@ enum ThreadItem: Equatable {
                 items += open ? allRows(work) : gallery("gallery:" + id, work)
             }
             if let answer { items.append(.answer(answer)) }
+            if !live {
+                let turnIDs = Set(([turn.user] + rest).compactMap { $0?.turnID })
+                if let change = changes.last(where: { turnIDs.contains($0.turnID) || ($0.assistantMessageID != nil && $0.assistantMessageID == answer?.id) }) {
+                    items.append(.changes(change, turn: id))
+                }
+            }
             items += mentionedBuilds(in: rest, builds: builds).map { .build($0, turn: id) }
             if live {
                 items.append(.live(LiveStatus(headline: headline(work: work, answer: answer), started: turn.user.flatMap { date($0.createdAt) })))

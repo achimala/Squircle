@@ -53,7 +53,8 @@ struct T3ThreadState {
             let reasoning = m["role"].string == "system" && id.hasPrefix("reasoning:")
             guard reasoning || m["role"].string != "system" else { return nil }
             return (m["createdAt"].string ?? "", ChatMessage(id: id, role: reasoning ? "thinking" : m["role"].string ?? "assistant",
-                content: Self.spoken(m["text"].string ?? ""), isStreaming: m["streaming"].bool, createdAt: m["createdAt"].string ?? ""))
+                content: Self.spoken(m["text"].string ?? ""), isStreaming: m["streaming"].bool, createdAt: m["createdAt"].string ?? "",
+                turnID: m["turnId"].string))
         }
         let running = isRunning
         var steps: [String: Int] = [:]
@@ -107,6 +108,19 @@ struct T3ThreadState {
     static func spoken(_ text: String) -> String {
         guard let range = text.range(of: AppProject.contextMarker) else { return text }
         return String(text[..<range.lowerBound])
+    }
+    /// Each finished turn's changed files, from its ready checkpoint.
+    var changes: [TurnChanges] {
+        thread["checkpoints"].array.compactMap { c in
+            guard c["status"].string == "ready", let turn = c["turnId"].string, let count = c["checkpointTurnCount"].int else { return nil }
+            let files = c["files"].array.compactMap { f -> TurnChanges.File? in
+                guard let path = f["path"].string else { return nil }
+                return TurnChanges.File(path: path, kind: f["kind"].string ?? "modified",
+                                        additions: f["additions"].int ?? 0, deletions: f["deletions"].int ?? 0)
+            }
+            guard !files.isEmpty else { return nil }
+            return TurnChanges(turnID: turn, count: count, assistantMessageID: c["assistantMessageId"].string, files: files)
+        }
     }
     var pendingRequests: [JSONValue] {
         let activities = thread["activities"].array

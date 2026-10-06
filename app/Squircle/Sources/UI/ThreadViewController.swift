@@ -26,13 +26,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private let back = Theme.glassButton(symbol: "chevron.left", identifier: "thread.close", accessibilityLabel: "Back to threads")
     private var threadTitle = ""
     private let pickers = PickerBar()
-    private let jump = Theme.glassButton(symbol: "arrow.down", identifier: "thread.jump", accessibilityLabel: "Jump to latest")
+    private var jump: UIButton { pickers.jump }
     private var jumpShown = false
     private let clip = UIView()
     private let fade = CAGradientLayer()
     /// Keeps the conversation out from under the docked device, so it floats
     /// above the text like a picture-in-picture.
     private let pipHole = CAShapeLayer()
+    /// The device's on-screen frame (in the parent's coordinates) while it
+    /// travels between Home and this thread; the conversation is cut away
+    /// around it so the device always reads as floating above the text.
+    var travelingDeviceFrame: CGRect? {
+        didSet { if travelingDeviceFrame != oldValue { updatePipHole() } }
+    }
+    private var lastArrive: CGFloat = 0
     private let table = UITableView(frame: .zero, style: .plain)
     private let divider = UIView()
     private let grabber = UIView()
@@ -146,6 +153,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         table.register(SummaryCell.self, forCellReuseIdentifier: "summary")
         table.register(LiveCell.self, forCellReuseIdentifier: "live")
         table.register(BuildCell.self, forCellReuseIdentifier: "build")
+        table.register(ChangesCell.self, forCellReuseIdentifier: "changes")
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] table, indexPath, id in
             guard let self, let item = itemsByID[id] else { return UITableViewCell() }
             let cell = table.dequeueReusableCell(withIdentifier: Self.reuseIdentifier(for: item), for: indexPath)
@@ -239,7 +247,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             scrollToBottom(animated: true)
             setJumpShown(false)
         }, for: .touchUpInside)
-        [request, notice, pickers, composer, jump].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        [request, notice, pickers, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
@@ -253,9 +261,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8),
-            jump.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            jump.bottomAnchor.constraint(equalTo: pickers.topAnchor, constant: -10),
-            jump.widthAnchor.constraint(equalToConstant: 42), jump.heightAnchor.constraint(equalToConstant: 42),
             requestStack.topAnchor.constraint(equalTo: request.contentView.topAnchor, constant: 14),
             requestStack.bottomAnchor.constraint(equalTo: request.contentView.bottomAnchor, constant: -12),
             requestStack.leadingAnchor.constraint(equalTo: request.contentView.leadingAnchor, constant: 16),
@@ -352,14 +357,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let phoneWidth = pose.height * PhonePose.aspect
         deviceTouch.frame = CGRect(x: pose.center.x - phoneWidth / 2, y: pose.center.y - pose.height / 2,
                                    width: phoneWidth, height: pose.height).insetBy(dx: -6, dy: -4)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        pipHole.frame = fade.bounds
-        let hole = view.convert(deviceTouch.frame.insetBy(dx: -4, dy: -6), to: clip)
-        let path = UIBezierPath(rect: pipHole.bounds.insetBy(dx: -50, dy: -50))
-        if arrive < 0.99 { path.append(UIBezierPath(roundedRect: hole, cornerRadius: 18)) }
-        pipHole.path = path.cgPath
-        CATransaction.commit()
+        lastArrive = arrive
+        updatePipHole()
         // The simulator's buttons ride on the divider, either side of its grabber.
         for (button, x) in [(home, 20), (simulator, width - 56)] {
             button.transform = .identity
@@ -371,6 +370,32 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         simulatorStatus.frame = CGRect(x: 64, y: y + (rowHeight - 16) / 2 + 14, width: width - 128, height: 16)
         simulatorStatus.alpha = arrive
         onGeometry?()
+    }
+
+    /// Floating controls fade as the thread leaves, so they never cross
+    /// Home's own controls coming the other way.
+    func setTransitionProgress(_ progress: CGFloat) {
+        let alpha = ((progress - 0.55) / 0.45).clamped()
+        back.alpha = alpha
+        pickers.alpha = alpha
+        jump.alpha = jumpShown ? alpha : 0
+    }
+
+    private func updatePipHole() {
+        guard isViewLoaded else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pipHole.frame = fade.bounds
+        let path = UIBezierPath(rect: pipHole.bounds.insetBy(dx: -50, dy: -50))
+        if let frame = travelingDeviceFrame, let host = view.superview {
+            let hole = host.convert(frame, to: clip).insetBy(dx: -10, dy: -10)
+            if hole.intersects(clip.bounds) { path.append(UIBezierPath(roundedRect: hole, cornerRadius: min(40, hole.width * 0.16))) }
+        } else if lastArrive < 0.99 {
+            let hole = view.convert(deviceTouch.frame.insetBy(dx: -4, dy: -6), to: clip)
+            path.append(UIBezierPath(roundedRect: hole, cornerRadius: 18))
+        }
+        pipHole.path = path.cgPath
+        CATransaction.commit()
     }
 
     private func setDetent(_ value: CGFloat, velocity: CGFloat? = nil) {
@@ -505,13 +530,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .summary: return "summary"
         case .live: return "live"
         case .build: return "build"
+        case .changes: return "changes"
         }
     }
 
     private func renderItems(animated: Bool = false) {
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
         let next = header + ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
-                                             builds: model.builds(for: project))
+                                             builds: model.builds(for: project), changes: model.changes)
         guard next != items else { return }
         let previous = itemsByID
         let first = items.isEmpty
@@ -613,13 +639,23 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             if abs(next - target) < 0.5 { break }
             target = next
         }
-        guard animated, !Motion.reduced, abs(start - target) > 0.5, abs(start - target) < table.bounds.height else { return }
-        table.contentOffset.y = start
-        UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0,
-                       options: [.allowUserInteraction, .beginFromCurrentState]) {
-            self.table.contentOffset.y = target
-        }
+        guard animated, !Motion.reduced, abs(start - target) > 0.5 else { return }
+        // From far away, glide the last screen rather than racing through
+        // every row in between.
+        // Driven frame by frame, so rows are laid out all the way down.
+        scrollSpring.set(max(start, target - table.bounds.height * 0.9))
+        scrollSpring.animate(to: target)
     }
+
+    /// Scrolls the conversation on one spring, laying rows out every frame.
+    private lazy var scrollSpring: SpringDriver = {
+        let spring = SpringDriver(value: table.contentOffset.y)
+        spring.parameters = SpringDriver.Parameters(response: 0.45, damping: 0.92)
+        spring.onChange = { [weak self] value in self?.table.contentOffset.y = value }
+        return spring
+    }()
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { scrollSpring.stop() }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateSticky()
@@ -677,7 +713,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: shown ? 0.62 : 0.9, initialSpringVelocity: 0,
                        options: [.allowUserInteraction, .beginFromCurrentState]) {
             self.jump.alpha = shown ? 1 : 0
-            self.jump.transform = shown ? .identity : CGAffineTransform(scaleX: 0.5, y: 0.5).translatedBy(x: 0, y: 20)
+            self.jump.transform = shown ? .identity : CGAffineTransform(scaleX: 0.5, y: 0.5)
         }
     }
 
@@ -707,6 +743,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             (cell as? SummaryCell)?.configure(summary)
         case .live(let status):
             (cell as? LiveCell)?.configure(status)
+        case .changes(let changes, _):
+            (cell as? ChangesCell)?.configure(changes)
         case .build(let build, _):
             guard let cell = cell as? BuildCell else { return }
             cell.configure(build, installing: installingBuild == build.id)
@@ -733,7 +771,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private func tappable(_ item: ThreadItem?) -> Bool {
         switch item {
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
-        case .earlier, .summary, .note, .thought: return true
+        case .earlier, .summary, .note, .thought, .changes: return true
         default: return false
         }
     }
@@ -763,6 +801,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .summary: return 54
         case .live: return 72
         case .build: return 74
+        case .changes: return 46
         case nil: return 60
         }
     }
@@ -783,6 +822,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .step(let message, _, _): showDetail(message)
         case .earlier(let turn, _): toggle(turn)
         case .summary(let summary): toggle(summary.turn)
+        case .changes(let changes, _): showChanges(changes)
         case .note(let message), .thought(let message): toggle(message.id)
         default: break
         }
@@ -812,6 +852,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             snapshot.reconfigureItems(ids)
             await dataSource.apply(snapshot, animatingDifferences: false)
         }
+    }
+
+    private func showChanges(_ changes: TurnChanges) {
+        guard presentedViewController == nil else { return }
+        Theme.selectionHaptic()
+        present(DiffViewController(title: "Changes") { [weak self] in await self?.model.turnDiff(changes) }, animated: true)
     }
 
     private func showDetail(_ step: ChatMessage) {

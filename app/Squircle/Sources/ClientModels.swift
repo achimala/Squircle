@@ -35,6 +35,25 @@ struct ChatMessage: Identifiable, Equatable {
     var imageCount = 0
     /// A recording published into the thread with `squircle media add`.
     var videoID: String?
+    /// The T3 turn this belongs to.
+    var turnID: String?
+}
+
+/// What one turn changed in the project, from T3's checkpoint for it.
+struct TurnChanges: Equatable {
+    struct File: Equatable {
+        let path: String
+        let kind: String
+        let additions: Int
+        let deletions: Int
+    }
+    let turnID: String
+    /// T3 numbers checkpoints by turn; a turn's diff runs from count − 1.
+    let count: Int
+    let assistantMessageID: String?
+    let files: [File]
+    var additions: Int { files.reduce(0) { $0 + $1.additions } }
+    var deletions: Int { files.reduce(0) { $0 + $1.deletions } }
 }
 
 struct AppBuild: Identifiable, Decodable, Equatable {
