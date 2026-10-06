@@ -590,3 +590,20 @@ speed. Back-swipe states were checked frozen at 35, 60 and 85 % for docked and
 half detents. The diff viewer opened a real 8-file turn diff from T3, scrolled
 and scrolled sideways with headers pinned. Not checked on the phone.
 Signed build 21 succeeded, job `ea489ca3-23f5-4275-8c95-ff26ccebd611`. Not installed on the phone.
+
+## 2026-10-06 phone on top, one-arc tap, Messages send, 0.3.0 (22)
+
+- The 3D devices render in an overlay above the conversation, so the phone
+  always sits on top; the conversation cut-out (which lagged the device
+  during the edge swipe) is removed.
+- Tapping the device moves it in one spring arc from its pose to the target
+  detent's pose, lifting toward the viewer and turning to show its body,
+  instead of sliding then growing.
+- Send follows Messages: the bubble, with its text, rises from where the
+  text was typed into place; the placeholder stays hidden until it lands.
+  (Build 21's text-free drop was a misreading of the feedback.)
+- 3D: jittered antialiasing at rest and native-scale rendering. Live-stream
+  frames have no mipmaps, so tiny docked live pictures can still shimmer.
+
+Evidence (simulator): tests as before pass; tap arc and send checked frame by
+frame in slow motion; back swipe frozen at 25/55/85 % docked and half.

@@ -56,6 +56,9 @@ final class DeviceStage: UIView {
     private let scene = SCNScene()
     private let cameraNode = SCNNode()
     private var phones: [String: StagePhone] = [:]
+    /// The rendered devices, kept separate from the backdrop so the host can
+    /// place them above everything else: the phone always sits on top.
+    let overlay = UIView()
     private var liveReasons = Set<String>()
 
     private var textureCache: CVMetalTextureCache?
@@ -93,9 +96,13 @@ final class DeviceStage: UIView {
         sceneView.allowsCameraControl = false
         sceneView.isUserInteractionEnabled = false
         sceneView.antialiasingMode = .multisampling4X
+        // At rest, extra jittered passes smooth thin bezel highlights.
+        sceneView.isJitteringEnabled = true
         sceneView.rendersContinuously = false
         sceneView.isPlaying = false
-        addSubview(sceneView)
+        overlay.isUserInteractionEnabled = false
+        overlay.accessibilityElementsHidden = true
+        overlay.addSubview(sceneView)
         buildStudio()
         updateColors()
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (stage: DeviceStage, _: UITraitCollection) in
@@ -112,6 +119,7 @@ final class DeviceStage: UIView {
         CATransaction.setDisableActions(true)
         backdrop.frame = bounds
         CATransaction.commit()
+        overlay.frame = frame
         if sceneView.frame != bounds {
             sceneView.frame = bounds
             sceneView.setNeedsDisplay()
@@ -122,6 +130,8 @@ final class DeviceStage: UIView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         sceneView.preferredFramesPerSecond = window?.windowScene?.screen.maximumFramesPerSecond ?? 60
+        // Render at the display's native pixel density.
+        if let screen = window?.windowScene?.screen { sceneView.contentScaleFactor = screen.nativeScale }
     }
 
     /// Scene units per point at zero depth; the camera looks down -z.

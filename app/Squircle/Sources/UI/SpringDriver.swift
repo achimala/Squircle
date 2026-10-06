@@ -74,9 +74,17 @@ final class SpringDriver {
         lastTimestamp = nil
     }
 
+    #if DEBUG
+    /// Verification only: slows every spring for frame-by-frame review.
+    nonisolated(unsafe) static var debugSlowMotion: Double = 1
+    #endif
+
     private func tick(_ link: CADisplayLink) {
         let now = link.targetTimestamp
-        let dt = min(1.0 / 30.0, max(0, now - (lastTimestamp ?? (now - link.duration))))
+        var dt = min(1.0 / 30.0, max(0, now - (lastTimestamp ?? (now - link.duration))))
+        #if DEBUG
+        dt /= Self.debugSlowMotion
+        #endif
         lastTimestamp = now
         #if DEBUG
         let started = CACurrentMediaTime()

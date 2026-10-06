@@ -30,16 +30,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private var jumpShown = false
     private let clip = UIView()
     private let fade = CAGradientLayer()
-    /// Keeps the conversation out from under the docked device, so it floats
-    /// above the text like a picture-in-picture.
-    private let pipHole = CAShapeLayer()
-    /// The device's on-screen frame (in the parent's coordinates) while it
-    /// travels between Home and this thread; the conversation is cut away
-    /// around it so the device always reads as floating above the text.
-    var travelingDeviceFrame: CGRect? {
-        didSet { if travelingDeviceFrame != oldValue { updatePipHole() } }
-    }
-    private var lastArrive: CGFloat = 0
     private let table = UITableView(frame: .zero, style: .plain)
     private let divider = UIView()
     private let grabber = UIView()
@@ -118,7 +108,24 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     }
 
     var dividerY: CGFloat { layout.divider(detent: detent.value, limit: dividerLimit) }
-    var pose: PhonePose { layout.threadPose(divider: dividerY) }
+    var pose: PhonePose {
+        guard let morph else { return layout.threadPose(divider: dividerY) }
+        // A tap moves the device in one gesture: straight from where it was to
+        // where it is going, lifting toward you and turning to show its body.
+        let span = morph.to - morph.from
+        let t = span == 0 ? 1 : ((detent.value - morph.from) / span).clamped(-0.1, 1.1)
+        let end = layout.threadPose(divider: layout.divider(detent: morph.to, limit: dividerLimit))
+        var pose = PhonePose.interpolate(morph.pose, end, t)
+        let arc = sin(.pi * t.clamped())
+        if !layout.reducedMotion {
+            pose.depth -= arc * min(morph.pose.height, end.height) * 0.35
+            pose.yaw += arc * (morph.to > morph.from ? -0.55 : 0.55)
+            pose.pitch -= arc * 0.08
+        }
+        return pose
+    }
+    /// The tap-driven move in progress: from which detent and pose, to which detent.
+    private var morph: (from: CGFloat, to: CGFloat, pose: PhonePose)?
 
     /// The simulator owns touches on its display once it is large and live.
     private var simulatorOwnsTouches: Bool { stream?.isInteractive == true && detent.value > 0.6 }
@@ -165,8 +172,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
         fade.startPoint = CGPoint(x: 0.5, y: 0)
         clip.layer.mask = fade
-        pipHole.fillRule = .evenOdd
-        fade.mask = pipHole
         clip.addSubview(table)
         draftScroll.backgroundColor = .clear
         draftScroll.keyboardDismissMode = .interactive
@@ -284,6 +289,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84)
         detent.onChange = { [weak self] _ in self?.layoutStage() }
         detent.onRest = { [weak self] value in
+            self?.morph = nil
+            self?.detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84)
             UserDefaults.standard.set(Double(min(1, value.rounded())), forKey: Self.detentKey)
             self?.stage?.setLive(false, reason: "detent")
         }
@@ -357,8 +364,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let phoneWidth = pose.height * PhonePose.aspect
         deviceTouch.frame = CGRect(x: pose.center.x - phoneWidth / 2, y: pose.center.y - pose.height / 2,
                                    width: phoneWidth, height: pose.height).insetBy(dx: -6, dy: -4)
-        lastArrive = arrive
-        updatePipHole()
         // The simulator's buttons ride on the divider, either side of its grabber.
         for (button, x) in [(home, 20), (simulator, width - 56)] {
             button.transform = .identity
@@ -381,23 +386,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         jump.alpha = jumpShown ? alpha : 0
     }
 
-    private func updatePipHole() {
-        guard isViewLoaded else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        pipHole.frame = fade.bounds
-        let path = UIBezierPath(rect: pipHole.bounds.insetBy(dx: -50, dy: -50))
-        if let frame = travelingDeviceFrame, let host = view.superview {
-            let hole = host.convert(frame, to: clip).insetBy(dx: -10, dy: -10)
-            if hole.intersects(clip.bounds) { path.append(UIBezierPath(roundedRect: hole, cornerRadius: min(40, hole.width * 0.16))) }
-        } else if lastArrive < 0.99 {
-            let hole = view.convert(deviceTouch.frame.insetBy(dx: -4, dy: -6), to: clip)
-            path.append(UIBezierPath(roundedRect: hole, cornerRadius: 18))
-        }
-        pipHole.path = path.cgPath
-        CATransaction.commit()
-    }
-
     private func setDetent(_ value: CGFloat, velocity: CGFloat? = nil) {
         stage?.setLive(true, reason: "detent")
         detent.animate(to: value, initialVelocity: velocity)
@@ -409,6 +397,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let layout = self.layout, limit = dividerLimit
         switch gesture.state {
         case .began:
+            if morph != nil { morph = nil; detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84) }
             raisedForDevice = false
             detent.stop()
             dragStart = dividerY
@@ -431,7 +420,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     @objc private func deviceTapped() {
         Theme.selectionHaptic()
         view.endEditing(true)
-        setDetent(detent.target < 0.5 ? 1 : detent.target < 1.5 ? 2 : 1)
+        let target: CGFloat = detent.target < 0.5 ? 1 : detent.target < 1.5 ? 2 : 1
+        morph = (detent.value, target, pose)
+        detent.parameters = SpringDriver.Parameters(response: 0.62, damping: 0.86)
+        setDetent(target)
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -930,10 +922,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         }
     }
 
-    /// Your message pinches off the message field as a drop of glass that
-    /// carries no text: field and drop share a Liquid Glass group, so the
-    /// system draws them parting as liquid. The drop travels to where the
-    /// bubble sits, and the bubble itself appears there as the drop fades.
+    /// As in Messages: your words become their bubble right where you typed
+    /// them and the bubble rises out of the field into place while the
+    /// conversation makes room. The text sits inside the bubble throughout.
     private func flySend(id: String, from source: CGPoint) {
         view.layoutIfNeeded()
         let start = table.contentOffset.y
@@ -941,41 +932,45 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let end = table.contentOffset.y
         guard !Motion.reduced, let index = dataSource.indexPath(for: id),
               let cell = table.cellForRow(at: index) as? MessageCell else { flyingID = nil; return }
+        cell.contentView.alpha = 1
         cell.layoutIfNeeded()
-        let group = composer.group.contentView
-        let bubble = cell.bubble.convert(cell.bubble.bounds, to: group)
+        let bubble = cell.bubble.convert(cell.bubble.bounds, to: view)
+        let textFrame = cell.text.convert(cell.text.bounds, to: view)
+        let inset = cell.text.textContainerInset
+        guard let words = cell.text.snapshotView(afterScreenUpdates: true) else { flyingID = nil; return }
         cell.contentView.alpha = 0
         table.contentOffset.y = start
 
-        let drop = Theme.glassSurface(cornerRadius: 18, tint: Theme.userGlass)
-        drop.isUserInteractionEnabled = false
-        group.addSubview(drop)
-        let seed = composer.send.convert(composer.send.bounds, to: group)
-        drop.frame = seed
+        let flyer = UIView(frame: bubble)
+        flyer.isUserInteractionEnabled = false
+        let fill = UIView(frame: flyer.bounds)
+        fill.backgroundColor = Theme.userBubble
+        fill.layer.cornerRadius = cell.bubble.layer.cornerRadius
+        fill.layer.cornerCurve = .continuous
+        flyer.addSubview(fill)
+        words.frame = CGRect(x: textFrame.minX - bubble.minX, y: textFrame.minY - bubble.minY,
+                             width: textFrame.width, height: textFrame.height)
+        flyer.addSubview(words)
+        view.insertSubview(flyer, aboveSubview: composer)
+        // Start with the first line of text exactly where it was typed.
+        let offset = CGPoint(x: words.frame.minX + inset.left, y: words.frame.minY + inset.top)
+        flyer.frame.origin = CGPoint(x: source.x - offset.x, y: source.y - offset.y)
+        fill.transform = CGAffineTransform(scaleX: 0.94, y: 0.9)
+        composer.holdsPlaceholder = true
 
-        let lift = UIViewPropertyAnimator(duration: 0.2, curve: .easeIn) {
-            // Swells out of the field beside the send button, still joined.
-            let width = min(bubble.width, 96)
-            drop.frame = CGRect(x: seed.maxX - width, y: seed.minY - 22, width: width, height: 40)
-        }
-        let settle = UIViewPropertyAnimator(duration: 0.55, dampingRatio: 0.82) {
-            drop.frame = bubble
+        let rise = UIViewPropertyAnimator(duration: 0.5, dampingRatio: 0.84) {
+            flyer.frame.origin = bubble.origin
+            fill.transform = .identity
             self.table.contentOffset.y = end
         }
-        if #available(iOS 26.0, *) {
-            settle.addAnimations { drop.cornerConfiguration = .corners(radius: .fixed(21)) }
-        }
-        lift.addCompletion { _ in settle.startAnimation() }
-        settle.addCompletion { [weak self] _ in
-            guard let self else { drop.removeFromSuperview(); return }
+        rise.addCompletion { [weak self] _ in
+            flyer.removeFromSuperview()
+            guard let self else { return }
+            composer.revealPlaceholder()
             if flyingID == id { flyingID = nil }
-            let shown = dataSource.indexPath(for: id).flatMap { self.table.cellForRow(at: $0) }
-            UIView.animate(withDuration: 0.18, delay: 0, options: [.allowUserInteraction]) {
-                shown?.contentView.alpha = 1
-                drop.alpha = 0
-            } completion: { _ in drop.removeFromSuperview() }
+            if let index = dataSource.indexPath(for: id) { table.cellForRow(at: index)?.contentView.alpha = 1 }
         }
-        lift.startAnimation()
+        rise.startAnimation()
     }
 
     private var debugRequest: JSONValue?
@@ -1291,6 +1286,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         guard let cell = table.visibleCells.compactMap({ $0 as? LiveCell }).first else { return }
         cell.configure(LiveStatus(headline: "Running the unit tests", started: nil))
     }
+    func debugTapDevice() { deviceTapped() }
     func debugSetDetent(_ value: CGFloat) {
         view.layoutIfNeeded()
         detent.set(value)

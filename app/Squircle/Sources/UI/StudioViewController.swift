@@ -52,6 +52,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         view.backgroundColor = Theme.backdropBottom
         view.addSubview(stage)
         view.addSubview(home)
+        view.addSubview(stage.overlay)
 
         picker.delegate = self
         picker.isPagingEnabled = true
@@ -121,6 +122,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             phase = .dragging
             if let detent = value("SQUIRCLE_DETENT") { thread?.debugSetDetent(detent) }
             if environment["SQUIRCLE_DEMO_QUESTION"] == "1" { thread?.debugShowQuestion() }
+            if environment["SQUIRCLE_DEMO_TAP"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    SpringDriver.debugSlowMotion = value("SQUIRCLE_SLOW").map(Double.init) ?? 1
+                    self?.thread?.debugTapDevice()
+                }
+            }
             if environment["SQUIRCLE_DEMO_LENS"] == "1" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
                     LensView.slowMotion = value("SQUIRCLE_SLOW").map(Double.init) ?? 1
@@ -156,6 +163,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         super.viewDidLayoutSubviews()
         let bounds = view.bounds
         stage.frame = bounds
+        stage.overlay.frame = bounds
         home.place(in: bounds)
         pagesClip.frame = bounds
         picker.frame = bounds
@@ -318,12 +326,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if progress > 0.0001 {
                 if project.id == thread?.project.id, let thread {
                     pose = layout.transitionPose(from: pose, to: thread.pose, progress: progress)
-                    // While it travels the conversation keeps out of its way.
-                    let scale = 1 - pose.depth / max(1, pose.height * 4)
-                    let size = CGSize(width: pose.height * PhonePose.aspect * scale, height: pose.height * scale)
-                    thread.travelingDeviceFrame = progress < 0.999
-                        ? CGRect(x: pose.center.x - size.width / 2, y: pose.center.y - size.height / 2, width: size.width, height: size.height)
-                        : nil
+
                 } else {
                     let direction: CGFloat = offset < 0 ? -1 : 1
                     pose = layout.homePose(offset: offset + direction * progress.clamped() * 1.5, scroll: scroll, spread: spread)
@@ -432,7 +435,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         addChild(controller)
         controller.view.frame = view.bounds
         controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
-        view.addSubview(controller.view)
+        // Conversations pass beneath the devices.
+        view.insertSubview(controller.view, belowSubview: stage.overlay)
         controller.didMove(toParent: self)
         controller.view.layoutIfNeeded()
         let pan = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(backPanned(_:)))

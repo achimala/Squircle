@@ -128,6 +128,20 @@ final class Composer: UIView, UITextViewDelegate {
         return input.convert(origin, to: view)
     }
 
+    /// Keeps the placeholder away while a sent message leaves the field.
+    var holdsPlaceholder = false {
+        didSet {
+            guard holdsPlaceholder != oldValue else { return }
+            placeholder.alpha = holdsPlaceholder ? 0 : 1
+        }
+    }
+
+    func revealPlaceholder() {
+        holdsPlaceholder = false
+        placeholder.alpha = 0
+        UIView.animate(withDuration: 0.25) { self.placeholder.alpha = 1 }
+    }
+
     func textViewDidChange(_ textView: UITextView) {
         placeholder.isHidden = !textView.text.isEmpty
         let fitted = textView.sizeThatFits(CGSize(width: textView.bounds.width, height: .greatestFiniteMagnitude)).height
