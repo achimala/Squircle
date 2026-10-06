@@ -607,3 +607,4 @@ Signed build 21 succeeded, job `ea489ca3-23f5-4275-8c95-ff26ccebd611`. Not insta
 
 Evidence (simulator): tests as before pass; tap arc and send checked frame by
 frame in slow motion; back swipe frozen at 25/55/85 % docked and half.
+Signed build 22 succeeded, job `bba26565-54c6-403b-baf7-efaba4495f8b`. Not installed on the phone.
