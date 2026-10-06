@@ -422,7 +422,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         view.addSubview(controller.view)
         controller.didMove(toParent: self)
         controller.view.layoutIfNeeded()
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(backPanned(_:)))
+        let pan = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(backPanned(_:)))
+        pan.edges = .left
         pan.delegate = self
         controller.view.addGestureRecognizer(pan)
         phase = .opening
@@ -440,7 +441,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         spring.animate(to: 0)
     }
 
-    /// Swipe right anywhere in a thread to go back, following the finger.
+    /// Swipe in from the left edge to go back, following the finger.
     @objc private func backPanned(_ gesture: UIPanGestureRecognizer) {
         let width = max(1, view.bounds.width)
         switch gesture.state {
@@ -471,8 +472,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard let pan = gestureRecognizer as? UIPanGestureRecognizer, let thread, presentedViewController == nil else { return false }
-        let velocity = pan.velocity(in: view)
-        return velocity.x > 0 && velocity.x > abs(velocity.y) * 1.3 && thread.allowsBackSwipe(at: pan.location(in: thread.view))
+        return pan.velocity(in: view).x >= 0 && thread.allowsBackSwipe(at: pan.location(in: thread.view))
     }
 
     /// The conversation's own scrolling waits until a touch is known not to be

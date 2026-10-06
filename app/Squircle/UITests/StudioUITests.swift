@@ -25,18 +25,21 @@ final class StudioUITests: XCTestCase {
         waitForThreadDismissal()
         element("thread.new").tap()
         waitForThread()
-        requireHittable(element("draft.models"))
+        requireHittable(element("thread.model"))
         XCTAssertTrue(app.staticTexts["What’s next?"].exists)
         XCTAssertFalse(element("thread.messages").exists)
-        capture("New thread — quick models")
-        let choices = app.buttons.matching(NSPredicate(format:"identifier BEGINSWITH %@","draft.model."))
-        XCTAssertGreaterThan(choices.count,0)
+        capture("New thread — model picker")
+        element("thread.model").tap()
+        let choices = app.buttons.matching(NSPredicate(format:"label MATCHES %@", ".*[0-9].*"))
+        XCTAssertTrue(choices.firstMatch.waitForExistence(timeout:5))
+        XCTAssertFalse(app.buttons.matching(NSPredicate(format:"label BEGINSWITH %@", "Claude ")).firstMatch.exists,
+                       "Model names are not prefixed with their provider.")
         choices.element(boundBy:choices.count - 1).tap()
         XCTAssertFalse(element("thread.messages").exists)
         element("thread.close").tap()
         waitForThreadDismissal()
         element("thread.new").tap()
-        requireHittable(element("draft.models"))
+        requireHittable(element("thread.model"))
         XCTAssertTrue(app.staticTexts["What’s next?"].exists)
         XCTAssertFalse(element("thread.messages").exists)
     }
@@ -45,20 +48,20 @@ final class StudioUITests: XCTestCase {
     func testDraftApprovalOptions() {
         app.launchEnvironment = ["SQUIRCLE_APP":"Squircle", "SQUIRCLE_SCRUB":"1", "SQUIRCLE_DRAFT":"1"]
         app.launch()
-        let agent = element("thread.agent")
+        let agent = element("thread.approvals")
         requireHittable(agent, timeout:35)
-        XCTAssertTrue(agent.label.hasSuffix(" · Auto"))
+        XCTAssertTrue(agent.label.hasSuffix(", Auto"))
         agent.tap()
         for title in ["Ask", "Auto edits", "Auto", "Full access"] {
             XCTAssertTrue(app.buttons[title].waitForExistence(timeout:5))
         }
         capture("Approval mode options")
         app.buttons["Auto edits"].tap()
-        let changed = XCTNSPredicateExpectation(predicate:NSPredicate(format:"label ENDSWITH %@", " · Auto edits"), object:agent)
+        let changed = XCTNSPredicateExpectation(predicate:NSPredicate(format:"label ENDSWITH %@", ", Auto edits"), object:agent)
         XCTAssertEqual(XCTWaiter.wait(for:[changed], timeout:5), .completed)
         agent.tap()
         app.buttons["Auto"].tap()
-        let restored = XCTNSPredicateExpectation(predicate:NSPredicate(format:"label ENDSWITH %@", " · Auto"), object:agent)
+        let restored = XCTNSPredicateExpectation(predicate:NSPredicate(format:"label ENDSWITH %@", ", Auto"), object:agent)
         XCTAssertEqual(XCTWaiter.wait(for:[restored], timeout:5), .completed)
     }
 
@@ -280,8 +283,8 @@ final class StudioUITests: XCTestCase {
         // A fast flick still closes; an aborted drag restores the thread.
         row.tap()
         waitForThread()
-        let start = origin.withOffset(CGVector(dx: app.frame.width * 0.3, dy: app.frame.height * 0.7))
-        start.press(forDuration: 0.02, thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.6, dy: app.frame.height * 0.7)),
+        let start = origin.withOffset(CGVector(dx: 1, dy: app.frame.height * 0.7))
+        start.press(forDuration: 0.02, thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.45, dy: app.frame.height * 0.7)),
                     withVelocity: .fast, thenHoldForDuration: 0)
         waitForThreadDismissal()
         row.tap()
@@ -531,8 +534,9 @@ final class StudioUITests: XCTestCase {
     @MainActor
     private func backDrag(to fraction: CGFloat) {
         let origin = app.coordinate(withNormalizedOffset: .zero)
-        let start = origin.withOffset(CGVector(dx: app.frame.width * 0.12, dy: app.frame.height * 0.72))
-        let end = origin.withOffset(CGVector(dx: app.frame.width * (0.12 + fraction), dy: app.frame.height * 0.72))
+        // Back is a swipe in from the left edge, as in any navigation stack.
+        let start = origin.withOffset(CGVector(dx: 1, dy: app.frame.height * 0.72))
+        let end = origin.withOffset(CGVector(dx: app.frame.width * fraction, dy: app.frame.height * 0.72))
         start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
     }
 

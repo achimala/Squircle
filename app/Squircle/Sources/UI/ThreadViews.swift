@@ -1,5 +1,57 @@
 import UIKit
 
+/// The agent's model and approval mode, as two glass capsules just above
+/// the message field. Their menus are built when opened, so live updates
+/// never reset a menu you are reading.
+@MainActor
+final class PickerBar: UIView {
+    let model = PickerBar.capsule(identifier: "thread.model")
+    let approvals = PickerBar.capsule(identifier: "thread.approvals")
+
+    private static func capsule(identifier: String) -> UIButton {
+        let button = Theme.glassButton(identifier: identifier)
+        button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 12, bottom: 7, trailing: 12)
+        button.configuration?.imagePadding = 6
+        button.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        button.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes; attributes.font = Theme.font(.subheadline, 14, .semibold); return attributes
+        }
+        button.configuration?.titleLineBreakMode = .byTruncatingTail
+        button.showsMenuAsPrimaryAction = true
+        return button
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        let row = UIStackView(arrangedSubviews: [model, approvals, UIView()])
+        row.spacing = 8
+        row.alignment = .center
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            model.heightAnchor.constraint(equalToConstant: 34), approvals.heightAnchor.constraint(equalToConstant: 34)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func set(model name: String, mode: T3RuntimeMode) {
+        if model.configuration?.title != name {
+            model.configuration?.title = name
+            model.configuration?.image = UIImage(systemName: "cpu")
+        }
+        if approvals.configuration?.title != mode.title {
+            approvals.configuration?.title = mode.title
+            approvals.configuration?.image = UIImage(systemName: mode.symbol)
+        }
+        model.accessibilityLabel = "Model, " + name
+        approvals.accessibilityLabel = "Approvals, " + mode.title
+    }
+}
+
 /// Glass message field that grows with its text.
 @MainActor
 final class Composer: UIView, UITextViewDelegate {
@@ -7,8 +59,6 @@ final class Composer: UIView, UITextViewDelegate {
     var onChange: (() -> Void)?
     let input = UITextView()
     let send = Theme.glassButton(symbol: "arrow.up", prominent: true, identifier: "thread.send", accessibilityLabel: "Send message")
-    /// The agent and approval menu, at the field's leading edge.
-    let accessory = UIButton(configuration: .plain())
     var placeholderText: String {
         get { placeholder.text ?? "" }
         set { if placeholder.text != newValue { placeholder.text = newValue } }
@@ -35,20 +85,14 @@ final class Composer: UIView, UITextViewDelegate {
         send.addAction(UIAction { [weak self] _ in self?.onSend?() }, for: .touchUpInside)
         glass.translatesAutoresizingMaskIntoConstraints = false
         addSubview(glass)
-        accessory.configuration?.image = UIImage(systemName: "sparkles", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold))
-        accessory.configuration?.baseForegroundColor = .secondaryLabel
-        accessory.configuration?.contentInsets = .zero
-        [input, placeholder, send, accessory].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
+        [input, placeholder, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         height = input.heightAnchor.constraint(equalToConstant: 48)
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
             input.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
             input.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
-            accessory.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
-            accessory.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
-            accessory.widthAnchor.constraint(equalToConstant: 36), accessory.heightAnchor.constraint(equalToConstant: 36),
-            input.leadingAnchor.constraint(equalTo: accessory.trailingAnchor, constant: -6),
+            input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
             input.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -4),
             height,
             placeholder.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 17),
@@ -219,33 +263,4 @@ final class ThreadRow: UIControl {
             if isHighlighted { animations() } else { UIView.animate(withDuration: 0.25, animations: animations) }
         }
     }
-}
-
-/// Lays its subviews out left to right at their natural size, wrapping onto
-/// new lines, so every choice stays on screen.
-final class FlowView: UIView {
-    var spacing: CGFloat = 8 { didSet { invalidateIntrinsicContentSize(); setNeedsLayout() } }
-    private var measuredHeight: CGFloat = 0
-
-    private func frames(for width: CGFloat) -> [CGRect] {
-        var x: CGFloat = 0, y: CGFloat = 0, line: CGFloat = 0
-        return subviews.map { view in
-            let size = view.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize)
-            let w = min(size.width, width)
-            if x > 0, x + w > width { x = 0; y += line + spacing; line = 0 }
-            defer { x += w + spacing; line = max(line, size.height) }
-            return CGRect(x: x, y: y, width: w, height: size.height)
-        }
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let frames = frames(for: bounds.width)
-        zip(subviews, frames).forEach { $0.frame = $1 }
-        let height = frames.map(\.maxY).max() ?? 0
-        if height != measuredHeight { measuredHeight = height; invalidateIntrinsicContentSize() }
-    }
-
-    override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: measuredHeight) }
-    override func didAddSubview(_ subview: UIView) { super.didAddSubview(subview); setNeedsLayout() }
 }

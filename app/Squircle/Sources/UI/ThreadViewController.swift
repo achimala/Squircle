@@ -21,19 +21,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private var selectionReady = false
     private var sending = false
     private let draftScroll = UIScrollView()
-    private let draftOptions = FlowView()
-    private var renderedDraftChoices: [JSONValue] = []
     private var subscriptions = Set<AnyCancellable>()
 
     private let back = Theme.glassButton(symbol: "chevron.left", identifier: "thread.close", accessibilityLabel: "Back to threads")
     private var threadTitle = ""
-    private var agent: UIButton { composer.accessory }
+    private let pickers = PickerBar()
     private let jump = Theme.glassButton(symbol: "arrow.down", identifier: "thread.jump", accessibilityLabel: "Jump to latest")
     private var jumpShown = false
     /// Light around the message field while the agent works.
     private let composerGlow = EffectView()
     private let clip = UIView()
     private let fade = CAGradientLayer()
+    /// Keeps the conversation out from under the docked device, so it floats
+    /// above the text like a picture-in-picture.
+    private let pipHole = CAShapeLayer()
     private let table = UITableView(frame: .zero, style: .plain)
     private let divider = UIView()
     private let grabber = UIView()
@@ -100,7 +101,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
     /// The lowest the divider may sit: just above the composer.
     private var dividerLimit: CGFloat {
-        let floor = request.isHidden ? composer.frame.minY : request.frame.minY
+        let floor = request.isHidden ? pickers.frame.minY : request.frame.minY
         return floor - 6 - StageLayout.dividerHeight
     }
 
@@ -150,6 +151,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
         fade.startPoint = CGPoint(x: 0.5, y: 0)
         clip.layer.mask = fade
+        pipHole.fillRule = .evenOdd
+        fade.mask = pipHole
         clip.addSubview(table)
         draftScroll.backgroundColor = .clear
         draftScroll.keyboardDismissMode = .interactive
@@ -158,7 +161,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         // Nothing has been said yet: the app's device stands large above, and
         // the prompt and model chips sit right on top of the composer.
         let heading = Theme.label("What’s next?", Theme.font(.title1, 28, .bold), lines: 2)
-        [heading, draftOptions].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; draftScroll.addSubview($0) }
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        draftScroll.addSubview(heading)
         let content = draftScroll.contentLayoutGuide, frame = draftScroll.frameLayoutGuide
         NSLayoutConstraint.activate([
             content.widthAnchor.constraint(equalTo: frame.widthAnchor),
@@ -166,16 +170,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             heading.topAnchor.constraint(greaterThanOrEqualTo: content.topAnchor, constant: 20),
             heading.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
             heading.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            draftOptions.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 16),
-            draftOptions.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
-            draftOptions.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            draftOptions.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -4)
+            heading.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -4)
         ])
         clip.addSubview(draftScroll)
         view.addSubview(clip)
 
-        agent.showsMenuAsPrimaryAction = true
-        agent.accessibilityIdentifier = "thread.agent"
+        pickers.model.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.modelMenu() ?? []) }])
+        pickers.approvals.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.approvalMenu() ?? []) }])
         back.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onBack?() }, for: .touchUpInside)
         [deviceTouch, back, simulatorStatus, divider, home, simulator].forEach(view.addSubview)
 
@@ -230,14 +231,17 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         }, for: .touchUpInside)
         composerGlow.cornerRadius = 24
         composerGlow.inset = 22
-        [request, notice, composerGlow, composer, jump].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        [request, notice, pickers, composerGlow, composer, jump].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
             notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            notice.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
+            pickers.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
+            pickers.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+            pickers.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
+            notice.bottomAnchor.constraint(equalTo: pickers.topAnchor, constant: -8),
             request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8),
@@ -246,7 +250,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             composerGlow.leadingAnchor.constraint(equalTo: composer.leadingAnchor, constant: -22),
             composerGlow.trailingAnchor.constraint(equalTo: composer.trailingAnchor, constant: 22),
             jump.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            jump.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -12),
+            jump.bottomAnchor.constraint(equalTo: pickers.topAnchor, constant: -10),
             jump.widthAnchor.constraint(equalToConstant: 42), jump.heightAnchor.constraint(equalToConstant: 42),
             requestStack.topAnchor.constraint(equalTo: request.contentView.topAnchor, constant: 14),
             requestStack.bottomAnchor.constraint(equalTo: request.contentView.bottomAnchor, constant: -12),
@@ -255,12 +259,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         ])
         if #available(iOS 26.0, *) {
             table.bottomEdgeEffect.style = .soft
+            // Header-less: text scrolling under the floating back button blurs away.
+            table.topEdgeEffect.style = .soft
+            let top = UIScrollEdgeElementContainerInteraction()
+            top.scrollView = table
+            top.edge = .top
+            back.addInteraction(top)
             let bottom = UIScrollEdgeElementContainerInteraction()
             bottom.scrollView = table
             bottom.edge = .bottom
             composer.addInteraction(bottom)
         }
-        view.accessibilityElements = [back, deviceTouch, home, simulator, divider, draftScroll, table, request, notice, jump, composer]
+        view.accessibilityElements = [back, deviceTouch, home, simulator, divider, draftScroll, table, request, notice, jump, pickers.model, pickers.approvals, composer]
 
         detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84)
         detent.onChange = { [weak self] _ in self?.layoutStage() }
@@ -313,18 +323,21 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         grabber.frame = CGRect(x: (width - 36) / 2, y: (rowHeight - 5) / 2, width: 36, height: 5)
         divider.accessibilityValue = detent.value < 0.5 ? "Docked" : detent.value < 1.5 ? "Half" : "Full"
 
-        let chatTop = layout.chatDivider
-        let clipTop = y + rowHeight * arrive
+        // Docked, the conversation runs to the top of the screen beneath the
+        // floating back button and the device, which floats like a PiP. As
+        // the device grows the conversation starts below the divider.
+        let clipTop = (y + rowHeight) * arrive
         clip.frame = CGRect(x: 0, y: clipTop, width: width, height: max(0, height - clipTop))
-        table.frame = CGRect(x: 0, y: chatTop - clipTop, width: width, height: height - chatTop)
+        table.frame = CGRect(x: 0, y: -clipTop, width: width, height: height)
+        let fadeLength = CGFloat.lerp(view.safeAreaInsets.top + 20, 14, arrive)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         fade.frame = clip.bounds
-        fade.endPoint = CGPoint(x: 0.5, y: min(1, 14 / max(1, clip.bounds.height)))
+        fade.endPoint = CGPoint(x: 0.5, y: min(1, fadeLength / max(1, clip.bounds.height)))
         CATransaction.commit()
-        let floor = request.isHidden ? (notice.isHidden ? composer.frame.minY : notice.frame.minY) : request.frame.minY
+        let floor = request.isHidden ? (notice.isHidden ? pickers.frame.minY : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - clipTop - 8))
-        let insets = UIEdgeInsets(top: clipTop - chatTop + 2, left: 0, bottom: height - floor + 10, right: 0)
+        let insets = UIEdgeInsets(top: .lerp(view.safeAreaInsets.top + 54, clipTop + 2, arrive), left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
@@ -335,6 +348,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let phoneWidth = pose.height * PhonePose.aspect
         deviceTouch.frame = CGRect(x: pose.center.x - phoneWidth / 2, y: pose.center.y - pose.height / 2,
                                    width: phoneWidth, height: pose.height).insetBy(dx: -6, dy: -4)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        pipHole.frame = fade.bounds
+        let hole = view.convert(deviceTouch.frame.insetBy(dx: -4, dy: -6), to: clip)
+        let path = UIBezierPath(rect: pipHole.bounds.insetBy(dx: -50, dy: -50))
+        if arrive < 0.99 { path.append(UIBezierPath(roundedRect: hole, cornerRadius: 18)) }
+        pipHole.path = path.cgPath
+        CATransaction.commit()
         // The simulator's buttons ride on the divider, either side of its grabber.
         for (button, x) in [(home, 20), (simulator, width - 56)] {
             button.transform = .identity
@@ -403,7 +424,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private func render() {
         guard isViewLoaded else { return }
         guard selectionReady else {
-            agent.isEnabled = false
+            pickers.model.isEnabled = false
             composer.send.isEnabled = false
             table.isHidden = true
             draftScroll.isHidden = true
@@ -413,9 +434,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         draftScroll.isHidden = showsConversation
         table.isHidden = !showsConversation
         view.accessibilityElements = [back, deviceTouch, home, simulator, divider,
-                                      showsConversation ? table : draftScroll, request, notice, jump, composer]
+                                      showsConversation ? table : draftScroll, request, notice, jump, pickers.model, pickers.approvals, composer]
         simulator.isEnabled = sessionID != nil
-        renderDraft()
         let session = model.sessions.first { $0.id == sessionID }
         threadTitle = session?.displayTitle(in: project) ?? ""
         renderAgent()
@@ -435,75 +455,32 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     }
 
     private func renderAgent() {
-        let modelName = model.agentName(for: model.modelSelection)
-        let name = modelName + " · " + model.runtimeMode.title
-        agent.accessibilityLabel = name
-        composer.placeholderText = "Message " + modelName
-        agent.isEnabled = true
-        let providers = model.availableModelProviders.map { provider in
-            UIMenu(title: provider["displayName"].string ?? "Agent", options: .displayInline, children: provider["models"].array.map { option in
-                let selection = JSONValue.from(["instanceId": provider["instanceId"].string ?? "", "model": option["slug"].string ?? ""])
-                return UIAction(title: option["name"].string ?? option["slug"].string ?? "Model",
-                                subtitle: provider["displayName"].string,
-                                attributes: model.isRunning || sending ? .disabled : [],
-                                state: selection == model.modelSelection ? .on : .off) { [weak self] _ in
-                    self?.model.chooseModel(selection)
-                }
-            })
-        }
-        let approvals = UIMenu(title: "Approvals", options: .displayInline, children: T3RuntimeMode.allCases.map { mode in
-            UIAction(title: mode.title, state: mode == model.runtimeMode ? .on : .off) { [weak self] _ in
-                Task { await self?.model.setRuntimeMode(mode) }
-            }
-        })
-        agent.menu = UIMenu(children: [approvals] + providers)
+        pickers.set(model: model.shortAgentName(for: model.modelSelection), mode: model.runtimeMode)
+        pickers.model.isEnabled = true
+        composer.placeholderText = "Message"
     }
 
-    private func renderDraft() {
-        guard sessionID == nil else { return }
-        let choices = model.quickModelSelections
-        // Keep the selected control and valid defaults immediately available.
-        let renderedChoices = choices + [model.modelSelection]
-        guard renderedChoices != renderedDraftChoices else { return }
-        renderedDraftChoices = renderedChoices
-        draftOptions.subviews.forEach { $0.removeFromSuperview() }
-        let current = model.modelSelection
-        func chip(_ title: String, symbol: String?, prominent: Bool, identifier: String) -> UIButton {
-            let button = Theme.glassButton(symbol: symbol, title: title, prominent: prominent, identifier: identifier)
-            button.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12, weight: .bold)
-            button.configuration?.imagePadding = 6
-            button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 16)
-            button.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-                var attributes = attributes; attributes.font = Theme.font(.subheadline, 15, .semibold); return attributes
-            }
-            return button
-        }
-        for selection in choices {
-            let selected = selection["instanceId"] == current["instanceId"] && selection["model"] == current["model"]
-            let button = chip(model.agentName(for: selection), symbol: selected ? "checkmark" : nil, prominent: selected,
-                              identifier: "draft.model.\(selection["instanceId"].string ?? "").\(selection["model"].string ?? "")")
-            button.accessibilityTraits = selected ? [.button, .selected] : .button
-            button.addAction(UIAction { [weak self] _ in
-                Theme.selectionHaptic()
-                self?.model.chooseModel(selection)
-                self?.render()
-            }, for: .touchUpInside)
-            draftOptions.addSubview(button)
-        }
-        let more = chip("More", symbol: "ellipsis", prominent: false, identifier: "draft.models")
-        more.accessibilityLabel = "All models"
-        more.showsMenuAsPrimaryAction = true
-        more.menu = UIMenu(children: model.availableModelProviders.map { provider in
-            UIMenu(title: provider["displayName"].string ?? "", options: .displayInline, children: provider["models"].array.map { option in
-                let selection = JSONValue.from(["instanceId":provider["instanceId"].string!,"model":option["slug"].string!])
-                return UIAction(title: option["name"].string ?? option["slug"].string!,
-                                state: selection["instanceId"] == current["instanceId"] && selection["model"] == current["model"] ? .on : .off) { [weak self] _ in
-                    self?.model.chooseModel(selection)
+    private func modelMenu() -> [UIMenuElement] {
+        let locked = model.isRunning || sending
+        return model.modelMenu.map { section in
+            UIMenu(title: section.title, options: .displayInline, children: section.choices.map { choice in
+                UIAction(title: choice.name, attributes: locked ? .disabled : [],
+                         state: choice.selection == model.modelSelection ? .on : .off) { [weak self] _ in
+                    Theme.selectionHaptic()
+                    self?.model.chooseModel(choice.selection)
                     self?.render()
                 }
             })
-        })
-        draftOptions.addSubview(more)
+        }
+    }
+
+    private func approvalMenu() -> [UIMenuElement] {
+        T3RuntimeMode.allCases.map { mode in
+            UIAction(title: mode.title, image: UIImage(systemName: mode.symbol), state: mode == model.runtimeMode ? .on : .off) { [weak self] _ in
+                Theme.selectionHaptic()
+                Task { await self?.model.setRuntimeMode(mode) }
+            }
+        }
     }
 
     private func renderSend() {
@@ -670,7 +647,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             (cell as? StepCell)?.configureEarlier(count: count, expanded: count == 0)
         case .gallery(let id, let shots):
             guard let cell = cell as? GalleryCell else { return }
-            cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? 56 : 20)
+            cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? 56 : 20, id: id)
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
             for shot in shots where GalleryCell.image(for: shot) == nil { loadImage(shot, item: id) }
         case .summary(let summary):

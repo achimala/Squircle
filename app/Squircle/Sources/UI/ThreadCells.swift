@@ -298,9 +298,10 @@ final class StepCell: TimelineCell {
 final class GalleryCell: TimelineCell {
     static let height: CGFloat = 188
     var onTap: ((Shot) -> Void)?
-    private let scroll = GalleryScrollView()
+    private let scroll = UIScrollView()
     private let row = UIStackView()
     private var shots: [Shot] = []
+    private var galleryID: String?
     private static let cache = NSCache<NSString, UIImage>()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -338,20 +339,22 @@ final class GalleryCell: TimelineCell {
         return thumbnail
     }
 
-    func configure(_ shots: [Shot], indent: CGFloat) {
+    /// Oldest to newest, resting on the newest. Only screenshots added to
+    /// this same gallery while it is on screen animate in; scrolling back
+    /// through history never replays them.
+    func configure(_ shots: [Shot], indent: CGFloat, id: String) {
         scroll.contentInset = UIEdgeInsets(top: 0, left: indent, bottom: 0, right: 20)
-        // Newest first, so the row rests at its start and a swipe right there
-        // still means "back".
-        let shots = Array(shots.reversed())
+        let same = id == galleryID
+        galleryID = id
         if shots != self.shots {
-            let added = Set(shots.map { "\($0.step)#\($0.index)" }).subtracting(self.shots.map { "\($0.step)#\($0.index)" })
-            let animate = !self.shots.isEmpty && window != nil && !Motion.reduced
+            let known = Set(self.shots.map { "\($0.step)#\($0.index)" })
+            let animate = same && !self.shots.isEmpty && window != nil && !Motion.reduced
             self.shots = shots
             row.arrangedSubviews.forEach { $0.removeFromSuperview() }
             for shot in shots {
                 let view = ShotView(shot: shot) { [weak self] in self?.onTap?($0) }
                 row.addArrangedSubview(view)
-                if animate, added.contains("\(shot.step)#\(shot.index)") {
+                if animate, !known.contains("\(shot.step)#\(shot.index)") {
                     view.alpha = 0
                     view.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
                     UIView.animate(withDuration: 0.7, delay: 0.1, usingSpringWithDamping: 0.7, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
@@ -360,21 +363,12 @@ final class GalleryCell: TimelineCell {
                     }
                 }
             }
-            scroll.setContentOffset(CGPoint(x: -indent, y: 0), animated: animate)
+            row.layoutIfNeeded()
+            scroll.layoutIfNeeded()
+            let end = max(-indent, scroll.contentSize.width + 20 - scroll.bounds.width)
+            scroll.setContentOffset(CGPoint(x: end, y: 0), animated: animate)
         }
         for case let view as ShotView in row.arrangedSubviews { view.update() }
-    }
-}
-
-/// Leaves a rightward swipe to the thread's back gesture once there is
-/// nothing further left to scroll to.
-final class GalleryScrollView: UIScrollView {
-    override func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        if gesture === panGestureRecognizer {
-            let velocity = panGestureRecognizer.velocity(in: self)
-            if velocity.x > 0, abs(velocity.x) > abs(velocity.y), contentOffset.x <= -contentInset.left + 1 { return false }
-        }
-        return super.gestureRecognizerShouldBegin(gesture)
     }
 }
 
@@ -439,13 +433,18 @@ final class ShotView: UIControl {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// True once this frame was shown before its picture arrived; only then
+    /// does the picture fade in.
+    private var waited = false
+
     func update() {
         startPlaybackIfReady()
-        guard let picture = GalleryCell.image(for: shot), image.image !== picture else { return }
+        guard let picture = GalleryCell.image(for: shot) else { waited = true; return }
+        guard image.image !== picture else { return }
         let ratio = picture.size.width / max(1, picture.size.height)
         width.constant = min(320, max(64, GalleryCell.height * ratio))
         image.layer.cornerRadius = ratio < 0.7 ? 18 : 10
-        if image.image == nil, window != nil {
+        if waited, image.image == nil, window != nil {
             UIView.transition(with: image, duration: 0.35, options: [.transitionCrossDissolve, .allowUserInteraction]) { self.image.image = picture }
         } else {
             image.image = picture

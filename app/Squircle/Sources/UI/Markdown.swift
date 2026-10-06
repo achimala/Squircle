@@ -24,7 +24,8 @@ enum Markdown {
                     .font: mono, .foregroundColor: inCode ? color : UIColor.secondaryLabel, .paragraphStyle: style
                 ])
             } else if trimmed.isEmpty {
-                line = NSAttributedString(string: "", attributes: [.font: font.withSize(font.pointSize * 0.45)])
+                // A blank line between paragraphs: room to breathe.
+                line = NSAttributedString(string: "", attributes: [.font: font.withSize(font.pointSize * 0.75)])
             } else {
                 line = paragraph(raw, font: font, mono: mono, color: color)
             }
@@ -67,7 +68,9 @@ enum Markdown {
         let style = NSMutableParagraphStyle()
         style.firstLineHeadIndent = indent
         style.headIndent = indent + hanging
-        style.lineSpacing = 2
+        style.lineSpacing = 3
+        // List items sit closer together than paragraphs do.
+        style.paragraphSpacing = hanging > 0 ? 4 : font.pointSize * 0.35
         if hanging > 0 { style.tabStops = [NSTextTab(textAlignment: .left, location: indent + hanging)] }
         let result = NSMutableAttributedString(string: prefix, attributes: [.font: base, .foregroundColor: UIColor.secondaryLabel])
         let options = AttributedString.MarkdownParsingOptions(allowsExtendedAttributes: false,

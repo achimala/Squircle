@@ -15,4 +15,13 @@ enum T3RuntimeMode: String, CaseIterable {
         case .fullAccess: return "Full access"
         }
     }
+
+    var symbol: String {
+        switch self {
+        case .approvalRequired: return "hand.raised"
+        case .autoAcceptEdits: return "pencil"
+        case .auto: return "checkmark.shield"
+        case .fullAccess: return "bolt.shield"
+        }
+    }
 }
