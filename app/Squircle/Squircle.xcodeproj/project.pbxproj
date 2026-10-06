@@ -17,13 +17,10 @@
 		3B9BE6F5A38660FAB6765472 /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
 		418A84EAC572BD0535B5A81B /* T3DeviceStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */; };
 		45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
-		4D73C0B2D065893A3788D560 /* Effects.metal in Sources */ = {isa = PBXBuildFile; fileRef = D15403DB031F5A5871770612 /* Effects.metal */; };
 		5A543E9E783BC20D7DD0CF3F /* StageMotionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37662310ACFA109B8C10D377 /* StageMotionTests.swift */; };
 		5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9685CE2D9A277E148073C169 /* MotionAudit.swift */; };
-		688463870C313D2AAFF24D2C /* EffectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55EBD92CDB5C2E9B0B01AE78 /* EffectView.swift */; };
 		69A1E4E034A3A9C310663B31 /* AppProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0882163016B1D5C885051FAD /* AppProject.swift */; };
 		6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
-		861D470B058510E6A50A3DA2 /* LensView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 454996E69D087ADE3BF1A5EB /* LensView.swift */; };
 		87D6E7B728B1986849DCC922 /* StageLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5F85DA67966D2090740EE5 /* StageLayout.swift */; };
 		93827AAA4A823E5BCDF41C05 /* DiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */; };
 		9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
@@ -73,10 +70,8 @@
 		374818EF24FCE5A3AF15700A /* PerformanceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceUITests.swift; sourceTree = "<group>"; };
 		37662310ACFA109B8C10D377 /* StageMotionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageMotionTests.swift; sourceTree = "<group>"; };
 		44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadDetail.swift; sourceTree = "<group>"; };
-		454996E69D087ADE3BF1A5EB /* LensView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LensView.swift; sourceTree = "<group>"; };
 		4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViews.swift; sourceTree = "<group>"; };
 		52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientModels.swift; sourceTree = "<group>"; };
-		55EBD92CDB5C2E9B0B01AE78 /* EffectView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EffectView.swift; sourceTree = "<group>"; };
 		5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioUITests.swift; sourceTree = "<group>"; };
 		5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffViewer.swift; sourceTree = "<group>"; };
 		5DF796323376B17E9A5610B5 /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
@@ -93,7 +88,6 @@
 		A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadTimeline.swift; sourceTree = "<group>"; };
 		C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Gateway.swift; sourceTree = "<group>"; };
 		CA04F2B838066131F83E73E4 /* ThreadCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadCells.swift; sourceTree = "<group>"; };
-		D15403DB031F5A5871770612 /* Effects.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Effects.metal; sourceTree = "<group>"; };
 		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotBinding.swift; sourceTree = "<group>"; };
 		DB495D800CF688C469BFF725 /* AppProjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProjectTests.swift; sourceTree = "<group>"; };
@@ -141,9 +135,6 @@
 				8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */,
 				1AE56C52866D21AD27A18697 /* DeviceStage.swift */,
 				5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */,
-				D15403DB031F5A5871770612 /* Effects.metal */,
-				55EBD92CDB5C2E9B0B01AE78 /* EffectView.swift */,
-				454996E69D087ADE3BF1A5EB /* LensView.swift */,
 				5DF796323376B17E9A5610B5 /* Markdown.swift */,
 				9685CE2D9A277E148073C169 /* MotionAudit.swift */,
 				D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */,
@@ -354,9 +345,6 @@
 				B33D4A9C782619416B5ABFD7 /* ClientModels.swift in Sources */,
 				C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */,
 				93827AAA4A823E5BCDF41C05 /* DiffViewer.swift in Sources */,
-				688463870C313D2AAFF24D2C /* EffectView.swift in Sources */,
-				4D73C0B2D065893A3788D560 /* Effects.metal in Sources */,
-				861D470B058510E6A50A3DA2 /* LensView.swift in Sources */,
 				3B375023CFEB927A141C090E /* Markdown.swift in Sources */,
 				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
 				261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */,
@@ -492,7 +480,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 23;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -570,7 +558,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 23;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

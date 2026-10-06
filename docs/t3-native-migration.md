@@ -608,3 +608,26 @@ Signed build 21 succeeded, job `ea489ca3-23f5-4275-8c95-ff26ccebd611`. Not insta
 Evidence (simulator): tests as before pass; tap arc and send checked frame by
 frame in slow motion; back swipe frozen at 25/55/85 % docked and half.
 Signed build 22 succeeded, job `bba26565-54c6-403b-baf7-efaba4495f8b`. Not installed on the phone.
+
+## 2026-10-06 polish, 0.3.0 (23)
+
+- Your messages are tinted glass; glass rows rise on entrance instead of
+  fading (faded glass renders wrongly).
+- Finished-turn pulse: a soft Core Animation bloom around the summary pill
+  (the Metal ring rendered low-rate and blurry). `Effects.metal`,
+  `EffectView` and `LensView` are removed; no Metal shaders remain.
+- Live pill: task text slides vertically and is clipped by the capsule.
+- Pinned to the bottom, every change (your message, live pill, agent rows,
+  streaming text) follows on one retargeting spring, including after the
+  send flight and after animated row changes.
+- Threads are cached in memory and in Caches/threads (state, step details,
+  media); reopening shows the cached thread synchronously, laid out with
+  per-thread cached row heights, at the bottom. A restored thread accepts the
+  next live snapshot regardless of sequence.
+- Home orders apps by last opened (UserDefaults), reordering only when a
+  thread opens.
+
+Evidence (simulator): unit tests and the draft, approval, navigation and
+reduced-motion UI tests pass. Re-entry captured every 150 ms: the thread
+appears at the bottom and does not move. Pill slide and pulse checked in slow
+motion; send ends pinned with the live pill visible.

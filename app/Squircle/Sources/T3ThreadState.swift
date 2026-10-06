@@ -1,17 +1,24 @@
 import Foundation
 
 /// Server sequence numbers prevent replayed chunks from duplicating messages.
-struct T3ThreadState {
+struct T3ThreadState: Codable {
     private(set) var sequence = -1
     private(set) var thread: JSONValue = .null
     /// Inputs and screenshot counts from the Mac, keyed by tool call.
     var details: [String: JSONValue] = [:]
+    /// Newest step detail fetched, so later fetches ask only for what's new.
+    var detailsSince: String?
+    /// Recordings and images published into the thread.
+    var media: [JSONValue] = []
+    /// Restored from a cache: the next live snapshot replaces it whatever its
+    /// sequence, so a reset server can never leave a thread stuck.
+    var fromCache = false
     var activityCount: Int { thread["activities"].array.count }
     mutating func consume(_ item: JSONValue) {
         if item["kind"].string == "snapshot" {
             let snapshot = item["snapshot"]
-            guard let seq = snapshot["snapshotSequence"].int, seq >= sequence else { return }
-            sequence = seq; thread = snapshot["thread"]; return
+            guard let seq = snapshot["snapshotSequence"].int, seq >= sequence || fromCache else { return }
+            sequence = seq; thread = snapshot["thread"]; fromCache = false; return
         }
         guard item["kind"].string == "event" else { return }
         let event = item["event"]

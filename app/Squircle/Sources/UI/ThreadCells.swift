@@ -118,7 +118,8 @@ final class HeaderCell: TimelineCell {
 /// edge; the answer fills the column; notes and thoughts are quieter.
 final class MessageCell: TimelineCell {
     enum Style { case user, answer, note, thought }
-    let bubble = UIView()
+    /// Your words sit in lightly tinted glass.
+    let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
     let text = UITextView()
     private var leading: NSLayoutConstraint!
     private var trailing: NSLayoutConstraint!
@@ -127,9 +128,6 @@ final class MessageCell: TimelineCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        bubble.backgroundColor = Theme.userBubble
-        bubble.layer.cornerRadius = 21
-        bubble.layer.cornerCurve = .continuous
         text.isEditable = false
         text.isScrollEnabled = false
         text.backgroundColor = .clear
@@ -658,18 +656,40 @@ final class SummaryCell: TimelineCell {
         accessibilityIdentifier = "thread.summary"
     }
 
-    /// A ring of light leaves the pill: the turn just finished.
+    /// A soft pulse: light blooms around the pill and fades as it settles.
     func celebrate() {
-        let effect = EffectView()
-        effect.mode = .ripple
-        effect.cornerRadius = 19
-        effect.inset = 60
-        effect.frame = glass.frame.insetBy(dx: -60, dy: -60)
-        contentView.insertSubview(effect, belowSubview: glass)
-        effect.layoutIfNeeded()
-        effect.ripple { effect.removeFromSuperview() }
-        glass.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
-        UIView.animate(withDuration: 0.7, delay: 0, usingSpringWithDamping: 0.55, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
+        guard !Motion.reduced else { return }
+        let bloom = CALayer()
+        bloom.frame = glass.frame
+        bloom.cornerRadius = glass.bounds.height / 2
+        bloom.cornerCurve = .continuous
+        bloom.backgroundColor = Theme.accent.withAlphaComponent(0.18).cgColor
+        bloom.shadowColor = Theme.accent.cgColor
+        bloom.shadowRadius = 16
+        bloom.shadowOffset = .zero
+        bloom.shadowOpacity = 0
+        bloom.shadowPath = UIBezierPath(roundedRect: CGRect(origin: .zero, size: glass.bounds.size), cornerRadius: glass.bounds.height / 2).cgPath
+        bloom.opacity = 0
+        contentView.layer.insertSublayer(bloom, below: glass.layer)
+        let glow = CAKeyframeAnimation(keyPath: "shadowOpacity")
+        glow.values = [0, 0.75, 0]
+        glow.keyTimes = [0, 0.3, 1]
+        let fill = CAKeyframeAnimation(keyPath: "opacity")
+        fill.values = [0, 1, 0]
+        fill.keyTimes = [0, 0.25, 1]
+        let grow = CABasicAnimation(keyPath: "transform.scale")
+        grow.fromValue = 1
+        grow.toValue = 1.12
+        let pulse = CAAnimationGroup()
+        pulse.animations = [glow, fill, grow]
+        pulse.duration = 1.1
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { bloom.removeFromSuperlayer() }
+        bloom.add(pulse, forKey: "pulse")
+        CATransaction.commit()
+        glass.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+        UIView.animate(withDuration: 0.8, delay: 0, usingSpringWithDamping: 0.6, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
             self.glass.transform = .identity
         }
     }
@@ -685,13 +705,23 @@ final class SummaryCell: TimelineCell {
     }
 }
 
-/// What the agent is doing now, in a glass loupe. When the agent moves on,
-/// the finished task rises out through the glass edge, bending as it goes
-/// (`LensView`), and the next one rises in; at rest the words are crisp.
+/// A view that reports when its own size is laid out.
+final class LayoutView: UIView {
+    var onLayout: (() -> Void)?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?()
+    }
+}
+
+/// What the agent is doing now, in a glass capsule. When the agent moves on,
+/// the finished task slides up out of the capsule and the next slides in
+/// from below, clipped by the capsule's shape.
 final class LiveCell: TimelineCell {
     private let glass = Theme.glassSurface(cornerRadius: 23)
-    private let line = ShimmerLabel()
-    private let lens = LensView()
+    /// Clips the sliding lines to the capsule.
+    private let track = LayoutView()
+    private var line = ShimmerLabel()
     private var text: String?
     private let mark = UIView()
     private let elapsed = UILabel()
@@ -707,18 +737,18 @@ final class LiveCell: TimelineCell {
         elapsed.textColor = .tertiaryLabel
         elapsed.setContentCompressionResistancePriority(.required, for: .horizontal)
         elapsed.setContentHuggingPriority(.required, for: .horizontal)
-        line.font = Theme.font(.subheadline, 15, .semibold)
-        line.textColor = .secondaryLabel
-        line.numberOfLines = 1
-        line.isShimmering = true
-        lens.isHidden = true
+        track.onLayout = { [weak self] in self?.placeLine() }
+        track.clipsToBounds = true
+        track.layer.cornerRadius = 23
+        track.layer.cornerCurve = .continuous
+        self.style(line)
         glass.isUserInteractionEnabled = false
         glass.contentView.clipsToBounds = true
         glass.contentView.layer.cornerRadius = 23
         glass.contentView.layer.cornerCurve = .continuous
         glass.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(glass)
-        [mark, line, lens, elapsed].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
+        [track, mark, elapsed].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         NSLayoutConstraint.activate([
             glass.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
             glass.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
@@ -728,14 +758,10 @@ final class LiveCell: TimelineCell {
             mark.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 17),
             mark.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
             mark.widthAnchor.constraint(equalToConstant: 14), mark.heightAnchor.constraint(equalToConstant: 14),
-            line.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 12),
-            line.trailingAnchor.constraint(lessThanOrEqualTo: elapsed.leadingAnchor, constant: -10),
-            line.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
-            lens.leadingAnchor.constraint(equalTo: mark.trailingAnchor, constant: 12),
-            // Fixed width, so a picture drawn for it is never stretched.
-            lens.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -72),
-            lens.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
-            lens.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
+            track.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor),
+            track.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor),
+            track.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
+            track.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
             elapsed.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -17),
             elapsed.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor)
         ])
@@ -743,23 +769,21 @@ final class LiveCell: TimelineCell {
         isAccessibilityElement = true
     }
 
-    /// The line as the lens will see it: drawn at the lens's size, text
-    /// vertically centred where the label sits.
-    private func picture(of text: String) -> UIImage {
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = window?.screen.scale ?? traitCollection.displayScale
-        let size = lens.bounds.size
-        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            let attributes: [NSAttributedString.Key: Any] = [.font: line.font, .foregroundColor: UIColor.secondaryLabel.resolvedColor(with: traitCollection)]
-            let measured = (text as NSString).boundingRect(with: CGSize(width: .greatestFiniteMagnitude, height: size.height),
-                                                           options: [.usesLineFragmentOrigin], attributes: attributes, context: nil)
-            let style = NSMutableParagraphStyle()
-            style.lineBreakMode = .byTruncatingTail
-            var withStyle = attributes
-            withStyle[.paragraphStyle] = style
-            (text as NSString).draw(in: CGRect(x: 0, y: (size.height - measured.height) / 2, width: size.width, height: measured.height),
-                                    withAttributes: withStyle)
-        }
+    private func style(_ label: ShimmerLabel) {
+        label.font = Theme.font(.subheadline, 15, .semibold)
+        label.textColor = .secondaryLabel
+        label.numberOfLines = 1
+        label.isShimmering = true
+        track.addSubview(label)
+    }
+
+    /// Where a line rests: after the mark, short of the timer.
+    private var restingFrame: CGRect {
+        CGRect(x: 43, y: 0, width: max(0, track.bounds.width - 43 - 66), height: track.bounds.height)
+    }
+
+    private func placeLine() {
+        if line.layer.animationKeys() == nil { line.frame = restingFrame }
     }
 
     func configure(_ status: LiveStatus) {
@@ -767,21 +791,26 @@ final class LiveCell: TimelineCell {
         tick()
         accessibilityLabel = status.headline
         guard status.headline != text else { return }
-        let previous = text
+        let first = text == nil
         text = status.headline
-        guard let previous, window != nil, !Motion.reduced, lens.bounds.width > 1 else {
+        guard !first, window != nil, !Motion.reduced, track.bounds.height > 0 else {
             line.text = status.headline
+            setNeedsLayout()
             return
         }
-        let played = lens.play(from: picture(of: previous), to: picture(of: status.headline)) { [weak self] in
-            guard let self else { return }
-            line.text = text
-            line.isHidden = false
-            lens.isHidden = true
-        }
-        guard played else { line.text = status.headline; return }
-        line.isHidden = true
-        lens.isHidden = false
+        // The finished task slides up out of the capsule; the next slides in.
+        let old = line
+        let next = ShimmerLabel()
+        style(next)
+        next.text = status.headline
+        line = next
+        let rest = restingFrame, travel = track.bounds.height * 0.8
+        next.frame = rest.offsetBy(dx: 0, dy: travel)
+        UIView.animate(withDuration: 0.55, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) {
+            old.frame = rest.offsetBy(dx: 0, dy: -travel)
+            next.frame = rest
+        } completion: { _ in old.removeFromSuperview() }
     }
 
     private func tick() {

@@ -61,7 +61,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private var stickyTurn: String?
     /// Measured row heights, so long conversations keep their place while
     /// rows above are measured, expanded or folded.
-    private var heights: [String: CGFloat] = [:]
+    private var heights: [String: CGFloat] {
+        get { Self.heightCache[sessionID ?? ""] ?? [:] }
+        set { Self.heightCache[sessionID ?? ""] = newValue }
+    }
+    /// Row heights per thread, kept across visits so a returning thread lays
+    /// out at its true size and opens exactly at the bottom.
+    private static var heightCache: [String: [String: CGFloat]] = [:]
     private var items: [ThreadItem] = []
     private var itemsByID: [String: ThreadItem] = [:]
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
@@ -307,6 +313,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         model.selectProject(project)
         detent.set(sessionID == nil ? 1 : CGFloat(UserDefaults.standard.double(forKey: Self.detentKey)).clamped())
         let requestedSessionID = sessionID
+        if let requestedSessionID {
+            // Show what was last seen of this thread right away, at the bottom.
+            model.prepareSession(requestedSessionID)
+            selectionReady = true
+        }
         Task { [weak self] in
             guard let self else { return }
             if let requestedSessionID { await model.selectSession(requestedSessionID) } else { await model.beginDraft() }
@@ -550,7 +561,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         // only streaming text, which just grows, updates without animation.
         let structural = !first && (!inserted.isEmpty || removed > 0) && inserted.count + removed <= 16 && !Motion.reduced
         if folding || structural {
-            dataSource.apply(snapshot, animatingDifferences: true)
+            dataSource.apply(snapshot, animatingDifferences: true) { [weak self] in
+                guard let self, pinToBottom, flyingID == nil else { return }
+                scrollToBottom(animated: true)
+            }
         } else {
             UIView.performWithoutAnimation {
                 dataSource.apply(snapshot, animatingDifferences: false)
@@ -558,7 +572,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             }
         }
         // A message in flight scrolls the conversation on its own spring.
-        if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && (!inserted.isEmpty || folding)) }
+        // Pinned, the conversation follows new content on one spring.
+        if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && view.window != nil) }
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
         updateSticky()
         if previous["live"] != nil, itemsByID["live"] == nil, let finished = next.last(where: { if case .summary = $0 { return true }; return false }) {
@@ -608,7 +623,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             guard let index = dataSource.indexPath(for: id), let cell = table.cellForRow(at: index) else { continue }
             if id == flyingID { continue }
             let view = cell.contentView
-            view.alpha = 0
+            // Glass mustn't be faded (it renders wrongly); it rises instead.
+            let glassy = cell is MessageCell || cell is SummaryCell || cell is LiveCell || cell is BuildCell || cell is ChangesCell
+            if !glassy { view.alpha = 0 }
             view.transform = CGAffineTransform(translationX: 0, y: 16).scaledBy(x: 0.97, y: 0.97)
             UIView.animate(withDuration: 0.6, delay: Double(order) * 0.05, usingSpringWithDamping: 0.82, initialSpringVelocity: 0,
                            options: [.allowUserInteraction, .beginFromCurrentState]) {
@@ -620,7 +637,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
     private func scrollToBottom(animated: Bool = false) {
         // Rows are measured as they appear, so the true bottom is only known
-        // after laying out there; settle on it before any animation.
+        // after laying out there; find it, then move there.
         let start = table.contentOffset.y
         func bottom() -> CGFloat { max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height) }
         var target = bottom()
@@ -631,12 +648,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             if abs(next - target) < 0.5 { break }
             target = next
         }
-        guard animated, !Motion.reduced, abs(start - target) > 0.5 else { return }
-        // From far away, glide the last screen rather than racing through
-        // every row in between.
-        // Driven frame by frame, so rows are laid out all the way down.
-        scrollSpring.set(max(start, target - table.bounds.height * 0.9))
-        scrollSpring.animate(to: target)
+        guard animated, !Motion.reduced, abs(start - target) > 0.5 else {
+            scrollSpring.stop()
+            table.contentOffset.y = target
+            return
+        }
+        table.contentOffset.y = start
+        if abs(scrollSpring.value - scrollSpring.target) > 0.5, abs(scrollSpring.value - start) < 1 {
+            // Already gliding: retarget without losing speed.
+            scrollSpring.animate(to: target)
+        } else {
+            // From far away, glide the last screen rather than racing past every row.
+            scrollSpring.set(max(start, target - table.bounds.height * 0.9))
+            scrollSpring.animate(to: target)
+        }
     }
 
     /// Scrolls the conversation on one spring, laying rows out every frame.
@@ -943,10 +968,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
         let flyer = UIView(frame: bubble)
         flyer.isUserInteractionEnabled = false
-        let fill = UIView(frame: flyer.bounds)
-        fill.backgroundColor = Theme.userBubble
-        fill.layer.cornerRadius = cell.bubble.layer.cornerRadius
-        fill.layer.cornerCurve = .continuous
+        let fill = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
+        fill.frame = flyer.bounds
         flyer.addSubview(fill)
         words.frame = CGRect(x: textFrame.minX - bubble.minX, y: textFrame.minY - bubble.minY,
                              width: textFrame.width, height: textFrame.height)
@@ -969,6 +992,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             composer.revealPlaceholder()
             if flyingID == id { flyingID = nil }
             if let index = dataSource.indexPath(for: id) { table.cellForRow(at: index)?.contentView.alpha = 1 }
+            if pinToBottom { scrollToBottom(animated: true) }
         }
         rise.startAnimation()
     }
@@ -1287,6 +1311,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         cell.configure(LiveStatus(headline: "Running the unit tests", started: nil))
     }
     func debugTapDevice() { deviceTapped() }
+    /// Verification only: replays the finished-turn pulse on the last summary.
+    func debugPulse() {
+        guard let last = items.last(where: { if case .summary = $0 { return true }; return false }),
+              let index = dataSource.indexPath(for: last.id) else { return }
+        pinToBottom = false
+        table.scrollToRow(at: index, at: .middle, animated: false)
+        table.layoutIfNeeded()
+        (table.cellForRow(at: index) as? SummaryCell)?.celebrate()
+    }
     func debugSetDetent(_ value: CGFloat) {
         view.layoutIfNeeded()
         detent.set(value)

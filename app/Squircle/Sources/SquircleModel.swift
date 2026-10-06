@@ -42,9 +42,11 @@ final class SquircleModel: ObservableObject {
     private var sessionProjects: [String:String] = [:]
     private var submitting = false
     private var stepDetails: Task<Void,Never>?
-    private var stepDetailsSince: String?
     private var stepDetailsCount = -1
-    private var media: [JSONValue] = []
+    /// Threads seen this session, so returning to one shows it at once.
+    private var threadCache: [String: T3ThreadState] = [:]
+    private var cacheWrite: Task<Void, Never>?
+    private var media: [JSONValue] { state.media }
     private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
     private let preferences: UserDefaults
     private static let preferredModelKey = "squircle.t3.preferredModel"
@@ -209,17 +211,43 @@ final class SquircleModel: ObservableObject {
         reconcileProjects()
     }
     private func reconcileProjects() {
-        projects = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
+        // Most recently used first; apps never opened keep T3's order after them.
+        let used = preferences.dictionary(forKey: Self.lastUsedKey) as? [String: Double] ?? [:]
+        let catalog = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
+        projects = catalog.enumerated().sorted { a, b in
+            let x = used[a.element.id] ?? 0, y = used[b.element.id] ?? 0
+            return x != y ? x > y : a.offset < b.offset
+        }.map(\.element)
     }
-    func selectProject(_ project: AppProject) { selectedProjectID = project.id; UserDefaults.standard.set(project.id,forKey:"squircle.t3.selectedProject") }
+    private static let lastUsedKey = "squircle.t3.lastUsed"
+    /// Opening an app's thread makes it the most recently used. The carousel
+    /// reorders behind the open thread, never while you're browsing it.
+    func selectProject(_ project: AppProject) {
+        selectedProjectID = project.id; UserDefaults.standard.set(project.id,forKey:"squircle.t3.selectedProject")
+        var used = preferences.dictionary(forKey: Self.lastUsedKey) as? [String: Double] ?? [:]
+        used[project.id] = Date.now.timeIntervalSince1970
+        preferences.set(used, forKey: Self.lastUsedKey)
+        reconcileProjects()
+    }
     func sessions(for project: AppProject) -> [ChatSession] { sessions.filter { sessionProjects[$0.id] == project.id } }
     func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
-    func selectSession(_ id: String) async {
-        selectedSessionID = id; messages = []; requests = []; state = T3ThreadState(); isRunning = false
-        stepDetails?.cancel(); stepDetailsSince = nil; stepDetailsCount = -1; media = []; changes = []
-        runtimeMode = pendingRuntimeModes[id] ?? .auto
+    /// Shows a thread immediately from what was last seen of it (this session
+    /// or on disk); the live subscription then brings it up to date.
+    func prepareSession(_ id: String) {
+        guard selectedSessionID != id || state.sequence < 0 else { return }
+        saveCurrentThread()
+        selectedSessionID = id; requests = []; isRunning = false
+        stepDetails?.cancel(); stepDetailsCount = -1
+        state = threadCache[id] ?? (configuration != nil ? Self.loadThread(id) : nil) ?? T3ThreadState()
+        if state.sequence >= 0 { state.fromCache = true }
+        messages = conversation(); requests = state.pendingRequests; changes = state.changes; isRunning = state.isRunning
+        runtimeMode = pendingRuntimeModes[id] ?? state.thread["runtimeMode"].string.flatMap(T3RuntimeMode.init(rawValue:)) ?? .auto
         if let pending = pendingModelSelections[id] { modelSelection = pending }
+        else if state.thread["modelSelection"] != .null { modelSelection = state.thread["modelSelection"] }
+    }
+    func selectSession(_ id: String) async {
+        prepareSession(id)
         guard let gateway else { return }
         let previousSubscription = threadSubscription; threadSubscription = nil
         await gateway.unsubscribe(previousSubscription)
@@ -237,6 +265,7 @@ final class SquircleModel: ObservableObject {
     /// A new conversation that T3 has not been told about yet. The thread is
     /// created by its first message, so abandoned drafts leave nothing behind.
     func beginDraft() async {
+        saveCurrentThread()
         selectedSessionID = nil; messages = []; requests = []; changes = []; state = T3ThreadState(); isRunning = false; error = nil
         runtimeMode = .auto
         restorePreferredModel()
@@ -278,8 +307,45 @@ final class SquircleModel: ObservableObject {
             self.error = error.localizedDescription
         }
     }
+    // MARK: Thread cache
+
+    private nonisolated static var cacheDirectory: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("threads", isDirectory: true)
+    }
+    private nonisolated static func loadThread(_ id: String) -> T3ThreadState? {
+        guard let url = cacheDirectory?.appendingPathComponent(id + ".json"), let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(T3ThreadState.self, from: data)
+    }
+    private func saveCurrentThread() {
+        guard let id = selectedSessionID, state.sequence >= 0 else { return }
+        threadCache[id] = state
+        cacheWrite?.cancel(); cacheWrite = nil
+        writeToDisk(id, state)
+    }
+    /// Keeps the on-disk copy current without writing on every event.
+    private func scheduleCacheWrite() {
+        guard let id = selectedSessionID else { return }
+        threadCache[id] = state
+        guard cacheWrite == nil else { return }
+        cacheWrite = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, !Task.isCancelled else { return }
+            cacheWrite = nil
+            if selectedSessionID == id { writeToDisk(id, state) }
+        }
+    }
+    private func writeToDisk(_ id: String, _ state: T3ThreadState) {
+        guard configuration != nil else { return }
+        Task.detached(priority: .utility) {
+            guard let directory = Self.cacheDirectory, let data = try? JSONEncoder().encode(state) else { return }
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? data.write(to: directory.appendingPathComponent(id + ".json"), options: .atomic)
+        }
+    }
+
     func consumeThread(_ item: JSONValue) {
         state.consume(item); messages = conversation(); requests = state.pendingRequests
+        scheduleCacheWrite()
         let turnChanges = state.changes
         if turnChanges != changes { changes = turnChanges }
         if state.activityCount != stepDetailsCount { stepDetailsCount = state.activityCount; scheduleStepDetails() }
@@ -351,11 +417,12 @@ final class SquircleModel: ObservableObject {
             try? await Task.sleep(for: .milliseconds(400))
             guard let self, !Task.isCancelled else { return }
             async let published = try? client.threadMedia(threadID: id)
-            guard let steps = try? await client.threadSteps(threadID: id, since: stepDetailsSince),
+            guard let steps = try? await client.threadSteps(threadID: id, since: state.detailsSince),
                   !Task.isCancelled, selectedSessionID == id else { return }
             if let published = await published, published != media, selectedSessionID == id {
-                media = published
+                state.media = published
                 messages = conversation()
+                scheduleCacheWrite()
             }
             guard !steps.isEmpty else { return }
             for step in steps {
@@ -363,9 +430,10 @@ final class SquircleModel: ObservableObject {
                 var merged = state.details[key]?.object ?? [:]
                 for (field, value) in step.object { merged[field] = value }
                 state.details[key] = .object(merged)
-                if let at = step["updated_at"].string, at > (stepDetailsSince ?? "") { stepDetailsSince = at }
+                if let at = step["updated_at"].string, at > (state.detailsSince ?? "") { state.detailsSince = at }
             }
             messages = conversation()
+            scheduleCacheWrite()
         }
     }
     /// T3's conversation with the thread's published recordings in time order.

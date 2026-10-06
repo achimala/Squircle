@@ -130,8 +130,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             }
             if environment["SQUIRCLE_DEMO_LENS"] == "1" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                    LensView.slowMotion = value("SQUIRCLE_SLOW").map(Double.init) ?? 1
+                    if let slow = value("SQUIRCLE_SLOW") { self?.view.window?.layer.speed = Float(1 / slow) }
                     self?.thread?.debugLens()
+                }
+            }
+            if environment["SQUIRCLE_DEMO_PULSE"] == "1" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                    if let slow = value("SQUIRCLE_SLOW") { self?.view.window?.layer.speed = Float(1 / slow) }
+                    self?.thread?.debugPulse()
                 }
             }
             if let text = environment["SQUIRCLE_DEMO_SEND"] {
