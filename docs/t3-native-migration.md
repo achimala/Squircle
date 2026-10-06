@@ -631,3 +631,4 @@ Evidence (simulator): unit tests and the draft, approval, navigation and
 reduced-motion UI tests pass. Re-entry captured every 150 ms: the thread
 appears at the bottom and does not move. Pill slide and pulse checked in slow
 motion; send ends pinned with the live pill visible.
+Signed build 23 succeeded, job `b98771f0-439e-4e8a-abc9-107ba1293aca`. Not installed on the phone.
