@@ -609,10 +609,18 @@ final class SquircleModel: ObservableObject {
         guard let client else { throw ClientError.configuration }
         let record = try await client.importMacProject(project:project,scheme:scheme,name:name,configuration:configuration)
         let root = URL(fileURLWithPath:project).deletingLastPathComponent().path
-        if !shell["projects"].array.contains(where: { let workspace = $0["workspaceRoot"].string ?? ""; return !workspace.isEmpty && (root == workspace || root.hasPrefix(workspace + "/")) }) {
+        appMetadata.removeAll { $0.id == record.id }; appMetadata.append(record)
+        // The app needs a T3 project of its own unless it already owns the
+        // workspace around it; another app may own that one.
+        let catalog = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
+        if !catalog.contains(where: { $0.metadataID == record.id }) {
+            if let taken = catalog.first(where: { app in
+                shell["projects"].array.contains { $0["id"].string == app.id && $0["workspaceRoot"].string == root }
+            }) {
+                throw ClientError.backend("T3", 409, "\(taken.name) already uses this folder in T3.")
+            }
             try await dispatch(["type":"project.create","projectId":UUID().uuidString.lowercased(),"title":name,"workspaceRoot":root])
         }
-        appMetadata.removeAll { $0.id == record.id }; appMetadata.append(record)
         // HTTP shell gives an immediate authoritative result after the write.
         if let gateway { shell = try await gateway.http.json("/api/orchestration/shell"); consumeShell(.from(["kind":"snapshot","snapshot":shell.foundation])) }
         guard let app = projects.first(where: { $0.metadataID == record.id }) else { throw ClientError.response("T3 app import") }

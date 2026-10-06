@@ -671,3 +671,11 @@ export re-signed the framework with Apple Distribution (2F26US4NAU); entitlement
 list both Keychain groups. Overlay binary 1.4 MB; the IPA grew from 165 KB to 776 KB.
 Squircle build `1bd05d40-3585-4341-ac0a-86572806af82` carries the shared group.
 **Not yet validated:** overlay launch and use on the phone.
+
+**Fix, 0.3.0 (25):** several Xcode projects inside one T3 workspace (this repo
+holds Squircle and Squircle Probe) made the app whose Mac record was updated last
+take over the T3 project, and importing Probe failed. The owner is now chosen
+independently of list order (the project nearest the workspace root, then the
+one T3's title names), and importing an app whose surrounding T3 project
+belongs to another app creates a T3 project for the app's own folder. Build
+`03aca239-90fe-4593-a525-c2da742ddbb8`; catalog regression test passes.

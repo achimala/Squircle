@@ -158,6 +158,23 @@ struct AppProject: Identifiable, Equatable, Codable {
 /// T3 IDs own navigation and thread membership. The Mac catalog enriches the
 /// matching checkout without deriving identity from app names or chat titles.
 enum T3AppCatalog {
+    /// Several Xcode projects can sit inside one T3 workspace; only one app
+    /// can own its threads. Independent of the Mac's list order: the project
+    /// nearest the workspace root, then the one T3 names, then a stable ID.
+    static func claimant(_ records: [AppMetadata], of project: JSONValue) -> AppMetadata? {
+        let root = project["workspaceRoot"].string ?? ""
+        let title = project["title"].string ?? ""
+        func depth(_ record: AppMetadata) -> Int {
+            URL(fileURLWithPath: record.project).deletingLastPathComponent().path
+                .dropFirst(root.count).split(separator: "/").count
+        }
+        return records.min { a, b in
+            if depth(a) != depth(b) { return depth(a) < depth(b) }
+            if (a.name == title) != (b.name == title) { return a.name == title }
+            return a.id < b.id
+        }
+    }
+
     static func projects(shell:JSONValue,metadata:[AppMetadata],builds:[AppBuild]) -> [AppProject] {
         let projects = shell["projects"].array.filter { $0["deletedAt"] == .null }
         func owner(_ path:String) -> String? {
@@ -168,7 +185,7 @@ enum T3AppCatalog {
         }
         return projects.map { p in
             let id = p["id"].string ?? ""
-            let record = metadata.first { owner($0.project) == id }
+            let record = claimant(metadata.filter { owner($0.project) == id }, of: p)
             let related = builds.filter { $0.request.map { owner($0.project) == id } ?? false }
             let request = record?.buildRequest ?? related.filter { $0.request?.mode == "archive" }.sorted { $0.date > $1.date }.first?.request
             return AppProject(id:id,name:record?.name ?? p["title"].string ?? "App",subtitle:"",

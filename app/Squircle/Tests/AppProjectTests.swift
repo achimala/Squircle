@@ -39,6 +39,20 @@ final class AppProjectTests: XCTestCase {
         XCTAssertEqual(rows[1].metadataID,"mac-app"); XCTAssertTrue(rows[1].canBuild)
         XCTAssertNil(rows[2].metadataID); XCTAssertFalse(rows[2].canBuild)
     }
+    func testSharedWorkspaceOwnerDoesNotDependOnMacListOrder() {
+        let snapshot = shell([["id":"repo","title":"Squircle","workspaceRoot":"/src/Repo"]])
+        let main = AppMetadata(id:"main",name:"Squircle",project:"/src/Repo/app/Squircle/Squircle.xcodeproj",scheme:"Squircle",
+                               bundleID:"a",summary:"",updatedAt:1,preview:nil)
+        let probe = AppMetadata(id:"probe",name:"Squircle Probe",project:"/src/Repo/examples/Probe/Probe.xcodeproj",scheme:"Probe",
+                                bundleID:"b",summary:"",updatedAt:2,preview:nil)
+        XCTAssertEqual(T3AppCatalog.projects(shell:snapshot,metadata:[probe,main],builds:[]).first?.metadataID,"main")
+        XCTAssertEqual(T3AppCatalog.projects(shell:snapshot,metadata:[main,probe],builds:[]).first?.metadataID,"main")
+        // Its own nested T3 project gives the second app its own place.
+        let nested = shell([["id":"repo","title":"Squircle","workspaceRoot":"/src/Repo"],
+                            ["id":"probe-t3","title":"Squircle Probe","workspaceRoot":"/src/Repo/examples/Probe"]])
+        let rows = T3AppCatalog.projects(shell:nested,metadata:[probe,main],builds:[])
+        XCTAssertEqual(rows.map(\.metadataID),["main","probe"])
+    }
     func testSimulatorJobsDoNotReplaceAnInstallableArchiveRecipe() throws {
         let snapshot = shell([["id":"app","title":"App","workspaceRoot":"/src/App"]])
         let archive = try build(id:"archive",title:"App",path:"/src/App/App.xcodeproj",date:10)
