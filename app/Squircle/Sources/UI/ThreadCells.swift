@@ -118,8 +118,7 @@ final class HeaderCell: TimelineCell {
 /// edge; the answer fills the column; notes and thoughts are quieter.
 final class MessageCell: TimelineCell {
     enum Style { case user, answer, note, thought }
-    /// Your messages sit in tinted glass.
-    let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
+    let bubble = UIView()
     let text = UITextView()
     private var leading: NSLayoutConstraint!
     private var trailing: NSLayoutConstraint!
@@ -128,6 +127,9 @@ final class MessageCell: TimelineCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
+        bubble.backgroundColor = Theme.userBubble
+        bubble.layer.cornerRadius = 21
+        bubble.layer.cornerCurve = .continuous
         text.isEditable = false
         text.isScrollEnabled = false
         text.backgroundColor = .clear
@@ -644,7 +646,6 @@ final class LiveCell: TimelineCell {
     private var text: String?
     private let mark = UIView()
     private let elapsed = UILabel()
-    private let sheen = CAGradientLayer()
     private var started: Date?
     private var timer: Timer?
 
@@ -663,13 +664,6 @@ final class LiveCell: TimelineCell {
         line.isShimmering = true
         lens.isHidden = true
         glass.isUserInteractionEnabled = false
-        // A slow band of light crossing the glass.
-        sheen.colors = [UIColor.white.withAlphaComponent(0).cgColor, UIColor.white.withAlphaComponent(0.5).cgColor,
-                        UIColor.white.withAlphaComponent(0).cgColor]
-        sheen.startPoint = CGPoint(x: 0, y: 0.3)
-        sheen.endPoint = CGPoint(x: 1, y: 0.7)
-        sheen.locations = [0.35, 0.5, 0.65]
-        glass.contentView.layer.addSublayer(sheen)
         glass.contentView.clipsToBounds = true
         glass.contentView.layer.cornerRadius = 23
         glass.contentView.layer.cornerCurve = .continuous
@@ -698,14 +692,6 @@ final class LiveCell: TimelineCell {
         ])
         accessibilityIdentifier = "thread.working"
         isAccessibilityElement = true
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        sheen.frame = glass.contentView.bounds.insetBy(dx: -glass.bounds.width, dy: 0)
-        CATransaction.commit()
-        startSheen()
     }
 
     /// The line as the lens will see it: drawn at the lens's size, text
@@ -760,25 +746,10 @@ final class LiveCell: TimelineCell {
         timer?.invalidate()
         timer = nil
         animateMark()
-        startSheen()
         guard window != nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
-    }
-
-    private func startSheen() {
-        guard window != nil, !Motion.reduced, sheen.animation(forKey: "sheen") == nil, glass.bounds.width > 0 else { return }
-        let sweep = CABasicAnimation(keyPath: "transform.translation.x")
-        sweep.fromValue = -glass.bounds.width * 0.9
-        sweep.toValue = glass.bounds.width * 0.9
-        sweep.duration = 2.8
-        sweep.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        let group = CAAnimationGroup()
-        group.animations = [sweep]
-        group.duration = 4.2
-        group.repeatCount = .infinity
-        sheen.add(group, forKey: "sheen")
     }
 
     /// The app's mark turning between circle and squircle.

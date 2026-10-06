@@ -884,10 +884,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         }
     }
 
-    /// Your message pinches off the message field as a drop of glass and
-    /// settles into its bubble while the conversation makes room, all on one
-    /// spring. Field and drop share a Liquid Glass group, so the system draws
-    /// the liquid bridge between them as they part.
+    /// Your message pinches off the message field as a drop of glass that
+    /// carries no text: field and drop share a Liquid Glass group, so the
+    /// system draws them parting as liquid. The drop travels to where the
+    /// bubble sits, and the bubble itself appears there as the drop fades.
     private func flySend(id: String, from source: CGPoint) {
         view.layoutIfNeeded()
         let start = table.contentOffset.y
@@ -898,49 +898,38 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         cell.layoutIfNeeded()
         let group = composer.group.contentView
         let bubble = cell.bubble.convert(cell.bubble.bounds, to: group)
-        let textFrame = cell.text.convert(cell.text.bounds, to: group)
         cell.contentView.alpha = 0
         table.contentOffset.y = start
 
         let drop = Theme.glassSurface(cornerRadius: 18, tint: Theme.userGlass)
-        let words = UITextView()
-        words.isEditable = false
-        words.isScrollEnabled = false
-        words.backgroundColor = .clear
-        words.textContainer.lineFragmentPadding = 0
-        words.textContainerInset = cell.text.textContainerInset
-        words.attributedText = cell.text.attributedText
-        words.isUserInteractionEnabled = false
-        words.alpha = 0
-        drop.contentView.addSubview(words)
+        drop.isUserInteractionEnabled = false
         group.addSubview(drop)
-        // Born as a drop over the send button, inside the field's glass.
         let seed = composer.send.convert(composer.send.bounds, to: group)
         drop.frame = seed
-        words.frame = CGRect(x: textFrame.minX - bubble.minX, y: textFrame.minY - bubble.minY, width: textFrame.width, height: textFrame.height)
-        group.layoutIfNeeded()
 
-        let stretch = UIViewPropertyAnimator(duration: 0.22, curve: .easeIn) {
-            // Swell and start lifting: still joined to the field.
-            drop.frame = CGRect(x: bubble.maxX - min(bubble.width, 120), y: seed.minY - 26,
-                                width: min(bubble.width, 120), height: max(40, min(bubble.height, 48)))
+        let lift = UIViewPropertyAnimator(duration: 0.2, curve: .easeIn) {
+            // Swells out of the field beside the send button, still joined.
+            let width = min(bubble.width, 96)
+            drop.frame = CGRect(x: seed.maxX - width, y: seed.minY - 22, width: width, height: 40)
         }
-        let settle = UIViewPropertyAnimator(duration: 0.62, dampingRatio: 0.74) {
+        let settle = UIViewPropertyAnimator(duration: 0.55, dampingRatio: 0.82) {
             drop.frame = bubble
-            words.alpha = 1
             self.table.contentOffset.y = end
         }
         if #available(iOS 26.0, *) {
             settle.addAnimations { drop.cornerConfiguration = .corners(radius: .fixed(21)) }
         }
-        stretch.addCompletion { _ in settle.startAnimation() }
+        lift.addCompletion { _ in settle.startAnimation() }
         settle.addCompletion { [weak self] _ in
-            drop.removeFromSuperview()
-            guard let self else { return }
+            guard let self else { drop.removeFromSuperview(); return }
             if flyingID == id { flyingID = nil }
-            if let index = dataSource.indexPath(for: id) { table.cellForRow(at: index)?.contentView.alpha = 1 }
+            let shown = dataSource.indexPath(for: id).flatMap { self.table.cellForRow(at: $0) }
+            UIView.animate(withDuration: 0.18, delay: 0, options: [.allowUserInteraction]) {
+                shown?.contentView.alpha = 1
+                drop.alpha = 0
+            } completion: { _ in drop.removeFromSuperview() }
         }
-        stretch.startAnimation()
+        lift.startAnimation()
     }
 
     private var debugRequest: JSONValue?
