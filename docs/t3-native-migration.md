@@ -742,3 +742,14 @@ arrives, so nothing is clipped. Dragging moves glass and content together by the
 finger's offset and springs to the side with its speed; pans start from the
 touch-down point. Verified frame by frame in the simulator (open, minimize,
 panel drag, bubble drag). Probe `3218ba9c-7b9e-4fb2-8e2b-7d92547143af`.
+
+**Morph, stretch and cross blur (user request, 2026-10-07):** one spring
+(slightly underdamped) drives the morph. Every frame the single glass view takes
+a shape between bubble and panel, past the panel while it overshoots; the panel's
+content is stretched to that shape and un-blurs (Core Animation's Gaussian blur
+filter, private API, only in the injected overlay and Debug builds) as it fades
+in, while a plain copy of the bubble's line stretches and fades out. Found in
+frame review: a blur filter renders transparent areas black, so only the
+panel's content (on its paper) is blurred, and the live bubble line (masked
+shimmer) is swapped for a plain copy during the morph. Probe
+`1b6ebe57-95b3-4449-ba9c-babb90327c7c`.

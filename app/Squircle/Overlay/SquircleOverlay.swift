@@ -78,12 +78,20 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private var size = Size.bubble
     /// 0 shows the thread list, 1 the open thread; a finger can scrub it.
     private let push = SpringDriver(value: 0)
+    /// The morph between bubble (0) and panel (1). Slightly underdamped, so
+    /// the glass overshoots and stretches as it lands.
+    private let morph = SpringDriver(value: 0)
+    /// The panel's frame for the morph in progress.
+    private var morphFrame = CGRect.zero
 
-    /// One piece of glass: the bubble, and the panel it reshapes into. Its
-    /// shape animates on a spring and the system redraws the glass at every
-    /// frame, so it morphs rather than crossfading two surfaces.
+    /// One piece of glass: the bubble, and the panel it morphs into.
     private let shell = UIVisualEffectView(effect: Theme.glassEffect(interactive: true))
     private let bubble = LiveCapsule(glass: false)
+    /// A plain copy of the bubble's line that stretches and fades during the
+    /// morph, in place of the live line with its masked shimmer.
+    private let morphLine = UIView()
+    private let morphDot = UIView()
+    private let morphText = Theme.label("", Theme.font(.subheadline, 15, .semibold), color: .secondaryLabel)
     /// Everything on the panel, above the glass so the conversation's glass
     /// controls stay their own glass. Laid out at the panel's final size and
     /// shown as the glass arrives there, so nothing is clipped mid-morph.
@@ -144,8 +152,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubble.isUserInteractionEnabled = false
         bubble.showsTime = false
         shell.contentView.addSubview(bubble)
+        morphLine.isHidden = true
+        morphLine.isUserInteractionEnabled = false
+        morphDot.layer.cornerRadius = 4.5
+        morphDot.layer.cornerCurve = .continuous
+        [morphDot, morphText].forEach(morphLine.addSubview)
         view.addSubview(shell)
         view.addSubview(content)
+        view.addSubview(morphLine)
         content.isHidden = true
         content.alpha = 0
         // The panel's own rounded shape; content follows its bounds.
@@ -171,6 +185,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         backPan.delegate = self
         content.addGestureRecognizer(backPan)
 
+        morph.parameters = SpringDriver.Parameters(response: 0.5, damping: 0.72)
+        morph.onChange = { [weak self] _ in self?.applyMorph() }
+        morph.onRest = { [weak self] value in self?.morphRested(at: value) }
         push.onChange = { [weak self] _ in self?.layoutPages() }
         push.onRest = { [weak self] value in if value <= 0.001 { self?.closeThread() } }
         model.objectWillChange.receive(on: DispatchQueue.main)
@@ -282,30 +299,113 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     /// Places everything for the current size, without animating by itself.
     private func place() {
-        guard view.bounds.width > 0 else { return }
+        guard view.bounds.width > 0, !morph.isAnimating else { return }
         let bubbleFrame = self.bubbleFrame
         let panelFrame = self.panelFrame.offsetBy(dx: dragOffset.x, dy: dragOffset.y)
         let glass = size == .bubble ? bubbleFrame.offsetBy(dx: dragOffset.x, dy: dragOffset.y) : panelFrame
         shell.frame = glass
         Theme.setGlassCorner(shell, radius: size == .bubble ? glass.height / 2 : size == .full ? 0 : 30)
-        // The bubble's line stays put at the glass's corner as it reshapes.
-        let right = bubbleFrame.midX > view.bounds.midX, lower = bubbleFrame.midY > view.bounds.midY
-        bubble.frame = CGRect(x: right ? glass.width - bubbleFrame.width : 0, y: lower ? glass.height - bubbleFrame.height : 0,
-                              width: bubbleFrame.width, height: bubbleFrame.height)
+        bubble.transform = .identity
+        bubble.frame = CGRect(origin: .zero, size: bubbleFrame.size)
+        layoutContent(in: panelFrame)
+    }
+
+    /// The panel's content at a panel frame, untransformed.
+    private func layoutContent(in frame: CGRect) {
+        content.transform = .identity
         content.layer.cornerRadius = size == .full ? 0 : 30
-        content.bounds = CGRect(origin: .zero, size: panelFrame.size)
-        content.center = CGPoint(x: panelFrame.midX, y: panelFrame.midY)
+        content.bounds = CGRect(origin: .zero, size: frame.size)
+        content.center = CGPoint(x: frame.midX, y: frame.midY)
         veil.frame = content.bounds
         veil.backgroundColor = Theme.paper.withAlphaComponent(size == .full ? 1 : 0.72)
         let top: CGFloat = size == .full ? view.safeAreaInsets.top + 2 : 8
-        grabber.frame = CGRect(x: (panelFrame.width - 36) / 2, y: 6, width: 36, height: 5)
+        grabber.frame = CGRect(x: (frame.width - 36) / 2, y: 6, width: 36, height: 5)
         grabber.alpha = size == .full ? 0 : 1
-        minimizeButton.frame = CGRect(x: panelFrame.width - 46, y: top, width: 38, height: 38)
+        minimizeButton.frame = CGRect(x: frame.width - 46, y: top, width: 38, height: 38)
         resizeButton.frame = minimizeButton.frame.offsetBy(dx: -38, dy: 0)
         resizeButton.configuration?.image = UIImage(systemName: size == .full
             ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
         resizeButton.accessibilityLabel = size == .full ? "Make small" : "Full screen"
         layoutPages()
+    }
+
+    /// One frame of the morph: the glass takes a shape between bubble and
+    /// panel (past the panel while it overshoots), and both contents stretch
+    /// to that shape, the old one blurring out as the new one blurs in.
+    private func applyMorph() {
+        let p = morph.value
+        let bubble = bubbleFrame, panel = morphFrame
+        let glass = CGRect(x: .lerp(bubble.minX, panel.minX, p), y: .lerp(bubble.minY, panel.minY, p),
+                           width: max(1, .lerp(bubble.width, panel.width, p)), height: max(1, .lerp(bubble.height, panel.height, p)))
+        shell.frame = glass
+        Theme.setGlassCorner(shell, radius: max(0, .lerp(bubble.height / 2, panel == view.bounds ? 0 : 30, p.clamped())))
+
+        morphLine.transform = .identity
+        morphLine.bounds = CGRect(origin: .zero, size: bubble.size)
+        morphLine.center = CGPoint(x: glass.midX, y: glass.midY)
+        // The line stretches mostly along its length; tall glyphs smear.
+        morphLine.transform = CGAffineTransform(scaleX: glass.width / bubble.width, y: min(1.5, glass.height / bubble.height))
+        // Only near bubble size, so it never smears across a wide shape.
+        // No blur here: the filter turns the transparent area around text
+        // black. The panel's content, on its paper, carries the cross blur.
+        morphLine.alpha = (1 - p * 5).clamped()
+
+        content.center = CGPoint(x: glass.midX, y: glass.midY)
+        content.transform = CGAffineTransform(scaleX: glass.width / panel.width, y: glass.height / panel.height)
+        content.alpha = ((p - 0.15) * 1.6).clamped()
+        Self.blur(content.layer, radius: (1 - p).clamped() * 22)
+        content.isUserInteractionEnabled = p > 0.9
+    }
+
+    /// Puts the plain copy of the bubble's line in place of the live one.
+    private func beginMorph() {
+        let size = bubbleFrame.size
+        morphLine.transform = .identity
+        morphLine.bounds = CGRect(origin: .zero, size: size)
+        let inset = max(12, (size.height - 14) / 2 + 1)
+        morphDot.frame = CGRect(x: inset, y: (size.height - 14) / 2, width: 14, height: 14)
+        morphDot.backgroundColor = bubble.tone == .needsYou ? Theme.warning : bubble.tone == .done ? Theme.success : Theme.accent
+        morphText.text = bubble.headline
+        morphText.frame = CGRect(x: morphDot.frame.maxX + 11, y: 0, width: max(0, size.width - morphDot.frame.maxX - 11 - inset), height: size.height)
+        bubble.isHidden = true
+        morphLine.isHidden = false
+    }
+
+    private func morphRested(at value: CGFloat) {
+        morphLine.isHidden = true
+        bubble.isHidden = false
+        Self.blur(content.layer, radius: 0)
+        if value <= 0.001 {
+            content.isHidden = true
+            bubble.alpha = 1
+            previousKey?.makeKey()
+            previousKey = nil
+            render()
+        } else {
+            content.alpha = 1
+            bubble.alpha = 0
+        }
+        content.isUserInteractionEnabled = true
+        place()
+        setNeedsUpdateOfSupportedInterfaceOrientations()
+    }
+
+    /// Core Animation's Gaussian blur on a layer, by radius; nil clears it.
+    /// Private, as UIKit has no public variable blur on arbitrary views; this
+    /// code exists only in the debug overlay and Debug builds.
+    private static func blur(_ layer: CALayer, radius: CGFloat) {
+        guard radius > 0.3 else {
+            if layer.filters != nil { layer.filters = nil }
+            return
+        }
+        if layer.filters == nil {
+            guard let type = NSClassFromString("CAFilter") as? NSObject.Type,
+                  let filter = type.perform(NSSelectorFromString("filterWithType:"), with: "gaussianBlur")?
+                    .takeUnretainedValue() as? NSObject else { return }
+            filter.setValue(true, forKey: "inputNormalizeEdges")
+            layer.filters = [filter]
+        }
+        layer.setValue(radius, forKeyPath: "filters.gaussianBlur.inputRadius")
     }
 
     private func layoutPages() {
@@ -339,52 +439,29 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     // MARK: Moves
 
-    /// The glass reshapes from the bubble into the panel. The bubble's line
-    /// fades as the shape leaves it; the panel's content, already laid out at
-    /// its size, fades in as the glass arrives.
+    /// The bubble morphs into the panel.
     @objc private func open() {
         guard size == .bubble else { return }
         Theme.openHaptic()
         size = .mini
+        morphFrame = panelFrame
         content.isHidden = false
-        content.alpha = 0
-        UIView.performWithoutAnimation { place(); content.layoutIfNeeded() }
-        shell.frame = bubbleFrame
-        Theme.setGlassCorner(shell, radius: bubbleFrame.height / 2)
-        bubble.frame = CGRect(origin: .zero, size: bubbleFrame.size)
+        layoutContent(in: morphFrame)
+        content.layoutIfNeeded()
         makeKey()
-        UIView.animate(springDuration: 0.5, bounce: 0.16, initialSpringVelocity: 0, delay: 0, options: [.allowUserInteraction]) {
-            self.place()
-        }
-        UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { self.bubble.alpha = 0 }
-        UIView.animate(withDuration: 0.22, delay: 0.14, options: [.curveEaseOut, .allowUserInteraction]) { self.content.alpha = 1 }
+        beginMorph()
+        applyMorph()
+        morph.animate(to: 1)
     }
 
-    /// The panel's content leaves first; then the glass gathers back into
-    /// the bubble, whose line returns as the shape arrives.
+    /// The panel morphs back into the bubble, from whatever size it is.
     private func minimize() {
         guard size != .bubble else { return }
         view.endEditing(true)
+        morphFrame = panelFrame
         size = .bubble
-        UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseIn, .allowUserInteraction]) {
-            self.content.alpha = 0
-        } completion: { _ in
-            guard self.size == .bubble else { return }
-            self.content.isHidden = true
-        }
-        UIView.animate(springDuration: 0.5, bounce: 0.16, initialSpringVelocity: 0, delay: 0.04, options: [.allowUserInteraction]) {
-            self.shell.frame = self.bubbleFrame
-            Theme.setGlassCorner(self.shell, radius: self.bubbleFrame.height / 2)
-            self.bubble.frame = CGRect(origin: .zero, size: self.bubbleFrame.size)
-        } completion: { _ in
-            guard self.size == .bubble else { return }
-            self.place()
-            self.previousKey?.makeKey()
-            self.previousKey = nil
-            self.setNeedsUpdateOfSupportedInterfaceOrientations()
-            self.render()
-        }
-        UIView.animate(withDuration: 0.2, delay: 0.3, options: [.curveEaseOut, .allowUserInteraction]) { self.bubble.alpha = 1 }
+        beginMorph()
+        morph.animate(to: 0)
     }
 
     /// Mini ↔ full screen, for whichever page is showing; the content lays
