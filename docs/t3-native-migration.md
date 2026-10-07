@@ -728,3 +728,17 @@ it returns to normal if the update fails. iOS has no way to reopen an app after
 replacing it. Squircle `151a7519-aa01-4af6-acaf-b758055dc285` (0.3.0 26) and
 Probe `1abd89ec-8a3d-4403-909e-aa30debb25ff`; transitions verified frame by
 frame in the simulator; not yet on the phone.
+
+**Correction, real glass morph (2026-10-07):** the previous build faked the
+morph: two glass views crossfaded (materialize/dematerialize in a container)
+while the content scaled and faded, which ghosted; and moving the content above
+the glass broke panel dragging (only the glass moved). The system morph between
+distinct shapes (`glassEffectID` in a `GlassEffectContainer`) exists only in
+SwiftUI, which may not drive this layout. Now the bubble and panel are one
+`UIGlassEffect` view whose frame and corners animate on a spring, so the glass
+itself reshapes; the bubble's line fades as the shape leaves it, and the panel's
+content (laid out at its final size, above the glass) fades in as the glass
+arrives, so nothing is clipped. Dragging moves glass and content together by the
+finger's offset and springs to the side with its speed; pans start from the
+touch-down point. Verified frame by frame in the simulator (open, minimize,
+panel drag, bubble drag). Probe `3218ba9c-7b9e-4fb2-8e2b-7d92547143af`.

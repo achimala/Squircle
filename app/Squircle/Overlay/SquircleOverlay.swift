@@ -65,8 +65,8 @@ final class OverlayWindow: UIWindow {
 }
 
 /// The overlay over the host app. A glass bubble shows what the agent is
-/// doing in this app; it materializes into a glass panel at the same place,
-/// as Liquid Glass shapes merge. The panel shows the app's threads or one
+/// doing in this app; the same glass reshapes into a panel at the same place
+/// and back, on one spring. The panel shows the app's threads or one
 /// thread, each either mini (floating over the app while you use it) or full
 /// screen; size and content change independently.
 @MainActor
@@ -79,13 +79,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// 0 shows the thread list, 1 the open thread; a finger can scrub it.
     private let push = SpringDriver(value: 0)
 
-    /// Lets the bubble and panel glass flow into each other.
-    private let group = Theme.glassGroup(spacing: 30)
-    private let bubbleGlass = UIVisualEffectView(effect: Theme.glassEffect(interactive: true))
+    /// One piece of glass: the bubble, and the panel it reshapes into. Its
+    /// shape animates on a spring and the system redraws the glass at every
+    /// frame, so it morphs rather than crossfading two surfaces.
+    private let shell = UIVisualEffectView(effect: Theme.glassEffect(interactive: true))
     private let bubble = LiveCapsule(glass: false)
-    private let panel = UIVisualEffectView(effect: nil)
-    /// Everything on the panel; follows its frame and bounds, never clipped
-    /// by a moving mask.
+    /// Everything on the panel, above the glass so the conversation's glass
+    /// controls stay their own glass. Laid out at the panel's final size and
+    /// shown as the glass arrives there, so nothing is clipped mid-morph.
     private let content = UIView()
     /// Paper under the text, so it reads over any app.
     private let veil = UIView()
@@ -98,7 +99,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Bubble center; the panel opens from the bubble's corner and the two
     /// always share this place.
     private var anchor: CGPoint?
-    private var dragOrigin = CGPoint.zero
+    /// The finger's offset while the bubble or panel is being dragged; the
+    /// glass and its content move together by it.
+    private var dragOffset = CGPoint.zero
     private var movePan: UIPanGestureRecognizer!
     private var backPan: UIPanGestureRecognizer!
     private var pushStart: CGFloat = 0
@@ -135,25 +138,16 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
-        group.frame = view.bounds
-        group.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        group.accessibilityIdentifier = Self.passthrough
-        group.contentView.accessibilityIdentifier = Self.passthrough
-        view.addSubview(group)
-        group.contentView.addSubview(panel)
-        group.contentView.addSubview(bubbleGlass)
-
-        bubbleGlass.accessibilityIdentifier = "overlay.bubble"
-        bubbleGlass.isAccessibilityElement = true
-        bubbleGlass.accessibilityTraits = .button
+        shell.accessibilityIdentifier = "overlay.bubble"
+        shell.isAccessibilityElement = true
+        shell.accessibilityTraits = .button
         bubble.isUserInteractionEnabled = false
         bubble.showsTime = false
-        bubbleGlass.contentView.addSubview(bubble)
-
-        panel.isHidden = true
-        // Above the glass, not inside it: the container would merge the
-        // conversation's own glass controls into the panel.
+        shell.contentView.addSubview(bubble)
+        view.addSubview(shell)
         view.addSubview(content)
+        content.isHidden = true
+        content.alpha = 0
         // The panel's own rounded shape; content follows its bounds.
         content.clipsToBounds = true
         content.layer.cornerCurve = .continuous
@@ -168,9 +162,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         resizeButton.addAction(UIAction { [weak self] _ in self?.resize() }, for: .touchUpInside)
         minimizeButton.addAction(UIAction { [weak self] _ in self?.minimize() }, for: .touchUpInside)
 
-        bubbleGlass.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(open)))
-        let bubblePan = UIPanGestureRecognizer(target: self, action: #selector(bubbleDragged(_:)))
-        bubbleGlass.addGestureRecognizer(bubblePan)
+        shell.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(open)))
+        shell.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(bubbleDragged(_:))))
         movePan = UIPanGestureRecognizer(target: self, action: #selector(panelDragged(_:)))
         movePan.delegate = self
         content.addGestureRecognizer(movePan)
@@ -236,8 +229,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         }
         let width = bubble.headline == status.headline ? nil : bubble.bounds.width
         bubble.configure(headline: status.headline, started: status.started, tone: status.tone)
-        bubbleGlass.accessibilityLabel = "Squircle"
-        bubbleGlass.accessibilityValue = status.headline ?? "Idle"
+        shell.accessibilityLabel = "Squircle"
+        shell.accessibilityValue = status.headline ?? "Idle"
         list.update(project: project, sessions: sessions, model: model,
                     live: target.map { _ in (status.headline, status.started, status.tone, target?.id) })
         if let build = model.updatingTo {
@@ -290,23 +283,24 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Places everything for the current size, without animating by itself.
     private func place() {
         guard view.bounds.width > 0 else { return }
-        let bubble = bubbleFrame
-        bubbleGlass.frame = bubble
-        Theme.setGlassCorner(bubbleGlass, radius: bubble.height / 2)
-        self.bubble.frame = CGRect(origin: .zero, size: bubble.size)
-        let frame = panelFrame
-        panel.frame = frame
-        Theme.setGlassCorner(panel, radius: size == .full ? 0 : 30)
+        let bubbleFrame = self.bubbleFrame
+        let panelFrame = self.panelFrame.offsetBy(dx: dragOffset.x, dy: dragOffset.y)
+        let glass = size == .bubble ? bubbleFrame.offsetBy(dx: dragOffset.x, dy: dragOffset.y) : panelFrame
+        shell.frame = glass
+        Theme.setGlassCorner(shell, radius: size == .bubble ? glass.height / 2 : size == .full ? 0 : 30)
+        // The bubble's line stays put at the glass's corner as it reshapes.
+        let right = bubbleFrame.midX > view.bounds.midX, lower = bubbleFrame.midY > view.bounds.midY
+        bubble.frame = CGRect(x: right ? glass.width - bubbleFrame.width : 0, y: lower ? glass.height - bubbleFrame.height : 0,
+                              width: bubbleFrame.width, height: bubbleFrame.height)
         content.layer.cornerRadius = size == .full ? 0 : 30
-        content.bounds = CGRect(origin: .zero, size: frame.size)
-        content.center = CGPoint(x: frame.midX, y: frame.midY)
-        content.isHidden = panel.isHidden
+        content.bounds = CGRect(origin: .zero, size: panelFrame.size)
+        content.center = CGPoint(x: panelFrame.midX, y: panelFrame.midY)
         veil.frame = content.bounds
         veil.backgroundColor = Theme.paper.withAlphaComponent(size == .full ? 1 : 0.72)
         let top: CGFloat = size == .full ? view.safeAreaInsets.top + 2 : 8
-        grabber.frame = CGRect(x: (frame.width - 36) / 2, y: 6, width: 36, height: 5)
+        grabber.frame = CGRect(x: (panelFrame.width - 36) / 2, y: 6, width: 36, height: 5)
         grabber.alpha = size == .full ? 0 : 1
-        minimizeButton.frame = CGRect(x: frame.width - 46, y: top, width: 38, height: 38)
+        minimizeButton.frame = CGRect(x: panelFrame.width - 46, y: top, width: 38, height: 38)
         resizeButton.frame = minimizeButton.frame.offsetBy(dx: -38, dy: 0)
         resizeButton.configuration?.image = UIImage(systemName: size == .full
             ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
@@ -345,59 +339,52 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     // MARK: Moves
 
+    /// The glass reshapes from the bubble into the panel. The bubble's line
+    /// fades as the shape leaves it; the panel's content, already laid out at
+    /// its size, fades in as the glass arrives.
     @objc private func open() {
         guard size == .bubble else { return }
         Theme.openHaptic()
         size = .mini
-        place()
-        panel.isHidden = false
         content.isHidden = false
-        // The panel's content rises from the bubble as the glass forms.
         content.alpha = 0
-        content.transform = shrink(toward: bubbleFrame)
+        UIView.performWithoutAnimation { place(); content.layoutIfNeeded() }
+        shell.frame = bubbleFrame
+        Theme.setGlassCorner(shell, radius: bubbleFrame.height / 2)
+        bubble.frame = CGRect(origin: .zero, size: bubbleFrame.size)
         makeKey()
-        UIView.animate(springDuration: 0.5, bounce: 0.18, initialSpringVelocity: 0, delay: 0, options: [.allowUserInteraction]) {
-            self.bubbleGlass.effect = nil
-            self.bubble.alpha = 0
-            self.panel.effect = Theme.glassEffect()
-            self.content.alpha = 1
-            self.content.transform = .identity
-        } completion: { _ in
-            if self.size != .bubble { self.bubbleGlass.isHidden = true }
+        UIView.animate(springDuration: 0.5, bounce: 0.16, initialSpringVelocity: 0, delay: 0, options: [.allowUserInteraction]) {
+            self.place()
         }
+        UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { self.bubble.alpha = 0 }
+        UIView.animate(withDuration: 0.22, delay: 0.14, options: [.curveEaseOut, .allowUserInteraction]) { self.content.alpha = 1 }
     }
 
+    /// The panel's content leaves first; then the glass gathers back into
+    /// the bubble, whose line returns as the shape arrives.
     private func minimize() {
         guard size != .bubble else { return }
         view.endEditing(true)
-        let wasFull = size == .full
         size = .bubble
-        bubbleGlass.isHidden = false
-        UIView.animate(springDuration: 0.5, bounce: 0.12, initialSpringVelocity: 0, delay: 0, options: [.allowUserInteraction]) {
-            if wasFull {
-                // Back to its small size as it goes, so it gathers into the bubble.
-                self.panel.frame = self.miniFrame
-                Theme.setGlassCorner(self.panel, radius: 30)
-                self.content.layer.cornerRadius = 30
-                self.content.bounds = CGRect(origin: .zero, size: self.miniFrame.size)
-                self.content.center = CGPoint(x: self.miniFrame.midX, y: self.miniFrame.midY)
-                self.layoutPages()
-            }
-            self.panel.effect = nil
+        UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseIn, .allowUserInteraction]) {
             self.content.alpha = 0
-            self.content.transform = self.shrink(toward: self.bubbleFrame)
-            self.bubbleGlass.effect = Theme.glassEffect(interactive: true)
-            self.bubble.alpha = 1
         } completion: { _ in
             guard self.size == .bubble else { return }
-            self.panel.isHidden = true
             self.content.isHidden = true
-            self.content.transform = .identity
+        }
+        UIView.animate(springDuration: 0.5, bounce: 0.16, initialSpringVelocity: 0, delay: 0.04, options: [.allowUserInteraction]) {
+            self.shell.frame = self.bubbleFrame
+            Theme.setGlassCorner(self.shell, radius: self.bubbleFrame.height / 2)
+            self.bubble.frame = CGRect(origin: .zero, size: self.bubbleFrame.size)
+        } completion: { _ in
+            guard self.size == .bubble else { return }
+            self.place()
             self.previousKey?.makeKey()
             self.previousKey = nil
             self.setNeedsUpdateOfSupportedInterfaceOrientations()
             self.render()
         }
+        UIView.animate(withDuration: 0.2, delay: 0.3, options: [.curveEaseOut, .allowUserInteraction]) { self.bubble.alpha = 1 }
     }
 
     /// Mini ↔ full screen, for whichever page is showing; the content lays
@@ -412,14 +399,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             self.place()
             self.content.layoutIfNeeded()
         }
-    }
-
-    /// A transform that shrinks the panel's content toward the bubble.
-    private func shrink(toward bubble: CGRect) -> CGAffineTransform {
-        let frame = panel.frame
-        let point = CGPoint(x: bubble.midX - frame.minX - frame.width / 2, y: bubble.midY - frame.minY - frame.height / 2)
-        return CGAffineTransform(translationX: point.x, y: point.y).scaledBy(x: 0.6, y: 0.6)
-            .translatedBy(x: -point.x * 0.5, y: -point.y * 0.5)
     }
 
     private func makeKey() {
@@ -501,7 +480,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     // MARK: Gestures
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        let point = gesture.location(in: content)
+        // Where the finger went down, not where it is once the pan is
+        // recognized: a quick drag has already left the strip by then.
+        var point = gesture.location(in: content)
+        if let pan = gesture as? UIPanGestureRecognizer {
+            let moved = pan.translation(in: content)
+            point = CGPoint(x: point.x - moved.x, y: point.y - moved.y)
+        }
         if gesture === backPan {
             // Back: from the panel's left edge, rightward, while a thread is open.
             let velocity = backPan.velocity(in: content)
@@ -514,34 +499,39 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         return true
     }
 
-    @objc private func bubbleDragged(_ gesture: UIPanGestureRecognizer) {
-        switch gesture.state {
-        case .began: dragOrigin = bubbleGlass.center
-        case .changed:
-            let t = gesture.translation(in: view)
-            bubbleGlass.center = CGPoint(x: dragOrigin.x + t.x, y: dragOrigin.y + t.y)
-        case .ended, .cancelled:
-            let v = gesture.velocity(in: view)
-            anchor = CGPoint(x: bubbleGlass.center.x + v.x * 0.15, y: bubbleGlass.center.y + v.y * 0.15)
-            settle()
-        default: break
-        }
-    }
+    @objc private func bubbleDragged(_ gesture: UIPanGestureRecognizer) { drag(gesture, frame: bubbleFrame) }
 
     /// Moving the panel moves the bubble with it: they share one place.
-    @objc private func panelDragged(_ gesture: UIPanGestureRecognizer) {
+    @objc private func panelDragged(_ gesture: UIPanGestureRecognizer) { drag(gesture, frame: miniFrame) }
+
+    /// The glass and everything on it follow the finger together; on
+    /// release they spring to the nearer side, carrying the finger's speed.
+    private func drag(_ gesture: UIPanGestureRecognizer, frame: CGRect) {
+        let t = gesture.translation(in: view)
         switch gesture.state {
-        case .began: dragOrigin = panel.center
         case .changed:
-            let t = gesture.translation(in: view)
-            panel.center = CGPoint(x: dragOrigin.x + t.x, y: dragOrigin.y + t.y)
+            dragOffset = t
+            place()
         case .ended, .cancelled:
             let v = gesture.velocity(in: view)
-            let frame = panel.frame.offsetBy(dx: v.x * 0.12, dy: v.y * 0.12)
-            let lower = frame.midY > view.bounds.midY
-            anchor = CGPoint(x: frame.midX > view.bounds.midX ? view.bounds.maxX : 0,
-                             y: lower ? frame.maxY - 22 : frame.minY + 22)
-            settle()
+            // Where it would coast to, then which side and height it rests at.
+            let rest = frame.offsetBy(dx: t.x + v.x * 0.12, dy: t.y + v.y * 0.12)
+            let lower = rest.midY > view.bounds.midY
+            let bubble = bubbleSize
+            anchor = CGPoint(x: rest.midX > view.bounds.midX ? view.bounds.maxX : 0,
+                             y: size == .bubble ? rest.midY : lower ? rest.maxY - bubble.height / 2 : rest.minY + bubble.height / 2)
+            let before = shell.center
+            dragOffset = .zero
+            UIView.performWithoutAnimation { place() }
+            let after = shell.center
+            let distance = hypot(after.x - before.x, after.y - before.y)
+            let speed = distance > 1 ? hypot(v.x, v.y) / distance : 0
+            // Start from where the finger left it.
+            dragOffset = CGPoint(x: before.x - after.x, y: before.y - after.y)
+            UIView.performWithoutAnimation { place() }
+            dragOffset = .zero
+            UIView.animate(springDuration: 0.5, bounce: 0.18, initialSpringVelocity: min(speed, 8), delay: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState]) { self.place() }
         default: break
         }
     }
@@ -563,11 +553,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         }
     }
 
-    private func settle() {
-        UIView.animate(springDuration: 0.45, bounce: 0.18, initialSpringVelocity: 0, delay: 0,
-                       options: [.allowUserInteraction, .beginFromCurrentState]) { self.place() }
-    }
-
     /// A soft beat when a turn finishes.
     private func pulse() {
         guard !Motion.reduced, size == .bubble else { return }
@@ -576,7 +561,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         beat.keyTimes = [0, 0.35, 1]
         beat.duration = 0.6
         beat.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        bubbleGlass.layer.add(beat, forKey: "pulse")
+        shell.layer.add(beat, forKey: "pulse")
     }
 
     private func keyboardMoved(_ note: Notification) {
