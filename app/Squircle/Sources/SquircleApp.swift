@@ -36,6 +36,12 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         if let bundleID = ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_DEMO"], let configuration = model.configuration {
             DispatchQueue.main.async { OverlayHost.shared.start(bundleID: bundleID, configuration: configuration) }
         }
+        // Verification only: the notice shown once an update of this app is confirmed.
+        if ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_UPDATE"] == "1",
+           let data = #"{"id":"demo","state":"succeeded","created_at":0,"output":{"version":"0.3.0","build_number":"26","ipa_path":"/x.ipa"}}"#.data(using: .utf8),
+           let build = try? JSONDecoder().decode(AppBuild.self, from: data) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { UpdateCurtain.show(in: window, build: build) {} }
+        }
         #endif
     }
 

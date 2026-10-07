@@ -678,6 +678,14 @@ async fn imported_ipa_downloads_unchanged_with_correct_manifest_and_no_installat
     let ipa_url = url::Url::parse(asset["url"].as_string().unwrap()).unwrap();
     assert_eq!(ipa_url.as_str(), format!("{page}/app.ipa"));
 
+    // Fetching the IPA is what records that installation was confirmed.
+    let token = page.path_segments().unwrap().next_back().unwrap().to_owned();
+    let status_path = format!("/v1/install-links/{token}");
+    let (code, before) = fixture.json("GET", &status_path, Some(&fixture.control), None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert!(before["data"]["downloaded_at"].is_null());
+    assert_eq!(fixture.request("GET", &status_path, None, None).await.status(), StatusCode::UNAUTHORIZED);
+
     // Capability URLs work without either bearer token, as the iOS installer requires.
     let response = fixture.request("GET", ipa_url.path(), None, None).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -699,6 +707,8 @@ async fn imported_ipa_downloads_unchanged_with_correct_manifest_and_no_installat
             .as_ref(),
         fixture.ipa_bytes
     );
+    let (_, after) = fixture.json("GET", &status_path, Some(&fixture.control), None).await;
+    assert!(after["data"]["downloaded_at"].as_u64().is_some());
     assert_eq!(fixture.status(&id).await["launch_observed"], false);
 }
 
@@ -711,6 +721,7 @@ async fn invalid_and_expired_tickets_cannot_fetch_any_installation_resource() {
         build_id: id,
         expires_at: now() - 1,
         base_url: "https://mac.test".into(),
+        downloaded_at: None,
     };
     fixture
         .state

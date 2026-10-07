@@ -24,6 +24,7 @@
 		3B375023CFEB927A141C090E /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF796323376B17E9A5610B5 /* Markdown.swift */; };
 		3B9BE6F5A38660FAB6765472 /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
 		418A84EAC572BD0535B5A81B /* T3DeviceStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */; };
+		41B1C50BF1A995CD85DD2FFC /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
 		45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		4799E1F4447FF279740AD98A /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
 		4D5A0C54F52464D0DC7E6B0B /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
@@ -43,6 +44,7 @@
 		93827AAA4A823E5BCDF41C05 /* DiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */; };
 		96D8D7C221734472B9BF0B8F /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
 		97B0E27B68EBBED4F0D63633 /* DiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */; };
+		97C1E54012EDF05F226B3682 /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
 		9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
 		A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */; };
 		A3E8C16A2A67B25E7C0C3B83 /* ThreadTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */; };
@@ -101,6 +103,7 @@
 		37662310ACFA109B8C10D377 /* StageMotionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageMotionTests.swift; sourceTree = "<group>"; };
 		3C480DAB8EE878E0069F36AD /* SquircleOverlay.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = SquircleOverlay.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadDetail.swift; sourceTree = "<group>"; };
+		48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCurtain.swift; sourceTree = "<group>"; };
 		4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViews.swift; sourceTree = "<group>"; };
 		52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientModels.swift; sourceTree = "<group>"; };
 		5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioUITests.swift; sourceTree = "<group>"; };
@@ -189,6 +192,7 @@
 				A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */,
 				2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */,
 				4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */,
+				48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -429,6 +433,7 @@
 				A3E8C16A2A67B25E7C0C3B83 /* ThreadTimeline.swift in Sources */,
 				FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */,
 				A48E1FCA693DC85CC567D780 /* ThreadViews.swift in Sources */,
+				97C1E54012EDF05F226B3682 /* UpdateCurtain.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -474,6 +479,7 @@
 				309BDA72A02ADD832BB40056 /* ThreadTimeline.swift in Sources */,
 				4D5A0C54F52464D0DC7E6B0B /* ThreadViewController.swift in Sources */,
 				8561E88460F96DCD4AB29DB4 /* ThreadViews.swift in Sources */,
+				41B1C50BF1A995CD85DD2FFC /* UpdateCurtain.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -612,7 +618,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 25;
+				CURRENT_PROJECT_VERSION = 26;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -721,7 +727,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 25;
+				CURRENT_PROJECT_VERSION = 26;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

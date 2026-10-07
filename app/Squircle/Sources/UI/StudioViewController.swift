@@ -31,12 +31,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private var subscriptions = Set<AnyCancellable>()
     private var laidOut: StageLayout?
     private(set) var thread: ThreadViewController?
-    /// Set before the view loads when hosted by the debug overlay: the
-    /// top-right control closes the overlay instead of adding an app.
-    var onClose: (() -> Void)?
-    /// Hosted by the overlay: the left-edge swipe out of a thread moves the
-    /// overlay instead of returning to Home.
-    var onBackDrag: ((UIPanGestureRecognizer) -> Void)?
     private var dragStart: CGFloat = 0
     private var tilt = CGPoint.zero
     private var tiltRest: CGPoint?
@@ -74,14 +68,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         home.addSubview(pagesClip)
         [connection, add, compose, builds].forEach(home.addSubview)
         connection.showsMenuAsPrimaryAction = true
-        if onClose != nil {
-            add.configuration?.image = UIImage(systemName: "xmark")
-            add.accessibilityLabel = "Close"
-            add.accessibilityIdentifier = "overlay.close"
-            add.addAction(UIAction { [weak self] _ in self?.onClose?() }, for: .touchUpInside)
-        } else {
-            add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
-        }
+        add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
         compose.addAction(UIAction { [weak self] _ in self?.openThread(nil) }, for: .touchUpInside)
         builds.addAction(UIAction { [weak self] _ in self?.presentBuilds() }, for: .touchUpInside)
 
@@ -263,6 +250,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             binding.update(model: model, project: project)
         }
         renderControls()
+        if let build = model.updatingTo {
+            UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
+        }
         if changed && laidOut != nil {
             layoutPages()
             picker.contentOffset.x = CGFloat(selectedIndex) * view.bounds.width
@@ -353,16 +343,13 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                     pose = layout.homePose(offset: offset + direction * progress.clamped() * 1.5, scroll: scroll, spread: spread)
                 }
             }
-            let hidden = project.id == thread?.project.id && thread?.hidesDevice == true
-            if index == nearest, !hidden { focus = pose }
-            if pose.visible, !hidden { poses[project.id] = pose }
+            if index == nearest { focus = pose }
+            if pose.visible { poses[project.id] = pose }
         }
         stage.apply(poses)
         if let focus {
             stage.glowCenter = focus.center
             stage.glowRadius = max(120, focus.height * 0.95)
-        } else if thread?.hidesDevice == true {
-            stage.glowRadius = 0
         }
         if !projects.isEmpty {
             stage.setAmbient(from: stage.ambientColor(for: projects[lower].id), to: stage.ambientColor(for: projects[upper].id), mix: fraction)
@@ -453,10 +440,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         model.selectProject(project)
         let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage)
         controller.layoutProvider = { [weak self] in self?.layout }
-        controller.hidesIdleDevice = onClose != nil
-        controller.onBack = { [weak self] in
-            if let close = self?.onClose { close() } else { self?.closeThread() }
-        }
+        controller.onBack = { [weak self] in self?.closeThread() }
         controller.onGeometry = { [weak self] in self?.applyScene() }
         thread = controller
         addChild(controller)
@@ -485,31 +469,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         spring.animate(to: 0)
     }
 
-    /// Opens straight into a conversation, with no trip from Home (overlay).
-    func presentThread(_ sessionID: String?) {
-        loadViewIfNeeded()
-        view.layoutIfNeeded()
-        openThread(sessionID)
-        guard thread != nil else { return }
-        spring.set(1)
-        stage.setLive(false, reason: "transition")
-        phase = .thread
-        updateInteractivity()
-    }
-
-    /// Releases the open conversation and its simulator picture (overlay).
-    func tearDown() {
-        guard let thread else { return }
-        thread.pausePreview()
-        stage.endLive(for: thread.project.id)
-    }
-
     /// Swipe in from the left edge to go back, following the finger.
     @objc private func backPanned(_ gesture: UIPanGestureRecognizer) {
-        if let onBackDrag {
-            onBackDrag(gesture)
-            return
-        }
         let width = max(1, view.bounds.width)
         switch gesture.state {
         case .began:

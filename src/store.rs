@@ -439,6 +439,7 @@ mod tests {
             build_id: job.id.clone(),
             expires_at: 44,
             base_url: "https://example.test".into(),
+            downloaded_at: None,
         };
         store.save_ticket(&ticket)?;
         let control_token = store.settings.control_token.clone();
@@ -661,6 +662,7 @@ mod tests {
             build_id: job.id.clone(),
             expires_at: 10,
             base_url: "https://example.test".into(),
+            downloaded_at: None,
         };
         store.save_ticket(&ticket)?;
         for path in [

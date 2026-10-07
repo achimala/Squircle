@@ -103,6 +103,17 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return url
     }
 
+    /// True once iOS has started downloading the link's IPA, which happens
+    /// only after the person taps Install in the system prompt.
+    func installStarted(link: URL) async throws -> Bool {
+        struct Reply: Decodable { struct Status: Decodable { let downloaded_at: Double? }; let ok: Bool; let data: Status }
+        guard let manifest = URLComponents(url: link, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "url" })?.value.flatMap(URL.init(string:)) else { throw ClientError.response("Squircle") }
+        let token = manifest.deletingLastPathComponent().lastPathComponent
+        let reply: Reply = try await get(["v1", "install-links", token])
+        return reply.ok && reply.data.downloaded_at != nil
+    }
+
     /// Tool-call inputs and screenshot counts T3 leaves out of its stream.
     func threadSteps(threadID: String, since: String?) async throws -> [JSONValue] {
         struct Reply: Decodable { let ok: Bool; let data: JSONValue }

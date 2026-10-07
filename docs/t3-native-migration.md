@@ -703,3 +703,28 @@ Squircle host the overlay for simulator checks with
 (Squircle Debug, scoped to Squircle): all four transitions are continuous and
 the opened thread is kept. Probe build `561aa697-61e7-4bef-8134-e23931e2d0eb`
 carries it; not yet seen on the phone.
+
+**Second redesign (user request, 2026-10-07):** no clipped morph; standard
+Liquid Glass instead. The bubble and panel are glass in one
+`UIGlassContainerEffect`: opening dematerializes the bubble's glass while the
+panel's materializes at the same place, and the content scales out of the
+bubble and fades in above the glass (it is a sibling of the container, so the
+conversation's own glass controls are not merged into the panel). The bubble
+and the panel share one anchor: the panel grows from the bubble's corner, and
+moving either moves both. The panel shows the thread list or one thread, and
+either can be mini (floating over the app while you use it) or full screen;
+opening a thread keeps the size. Back is the thread's back button or a swipe
+from the panel's left edge. The overlay hosts the conversation directly on its
+own stage (transparent when mini, Squircle's backdrop when full); the device
+appears only while the agent's simulator is live. A message in the list's field
+starts a thread and opens it in place.
+
+**Installing the running app (2026-10-07):** the Mac records when iOS first
+fetches a link's IPA (`downloaded_at`, `GET /v1/install-links/{token}`), which
+happens only after Install is tapped. A build of the running app (Squircle
+itself, or an app with the overlay) then shows a glass notice that the app is
+closing to update and goes to the Home Screen, where the icon shows progress;
+it returns to normal if the update fails. iOS has no way to reopen an app after
+replacing it. Squircle `151a7519-aa01-4af6-acaf-b758055dc285` (0.3.0 26) and
+Probe `1abd89ec-8a3d-4403-909e-aa30debb25ff`; transitions verified frame by
+frame in the simulator; not yet on the phone.

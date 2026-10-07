@@ -156,6 +156,16 @@ enum Theme {
         return view
     }
 
+    /// The glass material itself, for materializing a surface in an animation.
+    static func glassEffect(interactive: Bool = false) -> UIVisualEffect {
+        if #available(iOS 26.0, *) {
+            let effect = UIGlassEffect(style: .regular)
+            effect.isInteractive = interactive
+            return effect
+        }
+        return UIBlurEffect(style: .systemThinMaterial)
+    }
+
     /// Rounds a glass surface made by `glassSurface` to a new radius.
     static func setGlassCorner(_ view: UIVisualEffectView, radius: CGFloat) {
         if #available(iOS 26.0, *) {

@@ -99,6 +99,9 @@ pub struct Ticket {
     pub build_id: String,
     pub expires_at: u64,
     pub base_url: String,
+    /// When iOS first fetched the IPA: the person confirmed installation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downloaded_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

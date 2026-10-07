@@ -18,6 +18,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     /// docked and the device shows only while its simulator is live.
     var hidesIdleDevice = false
     var hidesDevice: Bool { hidesIdleDevice && stream == nil }
+    var currentSessionID: String? { sessionID }
 
     private let model: SquircleModel
     private weak var stage: DeviceStage?
@@ -867,7 +868,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         renderItems()
         Task { [weak self] in
             guard let self else { return }
-            if let url = await model.installURL(for: build) { _ = await UIApplication.shared.open(url) }
+            await model.install(build)
             installingBuild = nil
             var snapshot = dataSource.snapshot()
             let ids = snapshot.itemIdentifiers.filter { $0.hasSuffix(build.id) }

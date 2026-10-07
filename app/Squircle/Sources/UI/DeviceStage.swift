@@ -73,6 +73,10 @@ final class DeviceStage: UIView {
         ambientMix = (from, to, mix)
         updateGlowColor()
     }
+    /// Off where the stage sits on glass over another app (the overlay).
+    var showsBackdrop = true {
+        didSet { backdrop.isHidden = !showsBackdrop; glow.isHidden = !showsBackdrop }
+    }
     var glowCenter = CGPoint.zero { didSet { if glowCenter != oldValue { layoutGlow() } } }
     var glowRadius: CGFloat = 300 { didSet { if glowRadius != oldValue { layoutGlow() } } }
 

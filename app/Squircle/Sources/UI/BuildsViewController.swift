@@ -179,11 +179,7 @@ final class BuildsViewController: UIViewController {
         render()
         Task { [weak self] in
             guard let self else { return }
-            if let url = await model.installURL(for: build) {
-                if await UIApplication.shared.open(url) == false { showMessage(title: "Couldn’t open installer", message: nil) }
-            } else {
-                showMessage(title: "Couldn’t install", message: model.error)
-            }
+            if await !model.install(build) { showMessage(title: "Couldn’t install", message: model.error) }
             isSubmitting = false
             render()
         }

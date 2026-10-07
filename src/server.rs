@@ -163,6 +163,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
         .route("/v1/import", post(import))
         .route("/v1/diagnostics", post(ingest))
+        .route("/v1/install-links/{token}", get(link_status))
         .route("/install/{token}", get(install_page))
         .route("/install/{token}/manifest.plist", get(download_manifest))
         .route("/install/{token}/app.ipa", get(download_ipa))
@@ -1129,6 +1130,7 @@ async fn create_link(
         build_id: id.clone(),
         expires_at: now() + input.ttl_seconds,
         base_url: base.clone(),
+        downloaded_at: None,
     };
     store.save_ticket(&ticket).map_err(ApiError::internal)?;
     let page = format!("{base}/install/{}", ticket.token);
@@ -1162,6 +1164,24 @@ fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, Job)> {
         return Err(ApiError::missing("No IPA for this build"));
     }
     Ok((ticket, job))
+}
+/// Whether iOS has started downloading a link's IPA, which happens only after
+/// the person confirms the system install prompt.
+async fn link_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let ticket = state
+        .store
+        .lock()
+        .unwrap()
+        .load_ticket(&token)
+        .map_err(|_| ApiError::missing("Unknown install link"))?;
+    Ok(Json(success(
+        json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,"downloaded_at":ticket.downloaded_at}),
+    )))
 }
 fn private_headers() -> [(header::HeaderName, &'static str); 3] {
     [
@@ -1211,7 +1231,12 @@ async fn download_ipa(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (_, job) = ticket_job(&state, &token)?;
+    let (mut ticket, job) = ticket_job(&state, &token)?;
+    if ticket.downloaded_at.is_none() {
+        ticket.downloaded_at = Some(now());
+        // Only informs the installing app; never blocks the download.
+        let _ = state.store.lock().unwrap().save_ticket(&ticket);
+    }
     let path = job.output.unwrap().ipa_path.unwrap();
     let file = tokio::fs::File::open(path)
         .await

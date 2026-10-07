@@ -19,6 +19,9 @@ final class SquircleModel: ObservableObject {
     @Published private(set) var status = "Connecting"
     @Published var error: String?
     @Published var composerPrefill: String?
+    /// A build of the running app whose installation was just confirmed;
+    /// the app steps aside so iOS can replace it.
+    @Published private(set) var updatingTo: AppBuild?
     @Published private(set) var providers: [JSONValue] = []
     @Published private(set) var devices: JSONValue = .null
     @Published private(set) var requests: [JSONValue] = []
@@ -597,9 +600,23 @@ final class SquircleModel: ObservableObject {
         do { let build = try await client.startBuild(request.freshSubmission()); await refreshMetadata(); return build }
         catch { self.error = error.localizedDescription; return nil }
     }
-    func installURL(for build: AppBuild) async -> URL? {
-        do { return try await client?.installURL(buildID:build.id) } catch { self.error = error.localizedDescription; return nil }
+    /// Opens iOS's install prompt. For a build of this very app, waits for
+    /// the person to confirm (the Mac sees the download start) and then
+    /// publishes `updatingTo`.
+    @discardableResult
+    func install(_ build: AppBuild) async -> Bool {
+        guard let client else { error = ClientError.configuration.localizedDescription; return false }
+        let url: URL
+        do { url = try await client.installURL(buildID: build.id) } catch { self.error = error.localizedDescription; return false }
+        guard await UIApplication.shared.open(url) else { error = "Couldn’t open the installer."; return false }
+        guard build.bundleID != nil, build.bundleID == Bundle.main.bundleIdentifier else { return true }
+        for _ in 0..<180 {
+            try? await Task.sleep(for: .seconds(1))
+            if (try? await client.installStarted(link: url)) == true { updatingTo = build; return true }
+        }
+        return true
     }
+    func cancelUpdate() { updatingTo = nil }
     func browseMacProjects(path: String? = nil) async throws -> MacProjectDirectory {
         guard let client else { throw ClientError.configuration }; return try await client.browseMacProjects(path:path)
     }
