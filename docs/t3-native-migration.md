@@ -854,3 +854,13 @@ runs in every app build against `app/Squircle/concurrency-baseline.txt`
 (50 legacy uses in 7 files; may only decrease). The DEBUG stress mode now
 also drags the back edge with random releases and drafts, and audits every
 frame; two 60 s runs: 0 violations, settled on the route.
+
+**Build 34: tap flicker, type.** On the phone, tapping a device sometimes
+flashed it at the top center for a frame: the app page mounts as the open
+begins, and its hero portrait was allowed to draw the device until the stage
+reported a render, which on hardware can lag a frame. A portrait now draws
+the device only while progress is within 3% of where that portrait stands
+(`atCell`, `atPage`); not reproduced in the simulator (2,883 frames
+scanned), fixed from the code path; stress audit still 0 violations. The
+user disliked the rounded app-name type: app names are now New York
+(`Theme.appNameFont`, `appCaptionFont`); the rounded design is gone.

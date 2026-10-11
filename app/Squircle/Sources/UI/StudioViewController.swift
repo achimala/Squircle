@@ -717,8 +717,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         portraitsHidden = hidePortraits
         stage.apply(poses)
         stage.setLive(!poses.isEmpty && moving, reason: "navigation")
-        page.portrait.isHidden = hidePortraits
-        for (id, cell) in cells { cell.portrait.isHidden = id == selectedID && hidePortraits }
+        // A portrait may draw the device only while it is (nearly) where that
+        // portrait stands; once the stage has it, neither does.
+        let atCell = a < 0.03 && t < 0.001, atPage = a > 0.97 && t < 0.03
+        page.portrait.isHidden = hidePortraits || !atPage
+        for (id, cell) in cells { cell.portrait.isHidden = id == selectedID && (hidePortraits || !atCell) }
 
         // The other apps drift back and fade; the opened one's name goes first.
         home.alpha = (1 - a * 1.6).clamped()
@@ -835,7 +838,7 @@ final class GridCell: UIControl {
     var captionAlpha: CGFloat = 1 {
         didSet { if captionAlpha != oldValue { name.alpha = captionAlpha; dot.alpha = captionAlpha } }
     }
-    private let name = Theme.label("", Theme.font(.headline, 16, .semibold))
+    private let name = Theme.label("", Theme.appCaptionFont())
     private let dot = UIView()
 
     init(id: String) {
