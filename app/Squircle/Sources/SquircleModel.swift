@@ -226,24 +226,11 @@ final class SquircleModel: ObservableObject {
         reconcileProjects()
     }
     private func reconcileProjects() {
-        // Most recently used first; apps never opened keep T3's order after them.
-        let used = preferences.dictionary(forKey: Self.lastUsedKey) as? [String: Double] ?? [:]
-        let catalog = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
+        projects = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
             .filter { scopeBundleID == nil || $0.bundleID == scopeBundleID }
-        projects = catalog.enumerated().sorted { a, b in
-            let x = used[a.element.id] ?? 0, y = used[b.element.id] ?? 0
-            return x != y ? x > y : a.offset < b.offset
-        }.map(\.element)
     }
-    private static let lastUsedKey = "squircle.t3.lastUsed"
-    /// Opening an app's thread makes it the most recently used. The carousel
-    /// reorders behind the open thread, never while you're browsing it.
     func selectProject(_ project: AppProject) {
         selectedProjectID = project.id; UserDefaults.standard.set(project.id,forKey:"squircle.t3.selectedProject")
-        var used = preferences.dictionary(forKey: Self.lastUsedKey) as? [String: Double] ?? [:]
-        used[project.id] = Date.now.timeIntervalSince1970
-        preferences.set(used, forKey: Self.lastUsedKey)
-        reconcileProjects()
     }
     func sessions(for project: AppProject) -> [ChatSession] { sessions.filter { sessionProjects[$0.id] == project.id } }
     func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }

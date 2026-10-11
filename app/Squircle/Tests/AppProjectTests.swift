@@ -35,9 +35,7 @@ final class AppProjectTests: XCTestCase {
             ["id":"other","title":"Other","workspaceRoot":"/src/AppTwo"]])
         let b = try build(id:"b",title:"App",path:"/src/App/Child/App.xcodeproj")
         let rows = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/Child/App.xcodeproj",request:b.request)],builds:[b])
-        XCTAssertNil(rows[0].metadataID); XCTAssertFalse(rows[0].canBuild)
-        XCTAssertEqual(rows[1].metadataID,"mac-app"); XCTAssertTrue(rows[1].canBuild)
-        XCTAssertNil(rows[2].metadataID); XCTAssertFalse(rows[2].canBuild)
+        XCTAssertEqual(rows.map(\.id),["nested"]); XCTAssertTrue(rows[0].canBuild)
     }
     func testSharedWorkspaceOwnerDoesNotDependOnMacListOrder() {
         let snapshot = shell([["id":"repo","title":"Squircle","workspaceRoot":"/src/Repo"]])
@@ -57,7 +55,7 @@ final class AppProjectTests: XCTestCase {
         let snapshot = shell([["id":"app","title":"App","workspaceRoot":"/src/App"]])
         let archive = try build(id:"archive",title:"App",path:"/src/App/App.xcodeproj",date:10)
         let sim = try build(id:"sim",title:"App",path:"/src/App/App.xcodeproj",date:20,mode:"simulator")
-        let row = T3AppCatalog.projects(shell:snapshot,metadata:[],builds:[archive,sim]).first!
+        let row = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/App.xcodeproj")],builds:[archive,sim]).first!
         XCTAssertTrue(row.canBuild); XCTAssertEqual(row.buildRequest?.mode,"archive")
         let fresh = row.buildRequest!.freshSubmission(id:"new-request")
         XCTAssertEqual(fresh.requestID,"new-request"); XCTAssertTrue(fresh.capturePreview)

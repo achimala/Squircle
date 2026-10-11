@@ -175,22 +175,31 @@ enum T3AppCatalog {
         }
     }
 
+    /// Only apps in Squircle's Mac catalog appear; a T3 project nobody
+    /// imported is not a Squircle app. Newest thread activity first.
     static func projects(shell:JSONValue,metadata:[AppMetadata],builds:[AppBuild]) -> [AppProject] {
         let projects = shell["projects"].array.filter { $0["deletedAt"] == .null }
+        var active: [String: Date] = [:]
+        for t in shell["threads"].array where t["deletedAt"] == .null && t["archivedAt"] == .null {
+            guard let id = t["projectId"].string else { continue }
+            active[id] = max(active[id] ?? .distantPast, t["updatedAt"].date)
+        }
         func owner(_ path:String) -> String? {
             projects.filter {
                 let root = $0["workspaceRoot"].string ?? ""
                 return !root.isEmpty && (path == root || path.hasPrefix(root + "/"))
             }.max { ($0["workspaceRoot"].string ?? "").count < ($1["workspaceRoot"].string ?? "").count }?["id"].string
         }
-        return projects.map { p in
+        return projects.compactMap { p -> AppProject? in
             let id = p["id"].string ?? ""
-            let record = claimant(metadata.filter { owner($0.project) == id }, of: p)
+            guard let record = claimant(metadata.filter { owner($0.project) == id }, of: p) else { return nil }
             let related = builds.filter { $0.request.map { owner($0.project) == id } ?? false }
-            let request = record?.buildRequest ?? related.filter { $0.request?.mode == "archive" }.sorted { $0.date > $1.date }.first?.request
-            return AppProject(id:id,name:record?.name ?? p["title"].string ?? "App",subtitle:"",
-                bundleID:record?.bundleID,canBuild:request?.canSubmit ?? false,updatedAt:p["updatedAt"].date,
-                buildRequest:request,metadataID:record?.id,metadataPreview:record?.preview)
-        }
+            let request = record.buildRequest ?? related.filter { $0.request?.mode == "archive" }.sorted { $0.date > $1.date }.first?.request
+            return AppProject(id:id,name:record.name,subtitle:"",
+                bundleID:record.bundleID,canBuild:request?.canSubmit ?? false,updatedAt:max(active[id] ?? .distantPast, p["updatedAt"].date),
+                buildRequest:request,metadataID:record.id,metadataPreview:record.preview)
+        }.enumerated().sorted { a, b in
+            a.element.updatedAt != b.element.updatedAt ? a.element.updatedAt > b.element.updatedAt : a.offset < b.offset
+        }.map(\.element)
     }
 }
