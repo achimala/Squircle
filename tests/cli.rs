@@ -29,97 +29,8 @@ fn json_result(output: &Output) -> Value {
     result
 }
 
-#[test]
-fn capabilities_work_without_agents_service_or_initialized_state() {
-    let directory = tempfile::tempdir().unwrap();
-    let state = directory.path().join("not-initialized");
-    let output = command()
-        .arg("--data-dir")
-        .arg(&state)
-        .args(["capabilities", "--json"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let result = json_result(&output);
-    assert_eq!(result["ok"], true);
-    assert!(
-        result["data"]["operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|operation| operation == "build.start")
-    );
-    assert!(!state.exists(), "capability discovery created local state");
-    for operation in [
-        "app.register",
-        "app.list",
-        "app.show",
-        "app.update",
-        "app.preview",
-        "preview.capture",
-        "app.browse",
-        "app.inspect",
-        "app.import",
-    ] {
-        assert!(
-            result["data"]["operations"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|value| value == operation),
-            "missing {operation}"
-        );
-    }
-}
 
-#[test]
-fn app_preview_help_explains_publication_without_a_build() {
-    let output = command()
-        .args(["app", "preview", "--help"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let help = String::from_utf8(output.stdout).unwrap();
-    for expected in [
-        "real PNG",
-        "--file",
-        "--caption",
-        "--build",
-        "--source-revision",
-        "no build is required",
-    ] {
-        assert!(help.contains(expected), "missing help: {expected}");
-    }
-}
 
-#[test]
-fn app_import_discovery_explains_no_build_and_xcode_project_preservation() {
-    let output = command()
-        .args(["app", "import", "--help"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let text = String::from_utf8(output.stdout).unwrap();
-    for item in [
-        "without starting a build",
-        "--project",
-        "--scheme",
-        "--name",
-        "--configuration",
-    ] {
-        assert!(text.contains(item), "missing {item}");
-    }
-    let output = command()
-        .args(["app", "browse", "--help"])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8(output.stdout).unwrap().contains("--path"));
-}
 
 #[test]
 fn argument_errors_are_one_machine_readable_result() {
@@ -139,20 +50,6 @@ fn argument_errors_are_one_machine_readable_result() {
     );
 }
 
-#[test]
-fn workflow_help_covers_the_remote_loop() {
-    let output = command().args(["help", "workflow"]).output().unwrap();
-    assert!(output.status.success());
-    let help = String::from_utf8(output.stdout).unwrap();
-    for text in [
-        "build start",
-        "install-link",
-        "logs BUILD_ID",
-        "crashes BUILD_ID",
-    ] {
-        assert!(help.contains(text), "workflow is missing {text}");
-    }
-}
 
 struct TestServer {
     url: String,

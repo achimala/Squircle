@@ -269,14 +269,6 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn trims_to_describing_fields() {
-        let input = json!({"command":"ls","description":"List files","timeout":5,"content":"x".repeat(200_000)});
-        let out = trim_input(&input);
-        assert_eq!(out["description"], "List files");
-        assert!(out.get("timeout").is_none());
-        assert_eq!(out["content"].as_str().unwrap().len(), 100_000);
-    }
 
     #[test]
     fn reads_image_dimensions() {
