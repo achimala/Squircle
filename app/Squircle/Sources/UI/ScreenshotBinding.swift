@@ -22,14 +22,18 @@ final class ScreenshotBinding {
 
     deinit { loading?.cancel() }
 
+    /// The Mac catalog's published preview wins; then the newest build
+    /// capture; then the newest real screenshot an agent took in the app's
+    /// threads. Only an app with none of these shows "No screenshot yet".
     func update(model: SquircleModel, project: AppProject) {
-        let metadata = model.metadata(for: project)
-        // A registered app owns its publication state. A missing publication
-        // must not be silently replaced by a potentially older build image.
+        let metadata = model.metadata(for: project).flatMap { $0.preview == nil ? nil : $0 }
         let build = metadata == nil ? model.builds(for: project).first(where: { $0.previewAvailable }) : nil
+        // Threads move on often; look for a newer capture at most every few minutes.
+        let latest = model.sessions(for: project).map(\.updatedAt).max()
+        let version = latest.map { String(Int($0.timeIntervalSince1970 / 300)) } ?? "none"
         let key = metadata.flatMap { record in record.preview.map { "app:\(record.id):\($0.id)" } }
             ?? build.map { "build:\($0.id):\($0.previewCapturedAt?.timeIntervalSince1970 ?? 0)" }
-            ?? "missing"
+            ?? (latest == nil ? "missing" : "t3:\(project.id):\(version)")
         guard key != sourceKey else { return }
         sourceKey = key
         loading?.cancel()
@@ -45,9 +49,9 @@ final class ScreenshotBinding {
             guard let model else { return }
             do {
                 let data: Data
-                if let metadata, metadata.preview != nil { data = try await model.previewData(for: metadata) }
+                if let metadata { data = try await model.previewData(for: metadata) }
                 else if let build { data = try await model.previewData(for: build) }
-                else { return }
+                else { data = try await model.threadScreenshot(for: project, version: version) }
                 let image = await Self.decode(data)
                 guard let self, !Task.isCancelled, self.sourceKey == key else { return }
                 guard let image else { throw CocoaError(.fileReadCorruptFile) }
@@ -58,8 +62,12 @@ final class ScreenshotBinding {
                 self.onChange?()
             } catch {
                 guard let self, !Task.isCancelled, self.sourceKey == key else { return }
-                self.stage?.setScreen(.unavailable, for: self.id)
-                self.sourceKey = "" // Retry on the next metadata refresh.
+                // No capture in the threads yet is the honest "missing" state.
+                if self.stage?.screen(for: self.id).hasScreenshot != true {
+                    self.stage?.setScreen(key.hasPrefix("t3:") ? .missing : .unavailable, for: self.id)
+                }
+                self.onChange?()
+                if !key.hasPrefix("t3:") { self.sourceKey = "" } // Retry on the next metadata refresh.
             }
         }
     }

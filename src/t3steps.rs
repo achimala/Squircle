@@ -180,6 +180,91 @@ pub async fn image(thread: &str, call: &str, index: usize) -> Result<Option<Valu
     }))
 }
 
+/// Pixel size from an image's header: PNG's IHDR or a JPEG start-of-frame.
+fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() >= 24 && bytes.starts_with(b"\x89PNG") {
+        let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+        let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+        return Some((w, h));
+    }
+    if !bytes.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut i = 2;
+    while i + 9 < bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        let marker = bytes[i + 1];
+        let length = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+        if (0xC0..=0xCF).contains(&marker) && ![0xC4, 0xC8, 0xCC].contains(&marker) {
+            let h = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            let w = u16::from_be_bytes([bytes[i + 7], bytes[i + 8]]) as u32;
+            return Some((w, h));
+        }
+        i += 2 + length;
+    }
+    None
+}
+
+/// A single portrait phone screen, not a contact sheet or a desktop window.
+fn phone_shaped((w, h): (u32, u32)) -> bool {
+    w > 0 && (1.8..=2.4).contains(&(h as f64 / w as f64))
+}
+
+/// The newest real screenshot an agent captured in any of a T3 project's
+/// threads: a device or preview capture, or an image it read that has a
+/// phone screen's shape. Stands in on Home for apps with no published preview.
+pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
+    use base64::Engine;
+    if !valid(project, &[]) {
+        bail!("invalid project id");
+    }
+    // Only a prefix of each image is read: enough for its header.
+    let rows = query(&format!(
+        "select a.activity_id as activity, j.key as idx, a.created_at as created_at,
+                json_extract(a.payload_json,'$.data.toolName') as tool,
+                json_extract(j.value,'$.source.media_type') as media_type,
+                substr(json_extract(j.value,'$.source.data'),1,87380) as head
+         from projection_threads t
+         join projection_thread_activities a on a.thread_id=t.thread_id,
+              json_each({CONTENT}) j
+         where t.project_id='{project}' and t.deleted_at is null and a.kind='tool.completed'
+           and (case when j.type='object' then json_extract(j.value,'$.type') end)='image'
+         order by a.created_at desc limit 40"
+    ))
+    .await?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    for row in rows {
+        let tool = row["tool"].as_str().unwrap_or_default();
+        let capture = tool.ends_with("device_screenshot") || tool.ends_with("preview_snapshot");
+        let Some(head) = row["head"].as_str() else { continue };
+        let head = &head[..head.len() / 4 * 4];
+        let Some(size) = engine.decode(head).ok().as_deref().and_then(dimensions) else { continue };
+        if !(capture && size.0 > 0 && size.1 > 0) && !phone_shaped(size) {
+            continue;
+        }
+        let (Some(activity), Some(index)) = (row["activity"].as_str(), row["idx"].as_u64()) else { continue };
+        if !valid(activity, &['_', ':']) {
+            continue;
+        }
+        let full = query(&format!(
+            "select json_extract(payload_json,'$.data.result.content[{index}].source.data') as data
+             from projection_thread_activities where activity_id='{activity}'"
+        ))
+        .await?;
+        let Some(data) = full.first().and_then(|r| r["data"].as_str()) else { continue };
+        return Ok(Some(json!({
+            "media_type": row["media_type"].as_str().unwrap_or("image/png"),
+            "data": data,
+            "captured_at": row["created_at"],
+            "width": size.0,
+            "height": size.1,
+        })));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +276,17 @@ mod tests {
         assert_eq!(out["description"], "List files");
         assert!(out.get("timeout").is_none());
         assert_eq!(out["content"].as_str().unwrap().len(), 100_000);
+    }
+
+    #[test]
+    fn reads_image_dimensions() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend_from_slice(&[0, 0, 1, 230, 0, 0, 4, 32]);
+        assert_eq!(dimensions(&png), Some((486, 1056)));
+        assert!(phone_shaped((486, 1056)));
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0, 0xFF, 0xC0, 0, 17, 8, 5, 0x70, 2, 0x80, 0, 0];
+        assert_eq!(dimensions(&jpeg), Some((640, 1392)));
+        assert!(!phone_shaped((1600, 1392)), "A contact sheet is not a screen.");
     }
 
     #[test]

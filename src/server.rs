@@ -158,6 +158,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/builds/{id}/install-link", post(create_link))
         .route("/v1/builds/{id}/diagnostics", get(diagnostics))
         .route("/v1/t3/threads/{thread}/steps", get(t3_steps))
+        .route("/v1/t3/projects/{project}/screenshot", get(t3_project_screenshot))
         .route("/v1/t3/threads/{thread}/media", get(thread_media))
         .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
         .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
@@ -737,6 +738,20 @@ async fn t3_steps(
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?;
     Ok(Json(success(steps)))
+}
+
+/// The newest real screenshot captured in a project's threads; see `t3steps`.
+async fn t3_project_screenshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project): Path<String>,
+) -> ApiResult<Response> {
+    auth(&state, &headers, false)?;
+    let image = crate::t3steps::project_screenshot(&project)
+        .await
+        .map_err(|e| ApiError::bad(e.to_string()))?
+        .ok_or_else(|| ApiError::missing("No screenshot in this project's threads"))?;
+    Ok((private_headers(), Json(success(image))).into_response())
 }
 
 /// Recordings and images agents published into a thread (`squircle media add`).

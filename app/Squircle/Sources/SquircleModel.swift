@@ -591,6 +591,13 @@ final class SquircleModel: ObservableObject {
         if let data = previewCache[key] { return data }
         let data = try await client.fetchAppPreview(id:metadata.id,previewID:metadata.preview?.id); previewCache[key] = data; return data
     }
+    /// Apps without a published preview show the newest screenshot an agent
+    /// took in their threads. `version` changes as those threads move on.
+    func threadScreenshot(for project: AppProject, version: String) async throws -> Data {
+        guard let client else { throw ClientError.configuration }; let key = "t3:" + project.id + version
+        if let data = previewCache[key] { return data }
+        let data = try await client.projectScreenshot(projectID: project.id); previewCache[key] = data; return data
+    }
     func previewData(for build: AppBuild) async throws -> Data {
         guard let client else { throw ClientError.configuration }; return try await client.fetchBuildPreview(id:build.id)
     }

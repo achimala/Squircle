@@ -130,6 +130,14 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return data
     }
 
+    /// The newest real screenshot an agent captured in a T3 project's threads.
+    func projectScreenshot(projectID: String) async throws -> Data {
+        struct Reply: Decodable { let ok: Bool; let data: JSONValue }
+        let reply: Reply = try await get(["v1", "t3", "projects", projectID, "screenshot"])
+        guard reply.ok, let data = reply.data["data"].string.flatMap({ Data(base64Encoded: $0) }) else { throw ClientError.response("Squircle") }
+        return data
+    }
+
     /// Recordings and images agents published into a thread.
     func threadMedia(threadID: String) async throws -> [JSONValue] {
         struct Reply: Decodable { let ok: Bool; let data: JSONValue }
