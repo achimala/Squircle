@@ -1,13 +1,35 @@
-import Combine
 import UIKit
 
+/// Where the user has asked to be. The only navigation state there is:
+/// everything on screen is derived from it and from two springs that always
+/// move toward what it implies, so no sequence of taps can leave the screen
+/// somewhere it should not be.
+enum Route: Equatable {
+    case grid
+    case app(String)
+    /// `thread` is a T3 thread ID, or `draft:<uuid>` for a new conversation.
+    case thread(app: String, thread: String)
+
+    var app: String? {
+        switch self {
+        case .grid: nil
+        case .app(let id), .thread(let id, _): id
+        }
+    }
+    var thread: String? { if case .thread(_, let thread) = self { thread } else { nil } }
+}
+
 /// The root: every app's real device. Home is a grid of still portraits of
-/// those devices that scroll natively. Opening an app hands its device to the
-/// live 3D stage, which lifts it to the top while the others fall back and
-/// its threads rise beneath it; at rest it becomes a portrait in the app's
-/// list again. Opening a thread swings the list away as the same device
-/// travels into the conversation. Scroll views and one spring per level drive
-/// every move, so it follows the finger and can be reversed at any frame.
+/// those devices that scroll natively. Opening an app lifts its device to the
+/// top while the others fall back and its threads rise beneath it; a thread
+/// pushes in over the list while the same device travels into it.
+///
+/// Navigation is a route plus two springs (`appSpring` grid→app, `spring`
+/// app→thread). Each spring's target is a function of the route and of what
+/// is mounted. What is mounted (the app page's app, the thread controller)
+/// changes only while its spring is at zero, i.e. off screen. Every frame is
+/// a pure function of those values, including which views take touches and
+/// whether a portrait or the 3D stage draws the device.
 @MainActor
 final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGestureRecognizerDelegate {
     let model: SquircleModel
@@ -34,36 +56,29 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Display order. It changes only while the grid is out of sight, so
     /// nothing rearranges under a finger.
     private var projects: [AppProject] = []
-    private var selectedID: String?
-    private var subscriptions = Set<AnyCancellable>()
+    /// Pending model render (debounced), portrait drawing and handback.
+    private var renderTask: Task<Void, Never>?
+    private var portraitTask: Task<Void, Never>?
+    private var handbackTask: Task<Void, Never>?
     private var laidOut: StageLayout?
-    private(set) var thread: ThreadViewController?
-    private var dragStart: CGFloat = 0
-    /// True while the stage owns the selected device. Otherwise a portrait in
-    /// the grid or the app's list shows it and the stage draws nothing.
-    private var staged = false
-    /// The stage has drawn the device since taking it: only then do its
-    /// portraits hide, so the device is never drawn nowhere.
-    private var stageDrawn = false
-    /// After a handback the stage keeps drawing the device for one more turn,
-    /// until the portrait is on screen beneath it.
-    private var stageLinger = false
-    /// Bumped on every handoff; a callback from an older one does nothing.
-    private var stageGeneration = 0
     /// Bumped whenever an app's screen changes; part of each portrait's key.
     private var screenVersions: [String: Int] = [:]
-    private var portraitsScheduled = false
 
-    private enum Phase { case grid, toApp, app, toGrid, dragApp, toThread, thread, toPage, dragThread }
-    private var phase = Phase.grid
-    private var onGrid: Bool { phase == .grid }
-    /// The screen being arrived at takes touches from the start of its
-    /// transition; nothing waits for a spring to settle.
-    private var towardGrid: Bool { phase == .grid || phase == .toGrid }
-    private var towardPage: Bool { [.app, .toApp, .toPage].contains(phase) }
-    private var towardThread: Bool { phase == .thread || phase == .toThread }
-    /// The grid is entirely out of sight, so apps may reorder in it.
-    private var gridHidden: Bool { [.app, .toThread, .thread, .toPage, .dragThread].contains(phase) }
+    // MARK: Navigation state
+
+    private var route = Route.grid
+    /// The app whose page (and device) is mounted. Changes only at `appSpring` 0.
+    private(set) var selectedID: String?
+    /// The mounted conversation and its route key. Changes only at `spring` 0.
+    private(set) var thread: ThreadViewController?
+    private var threadKey: String?
+    /// A finger on the back edge owns one spring; targets wait for release.
+    private var dragging: SpringDriver?
+    private var dragStart: CGFloat = 0
+    /// Portraits were hidden in the last frame (the stage had the device).
+    private var portraitsHidden = false
+    /// Inside `sync()`: the scene is drawn once, from the finished state.
+    private var syncing = false
 
     init(model: SquircleModel) {
         self.model = model
@@ -92,7 +107,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         connection.showsMenuAsPrimaryAction = true
         add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
 
-        page.onScroll = { [weak self] in if self?.staged == true { self?.applyScene() } }
+        page.onScroll = { [weak self] in self?.applyScene() }
         page.onOpenThread = { [weak self] id in self?.openThread(id) }
         pageHost.addSubview(page)
         [back, compose, builds].forEach(pageHost.addSubview)
@@ -105,26 +120,39 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         edge.delegate = self
         view.addGestureRecognizer(edge)
 
-        appSpring.onChange = { [weak self] _ in self?.applyScene() }
-        appSpring.onRest = { [weak self] value in self?.appRested(at: value) }
-        spring.onChange = { [weak self] _ in self?.applyScene() }
-        spring.onRest = { [weak self] value in self?.threadRested(at: value) }
+        for driver in [appSpring, spring] {
+            driver.onChange = { [weak self] value in
+                guard let self else { return }
+                // Off screen: whatever the route wants mounted can mount now.
+                if value <= 0.001 { sync() } else { applyScene() }
+            }
+            driver.onRest = { [weak self] _ in self?.rested() }
+        }
+        stage.onRendered = { [weak self] in self?.applyScene() }
 
-        model.objectWillChange.receive(on: DispatchQueue.main)
-            .debounce(for: .milliseconds(80), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in self?.render() }
-            .store(in: &subscriptions)
-        NotificationCenter.default.publisher(for: UIAccessibility.reduceMotionStatusDidChangeNotification)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.relayout() }
-            .store(in: &subscriptions)
+        Task { [weak self, updates = model.updates] in
+            for await _ in updates {
+                guard let self else { return }
+                // Bursts of model changes render once, 80 ms after the last.
+                renderTask?.cancel()
+                renderTask = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(80))
+                    guard !Task.isCancelled else { return }
+                    self?.render()
+                }
+            }
+        }
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: UIAccessibility.reduceMotionStatusDidChangeNotification) {
+                self?.relayout()
+            }
+        }
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: StudioViewController, _: UITraitCollection) in
             controller.relayout()
         }
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: StudioViewController, _: UITraitCollection) in
             controller.schedulePortraits()
         }
-        updateInteractivity()
         render()
     }
 
@@ -139,98 +167,126 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     #if DEBUG
-    /// Verification only (never in Release). Holds real, finger-driven states
-    /// still for a screen capture: `SQUIRCLE_GRID` (grid scroll in points),
-    /// `SQUIRCLE_APP` (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1
-    /// of opening it), `SQUIRCLE_EXPAND` (its list's scroll in points),
-    /// `SQUIRCLE_SCRUB` (0…1 of the thread transition) and `SQUIRCLE_DETENT`
-    /// (0…2 of the thread's divider). `SQUIRCLE_DEMO=1` loops through them.
+    /// Verification only (never in Release). Holds real states still for a
+    /// screen capture: `SQUIRCLE_GRID` (grid scroll in points), `SQUIRCLE_APP`
+    /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it),
+    /// `SQUIRCLE_EXPAND` (its list's scroll in points), `SQUIRCLE_SCRUB` (0…1
+    /// of the thread transition) and `SQUIRCLE_DETENT` (0…2 of the thread's
+    /// divider). `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
+    /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
         func value(_ key: String) -> CGFloat? { environment[key].flatMap(Double.init).map { CGFloat($0) } }
         if let slow = value("SQUIRCLE_SLOW") { SpringDriver.debugSlowMotion = Double(slow) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
             guard let self else { return }
             if let y = value("SQUIRCLE_GRID") { grid.contentOffset.y = y; applyScene() }
             guard let name = environment["SQUIRCLE_APP"], let project = projects.first(where: { $0.name == name }) else { return }
-            openApp(project.id, begin: false)
-            if let scrub = value("SQUIRCLE_APP_SCRUB") {
-                phase = .dragApp
-                appSpring.set(scrub)
-                return
-            }
+            openApp(project.id)
+            if let scrub = value("SQUIRCLE_APP_SCRUB") { hold(appSpring, at: scrub); return }
             appSpring.set(1)
-            appRested(at: 1)
             if let expand = value("SQUIRCLE_EXPAND") { page.contentOffset.y = expand }
             guard let scrub = value("SQUIRCLE_SCRUB") else { return }
             let sessions = model.sessions(for: project)
             let named = environment["SQUIRCLE_THREAD"].flatMap { title in sessions.first { $0.title == title } }
-            openThread(environment["SQUIRCLE_DRAFT"] == "1" ? nil : (named ?? sessions.first)?.id, begin: false)
-            phase = .dragThread
+            openThread(environment["SQUIRCLE_DRAFT"] == "1" ? nil : (named ?? sessions.first)?.id)
             if let detent = value("SQUIRCLE_DETENT") { thread?.debugSetDetent(detent) }
             if environment["SQUIRCLE_DEMO_QUESTION"] == "1" { thread?.debugShowQuestion() }
-            let later: (@escaping () -> Void) -> Void = { work in DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work) }
+            let later: (@escaping @MainActor () -> Void) -> Void = { work in
+                Task { try? await Task.sleep(for: .seconds(2.5)); work() }
+            }
             if environment["SQUIRCLE_DEMO_TAP"] == "1" { later { [weak self] in self?.thread?.debugTapDevice() } }
             if environment["SQUIRCLE_DEMO_LENS"] == "1" { later { [weak self] in self?.thread?.debugLens() } }
             if environment["SQUIRCLE_DEMO_PULSE"] == "1" { later { [weak self] in self?.thread?.debugPulse() } }
             if let text = environment["SQUIRCLE_DEMO_SEND"] { later { [weak self] in self?.thread?.debugFlySend(text) } }
-            spring.set(scrub)
-            if scrub >= 1 { phase = .toThread; spring.animate(to: 1) }
+            if scrub < 1 { hold(spring, at: scrub) }
         }
-        if environment["SQUIRCLE_STRESS"] == "1" { stress(until: CACurrentMediaTime() + (value("SQUIRCLE_STRESS_SECONDS").map(Double.init) ?? 30)) }
+        if environment["SQUIRCLE_STRESS"] == "1" {
+            let seconds = value("SQUIRCLE_STRESS_SECONDS").map(Double.init) ?? 30
+            Task { [weak self] in await self?.stress(for: seconds) }
+        }
         if environment["SQUIRCLE_DEMO"] == "1" {
-            func cycle() {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            Task { [weak self] in
+                while true {
+                    try? await Task.sleep(for: .seconds(2.5))
                     guard let self else { return }
-                    switch phase {
+                    switch route {
                     case .grid: if let first = projects.first { openApp(first.id) }
                     case .app:
                         if let project = selectedProject, let first = model.sessions(for: project).first,
-                           thread == nil, Int.random(in: 0...1) == 0 { openThread(first.id) } else { closeApp() }
+                           Int.random(in: 0...1) == 0 { openThread(first.id) } else { closeApp() }
                     case .thread: closeThread()
-                    default: break
                     }
-                    cycle()
                 }
             }
-            cycle()
         }
     }
 
-    /// Verification only: taps as fast as a hurried person would, through the
-    /// same entry points as the controls, and reports any state that is stuck
-    /// (moving toward a screen with nothing moving it) or settles wrong.
-    private func stress(until end: CFTimeInterval) {
-        let now = CACurrentMediaTime()
-        let moving = appSpring.isAnimating || spring.isAnimating
-        if [.toApp, .toGrid, .toThread, .toPage].contains(phase), !moving, !(staged && !stageDrawn) {
-            NSLog("STRESS stuck phase=%@ a=%.3f t=%.3f staged=%d drawn=%d", "\(phase)", appSpring.value, spring.value, staged, stageDrawn)
-        }
-        guard now < end else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                guard let self else { return }
-                let restOK: Bool
-                switch phase {
-                case .grid: restOK = !staged && appSpring.value == 0
-                case .app: restOK = !staged && appSpring.value == 1 && thread == nil
-                case .thread: restOK = staged && stageDrawn && spring.value == 1 && thread != nil
-                default: restOK = false
+    /// Holds one spring still at a value, as a finger would.
+    private func hold(_ driver: SpringDriver, at value: CGFloat) {
+        driver.stop()
+        dragging = driver
+        driver.set(value)
+    }
+
+    /// Verification only: taps and back swipes as fast as a hurried person,
+    /// through the same entry points as the controls, while `audit` checks
+    /// every frame. At the end, the screen must have settled on the route.
+    private func stress(for seconds: Double) async {
+        let end = ContinuousClock.now + .seconds(seconds)
+        while ContinuousClock.now < end {
+            var actions: [() -> Void] = []
+            if let driver = dragging {
+                let target = (driver.value + CGFloat.random(in: -0.4...0.4)).clamped()
+                actions.append { [weak self] in self?.moveBack(to: target) }
+                actions.append { [weak self] in self?.endBack(velocity: CGFloat.random(in: -2...2), closing: Bool.random()) }
+            } else {
+                switch route {
+                case .grid: for project in projects.prefix(3) { actions.append { [weak self] in self?.openApp(project.id) } }
+                case .app:
+                    actions.append { [weak self] in self?.closeApp() }
+                    if let project = selectedProject {
+                        for session in model.sessions(for: project).prefix(2) { actions.append { [weak self] in self?.openThread(session.id) } }
+                    }
+                    actions.append { [weak self] in self?.openThread(nil) }
+                case .thread:
+                    actions.append { [weak self] in self?.closeThread() }
                 }
-                NSLog("STRESS end phase=%@ ok=%d a=%.3f t=%.3f staged=%d drawn=%d", "\(phase)", restOK, appSpring.value, spring.value, staged, stageDrawn)
+                if route != .grid { actions.append { [weak self] in self?.beginBack() } }
             }
-            return
+            actions.randomElement()?()
+            try? await Task.sleep(for: .milliseconds(Int.random(in: 20...450)))
         }
-        var actions: [() -> Void] = []
-        if towardGrid { for project in projects.prefix(3) { actions.append { [weak self] in self?.openApp(project.id) } } }
-        if towardPage {
-            actions.append { [weak self] in self?.closeApp() }
-            if let project = selectedProject {
-                for session in model.sessions(for: project).prefix(2) { actions.append { [weak self] in self?.openThread(session.id) } }
-            }
+        if dragging != nil { endBack(velocity: 0, closing: Bool.random()) }
+        try? await Task.sleep(for: .seconds(2.5))
+        let settled = !appSpring.isAnimating && !spring.isAnimating
+            && appSpring.value == appTarget && spring.value == threadTarget
+            && selectedID == (route.app ?? selectedID) && threadKey == route.thread
+        NSLog("STRESS end route=%@ settled=%d a=%.3f t=%.3f violations=%d", "\(route)", settled,
+              appSpring.value, spring.value, auditViolations)
+    }
+
+    private var auditViolations = 0
+
+    /// Every frame: the selected device is drawn somewhere, and at rest exactly
+    /// the routed screen is showing.
+    private func audit(a: CGFloat, t: CGFloat, posed: Bool) {
+        func fail(_ what: String) {
+            auditViolations += 1
+            NSLog("AUDIT %@ route=%@ a=%.3f t=%.3f", what, "\(route)", a, t)
         }
-        if towardThread { actions.append { [weak self] in self?.closeThread() } }
-        actions.randomElement()?()
-        DispatchQueue.main.asyncAfter(deadline: .now() + Double.random(in: 0.03...0.5)) { [weak self] in self?.stress(until: end) }
+        if let id = selectedID, a > 0.001 || route.app == id {
+            let cellShows = cells[id].map { !$0.portrait.isHidden } ?? false
+            let pageShows = !page.portrait.isHidden && !page.isHidden && !pageHost.isHidden
+            if !posed && !cellShows && !pageShows { fail("device drawn nowhere") }
+        }
+        guard !appSpring.isAnimating, !spring.isAnimating, dragging == nil else { return }
+        switch route {
+        case .grid: if home.isHidden || home.alpha < 0.99 { fail("grid not showing at rest") }
+        case .app: if pageHost.isHidden || page.isHidden || a < 1 || t > 0 { fail("app page not showing at rest") }
+        case .thread: if thread == nil || t < 1 || thread?.view.transform != .identity { fail("thread not showing at rest") }
+        }
     }
     #endif
 
@@ -275,6 +331,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private var layout: StageLayout { laidOut ?? makeLayout() }
     private var selectedProject: AppProject? { projects.first { $0.id == selectedID } }
+    /// The grid is entirely out of sight, so apps may reorder in it.
+    private var gridHidden: Bool { appSpring.value >= 1 && !appSpring.isAnimating }
 
     // MARK: Model
 
@@ -289,7 +347,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         } else {
             projects = next
         }
-        if let selectedID, !ids.contains(selectedID), thread == nil, !onGrid { closeApp() }
+        // An app that disappeared from the Mac takes its route with it.
+        if let app = route.app, !ids.contains(app) { route = .grid }
         for id in Array(cells.keys) where !ids.contains(id) {
             cells.removeValue(forKey: id)?.removeFromSuperview()
             bindings[id] = nil
@@ -327,7 +386,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
         }
         if laidOut != nil { layoutGrid() }
-        applyScene()
+        sync()
         schedulePortraits()
     }
 
@@ -368,7 +427,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         schedulePortraits()
         // An app reordered while the grid was hidden stays in sight for its return.
-        if !onGrid, let id = selectedID, let cell = cells[id] {
+        if gridHidden, let id = selectedID, let cell = cells[id] {
             let visible = CGRect(x: 0, y: grid.contentOffset.y + layout.gridTop, width: grid.bounds.width,
                                  height: grid.bounds.height - layout.gridTop)
             if !visible.contains(cell.frame) {
@@ -376,6 +435,193 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 grid.contentOffset.y = (cell.frame.minY - layout.gridTop).clamped(0, maxY)
             }
         }
+    }
+
+    // MARK: Navigation
+
+    /// Where each spring is headed: open only while the route wants exactly
+    /// what is mounted. Anything else first goes back to zero, off screen.
+    private var appTarget: CGFloat { route.app != nil && route.app == selectedID ? 1 : 0 }
+    private var threadTarget: CGFloat {
+        appTarget == 1 && route.thread != nil && route.thread == threadKey && thread != nil ? 1 : 0
+    }
+
+    func openApp(_ id: String) {
+        guard presentedViewController == nil, projects.contains(where: { $0.id == id }) else { return }
+        if route.app != id { Theme.openHaptic() }
+        route = .app(id)
+        sync()
+    }
+
+    func closeApp() {
+        guard route != .grid, presentedViewController == nil else { return }
+        Theme.selectionHaptic()
+        route = .grid
+        sync()
+    }
+
+    /// A thread of the mounted app; nil starts a new conversation.
+    func openThread(_ sessionID: String?) {
+        guard presentedViewController == nil, let app = selectedID, route.app == app else { return }
+        Theme.openHaptic()
+        route = .thread(app: app, thread: sessionID ?? "draft:" + UUID().uuidString)
+        sync()
+    }
+
+    func closeThread() {
+        guard case .thread(let app, _) = route, presentedViewController == nil else { return }
+        view.endEditing(true)
+        route = .app(app)
+        sync()
+    }
+
+    /// Makes what is mounted and where the springs head agree with the route.
+    /// Safe to call at any moment, any number of times.
+    private func sync() {
+        guard !syncing else { return }
+        syncing = true
+        defer {
+            syncing = false
+            applyScene()
+        }
+        // The thread level only exists inside its app; it leaves first.
+        if spring.value <= 0.001, threadKey != nil, route.thread != threadKey || route.app != selectedID {
+            unmountThread()
+        }
+        if appSpring.value <= 0.001, let app = route.app, app != selectedID {
+            unmountThread()
+            mountApp(app)
+        }
+        if spring.value <= 0.001, thread == nil, let key = route.thread, route.app == selectedID {
+            mountThread(key)
+        }
+        for (driver, target) in [(appSpring, appTarget), (spring, threadTarget)] where driver !== dragging {
+            if driver.target != target || (!driver.isAnimating && driver.value != target) {
+                driver.redirect(to: target)
+            }
+        }
+    }
+
+    private func rested() {
+        sync()
+        guard dragging == nil, !appSpring.isAnimating, !spring.isAnimating else { return }
+        let focus: Any? = switch route {
+        case .grid: selectedID.flatMap { cells[$0] }
+        case .app: page.hero
+        case .thread: thread?.view
+        }
+        UIAccessibility.post(notification: .screenChanged, argument: focus)
+    }
+
+    private func mountApp(_ id: String) {
+        guard let project = projects.first(where: { $0.id == id }) else { return }
+        selectedID = id
+        page.reset()
+        page.update(project: project, sessions: model.sessions(for: project), agentName: model.agentName(for:),
+                    loading: model.isLoading, error: model.error)
+        ensureHeroPortrait(id)
+        renderControls()
+        model.selectProject(project)
+    }
+
+    private func mountThread(_ key: String) {
+        guard let project = selectedProject else { return }
+        let sessionID = key.hasPrefix("draft:") ? nil : key
+        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage)
+        controller.layoutProvider = { [weak self] in self?.layout }
+        controller.onBack = { [weak self] in self?.closeThread() }
+        controller.onGeometry = { [weak self] in self?.applyScene() }
+        thread = controller
+        threadKey = key
+        addChild(controller)
+        controller.view.frame = view.bounds
+        // An opaque page that covers the list as it slides in, never text over text.
+        controller.view.backgroundColor = Theme.paper
+        controller.view.layer.shadowColor = UIColor.black.cgColor
+        controller.view.layer.shadowOpacity = 0.14
+        controller.view.layer.shadowRadius = 18
+        controller.view.layer.shadowOffset = CGSize(width: -6, height: 0)
+        controller.view.layer.shadowPath = UIBezierPath(rect: view.bounds).cgPath
+        controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
+        threadHost.addSubview(controller.view)
+        controller.didMove(toParent: self)
+        controller.view.layoutIfNeeded()
+    }
+
+    private func unmountThread() {
+        guard let controller = thread else { return }
+        thread = nil
+        threadKey = nil
+        controller.tearDown()
+        stage.endLive(for: controller.project.id)
+        controller.willMove(toParent: nil)
+        controller.view.removeFromSuperview()
+        controller.removeFromParent()
+    }
+
+    // MARK: Back
+
+    /// Swipe in from the left edge to go back a level, following the finger.
+    @objc private func backPanned(_ gesture: UIPanGestureRecognizer) {
+        let width = max(1, view.bounds.width)
+        switch gesture.state {
+        case .began: beginBack()
+        case .changed:
+            guard dragging != nil else { return }
+            moveBack(to: dragStart - gesture.translation(in: view).x / width)
+        case .ended, .cancelled, .failed:
+            guard let driver = dragging else { return }
+            let velocity = -gesture.velocity(in: view).x / width
+            let closing = gesture.state == .ended && driver.value + velocity * 0.18 < 0.5
+            #if DEBUG
+            MotionAudit.shared.note("back", values: ["progress": driver.value, "velocity": velocity, "closing": closing])
+            #endif
+            endBack(velocity: velocity, closing: closing)
+        default: break
+        }
+    }
+
+    /// The top level on screen: the thread if it is showing, else the app.
+    private func beginBack() {
+        guard dragging == nil, route != .grid else { return }
+        let driver = route.thread != nil && threadTarget == 1 ? spring : appSpring
+        guard driver === spring || appTarget == 1 else { return }
+        driver.stop()
+        dragging = driver
+        dragStart = driver.value
+        applyScene()
+    }
+
+    private func moveBack(to value: CGFloat) {
+        dragging?.set(value.clamped())
+    }
+
+    private func endBack(velocity: CGFloat, closing: Bool) {
+        guard let driver = dragging else { return }
+        dragging = nil
+        if closing {
+            if driver === spring { closeThread() } else { closeApp() }
+        }
+        let target = driver === spring ? threadTarget : appTarget
+        driver.animate(to: target, initialVelocity: velocity)
+        sync()
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard let pan = gestureRecognizer as? UIPanGestureRecognizer, presentedViewController == nil,
+              pan.velocity(in: view).x >= 0, dragging == nil else { return false }
+        if route.thread != nil {
+            guard let thread, threadTarget == 1 else { return false }
+            return thread.allowsBackSwipe(at: pan.location(in: thread.view))
+        }
+        return appTarget == 1
+    }
+
+    /// Scrolling waits until a touch is known not to be a back swipe, so the
+    /// two never move together.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        otherGestureRecognizer is UIPanGestureRecognizer && otherGestureRecognizer.view is UIScrollView
     }
 
     // MARK: Portraits
@@ -392,15 +638,13 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         "\(screenVersions[id] ?? 0):\(pose.height):\(pose.yaw):\(pose.pitch):\(dark)"
     }
 
-    /// Redraws stale portraits one per main-queue turn, so a grid of many apps
-    /// never stalls a frame.
+    /// Redraws stale portraits one per frame, so a grid of many apps never
+    /// stalls one.
     private func schedulePortraits() {
-        guard !portraitsScheduled, laidOut != nil else { return }
-        portraitsScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            portraitsScheduled = false
-            if drawNextPortrait() { schedulePortraits() }
+        guard portraitTask == nil, laidOut != nil else { return }
+        portraitTask = Task { [weak self] in
+            while let self, drawNextPortrait() { await DisplayFrame.next() }
+            self?.portraitTask = nil
         }
     }
 
@@ -428,84 +672,57 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         return true
     }
 
-    private func ensureCellPortrait(_ id: String) {
-        guard let index = projects.firstIndex(where: { $0.id == id }), let cell = cells[id] else { return }
-        let pose = gridPose(index), key = portraitKey(id, pose)
-        guard cell.portraitKey != key else { return }
-        cell.portraitKey = key
-        cell.portrait.image = stage.portrait(for: id, pose: pose, scale: displayScale)
-    }
-
-    /// The stage takes the selected device from the portrait showing it.
-    /// The portrait hides once the stage has drawn the device; `then` runs at
-    /// that moment, or at once if the stage already has it.
-    private func stageSelected(then: (() -> Void)? = nil) {
-        stageLinger = false
-        if staged && stageDrawn { then?(); return }
-        if !staged {
-            staged = true
-            stageGeneration += 1
-            applyScene()
-        }
-        let generation = stageGeneration
-        stage.afterNextRender { [weak self] in
-            guard let self, staged, generation == stageGeneration else { return }
-            stageDrawn = true
-            applyScene()
-            then?()
-        }
-    }
-
-    /// At rest a portrait takes the device back. It shows at once; the stage
-    /// keeps drawing the device beneath for one more turn, then clears.
-    private func unstageSelected() {
-        guard staged else { return }
-        staged = false
-        stageDrawn = false
-        stageLinger = true
-        stageGeneration += 1
-        applyScene()
-        let generation = stageGeneration
-        DispatchQueue.main.async { [weak self] in
-            guard let self, generation == stageGeneration else { return }
-            stageLinger = false
-            stage.setLive(false, reason: "transition")
-            applyScene()
-        }
-    }
-
     // MARK: Scene
 
-    /// Pushes both transitions and the thread's divider into every layer.
-    /// Called only while something moves.
+    /// Every frame, from the route and the two springs alone: where the
+    /// selected device stands and whether the stage or a portrait draws it,
+    /// what is visible, and which screen takes touches.
     private func applyScene() {
         let width = view.bounds.width
-        guard width > 0 else { return }
+        guard width > 0, !syncing else { return }
         let layout = self.layout
         // A spring may overshoot its end a little; screens never travel past it.
         let a = appSpring.value.clamped(), t = spring.value.clamped()
+        let moving = appSpring.isAnimating || spring.isAnimating || dragging != nil
         let scroll = grid.contentOffset.y
         var origin = CGPoint(x: width / 2, y: layout.pageHeroTop)
         var poses: [String: PhonePose] = [:]
+        var hidePortraits = false
         if let id = selectedID, let index = projects.firstIndex(where: { $0.id == id }) {
             let start = layout.gridPose(cell: layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll), column: index % layout.columns)
             origin = start.center
-            if staged || stageLinger {
-                var pose = layout.transitionPose(from: start, to: layout.pagePose(scroll: page.offset), progress: a)
-                if t > 0.0001, let thread, thread.project.id == id {
-                    pose = layout.transitionPose(from: pose, to: thread.pose, progress: t)
-                }
+            var pose = layout.transitionPose(from: start, to: layout.pagePose(scroll: page.offset), progress: a)
+            if t > 0.0001, let thread { pose = layout.transitionPose(from: pose, to: thread.pose, progress: t) }
+            // A portrait draws the device only where it rests still: in the
+            // grid or at the top of its list. Anywhere else the stage does,
+            // and the portrait hides once the stage has actually drawn it.
+            let resting = !moving && (a == 0 || (a == 1 && t == 0))
+            if !resting {
                 poses[id] = pose
+                hidePortraits = stage.drawn.contains(id)
+                if !hidePortraits { stage.requestRender() }
+            } else if portraitsHidden || handbackTask != nil {
+                // Handing back: the portrait shows now; the stage keeps the
+                // device beneath it until the next frame has put it on screen.
+                poses[id] = pose
+                if handbackTask == nil {
+                    handbackTask = Task { [weak self] in
+                        await DisplayFrame.next()
+                        self?.handbackTask = nil
+                        self?.applyScene()
+                    }
+                }
             }
         }
+        portraitsHidden = hidePortraits
         stage.apply(poses)
-        // Derived, never toggled: hidden exactly while the stage shows the device.
-        let onStage = staged && stageDrawn
-        page.portrait.isHidden = onStage
-        for (id, cell) in cells { cell.portrait.isHidden = id == selectedID && onStage }
+        stage.setLive(!poses.isEmpty && moving, reason: "navigation")
+        page.portrait.isHidden = hidePortraits
+        for (id, cell) in cells { cell.portrait.isHidden = id == selectedID && hidePortraits }
 
         // The other apps drift back and fade; the opened one's name goes first.
         home.alpha = (1 - a * 1.6).clamped()
+        home.isHidden = a >= 1 && !moving
         for (index, project) in projects.enumerated() {
             guard let cell = cells[project.id] else { continue }
             if project.id == selectedID {
@@ -521,8 +738,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
 
         // The app's list rises beneath its device, row by row.
-        pageHost.isHidden = a < 0.001
-        self.page.setArrival(a, reduced: layout.reducedMotion)
+        pageHost.isHidden = a <= 0.001
+        page.isHidden = t >= 1 && !moving
+        page.setArrival(a, reduced: layout.reducedMotion)
         let chrome = ((a - 0.5) / 0.5).clamped()
         for button in [back, compose, builds] { button.alpha = chrome * (1 - t * 2).clamped() }
         compose.transform = CGAffineTransform(translationX: 0, y: (1 - chrome) * 40)
@@ -530,241 +748,32 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
         // A thread: a flat push. The conversation slides over from the right
         // while the list drifts a third as far left. The device travels on its own.
-        self.page.transform = CGAffineTransform(translationX: layout.reducedMotion ? 0 : -width * 0.3 * t, y: 0)
+        page.transform = CGAffineTransform(translationX: layout.reducedMotion ? 0 : -width * 0.3 * t, y: 0)
         thread?.setTransitionProgress(t)
         thread?.view.transform = CGAffineTransform(translationX: width * (1 - t), y: 0)
-    }
 
-    // MARK: App page
-
-    /// `begin: false` stages the device without starting the spring
-    /// (verification holds a scrubbed frame).
-    private func openApp(_ id: String, begin: Bool = true) {
-        let returning = phase == .toGrid && id == selectedID
-        guard towardGrid, presentedViewController == nil,
-              let project = projects.first(where: { $0.id == id }), cells[id] != nil else { return }
-        // Another app still on its way back lands at once; the new one takes over.
-        if phase == .toGrid, !returning {
-            appSpring.set(0)
-            appRested(at: 0)
-        }
-        Theme.openHaptic()
-        if !returning {
-            selectedID = id
-            page.reset()
-            page.update(project: project, sessions: model.sessions(for: project), agentName: model.agentName(for:),
-                        loading: model.isLoading, error: model.error)
-            ensureHeroPortrait(id)
-            renderControls()
-        }
-        grid.setContentOffset(grid.contentOffset, animated: false)
-        phase = .toApp
-        beginMotion("app.open")
-        updateInteractivity()
-        stageSelected { [weak self] in
-            guard let self, begin, phase == .toApp else { return }
-            appSpring.redirect(to: 1)
-        }
-    }
-
-    func closeApp() {
-        guard [.app, .toApp, .dragApp, .toPage].contains(phase), presentedViewController == nil else { return }
-        // A thread still sliding away is gone at once.
-        if phase == .toPage, let leaving = thread {
-            spring.set(0)
-            removeThread(leaving)
-        }
-        Theme.selectionHaptic()
-        phase = .toGrid
-        beginMotion("app.close")
-        updateInteractivity()
-        stageSelected { [weak self] in
-            guard let self, phase == .toGrid else { return }
-            appSpring.redirect(to: 0)
-        }
-    }
-
-    private func appRested(at value: CGFloat) {
-        stage.setLive(false, reason: "transition")
-        if value >= 1, phase == .toApp {
-            phase = .app
-            if let project = selectedProject { model.selectProject(project) }
-            updateInteractivity()
-            if let id = selectedID { ensureHeroPortrait(id) }
-            unstageSelected()
-            UIAccessibility.post(notification: .screenChanged, argument: page.hero)
-        } else if value <= 0, phase == .toGrid {
-            phase = .grid
-            page.reset()
-            updateInteractivity()
-            render()
-            if let id = selectedID { ensureCellPortrait(id) }
-            unstageSelected()
-            UIAccessibility.post(notification: .screenChanged, argument: selectedID.flatMap { cells[$0] })
-        }
-    }
-
-    // MARK: Threads
-
-    private func openThread(_ sessionID: String?, begin: Bool = true) {
-        guard towardPage, presentedViewController == nil, let project = selectedProject else { return }
-        Theme.openHaptic()
-        model.selectProject(project)
-        // The same thread still leaving turns around; another one replaces it
-        // where it is and continues from there.
-        if let leaving = thread {
-            if phase == .toPage, leaving.currentSessionID == sessionID, sessionID != nil {
-                phase = .toThread
-                beginMotion("thread.open")
-                updateInteractivity()
-                spring.redirect(to: 1)
-                return
-            }
-            removeThread(leaving)
-        }
-        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage)
-        controller.layoutProvider = { [weak self] in self?.layout }
-        controller.onBack = { [weak self] in self?.closeThread() }
-        controller.onGeometry = { [weak self] in self?.applyScene() }
-        thread = controller
-        addChild(controller)
-        controller.view.frame = view.bounds
-        // An opaque page that covers the list as it turns in, never text over text.
-        controller.view.backgroundColor = Theme.paper
-        controller.view.layer.shadowColor = UIColor.black.cgColor
-        controller.view.layer.shadowOpacity = 0.14
-        controller.view.layer.shadowRadius = 18
-        controller.view.layer.shadowOffset = CGSize(width: -6, height: 0)
-        controller.view.layer.shadowPath = UIBezierPath(rect: view.bounds).cgPath
-        controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
-        // Conversations pass beneath the devices.
-        threadHost.addSubview(controller.view)
-        controller.didMove(toParent: self)
-        controller.view.layoutIfNeeded()
-        phase = .toThread
-        // Placed for the current progress now: a thread replacing one that was
-        // leaving continues from where that one was.
-        applyScene()
-        beginMotion("thread.open")
-        updateInteractivity()
-        stageSelected { [weak self] in
-            guard let self, begin, phase == .toThread else { return }
-            spring.redirect(to: 1)
-        }
-    }
-
-    func closeThread() {
-        guard thread != nil, presentedViewController == nil, [.thread, .toThread, .dragThread].contains(phase) else { return }
-        view.endEditing(true)
-        phase = .toPage
-        beginMotion("thread.close")
-        updateInteractivity()
-        spring.redirect(to: 0)
-    }
-
-    private func threadRested(at value: CGFloat) {
-        stage.setLive(false, reason: "transition")
-        if value >= 1, phase == .toThread {
-            phase = .thread
-            updateInteractivity()
-            UIAccessibility.post(notification: .screenChanged, argument: thread?.view)
-        } else if value <= 0, phase == .toPage {
-            if let thread { removeThread(thread) }
-            phase = .app
-            applyScene()
-            updateInteractivity()
-            unstageSelected()
-            UIAccessibility.post(notification: .screenChanged, argument: page.hero)
-        }
-    }
-
-    private func removeThread(_ controller: ThreadViewController) {
-        controller.tearDown()
-        stage.endLive(for: controller.project.id)
-        controller.willMove(toParent: nil)
-        controller.view.removeFromSuperview()
-        controller.removeFromParent()
-        if thread === controller { thread = nil }
-    }
-
-    // MARK: Back
-
-    /// Swipe in from the left edge to go back a level, following the finger.
-    @objc private func backPanned(_ gesture: UIPanGestureRecognizer) {
-        let width = max(1, view.bounds.width)
-        let threadLevel = thread != nil
-        let driver = threadLevel ? spring : appSpring
-        switch gesture.state {
-        case .began:
-            dragStart = driver.value
-            driver.stop()
-            if !threadLevel { stageSelected() }
-            phase = threadLevel ? .dragThread : .dragApp
-            beginMotion(threadLevel ? "thread.drag" : "app.drag")
-            updateInteractivity()
-        case .changed:
-            guard phase == .dragThread || phase == .dragApp else { return }
-            driver.set((dragStart - gesture.translation(in: view).x / width).clamped())
-        case .ended, .cancelled, .failed:
-            guard phase == .dragThread || phase == .dragApp else { return }
-            let velocity = -gesture.velocity(in: view).x / width
-            let closing = gesture.state == .ended && driver.value + velocity * 0.18 < 0.5
-            #if DEBUG
-            MotionAudit.shared.note("back", values: ["progress": driver.value, "velocity": velocity, "closing": closing])
-            #endif
-            if threadLevel {
-                if closing { view.endEditing(true) }
-                phase = closing ? .toPage : .toThread
-            } else {
-                phase = closing ? .toGrid : .toApp
-            }
-            updateInteractivity()
-            driver.animate(to: closing ? 0 : 1, initialVelocity: velocity)
-        default: break
-        }
-    }
-
-    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard let pan = gestureRecognizer as? UIPanGestureRecognizer, presentedViewController == nil,
-              pan.velocity(in: view).x >= 0 else { return false }
-        if let thread { return [.thread, .toThread].contains(phase) && thread.allowsBackSwipe(at: pan.location(in: thread.view)) }
-        return [.app, .toApp].contains(phase)
-    }
-
-    /// Scrolling waits until a touch is known not to be a back swipe, so the
-    /// two never move together.
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                           shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        otherGestureRecognizer is UIPanGestureRecognizer && otherGestureRecognizer.view is UIScrollView
-    }
-
-    private func beginMotion(_ name: String) {
-        stage.setLive(true, reason: "transition")
+        // Touches go to the screen the route names, from the first frame of its
+        // transition. A conversation on its way out still covers the list, so
+        // touches on it stop there instead of reaching rows hidden beneath.
+        let onGrid = route == .grid
+        let onPage = route.app != nil && route.app == selectedID && route.thread == nil
+        let onThread = threadTarget == 1
+        home.isUserInteractionEnabled = onGrid
+        home.accessibilityElementsHidden = !onGrid
+        pageHost.isUserInteractionEnabled = onPage
+        pageHost.accessibilityElementsHidden = !onPage
+        thread?.view.isUserInteractionEnabled = onThread
+        thread?.view.accessibilityElementsHidden = !onThread
+        threadHost.swallowsTouches = thread != nil && !onThread
         #if DEBUG
-        MotionAudit.shared.begin(name, duration: 1.0)
+        audit(a: a, t: t, posed: !poses.isEmpty)
         #endif
-    }
-
-    /// Only the resting screen is interactive and visible to VoiceOver/UI tests.
-    private func updateInteractivity() {
-        home.isUserInteractionEnabled = towardGrid
-        home.accessibilityElementsHidden = !towardGrid
-        pageHost.isUserInteractionEnabled = towardPage
-        pageHost.accessibilityElementsHidden = !towardPage
-        thread?.view.isUserInteractionEnabled = towardThread
-        // A conversation on its way out still covers the list: touches on it
-        // stop there instead of reaching rows hidden beneath.
-        threadHost.swallowsTouches = thread != nil && !towardThread
-        // Hidden at rest so nothing costs anything behind a conversation.
-        home.isHidden = phase == .thread || phase == .app
-        page.isHidden = phase == .thread
-        thread?.view.accessibilityElementsHidden = phase != .thread
     }
 
     // MARK: Sheets
 
     private func presentBuilds() {
-        guard let project = selectedProject, presentedViewController == nil, towardPage else { return }
+        guard let project = selectedProject, presentedViewController == nil, route == .app(project.id) else { return }
         Theme.selectionHaptic()
         let controller = BuildsViewController(model: model, project: project)
         controller.onNewThread = { [weak self, weak controller] in
@@ -780,7 +789,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     private func presentImport() {
-        guard towardGrid, presentedViewController == nil else { return }
+        guard route == .grid, presentedViewController == nil else { return }
         let importer = AppImportNavigationController(model: model)
         importer.onImport = { [weak self, weak importer] project in
             importer?.dismiss(animated: true) {
@@ -795,10 +804,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     override func accessibilityPerformEscape() -> Bool {
-        switch phase {
+        switch route {
         case .thread: closeThread(); return true
         case .app: closeApp(); return true
-        default: return false
+        case .grid: return false
         }
     }
 }

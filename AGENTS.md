@@ -17,6 +17,25 @@ Read [README.md](README.md), then only the linked detail relevant to the task. D
 
 - **2026-10-06 (user decision):** device builds Squircle signs for other apps get an injected debug overlay (Squircle's own sources as `SquircleOverlay.framework`, added between archive and export). The overlay reads Squircle's paired connection from a team-shared Keychain group; the user accepted that risk. It is never in App Store exports or simulator builds. No fallback credentials. See [debug overlay](docs/t3-native-migration.md#2026-10-06-in-app-debug-overlay-030-24).
 
+## Engineering rules (iPhone client)
+
+- **Make invalid states unrepresentable.** Model navigation and UI as a small
+  source of truth (an enum route, a value) plus values that move continuously
+  toward what it implies. Derive every frame, visibility, interactivity and
+  ownership from that state each time; never toggle them from callbacks or
+  completion handlers. Change what is mounted only where it is off screen.
+  If a sequence of taps could leave the screen wrong, the design is wrong, not
+  the timing. `StudioViewController` (route + `sync()` + `applyScene()`) is the
+  reference; its DEBUG `SQUIRCLE_STRESS=1` mode audits every frame and must
+  report `violations=0` after navigation changes.
+- **Swift concurrency only.** Use async/await, `Task`, `AsyncStream`,
+  `@MainActor` and `DisplayFrame.next()` (wait for the next frame). Do not add
+  Combine or Dispatch (`DispatchQueue`, `.sink`, `@Published`,
+  `ObservableObject`, …). `scripts/check-swift-concurrency` runs in every app
+  build and fails on any increase over `app/Squircle/concurrency-baseline.txt`;
+  the baseline only goes down (`--update` refuses increases). Remove existing
+  uses when you touch them.
+
 ## Documentation discipline
 
 User instructions take precedence. Label proposals and unknowns; do not turn a researched capability into a tested fact. Record evidence and versions when a milestone is actually validated. Update the relevant detail page when a decision changes; keep this entry point short.

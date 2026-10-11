@@ -328,7 +328,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             selectionReady = true
         }
         Task { [weak self] in
-            guard let self else { return }
+            // A thread removed before this ran must not take the model's selection.
+            guard let self, !tornDown else { return }
             if let requestedSessionID { await model.selectSession(requestedSessionID) } else { await model.beginDraft() }
             selectionReady = true
             render()
@@ -1278,7 +1279,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     /// Removed from the screen for good: stops everything that could still
     /// move the shared stage or the device (a removed controller can outlive
     /// its view while a load finishes).
+    private var tornDown = false
+
     func tearDown() {
+        tornDown = true
         pausePreview()
         subscriptions.removeAll()
         detent.stop()

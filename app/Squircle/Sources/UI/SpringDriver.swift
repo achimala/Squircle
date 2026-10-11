@@ -149,3 +149,30 @@ final class DisplayLinkProxy: NSObject {
     init(_ handler: @escaping @MainActor (CADisplayLink) -> Void) { self.handler = handler }
     @objc func tick(_ link: CADisplayLink) { MainActor.assumeIsolated { handler(link) } }
 }
+
+/// `await DisplayFrame.next()` resumes on the display's next frame, after
+/// everything this frame committed is on screen. One shared display link runs
+/// only while something is waiting.
+@MainActor
+enum DisplayFrame {
+    private static var waiting: [CheckedContinuation<Void, Never>] = []
+    private static var link: CADisplayLink?
+
+    static func next() async {
+        await withCheckedContinuation { continuation in
+            waiting.append(continuation)
+            guard link == nil else { return }
+            let link = CADisplayLink(target: DisplayLinkProxy { _ in DisplayFrame.tick() }, selector: #selector(DisplayLinkProxy.tick(_:)))
+            link.add(to: .main, forMode: .common)
+            Self.link = link
+        }
+    }
+
+    private static func tick() {
+        link?.invalidate()
+        link = nil
+        let resumed = waiting
+        waiting = []
+        resumed.forEach { $0.resume() }
+    }
+}

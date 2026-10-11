@@ -243,6 +243,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 8BE83FE460EEE1FC4F4C69A4 /* Build configuration list for PBXNativeTarget "Squircle" */;
 			buildPhases = (
+				944297A9792502448F1AC38C /* Swift concurrency only (no new Combine or Dispatch) */,
 				2B02C2EDDCC2CC2BD51A06F6 /* Bundle private Mac connection */,
 				134999952B6C50207950C0F0 /* Sources */,
 				B126382FE9DBCDE2575964E4 /* Resources */,
@@ -388,6 +389,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -eu\ndestination=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/client.json\"\nmkdir -p \"$(dirname \"$destination\")\"\nif [ -f \"${SQUIRCLE_CLIENT_CONFIG}\" ]; then\n  cp \"${SQUIRCLE_CLIENT_CONFIG}\" \"$destination\"\n  chmod 644 \"$destination\"\nelse\n  rm -f \"$destination\"\nfi\n";
+		};
+		944297A9792502448F1AC38C /* Swift concurrency only (no new Combine or Dispatch) */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Swift concurrency only (no new Combine or Dispatch)";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${SRCROOT}/../../scripts/check-swift-concurrency\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -618,7 +638,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -727,7 +747,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

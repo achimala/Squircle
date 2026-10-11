@@ -67,8 +67,14 @@ final class DeviceStage: UIView, SCNSceneRendererDelegate {
     private var liveReasons = Set<String>()
 
     private var textureCache: CVMetalTextureCache?
-    private let fence = RenderFence()
-    private var afterRender: [() -> Void] = []
+    /// Which devices were visible in the poses being rendered, handed from
+    /// the main thread to the render thread and back.
+    private let frames = RenderedDevices()
+    /// Devices visible in the poses the last completed render started from:
+    /// drawn for certain, not merely posed.
+    private(set) var drawn = Set<String>()
+    /// Called on the main thread after each completed render.
+    var onRendered: (() -> Void)?
 
     /// Renders single devices for `portrait`, lit exactly like the stage.
     private let portraitScene = SCNScene()
@@ -206,25 +212,21 @@ final class DeviceStage: UIView, SCNSceneRendererDelegate {
         return UIImage(cgImage: cgImage, scale: scale, orientation: .up)
     }
 
-    /// Runs `work` once the stage has drawn its current poses, so a portrait
-    /// can hand over to the stage without a frame where neither shows.
-    func afterNextRender(_ work: @escaping () -> Void) {
-        afterRender.append(work)
-        fence.arm()
-        sceneView.setNeedsDisplay()
+    nonisolated func renderer(_ renderer: SCNSceneRenderer, willRenderScene scene: SCNScene, atTime time: TimeInterval) {
+        frames.beginRender()
     }
 
     nonisolated func renderer(_ renderer: SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
-        guard fence.disarm() else { return }
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                let work = self.afterRender
-                self.afterRender = []
-                work.forEach { $0() }
-            }
+        let rendered = frames.endRender()
+        Task { @MainActor [weak self] in
+            guard let self, rendered != drawn else { return }
+            drawn = rendered
+            onRendered?()
         }
     }
+
+    /// Asks for a render even when nothing moved, so `drawn` catches up.
+    func requestRender() { sceneView.setNeedsDisplay() }
 
     // MARK: Live display
 
@@ -289,6 +291,7 @@ final class DeviceStage: UIView, SCNSceneRendererDelegate {
             Self.place(phone, pose: pose, unitsPerPoint: u, size: size)
         }
         SCNTransaction.commit()
+        frames.applied(Set(phones.compactMap { id, phone in phone.root.isHidden ? nil : id }))
         if changed { sceneView.setNeedsDisplay() }
     }
 
@@ -792,9 +795,12 @@ private enum PhoneModel {
     """
 }
 
-/// Set on the main thread, cleared by the render thread after a frame.
-private final class RenderFence: @unchecked Sendable {
-    private let lock = OSAllocatedUnfairLock(initialState: false)
-    func arm() { lock.withLock { $0 = true } }
-    func disarm() -> Bool { lock.withLock { armed in defer { armed = false }; return armed } }
+/// The visible set as last applied on the main thread, captured by the
+/// render thread when a frame starts and returned when it completes.
+private final class RenderedDevices: @unchecked Sendable {
+    private struct State { var applied = Set<String>(); var rendering = Set<String>() }
+    private let lock = OSAllocatedUnfairLock(initialState: State())
+    func applied(_ ids: Set<String>) { lock.withLock { $0.applied = ids } }
+    func beginRender() { lock.withLock { $0.rendering = $0.applied } }
+    func endRender() -> Set<String> { lock.withLock { $0.rendering } }
 }

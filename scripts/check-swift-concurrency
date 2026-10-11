@@ -1,0 +1,39 @@
+#!/bin/sh
+# Swift concurrency only: no Combine, no Dispatch in the iPhone client.
+# Existing uses are recorded in app/Squircle/concurrency-baseline.txt and may
+# only go down. The app's build runs this; a new use fails the build.
+#   scripts/check-swift-concurrency            check (exit 1 on any increase)
+#   scripts/check-swift-concurrency --update   rewrite the baseline; refuses
+#                                              to raise any file's count
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+APP="$ROOT/app/Squircle"
+BASELINE="$APP/concurrency-baseline.txt"
+PATTERN='import Combine|DispatchQueue|DispatchGroup|DispatchSemaphore|DispatchWorkItem|AnyCancellable|\.sink[ ({]|@Published|ObservableObject|PassthroughSubject|CurrentValueSubject|\.debounce\(|\.receive\(on'
+
+current=$(cd "$APP" && grep -rcE "$PATTERN" --include='*.swift' Sources Overlay Tests UITests 2>/dev/null \
+  | awk -F: '$2 > 0 { print $2 " " $1 }' | sort -k2)
+
+allowed() { awk -v f="$1" '$2 == f { print $1; found = 1 } END { if (!found) print 0 }' "$BASELINE" 2>/dev/null || echo 0; }
+
+status=0
+echo "$current" | while read -r count file; do
+  [ -n "${file:-}" ] || continue
+  limit=$(allowed "$file")
+  if [ "$count" -gt "$limit" ]; then
+    echo "$APP/$file:1: error: $count Combine/Dispatch uses (baseline $limit). Use async/await, Task, AsyncStream, DisplayFrame.next() and @MainActor instead; see AGENTS.md."
+    echo fail
+  elif [ "$count" -lt "$limit" ] && [ "${1:-}" != "--update" ]; then
+    echo "$APP/$file:1: warning: $count Combine/Dispatch uses, baseline $limit: run scripts/check-swift-concurrency --update to lock in the reduction."
+  fi
+done > "${TMPDIR:-/tmp}/squircle-concurrency.$$"
+grep -v '^fail$' "${TMPDIR:-/tmp}/squircle-concurrency.$$" || true
+grep -q '^fail$' "${TMPDIR:-/tmp}/squircle-concurrency.$$" && status=1
+rm -f "${TMPDIR:-/tmp}/squircle-concurrency.$$"
+
+if [ "${1:-}" = "--update" ]; then
+  if [ "$status" -ne 0 ]; then echo "Refusing to raise the baseline." >&2; exit 1; fi
+  echo "$current" > "$BASELINE"
+  echo "Baseline updated: $(awk '{ s += $1 } END { print s + 0 }' "$BASELINE") uses in $(grep -c . "$BASELINE") files."
+fi
+exit $status

@@ -704,3 +704,14 @@ final class SquircleModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 }
+
+extension ObservableObject where ObjectWillChangePublisher == ObservableObjectPublisher {
+    /// Model changes as an async sequence. A burst coalesces into one element,
+    /// so a slow consumer never falls behind (Combine's `.values` traps then).
+    var updates: AsyncStream<Void> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let subscription = objectWillChange.sink { continuation.yield() }
+            continuation.onTermination = { _ in subscription.cancel() }
+        }
+    }
+}

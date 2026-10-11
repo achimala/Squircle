@@ -834,3 +834,23 @@ reorders only while fully hidden; a new thread's first frame used unresolved
 keyboard-guide frames and drew the device tiny. 40 s stress run: no stuck
 states, correct rest; recordings checked frame by frame. Edge-swipe during
 these races is not covered by the stress mode.
+
+**Build 33: navigation as a route (user: make invalid states
+unrepresentable; no Combine/Dispatch).** Build 32 still reached a blank
+screen going in and out of threads. `StudioViewController` no longer has
+phases or completion callbacks. The only navigation state is `Route`
+(`grid`, `app(id)`, `thread(app, thread)`); user actions set it. Two springs
+always head to targets derived from the route and what is mounted; the app
+page's app and the thread controller change only while their spring is at 0
+(off screen), so a different thread animates out, swaps, and animates in.
+`sync()` is atomic and idempotent; `applyScene()` derives poses, visibility,
+touch routing and portrait/stage ownership every frame. Portraits hide only
+for devices the stage has actually rendered (`DeviceStage.drawn`, captured
+by the render thread). The stage hands a device back one frame after its
+portrait is on screen (`DisplayFrame.next()`). New async primitives:
+`DisplayFrame.next()`, `ObservableObject.updates` (coalescing AsyncStream;
+Combine's `.values` trapped under bursts). `scripts/check-swift-concurrency`
+runs in every app build against `app/Squircle/concurrency-baseline.txt`
+(50 legacy uses in 7 files; may only decrease). The DEBUG stress mode now
+also drags the back edge with random releases and drafts, and audits every
+frame; two 60 s runs: 0 violations, settled on the route.

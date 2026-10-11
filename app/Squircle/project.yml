@@ -7,7 +7,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: 2F26US4NAU
     SWIFT_VERSION: "5.0"
-    CURRENT_PROJECT_VERSION: 32
+    CURRENT_PROJECT_VERSION: 33
     MARKETING_VERSION: 0.3.0
     SQUIRCLE_BUILD_ID: ""
     SQUIRCLE_CLIENT_CONFIG: $(SRCROOT)/../../.squircle/client-t3.json
@@ -30,6 +30,10 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: Resources/Squircle.entitlements
     preBuildScripts:
+      - name: Swift concurrency only (no new Combine or Dispatch)
+        basedOnDependencyAnalysis: false
+        script: |
+          "${SRCROOT}/../../scripts/check-swift-concurrency"
       - name: Bundle private Mac connection
         basedOnDependencyAnalysis: false
         script: |
