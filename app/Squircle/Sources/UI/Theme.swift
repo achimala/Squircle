@@ -82,19 +82,16 @@ enum Theme {
 
     /// Dynamic Type aware; `rounded` is reserved for app names.
     static func font(_ style: UIFont.TextStyle, _ size: CGFloat, _ weight: UIFont.Weight = .regular,
-                     serif: Bool = false, monospaced: Bool = false) -> UIFont {
-        var font = monospaced ? UIFont.monospacedSystemFont(ofSize: size, weight: weight)
+                     monospaced: Bool = false) -> UIFont {
+        let font = monospaced ? UIFont.monospacedSystemFont(ofSize: size, weight: weight)
             : UIFont.systemFont(ofSize: size, weight: weight)
-        if serif, let descriptor = font.fontDescriptor.withDesign(.serif) {
-            font = UIFont(descriptor: descriptor, size: size)
-        }
         return UIFontMetrics(forTextStyle: style).scaledFont(for: font)
     }
 
-    /// App names are set in New York: an editorial voice for the things you
-    /// make, apart from the interface's SF.
-    static func appNameFont() -> UIFont { font(.largeTitle, 34, .semibold, serif: true) }
-    static func appCaptionFont() -> UIFont { font(.headline, 17, .medium, serif: true) }
+    /// App names: plain SF, like the rest of the interface (the user rejected
+    /// both SF Rounded and New York here).
+    static func appNameFont() -> UIFont { font(.largeTitle, 34, .bold) }
+    static func appCaptionFont() -> UIFont { font(.headline, 15, .semibold) }
 
     static func label(_ text: String = "", _ font: UIFont, color: UIColor = .label, lines: Int = 1) -> UILabel {
         let label = UILabel()

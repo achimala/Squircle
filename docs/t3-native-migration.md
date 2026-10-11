@@ -863,4 +863,4 @@ the device only while progress is within 3% of where that portrait stands
 (`atCell`, `atPage`); not reproduced in the simulator (2,883 frames
 scanned), fixed from the code path; stress audit still 0 violations. The
 user disliked the rounded app-name type: app names are now New York
-(`Theme.appNameFont`, `appCaptionFont`); the rounded design is gone.
+(`Theme.appNameFont`, `appCaptionFont`); the rounded design is gone. The user then found serif out of place; build 35 uses plain SF (bold 34 title, semibold 15 caption).
