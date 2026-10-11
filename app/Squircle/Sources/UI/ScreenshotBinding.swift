@@ -31,9 +31,10 @@ final class ScreenshotBinding {
         // Threads move on often; look for a newer capture at most every few minutes.
         let latest = model.sessions(for: project).map(\.updatedAt).max()
         let version = latest.map { String(Int($0.timeIntervalSince1970 / 300)) } ?? "none"
-        let key = metadata.flatMap { record in record.preview.map { "app:\(record.id):\($0.id)" } }
-            ?? build.map { "build:\($0.id):\($0.previewCapturedAt?.timeIntervalSince1970 ?? 0)" }
-            ?? (latest == nil ? "missing" : "t3:\(project.id):\(version)")
+        let published: String? = metadata.flatMap { record in record.preview.map { "app:\(record.id):\($0.id)" } }
+        let captured: String? = build.map { "build:\($0.id):\($0.previewCapturedAt?.timeIntervalSince1970 ?? 0)" }
+        let threads: String = latest == nil ? "missing" : "t3:\(project.id):\(version)"
+        let key = published ?? captured ?? threads
         guard key != sourceKey else { return }
         sourceKey = key
         loading?.cancel()
