@@ -817,3 +817,20 @@ still sliding away. Threads push flat: the conversation slides in from the
 right over the list, which drifts left by a third. Verified frame by frame
 in a simulator recording; touch-during-transition not yet exercised by a UI
 test.
+
+**Build 32: fast navigation.** The user found rapid in/out navigation
+broken. A DEBUG stress mode (`SQUIRCLE_STRESS=1`, `SQUIRCLE_STRESS_SECONDS`)
+now fires the controls' own entry points at random 30–500 ms intervals,
+logs any phase moving with no spring driving it, and checks the resting
+state. Fixed: stale handoff callbacks hid a portrait after it had taken the
+device back (portrait visibility is now derived from `staged && stageDrawn`
+and every handoff carries a generation); touches on a leaving conversation
+fell through to hidden list rows and opened other threads (the leaving
+conversation now swallows them); reversing kept opposing momentum and
+overshot (`SpringDriver.redirect` drops it; presented progress is clamped);
+removed thread controllers stayed subscribed and could move the stage
+(`tearDown`); reopening the same thread mid-close now reverses it; the grid
+reorders only while fully hidden; a new thread's first frame used unresolved
+keyboard-guide frames and drew the device tiny. 40 s stress run: no stuck
+states, correct rest; recordings checked frame by frame. Edge-swipe during
+these races is not covered by the stress mode.

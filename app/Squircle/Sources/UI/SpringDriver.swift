@@ -51,6 +51,13 @@ final class SpringDriver {
         startLink()
     }
 
+    /// A tap changing direction: momentum that opposes the new target is
+    /// dropped, so the move turns at once instead of drifting on first.
+    func redirect(to newTarget: CGFloat) {
+        let opposing = (newTarget - value) * velocity < 0
+        animate(to: newTarget, initialVelocity: opposing ? 0 : velocity)
+    }
+
     func stop() {
         stopLink()
         tween = nil

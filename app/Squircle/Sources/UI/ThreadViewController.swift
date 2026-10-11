@@ -114,7 +114,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
     /// The lowest the divider may sit: just above the composer.
     private var dividerLimit: CGFloat {
-        let floor = request.isHidden ? pickers.frame.minY : request.frame.minY
+        var floor = request.isHidden ? pickers.frame.minY : request.frame.minY
+        // Before the keyboard guide resolves (a thread's first frame on screen)
+        // the controls report the top of the view; use where they rest instead.
+        let layout = self.layout
+        if floor < layout.size.height * 0.5 { floor = layout.size.height - max(layout.safe.bottom, 16) - 100 }
         return floor - 6 - StageLayout.dividerHeight
     }
 
@@ -1271,6 +1275,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     }
 
     /// Stops the stream but keeps its last picture on the device.
+    /// Removed from the screen for good: stops everything that could still
+    /// move the shared stage or the device (a removed controller can outlive
+    /// its view while a load finishes).
+    func tearDown() {
+        pausePreview()
+        subscriptions.removeAll()
+        detent.stop()
+        detent.onChange = nil
+        stage?.setLive(false, reason: "detent")
+        stage = nil
+        onGeometry = nil
+        onBack = nil
+    }
+
     func pausePreview() {
         if case .visible(let target, let stream) = previewState {
             stream.stop()
