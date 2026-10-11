@@ -753,3 +753,43 @@ frame review: a blur filter renders transparent areas black, so only the
 panel's content (on its paper) is blurred, and the live bubble line (masked
 shimmer) is swapped for a plain copy during the morph. Probe
 `1b6ebe57-95b3-4449-ba9c-babb90327c7c`.
+
+## 2026-10-11 Home grid, 0.3.0 (28)
+
+The user tried build 27 (first grid) and confirmed the grid is better than
+the carousel, then reported: phones lagged and jiggled while scrolling, drew
+over the toolbar buttons and ignored the scroll edge blur; taps did nothing;
+the purple gradient backdrop read as AI slop; the latest thread title as a
+subtitle was useless; the loading screen was ugly.
+
+- Cause of lag/jiggle/overlap: one full-screen SceneKit view above all UIKit
+  content re-rendered every device from scroll callbacks a frame late.
+- Grid and app page now show still portraits (`DeviceStage.portrait`, an
+  `SCNRenderer` snapshot of the same scene, lights and per-point scale) inside
+  the scroll views. The stage draws only the moving or live device. Handoffs
+  wait for the stage's first rendered frame (`afterNextRender`) before hiding
+  a portrait, and clear the stage a turn after a portrait reappears.
+- Off-center devices are turned to face the camera (`place`), so a pose
+  looks the same anywhere on screen and in a centered portrait. Measured on
+  the simulator: grid portrait vs. stage at the start of opening differ by
+  0.64/255 mean over the screen, best alignment at (0, 0) px, equal shadow
+  brightness; residual is edge anti-aliasing. Without the correction: 1.43.
+- Taps: a plain `UIControl` never sends `.primaryActionTriggered`; cells use
+  `.touchUpInside`.
+- Removed: drum lean, scroll-velocity trailing, press tilt, CoreMotion tilt,
+  ambient color glow. Backdrop is flat `Theme.paper`.
+- Placeholder: an abstract, heavily blurred neutral screen (light and dark).
+- Fixed the app name landing up to 70 pt high: it was framed while carrying
+  its rise-in transform.
+- `StageMotionTests` rewritten for grid/page/recede; 18 tests passed.
+  Not yet measured on the physical phone.
+
+**Build 29 (same day, user request): local caching.** Screenshots loaded from
+the network on every launch and the grid waited for T3's shell snapshot.
+`ScreenshotBinding` now keeps each app's last capture on disk (Caches/
+Screenshots, key + bytes) and shows it immediately; it fetches only when the
+source key differs, keeping the cached image until the newer one decodes.
+`SquircleModel` caches the shell snapshot and app metadata
+(`squircle-home.json`, written two seconds after changes) and restores them
+at launch. Simulator: a cold relaunch showed the full grid with screenshots
+1.2 s after launch.

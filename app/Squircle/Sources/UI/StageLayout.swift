@@ -1,10 +1,9 @@
 import UIKit
 
-/// Geometry for every place a device can stand. One rule holds everywhere:
-/// the device fills the space above the content. On Home that space is above
-/// the app's name and shrinks as its thread list scrolls up; in a thread it is
-/// above the conversation's divider. Pure values, so transitions interpolate
-/// between them and tests check them without rendering.
+/// Geometry for every place a device can stand: a cell in Home's grid, the
+/// top of an app's thread list, and above a conversation's divider. Pure
+/// values, so transitions interpolate between them and tests check them
+/// without rendering.
 struct StageLayout: Equatable {
     var size: CGSize
     var safe: UIEdgeInsets
@@ -17,57 +16,85 @@ struct StageLayout: Equatable {
     static let dockHeight: CGFloat = 58
     static let dividerHeight: CGFloat = 26
 
-    // MARK: Home
+    // MARK: Home grid
 
-    /// Horizontal distance between neighboring devices in the carousel.
-    var phoneSpacing: CGFloat { size.width * 0.66 }
-    var heroTop: CGFloat { safe.top + 14 }
-    var bottomBarTop: CGFloat { size.height - max(safe.bottom, 16) - 6 - Self.bottomBarHeight }
-    /// Resting top of the app name; the first thread row peeks beneath it.
-    var nameTop: CGFloat { bottomBarTop - 56 - titleHeight }
-    var heroHeight: CGFloat {
-        min(max(160, nameTop - 34 - heroTop), size.width * 0.66 / PhonePose.aspect)
+    static let gridMargin: CGFloat = 20
+    static let gridGap: CGFloat = 18
+    /// The app's name beneath each device.
+    static let cellCaption: CGFloat = 26
+
+    var columns: Int { size.width > 600 ? 3 : 2 }
+    var gridTop: CGFloat { safe.top + 62 }
+    var cellWidth: CGFloat {
+        let n = CGFloat(columns)
+        return ((size.width - 2 * Self.gridMargin - Self.gridGap * (n - 1)) / n).rounded(.down)
     }
-    /// Device height once the list has been pulled up to its reading position.
-    var listPhoneHeight: CGFloat { min(heroHeight, (size.height * 0.30).rounded()) }
-    /// List offset at which the device reaches `listPhoneHeight`.
-    var expandedOffset: CGFloat { max(1, nameTop - 20 - heroTop - listPhoneHeight) }
-    private var minimumPhoneHeight: CGFloat { 150 }
+    /// Narrower than its cell, so a turned device never touches its neighbor.
+    var gridPhoneHeight: CGFloat { (cellWidth * 0.82 / PhonePose.aspect).rounded() }
+    var cellHeight: CGFloat { gridPhoneHeight + 12 + Self.cellCaption }
+    var rowPitch: CGFloat { cellHeight + 24 }
 
-    /// 0 = hero, 1 = list. `scroll` is the list's offset from its resting top.
-    func expansion(scroll: CGFloat) -> CGFloat { (scroll / expandedOffset).clamped() }
-
-    /// `offset` is the page distance from the centered app (negative = left).
-    /// `spread` separates neighbors to a full page apart as lists expand.
-    func homePose(offset: CGFloat, scroll: CGFloat = 0, spread: CGFloat = 0) -> PhonePose {
-        let e = expansion(scroll: scroll)
-        let nameY = nameTop - scroll
-        let gap = CGFloat.lerp(34, 20, e)
-        let available = nameY - gap - heroTop
-        let height = min(heroHeight + max(0, -scroll) * 0.2, max(minimumPhoneHeight, available))
-        let slack = max(0, available - height)
-        let distance = min(abs(offset), 2.5)
-        let side = offset.clamped(-1, 1)
-        let center = CGPoint(x: size.width / 2 + offset * .lerp(phoneSpacing, size.width, spread.clamped()),
-                             y: nameY - gap - height / 2 - slack / 2)
-        let visible = abs(offset) < 2.2 && center.y + height / 2 > -40
-        if reducedMotion {
-            // No turning or receding: neighbors simply sit smaller beside it.
-            return PhonePose(center: center, height: height * (1 - min(1, distance) * 0.14),
-                             pitch: -0.06, shadow: 1 - 0.35 * min(1, distance), visible: visible)
-        }
-        return PhonePose(center: center, height: height, depth: distance * height * 0.40,
-                         yaw: .lerp(0.10, -0.30, e) - side * 0.46, pitch: .lerp(-0.10, -0.05, e) - 0.03 * side * side,
-                         roll: 0.03 * side, shadow: 1 - 0.4 * min(1, distance), visible: visible)
+    /// A cell in the grid's content coordinates.
+    func cellFrame(_ index: Int) -> CGRect {
+        let column = index % columns, row = index / columns
+        return CGRect(x: Self.gridMargin + CGFloat(column) * (cellWidth + Self.gridGap),
+                      y: gridTop + CGFloat(row) * rowPitch, width: cellWidth, height: cellHeight)
     }
 
-    /// Where a released list should rest: fully hero, or at/after the reading
-    /// position. Past the reading position the list scrolls freely.
-    func restingOffset(current: CGFloat, projected: CGFloat, velocity: CGFloat) -> CGFloat {
-        guard projected < expandedOffset else { return projected }
-        if velocity > 0.2 { return expandedOffset }
-        if velocity < -0.2 { return 0 }
-        return current > expandedOffset * 0.4 ? expandedOffset : 0
+    func gridContentHeight(count: Int) -> CGFloat {
+        let rows = (max(1, count) + columns - 1) / columns
+        return gridTop + CGFloat(rows) * rowPitch + max(safe.bottom, 16) + 12
+    }
+
+    /// The device in a grid cell (`cell` in view coordinates). Each column
+    /// turns a little toward the middle. The pose is fixed, so a cell shows a
+    /// still portrait that scrolls natively with the grid.
+    func gridPose(cell: CGRect, column: Int) -> PhonePose {
+        let height = gridPhoneHeight
+        let center = CGPoint(x: cell.midX, y: cell.minY + height / 2)
+        if reducedMotion { return PhonePose(center: center, height: height, shadow: 0.8) }
+        let side: CGFloat = columns == 1 ? 0 : (CGFloat(column) / CGFloat(columns - 1)) * 2 - 1
+        return PhonePose(center: center, height: height, yaw: -side * 0.14, pitch: -0.06, shadow: 0.8)
+    }
+
+    /// Where a neighbor goes while one app opens: it drifts away from the
+    /// opened device, shrinks back and fades. Applied to the grid cell.
+    func recede(_ cell: CGRect, from origin: CGPoint, progress p: CGFloat) -> CATransform3D {
+        let p = p.clamped()
+        guard p > 0, !reducedMotion else { return CATransform3DIdentity }
+        let dx = cell.midX - origin.x, dy = cell.minY + gridPhoneHeight / 2 - origin.y
+        let length = max(1, hypot(dx, dy))
+        let push = p * p * (3 - 2 * p)
+        let scale = 1 - push * 0.28
+        return CATransform3DScale(CATransform3DMakeTranslation(dx / length * push * 70, dy / length * push * 70, 0),
+                                  scale, scale, 1)
+    }
+
+    /// Opacity of a receding neighbor.
+    func recedeAlpha(progress p: CGFloat) -> CGFloat { pow(1 - p.clamped(), 1.4) }
+
+    // MARK: App page
+
+    var pageHeroTop: CGFloat { safe.top + 58 }
+    var pageHeroHeight: CGFloat { min((size.height * 0.40).rounded(), (size.width * 0.6 / PhonePose.aspect).rounded()) }
+    var pageCompactHeight: CGFloat { (size.height * 0.17).rounded() }
+    /// Top of the app's name in the page's content.
+    var pageNameTop: CGFloat { pageHeroTop + pageHeroHeight + 18 }
+    var pageBottomBarTop: CGFloat { size.height - max(safe.bottom, 16) - 6 - Self.bottomBarHeight }
+
+    /// The opened app's device: it shrinks as its threads scroll up beneath
+    /// it, then travels away with them; pulling down enlarges it a little.
+    /// `pagePose(scroll: 0)` at `pageHeroHeight` is the portrait's size.
+    func pagePose(scroll s: CGFloat) -> PhonePose {
+        let room = pageHeroHeight - pageCompactHeight
+        let shrink = s.clamped(0, room)
+        let height = pageHeroHeight - shrink + max(0, -s) * 0.3
+        let top = pageHeroTop - max(0, s - room) + max(0, -s) * 0.5
+        let center = CGPoint(x: size.width / 2, y: top + height / 2)
+        let visible = top + height > -40
+        if reducedMotion { return PhonePose(center: center, height: height, shadow: 0.9, visible: visible) }
+        // One fixed angle, so the resting device is a portrait that scales.
+        return PhonePose(center: center, height: height, yaw: 0.12, pitch: -0.05, shadow: 0.9, visible: visible)
     }
 
     // MARK: Thread

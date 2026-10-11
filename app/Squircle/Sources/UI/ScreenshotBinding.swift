@@ -1,16 +1,22 @@
+import CryptoKit
 import UIKit
 
 /// Binds the Mac's published screenshot artifact to one device on the stage.
 /// The artifact ID changes on publication, so metadata refreshes swap the
 /// texture without rebuilding anything. Decoding and downsampling happen off
-/// the main thread; only the finished bitmap reaches SceneKit.
+/// the main thread; only the finished bitmap reaches SceneKit. The last
+/// capture shown is kept on disk, so a launch shows it at once while the
+/// newest is fetched, and skips the fetch when nothing has changed.
 @MainActor
 final class ScreenshotBinding {
     private let id: String
     private weak var stage: DeviceStage?
     private var sourceKey = ""
     private var loading: Task<Void, Never>?
-    /// Called after the device's screen or ambient color changes.
+    /// The source key of the capture on disk, once it has been read.
+    private var cachedKey: String?
+    private var restoring: Task<Void, Never>?
+    /// Called after the device's screen changes.
     var onChange: (() -> Void)?
     /// Long edge in pixels; the gallery device never displays more than this.
     nonisolated static let maximumPixelHeight: CGFloat = 1500
@@ -20,7 +26,7 @@ final class ScreenshotBinding {
         self.stage = stage
     }
 
-    deinit { loading?.cancel() }
+    deinit { loading?.cancel(); restoring?.cancel() }
 
     /// The Mac catalog's published preview wins; then the newest build
     /// capture; then the newest real screenshot an agent took in the app's
@@ -38,9 +44,18 @@ final class ScreenshotBinding {
         guard key != sourceKey else { return }
         sourceKey = key
         loading?.cancel()
+        // The capture on disk shows first; with the same key it is already the latest.
+        guard let cachedKey else {
+            restore { [weak self, weak model] in
+                guard let self, let model else { return }
+                sourceKey = ""
+                update(model: model, project: project)
+            }
+            return
+        }
+        if cachedKey == key, stage?.screen(for: id).hasScreenshot == true { return }
         guard key != "missing" else {
-            stage?.setScreen(.missing, for: id)
-            stage?.setAmbientColor(nil, for: id)
+            if stage?.screen(for: id).hasScreenshot != true { stage?.setScreen(.missing, for: id) }
             onChange?()
             return
         }
@@ -56,10 +71,9 @@ final class ScreenshotBinding {
                 let image = await Self.decode(data)
                 guard let self, !Task.isCancelled, self.sourceKey == key else { return }
                 guard let image else { throw CocoaError(.fileReadCorruptFile) }
-                let color = await Task.detached { Theme.characteristicColor(of: image) }.value
-                guard !Task.isCancelled, self.sourceKey == key else { return }
                 self.stage?.setScreen(.image(image), for: self.id)
-                self.stage?.setAmbientColor(color, for: self.id)
+                self.cachedKey = key
+                Self.store(data, key: key, for: self.id)
                 self.onChange?()
             } catch {
                 guard let self, !Task.isCancelled, self.sourceKey == key else { return }
@@ -70,6 +84,53 @@ final class ScreenshotBinding {
                 self.onChange?()
                 if !key.hasPrefix("t3:") { self.sourceKey = "" } // Retry on the next metadata refresh.
             }
+        }
+    }
+
+    /// Shows the capture on disk, if any, then continues.
+    private func restore(then next: @escaping () -> Void) {
+        guard restoring == nil else { return }
+        let id = self.id
+        restoring = Task { [weak self] in
+            let saved = await Task.detached(priority: .userInitiated) { Self.load(for: id) }.value
+            var image: UIImage?
+            if let saved { image = await Self.decode(saved.data) }
+            guard let self, !Task.isCancelled else { return }
+            restoring = nil
+            cachedKey = saved?.key ?? ""
+            if let image, stage?.screen(for: id).hasScreenshot != true {
+                stage?.setScreen(.image(image), for: id)
+                onChange?()
+            }
+            next()
+        }
+    }
+
+    nonisolated private static let directory: URL? = FileManager.default
+        .urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("Screenshots", isDirectory: true)
+
+    nonisolated private static func file(for id: String) -> URL? {
+        let name = SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
+        return directory?.appendingPathComponent(name)
+    }
+
+    /// The key's length, the key, then the image bytes: one file, one write.
+    nonisolated private static func load(for id: String) -> (key: String, data: Data)? {
+        guard let url = file(for: id), let blob = try? Data(contentsOf: url), blob.count > 4 else { return nil }
+        let length = Int(blob.prefix(4).withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian })
+        guard blob.count > 4 + length, let key = String(data: blob.subdata(in: 4..<(4 + length)), encoding: .utf8) else { return nil }
+        return (key, blob.subdata(in: (4 + length)..<blob.count))
+    }
+
+    nonisolated private static func store(_ data: Data, key: String, for id: String) {
+        Task.detached(priority: .utility) {
+            guard let directory, let url = file(for: id) else { return }
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let keyData = Data(key.utf8)
+            var blob = withUnsafeBytes(of: UInt32(keyData.count).bigEndian) { Data($0) }
+            blob.append(keyData)
+            blob.append(data)
+            try? blob.write(to: url, options: .atomic)
         }
     }
 

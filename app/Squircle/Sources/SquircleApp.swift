@@ -24,7 +24,7 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: scene)
-        window.backgroundColor = Theme.backdropBottom
+        window.backgroundColor = Theme.paper
         window.tintColor = Theme.accent
         window.rootViewController = StudioViewController(model: model)
         window.makeKeyAndVisible()

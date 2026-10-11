@@ -155,6 +155,10 @@ final class SquircleModel: ObservableObject {
         client = configuration.map { SquircleClient(configuration:$0) }
         gateway = configuration.map(T3Gateway.init(configuration:))
         selectedProjectID = UserDefaults.standard.string(forKey:"squircle.t3.selectedProject")
+        // Home shows the last known apps and threads at once; T3 then replaces them.
+        if configuration != nil, let home = Self.loadHome() {
+            shell = home.shell; appMetadata = home.metadata; shellChanged()
+        }
         gateway?.onDisconnect = { [weak self] in
             guard let self else { return }; connected = false; status = "Reconnecting"; reconnect?.cancel()
             reconnect = Task { [weak self] in
@@ -183,7 +187,7 @@ final class SquircleModel: ObservableObject {
             }
             async let listed = client.builds()
             async let metadata = client.fetchAppMetadata()
-            builds = try await listed; appMetadata = try await metadata; reconcileProjects()
+            builds = try await listed; appMetadata = try await metadata; reconcileProjects(); scheduleHomeWrite()
             await ensureScopedProject()
             if !launchReported, let id = Bundle.main.object(forInfoDictionaryKey:"SquircleBuildID") as? String, UUID(uuidString:id) != nil {
                 try await client.reportLaunch(buildID:id,eventID:UUID().uuidString,timestamp:Int(Date.now.timeIntervalSince1970)); launchReported = true
@@ -208,6 +212,10 @@ final class SquircleModel: ObservableObject {
             }
             shell = .object(s)
         }
+        shellChanged()
+        scheduleHomeWrite()
+    }
+    private func shellChanged() {
         sessions = shell["threads"].array.filter { $0["deletedAt"] == .null && $0["archivedAt"] == .null }.map { t in
             if let id = t["id"].string { sessionProjects[id] = t["projectId"].string }
             let working = ["running","starting"].contains(t["session"]["status"].string ?? "")
@@ -315,6 +323,32 @@ final class SquircleModel: ObservableObject {
             self.error = error.localizedDescription
         }
     }
+    // MARK: Home cache
+
+    private struct HomeCache: Codable { var shell: JSONValue; var metadata: [AppMetadata] }
+    private var homeWrite: Task<Void, Never>?
+    private nonisolated static var homeURL: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("squircle-home.json")
+    }
+    private nonisolated static func loadHome() -> HomeCache? {
+        guard let url = homeURL, let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(HomeCache.self, from: data)
+    }
+    /// Shell events arrive in bursts; the copy on disk trails by a couple of seconds.
+    private func scheduleHomeWrite() {
+        guard configuration != nil, homeWrite == nil, shell != .null else { return }
+        homeWrite = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, !Task.isCancelled else { return }
+            homeWrite = nil
+            let home = HomeCache(shell: shell, metadata: appMetadata)
+            Task.detached(priority: .utility) {
+                guard let url = Self.homeURL, let data = try? JSONEncoder().encode(home) else { return }
+                try? data.write(to: url, options: .atomic)
+            }
+        }
+    }
+
     // MARK: Thread cache
 
     private nonisolated static var cacheDirectory: URL? {

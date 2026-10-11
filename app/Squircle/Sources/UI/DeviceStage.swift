@@ -3,6 +3,8 @@ import SceneKit
 import CoreVideo
 import Metal
 import simd
+import CoreImage
+import os
 
 /// Where one device stands, expressed in the stage view's points so UIKit
 /// layout and the 3D scene share one coordinate system.
@@ -17,12 +19,14 @@ struct PhonePose: Equatable {
     var roll: CGFloat = 0
     var shadow: CGFloat = 1
     var visible = true
+    var opacity: CGFloat = 1
 
     static func interpolate(_ a: PhonePose, _ b: PhonePose, _ t: CGFloat) -> PhonePose {
         PhonePose(center: CGPoint(x: .lerp(a.center.x, b.center.x, t), y: .lerp(a.center.y, b.center.y, t)),
                   height: .lerp(a.height, b.height, t), depth: .lerp(a.depth, b.depth, t),
                   yaw: .lerp(a.yaw, b.yaw, t), pitch: .lerp(a.pitch, b.pitch, t), roll: .lerp(a.roll, b.roll, t),
-                  shadow: .lerp(a.shadow, b.shadow, t), visible: a.visible || b.visible)
+                  shadow: .lerp(a.shadow, b.shadow, t), visible: a.visible || b.visible,
+                  opacity: .lerp(a.opacity, b.opacity, t))
     }
 
     /// Device outline aspect (width / height) of the modeled hardware.
@@ -40,16 +44,17 @@ enum PhoneScreen: Equatable {
     var hasScreenshot: Bool { if case .image = self { return true }; return false }
 }
 
-/// One SceneKit view renders every device. Rendering happens only when a pose
-/// or screen changes, or while a gesture/transition explicitly marks it live.
+/// One SceneKit view renders a device while it moves between places or shows
+/// a live simulator. At rest in lists, devices are still portraits rendered
+/// from the same scene (`portrait`) that UIKit places in scrolling content,
+/// so they scroll, clip and blur exactly like the views around them.
 @MainActor
-final class DeviceStage: UIView {
+final class DeviceStage: UIView, SCNSceneRendererDelegate {
     static let cameraDistance: CGFloat = 30
     static let fieldOfView: CGFloat = 22
     static let modelHeight: CGFloat = 7.42
 
-    private let backdrop = CAGradientLayer()
-    private let glow = CAGradientLayer()
+    private let backdrop = CALayer()
     private let sceneView = SCNView(frame: .zero, options: [
         SCNView.Option.preferredRenderingAPI.rawValue: SCNRenderingAPI.metal.rawValue
     ])
@@ -62,35 +67,31 @@ final class DeviceStage: UIView {
     private var liveReasons = Set<String>()
 
     private var textureCache: CVMetalTextureCache?
-    private var ambients: [String: UIColor] = [:]
+    private let fence = RenderFence()
+    private var afterRender: [() -> Void] = []
 
-    private var ambientMix: (from: UIColor?, to: UIColor?, t: CGFloat) = (nil, nil, 0)
+    /// Renders single devices for `portrait`, lit exactly like the stage.
+    private let portraitScene = SCNScene()
+    private let portraitCamera = SCNNode()
+    private let sitter = StagePhone()
+    private lazy var portraitRenderer: SCNRenderer = {
+        let renderer = SCNRenderer(device: sceneView.device ?? MTLCreateSystemDefaultDevice(), options: nil)
+        renderer.scene = portraitScene
+        renderer.pointOfView = portraitCamera
+        renderer.autoenablesDefaultLighting = false
+        return renderer
+    }()
 
-    /// Tints the light behind the devices, blending between two apps' colors
-    /// while the carousel is between them. Nil is the neutral studio glow.
-    func setAmbient(from: UIColor?, to: UIColor?, mix: CGFloat) {
-        guard ambientMix.from != from || ambientMix.to != to || abs(ambientMix.t - mix) > 0.004 else { return }
-        ambientMix = (from, to, mix)
-        updateGlowColor()
-    }
     /// Off where the stage sits on glass over another app (the overlay).
     var showsBackdrop = true {
-        didSet { backdrop.isHidden = !showsBackdrop; glow.isHidden = !showsBackdrop }
+        didSet { backdrop.isHidden = !showsBackdrop }
     }
-    var glowCenter = CGPoint.zero { didSet { if glowCenter != oldValue { layoutGlow() } } }
-    var glowRadius: CGFloat = 300 { didSet { if glowRadius != oldValue { layoutGlow() } } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
         accessibilityElementsHidden = true
-        backdrop.startPoint = CGPoint(x: 0.5, y: 0)
-        backdrop.endPoint = CGPoint(x: 0.5, y: 1)
         layer.addSublayer(backdrop)
-        glow.type = .radial
-        glow.startPoint = CGPoint(x: 0.5, y: 0.5)
-        glow.endPoint = CGPoint(x: 1, y: 1)
-        layer.addSublayer(glow)
 
         scene.background.contents = UIColor.clear
         sceneView.scene = scene
@@ -104,10 +105,16 @@ final class DeviceStage: UIView {
         sceneView.isJitteringEnabled = true
         sceneView.rendersContinuously = false
         sceneView.isPlaying = false
+        sceneView.delegate = self
         overlay.isUserInteractionEnabled = false
         overlay.accessibilityElementsHidden = true
         overlay.addSubview(sceneView)
-        buildStudio()
+        buildStudio(scene, camera: cameraNode, fieldOfView: Self.fieldOfView)
+        sceneView.pointOfView = cameraNode
+        portraitScene.background.contents = UIColor.clear
+        buildStudio(portraitScene, camera: portraitCamera, fieldOfView: Self.fieldOfView)
+        portraitScene.rootNode.addChildNode(sitter.shadow)
+        portraitScene.rootNode.addChildNode(sitter.root)
         updateColors()
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (stage: DeviceStage, _: UITraitCollection) in
             stage.updateColors()
@@ -128,7 +135,6 @@ final class DeviceStage: UIView {
             sceneView.frame = bounds
             sceneView.setNeedsDisplay()
         }
-        layoutGlow()
     }
 
     override func didMoveToWindow() {
@@ -165,9 +171,60 @@ final class DeviceStage: UIView {
 
     func screen(for id: String) -> PhoneScreen { phones[id]?.screen ?? .off }
 
-    /// The characteristic color of an app's published screenshot, if it has one.
-    func ambientColor(for id: String) -> UIColor? { ambients[id] }
-    func setAmbientColor(_ color: UIColor?, for id: String) { ambients[id] = color }
+    private var dark: Bool { traitCollection.userInterfaceStyle == .dark }
+
+    // MARK: Portraits
+
+    /// Size of a portrait of a device `height` points tall: room for any
+    /// gentle turn and the contact shadow beneath it, the device centered.
+    static func portraitSize(height: CGFloat) -> CGSize {
+        CGSize(width: (height * PhonePose.aspect * 1.36).rounded(.up), height: (height * 1.34).rounded(.up))
+    }
+
+    /// One device alone, still, as an image with a transparent background.
+    /// Drawn with the stage's own lights and perspective, so a portrait placed
+    /// centered on a pose's center matches the stage rendering that pose.
+    func portrait(for id: String, pose: PhonePose, scale: CGFloat) -> UIImage? {
+        guard let phone = phones[id], pose.height > 4, bounds.height > 0 else { return nil }
+        let size = Self.portraitSize(height: pose.height)
+        sitter.setScreen(phone.screen, dark: dark)
+        // Same scene units per point as the stage, with a camera narrowed to
+        // the portrait: identical perspective, smaller frame.
+        let u = unitsPerPoint
+        portraitCamera.camera?.fieldOfView = 2 * atan(size.height * u / 2 / Self.cameraDistance) * 180 / .pi
+        var centered = pose
+        centered.center = CGPoint(x: size.width / 2, y: size.height / 2)
+        centered.depth = 0
+        centered.opacity = 1
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        Self.place(sitter, pose: centered, unitsPerPoint: u, size: size)
+        SCNTransaction.commit()
+        let pixels = CGSize(width: size.width * scale, height: size.height * scale)
+        let image = portraitRenderer.snapshot(atTime: 0, with: pixels, antialiasingMode: .multisampling4X)
+        guard let cgImage = image.cgImage else { return nil }
+        return UIImage(cgImage: cgImage, scale: scale, orientation: .up)
+    }
+
+    /// Runs `work` once the stage has drawn its current poses, so a portrait
+    /// can hand over to the stage without a frame where neither shows.
+    func afterNextRender(_ work: @escaping () -> Void) {
+        afterRender.append(work)
+        fence.arm()
+        sceneView.setNeedsDisplay()
+    }
+
+    nonisolated func renderer(_ renderer: SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
+        guard fence.disarm() else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let work = self.afterRender
+                self.afterRender = []
+                work.forEach { $0() }
+            }
+        }
+    }
 
     // MARK: Live display
 
@@ -188,7 +245,7 @@ final class DeviceStage: UIView {
     /// Returns the display to the published screenshot.
     func endLive(for id: String) {
         guard let phone = phones[id], phone.isLive else { return }
-        phone.setScreen(phone.screen)
+        phone.setScreen(phone.screen, dark: dark)
         sceneView.setNeedsDisplay()
     }
 
@@ -208,7 +265,7 @@ final class DeviceStage: UIView {
     func setScreen(_ screen: PhoneScreen, for id: String) {
         guard let phone = phones[id], phone.screen != screen else { return }
         if phone.isLive { phone.remember(screen); return }
-        phone.setScreen(screen)
+        phone.setScreen(screen, dark: dark)
         sceneView.setNeedsDisplay()
     }
 
@@ -224,28 +281,39 @@ final class DeviceStage: UIView {
             guard pose != phone.pose else { continue }
             changed = true
             phone.pose = pose
-            guard let pose, pose.visible, pose.height > 1 else {
+            guard let pose, pose.visible, pose.height > 1, pose.opacity > 0.005 else {
                 phone.root.isHidden = true
                 phone.shadow.isHidden = true
                 continue
             }
-            let scale = Float(pose.height * u / Self.modelHeight)
-            phone.root.isHidden = false
-            phone.root.simdPosition = SIMD3(Float((pose.center.x - size.width / 2) * u),
-                                            Float((size.height / 2 - pose.center.y) * u),
-                                            Float(-pose.depth * u))
-            phone.root.simdScale = SIMD3(repeating: scale)
-            phone.root.simdOrientation = simd_quatf(angle: Float(pose.yaw), axis: [0, 1, 0])
-                * simd_quatf(angle: Float(pose.pitch), axis: [1, 0, 0])
-                * simd_quatf(angle: Float(pose.roll), axis: [0, 0, 1])
-            let foot = phone.root.simdConvertPosition([0, -3.71, 0], to: nil)
-            phone.shadow.isHidden = pose.shadow <= 0.01
-            phone.shadow.simdPosition = SIMD3(foot.x, foot.y - 0.27 * scale, phone.root.simdPosition.z - 1.2 * scale)
-            phone.shadow.simdScale = SIMD3(repeating: scale)
-            phone.shadow.opacity = pose.shadow.clamped()
+            Self.place(phone, pose: pose, unitsPerPoint: u, size: size)
         }
         SCNTransaction.commit()
         if changed { sceneView.setNeedsDisplay() }
+    }
+
+    /// Positions a device for a pose in a view of `size`. The device is turned
+    /// to face the camera as it would at the center of the view, so the same
+    /// pose looks identical anywhere on screen and in a centered portrait.
+    private static func place(_ phone: StagePhone, pose: PhonePose, unitsPerPoint u: CGFloat, size: CGSize) {
+        let scale = Float(pose.height * u / modelHeight)
+        let position = SIMD3(Float((pose.center.x - size.width / 2) * u), Float((size.height / 2 - pose.center.y) * u),
+                             Float(-pose.depth * u))
+        let ray = simd_normalize(position - SIMD3(0, 0, Float(cameraDistance)))
+        let facing = simd_quatf(from: [0, 0, -1], to: ray)
+        phone.root.isHidden = false
+        phone.root.simdPosition = position
+        phone.root.simdScale = SIMD3(repeating: scale)
+        phone.root.opacity = pose.opacity.clamped()
+        phone.root.simdOrientation = facing
+            * simd_quatf(angle: Float(pose.yaw), axis: [0, 1, 0])
+            * simd_quatf(angle: Float(pose.pitch), axis: [1, 0, 0])
+            * simd_quatf(angle: Float(pose.roll), axis: [0, 0, 1])
+        let foot = phone.root.simdConvertPosition([0, -3.71, 0], to: nil)
+        phone.shadow.isHidden = pose.shadow <= 0.01
+        phone.shadow.simdPosition = SIMD3(foot.x, foot.y - 0.27 * scale, phone.root.simdPosition.z - 1.2 * scale)
+        phone.shadow.simdScale = SIMD3(repeating: scale)
+        phone.shadow.opacity = (pose.shadow * pose.opacity).clamped()
     }
 
     /// Continuous rendering only while something is actually moving.
@@ -261,49 +329,19 @@ final class DeviceStage: UIView {
 
     // MARK: Studio
 
-    private func layoutGlow() {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        glow.bounds = CGRect(x: 0, y: 0, width: glowRadius * 2, height: glowRadius * 2)
-        glow.position = glowCenter
-        CATransaction.commit()
-    }
-
     private func updateColors() {
-        let trait = traitCollection
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        backdrop.colors = [Theme.backdropTop.resolvedColor(with: trait).cgColor,
-                           Theme.backdropBottom.resolvedColor(with: trait).cgColor]
-        updateGlowColor()
+        backdrop.backgroundColor = Theme.paper.resolvedColor(with: traitCollection).cgColor
         CATransaction.commit()
-        PhoneAssets.contactMaterial.transparency = trait.userInterfaceStyle == .dark ? 1 : 0.85
+        PhoneAssets.contactMaterial.transparency = dark ? 1 : 0.85
+        for phone in phones.values where !phone.isLive { phone.setScreen(phone.screen, dark: dark) }
         sceneView.setNeedsDisplay()
     }
 
-    private func updateGlowColor() {
-        let trait = traitCollection
-        let dark = trait.userInterfaceStyle == .dark
-        func resolve(_ color: UIColor?) -> [CGFloat] {
-            let glow = Theme.glow(for: color ?? Theme.accent.resolvedColor(with: trait), dark: dark)
-                .withAlphaComponent(color == nil ? (dark ? 0.30 : 0.42) : (dark ? 0.50 : 0.85))
-            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-            glow.getRed(&r, green: &g, blue: &b, alpha: &a)
-            return [r, g, b, a]
-        }
-        let a = resolve(ambientMix.from), b = resolve(ambientMix.to), t = ambientMix.t.clamped()
-        let c = zip(a, b).map { CGFloat.lerp($0, $1, t) }
-        let color = UIColor(red: c[0], green: c[1], blue: c[2], alpha: c[3])
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        glow.colors = [color.cgColor, color.withAlphaComponent(c[3] * 0.45).cgColor, color.withAlphaComponent(0).cgColor]
-        glow.locations = [0, 0.45, 1]
-        CATransaction.commit()
-    }
-
-    private func buildStudio() {
+    private func buildStudio(_ scene: SCNScene, camera cameraNode: SCNNode, fieldOfView: CGFloat) {
         let camera = SCNCamera()
-        camera.fieldOfView = Self.fieldOfView
+        camera.fieldOfView = fieldOfView
         camera.projectionDirection = .vertical
         camera.zNear = 1
         camera.zFar = 100
@@ -314,7 +352,6 @@ final class DeviceStage: UIView {
         cameraNode.camera = camera
         cameraNode.position = SCNVector3(0, 0, Float(Self.cameraDistance))
         scene.rootNode.addChildNode(cameraNode)
-        sceneView.pointOfView = cameraNode
 
         scene.lightingEnvironment.contents = PhoneAssets.environment
         scene.lightingEnvironment.intensity = 1.0
@@ -375,7 +412,7 @@ private final class StagePhone {
         shadow.geometry = PhoneAssets.contactGeometry
         shadow.castsShadow = false
         shadow.renderingOrder = -1
-        setScreen(.off)
+        setScreen(.off, dark: true)
     }
 
     /// A screenshot published while live is shown once the stream ends.
@@ -391,7 +428,7 @@ private final class StagePhone {
         isLive = true
     }
 
-    func setScreen(_ next: PhoneScreen) {
+    func setScreen(_ next: PhoneScreen, dark: Bool) {
         screen = next
         isLive = false
         liveBacking = nil
@@ -400,9 +437,9 @@ private final class StagePhone {
         let contents: Any
         let aspect: CGFloat?
         switch next {
-        case .off: contents = PhoneAssets.offColor; aspect = nil
-        case .missing: contents = PhoneAssets.missingScreen; aspect = PhoneAssets.missingScreen.size.width / PhoneAssets.missingScreen.size.height
-        case .unavailable: contents = PhoneAssets.unavailableScreen; aspect = PhoneAssets.unavailableScreen.size.width / PhoneAssets.unavailableScreen.size.height
+        case .off, .missing, .unavailable:
+            let placeholder = dark ? PhoneAssets.darkPlaceholder : PhoneAssets.lightPlaceholder
+            contents = placeholder; aspect = placeholder.size.width / placeholder.size.height
         case .image(let image):
             contents = image
             aspect = image.size.height > 0 ? image.size.width / image.size.height : nil
@@ -462,35 +499,40 @@ enum PhoneAssets {
 
     static let environment: UIImage = studioEnvironment()
 
-    static let missingScreen: UIImage = placeholder(symbol: "camera.viewfinder", text: "No screenshot yet")
-    static let unavailableScreen: UIImage = placeholder(symbol: "exclamationmark.icloud", text: "Screenshot unavailable")
+    static let darkPlaceholder: UIImage = placeholder(dark: true)
+    static let lightPlaceholder: UIImage = placeholder(dark: false)
 
-    /// A dark, quiet display with one honest line; drawn once, shared.
-    private static func placeholder(symbol: String, text: String) -> UIImage {
-        let size = CGSize(width: 540, height: 1166)
+    /// Until a real capture arrives: an app's screen so far out of focus that
+    /// only soft, neutral masses of a header, content and a bar remain.
+    /// Abstract on purpose; it never pretends to be the app.
+    private static func placeholder(dark: Bool) -> UIImage {
+        let size = CGSize(width: 360, height: 777)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = true
-        return UIGraphicsImageRenderer(size: size, format: format).image { context in
-            let cg = context.cgContext
-            let colors = [UIColor(red: 0.105, green: 0.105, blue: 0.118, alpha: 1).cgColor,
-                          UIColor(red: 0.040, green: 0.040, blue: 0.046, alpha: 1).cgColor] as CFArray
-            let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 1])!
-            cg.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: 0, y: size.height), options: [])
-            let configuration = UIImage.SymbolConfiguration(pointSize: 64, weight: .light)
-            if let image = UIImage(systemName: symbol, withConfiguration: configuration)?
-                .withTintColor(UIColor(white: 1, alpha: 0.42), renderingMode: .alwaysOriginal) {
-                image.draw(at: CGPoint(x: (size.width - image.size.width) / 2, y: size.height * 0.44 - image.size.height))
+        let sharp = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            let base: CGFloat = dark ? 0.085 : 0.93
+            let ink: (CGFloat) -> UIColor = { amount in UIColor(white: dark ? base + amount : base - amount * 0.9, alpha: 1) }
+            ink(0).setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            func block(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, _ amount: CGFloat, radius: CGFloat = 18) {
+                ink(amount).setFill()
+                UIBezierPath(roundedRect: CGRect(x: x, y: y, width: w, height: h), cornerRadius: radius).fill()
             }
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: UIFont.systemFont(ofSize: 34, weight: .semibold),
-                .foregroundColor: UIColor(white: 1, alpha: 0.62),
-                .paragraphStyle: paragraph
-            ]
-            (text as NSString).draw(in: CGRect(x: 30, y: size.height * 0.44 + 28, width: size.width - 60, height: 60), withAttributes: attributes)
+            block(28, 96, 190, 34, 0.16, radius: 12)
+            block(24, 162, 312, 210, 0.10, radius: 28)
+            for row in 0..<4 {
+                let y = 402 + CGFloat(row) * 72
+                block(28, y, 48, 48, 0.12, radius: 14)
+                block(92, y + 6, 180 - CGFloat(row % 2) * 50, 14, 0.13, radius: 7)
+                block(92, y + 28, 120, 10, 0.08, radius: 5)
+            }
+            block(20, 700, 320, 56, 0.09, radius: 28)
         }
+        guard let input = CIImage(image: sharp) else { return sharp }
+        let blurred = input.clampedToExtent().applyingGaussianBlur(sigma: 16).cropped(to: input.extent)
+        guard let output = CIContext().createCGImage(blurred, from: input.extent) else { return sharp }
+        return UIImage(cgImage: output)
     }
 
     private static func contactShadowImage() -> UIImage {
@@ -748,4 +790,11 @@ private enum PhoneModel {
     float3 studioRadiance = float3(1.0, 0.988, 0.972) * 1.45 * studioFresnel;
     _output.color.rgb = mix(_output.color.rgb, studioRadiance, saturate(studioCoverage * studioReflectionStrength));
     """
+}
+
+/// Set on the main thread, cleared by the render thread after a frame.
+private final class RenderFence: @unchecked Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: false)
+    func arm() { lock.withLock { $0 = true } }
+    func disarm() -> Bool { lock.withLock { armed in defer { armed = false }; return armed } }
 }

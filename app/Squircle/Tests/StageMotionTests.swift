@@ -8,47 +8,51 @@ final class StageMotionTests: XCTestCase {
                     titleHeight: 41, reducedMotion: reduced)
     }
 
-    func testHeroFillsTheSpaceAboveTheNameAndNeighborsFaceTheCenter() {
+    func testGridCellsTileWithoutOverlapAndColumnsFaceTheCenter() {
         let layout = layout()
-        let hero = layout.homePose(offset: 0)
-        XCTAssertGreaterThan(hero.height, layout.size.height * 0.55, "The device is the hero of Home.")
-        XCTAssertGreaterThanOrEqual(hero.center.y - hero.height / 2, layout.heroTop - 0.001)
-        XCTAssertLessThan(hero.center.y + hero.height / 2, layout.nameTop)
-        XCTAssertLessThan(layout.nameTop + layout.titleHeight, layout.bottomBarTop, "The name clears the bottom controls.")
-        XCTAssertGreaterThan(layout.homePose(offset: -1).yaw, hero.yaw, "The left neighbor turns right, toward the center.")
-        XCTAssertLessThan(layout.homePose(offset: 1).yaw, hero.yaw)
-        XCTAssertFalse(layout.homePose(offset: 2.5).visible, "Far devices are not rendered.")
+        XCTAssertEqual(layout.columns, 2)
+        let first = layout.cellFrame(0), second = layout.cellFrame(1), third = layout.cellFrame(2)
+        XCTAssertEqual(first.minY, second.minY)
+        XCTAssertGreaterThanOrEqual(second.minX - first.maxX, StageLayout.gridGap - 0.001)
+        XCTAssertGreaterThan(third.minY, first.maxY, "Rows never overlap.")
+        XCTAssertLessThanOrEqual(second.maxX, layout.size.width - StageLayout.gridMargin + 0.001)
+        let left = layout.gridPose(cell: first, column: 0), right = layout.gridPose(cell: second, column: 1)
+        XCTAssertGreaterThan(left.yaw, 0, "The left column turns right, toward the center.")
+        XCTAssertLessThan(right.yaw, 0)
+        XCTAssertEqual(left.center.x, first.midX, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(left.height * PhonePose.aspect, layout.cellWidth, "A device fits its cell.")
+        XCTAssertLessThanOrEqual(left.center.y + left.height / 2, first.maxY - StageLayout.cellCaption, "The name sits beneath it.")
+        XCTAssertEqual(layout.gridContentHeight(count: 3), layout.gridContentHeight(count: 4))
     }
 
-    func testDeviceGivesWayAsItsListScrollsUp() {
+    func testPageDeviceShrinksAsItsListScrollsUpThenTravels() {
         let layout = layout()
-        let hero = layout.homePose(offset: 0)
-        let reading = layout.homePose(offset: 0, scroll: layout.expandedOffset, spread: 1)
-        XCTAssertEqual(reading.height, layout.listPhoneHeight, accuracy: 0.5)
-        XCTAssertEqual(layout.expansion(scroll: layout.expandedOffset), 1)
+        let hero = layout.pagePose(scroll: 0)
+        XCTAssertEqual(hero.height, layout.pageHeroHeight, accuracy: 0.001)
+        XCTAssertLessThan(hero.center.y + hero.height / 2, layout.pageNameTop, "The name sits beneath the device.")
+        let room = layout.pageHeroHeight - layout.pageCompactHeight
         var previous = hero.height
         for step in 1...20 {
-            let pose = layout.homePose(offset: 0, scroll: layout.expandedOffset * CGFloat(step) / 20)
+            let pose = layout.pagePose(scroll: room * CGFloat(step) / 20)
             XCTAssertLessThanOrEqual(pose.height, previous + 0.001, "Shrinks monotonically with the scroll.")
-            XCTAssertLessThan(pose.center.y + pose.height / 2, layout.nameTop - layout.expandedOffset * CGFloat(step) / 20,
-                              "Always stands above its name.")
+            XCTAssertEqual(pose.yaw, hero.yaw, "One fixed angle, so a portrait can scale.")
             previous = pose.height
         }
-        XCTAssertGreaterThan(layout.homePose(offset: 0, scroll: -80).height, hero.height, "Pulling down enlarges it slightly.")
-        XCTAssertFalse(layout.homePose(offset: 0, scroll: 2000).visible, "A device scrolled away is not rendered.")
-        // Neighbors stand a whole page apart once a list is being read.
-        XCTAssertEqual(layout.homePose(offset: 1, spread: 1).center.x, layout.size.width * 1.5, accuracy: 0.001)
-        XCTAssertLessThan(layout.homePose(offset: 1, spread: 0).center.x, layout.size.width * 1.2)
+        XCTAssertEqual(layout.pagePose(scroll: room).height, layout.pageCompactHeight, accuracy: 0.001)
+        XCTAssertGreaterThan(layout.pagePose(scroll: -80).height, hero.height, "Pulling down enlarges it slightly.")
+        XCTAssertFalse(layout.pagePose(scroll: 2000).visible, "A device scrolled away is not rendered.")
     }
 
-    func testListRestsAtHeroOrReadingPosition() {
-        let layout = layout(), expanded = layout.expandedOffset
-        XCTAssertEqual(layout.restingOffset(current: 40, projected: 90, velocity: 0.6), expanded, "A flick up opens the list.")
-        XCTAssertEqual(layout.restingOffset(current: expanded - 30, projected: expanded - 90, velocity: -0.6), 0, "A flick down returns the hero.")
-        XCTAssertEqual(layout.restingOffset(current: expanded * 0.2, projected: expanded * 0.25, velocity: 0), 0)
-        XCTAssertEqual(layout.restingOffset(current: expanded * 0.7, projected: expanded * 0.75, velocity: 0), expanded)
-        XCTAssertEqual(layout.restingOffset(current: expanded + 200, projected: expanded + 900, velocity: 2), expanded + 900,
-                       "Past the reading position the list scrolls freely.")
+    func testNeighborsRecedeAwayFromTheOpenedApp() {
+        let layout = layout()
+        let origin = layout.gridPose(cell: layout.cellFrame(0), column: 0).center
+        let cell = layout.cellFrame(1)
+        XCTAssertTrue(CATransform3DIsIdentity(layout.recede(cell, from: origin, progress: 0)))
+        let gone = layout.recede(cell, from: origin, progress: 1)
+        XCTAssertGreaterThan(gone.m41, 0, "A neighbor to the right drifts right.")
+        XCTAssertLessThan(gone.m11, 1, "It shrinks back.")
+        XCTAssertEqual(layout.recedeAlpha(progress: 1), 0)
+        XCTAssertEqual(layout.recedeAlpha(progress: 0), 1)
     }
 
     func testThreadDeviceFillsTheSpaceAboveTheDivider() {
@@ -77,7 +81,7 @@ final class StageMotionTests: XCTestCase {
 
     func testTransitionEndpointsMatchHomeAndThreadPoses() {
         let layout = layout()
-        let home = layout.homePose(offset: 0), thread = layout.threadPose(divider: layout.chatDivider)
+        let home = layout.pagePose(scroll: 0), thread = layout.threadPose(divider: layout.chatDivider)
         XCTAssertEqual(layout.transitionPose(from: home, to: thread, progress: 0), home)
         let end = layout.transitionPose(from: home, to: thread, progress: 1)
         XCTAssertEqual(end.center.y, thread.center.y, accuracy: 0.001)
@@ -88,12 +92,13 @@ final class StageMotionTests: XCTestCase {
 
     func testReducedMotionRemovesTurningRecedingAndLift() {
         let layout = layout(reduced: true)
-        for offset in [-1.0, -0.4, 0, 0.6, 1] as [CGFloat] {
-            let pose = layout.homePose(offset: offset)
+        for column in 0..<layout.columns {
+            let pose = layout.gridPose(cell: layout.cellFrame(column), column: column)
             XCTAssertEqual(pose.yaw, 0)
             XCTAssertEqual(pose.depth, 0)
         }
-        let home = layout.homePose(offset: 0), thread = layout.threadPose(divider: layout.splitDivider)
+        XCTAssertTrue(CATransform3DIsIdentity(layout.recede(layout.cellFrame(1), from: .zero, progress: 0.5)))
+        let home = layout.pagePose(scroll: 0), thread = layout.threadPose(divider: layout.splitDivider)
         XCTAssertEqual(thread.yaw, 0)
         XCTAssertEqual(layout.transitionPose(from: home, to: thread, progress: 0.5).depth, 0)
     }
