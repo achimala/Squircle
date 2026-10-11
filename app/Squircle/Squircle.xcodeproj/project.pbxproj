@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		01C183AE5505BED2A14E3B72 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF796323376B17E9A5610B5 /* Markdown.swift */; };
-		058BD3318E055882F53BD862 /* PerformanceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 374818EF24FCE5A3AF15700A /* PerformanceUITests.swift */; };
 		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
 		12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
 		2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */ = {isa = PBXBuildFile; fileRef = 27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */; };
@@ -31,7 +30,6 @@
 		4DDFD13E3021EAE8FBD50E7D /* T3RuntimeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */; };
 		55761DBC82306849B3DD6026 /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
 		59C2E7027B55B03E5809A83B /* ScreenshotBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */; };
-		5A543E9E783BC20D7DD0CF3F /* StageMotionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37662310ACFA109B8C10D377 /* StageMotionTests.swift */; };
 		5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9685CE2D9A277E148073C169 /* MotionAudit.swift */; };
 		6074C8820879B8258817156C /* AgentStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61BA8CB62C3A9F516000BF29 /* AgentStep.swift */; };
 		69A1E4E034A3A9C310663B31 /* AppProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0882163016B1D5C885051FAD /* AppProject.swift */; };
@@ -61,13 +59,13 @@
 		BD66E493DA20A62D30E1487B /* AgentStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61BA8CB62C3A9F516000BF29 /* AgentStep.swift */; };
 		BEF0D97D54BE2869497C9088 /* ThreadDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */; };
 		C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AE56C52866D21AD27A18697 /* DeviceStage.swift */; };
+		C5F5AE1D757E9658332F4638 /* SpringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51AB12A9050AE317BDBA9C84 /* SpringTests.swift */; };
 		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
 		CB3B7947C642FB450BF2C93F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
 		DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
 		EBB5E73877F124DDB564B2FB /* ThreadDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */; };
-		EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */; };
 		EF2030F39BE56875E731AD9A /* ThreadCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA04F2B838066131F83E73E4 /* ThreadCells.swift */; };
 		F9ABC01D7F49133520F5279F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
 		FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
@@ -81,17 +79,9 @@
 			remoteGlobalIDString = 48CB356BF6191F55960F572B;
 			remoteInfo = Squircle;
 		};
-		F3089C8AD119D77F5E43B706 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = B99870D716447DE6FD076F00 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 48CB356BF6191F55960F572B;
-			remoteInfo = Squircle;
-		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		00483E8542F562C568728AB7 /* SquircleUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		0882163016B1D5C885051FAD /* AppProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProject.swift; sourceTree = "<group>"; };
 		0D5F85DA67966D2090740EE5 /* StageLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageLayout.swift; sourceTree = "<group>"; };
 		1AE56C52866D21AD27A18697 /* DeviceStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStage.swift; sourceTree = "<group>"; };
@@ -99,14 +89,12 @@
 		2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViewController.swift; sourceTree = "<group>"; };
 		2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioViewController.swift; sourceTree = "<group>"; };
 		33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpringDriver.swift; sourceTree = "<group>"; };
-		374818EF24FCE5A3AF15700A /* PerformanceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceUITests.swift; sourceTree = "<group>"; };
-		37662310ACFA109B8C10D377 /* StageMotionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageMotionTests.swift; sourceTree = "<group>"; };
 		3C480DAB8EE878E0069F36AD /* SquircleOverlay.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = SquircleOverlay.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadDetail.swift; sourceTree = "<group>"; };
 		48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCurtain.swift; sourceTree = "<group>"; };
 		4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViews.swift; sourceTree = "<group>"; };
+		51AB12A9050AE317BDBA9C84 /* SpringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpringTests.swift; sourceTree = "<group>"; };
 		52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientModels.swift; sourceTree = "<group>"; };
-		5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioUITests.swift; sourceTree = "<group>"; };
 		5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffViewer.swift; sourceTree = "<group>"; };
 		5DF796323376B17E9A5610B5 /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
 		613DF9097AAA330CB0F89A33 /* SquircleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleApp.swift; sourceTree = "<group>"; };
@@ -138,7 +126,7 @@
 			isa = PBXGroup;
 			children = (
 				DB495D800CF688C469BFF725 /* AppProjectTests.swift */,
-				37662310ACFA109B8C10D377 /* StageMotionTests.swift */,
+				51AB12A9050AE317BDBA9C84 /* SpringTests.swift */,
 				FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */,
 			);
 			path = Tests;
@@ -151,7 +139,6 @@
 				6D3DA7CA0BBB806DCB782EA9 /* Resources */,
 				8A958A1FE5BAB76B766844F3 /* Sources */,
 				1A20A1D58C7BB1C09D18E702 /* Tests */,
-				D24FA892C1C78AF558D73097 /* UITests */,
 				F2356134AEAD3EDC720007DE /* Products */,
 			);
 			sourceTree = "<group>";
@@ -216,22 +203,12 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
-		D24FA892C1C78AF558D73097 /* UITests */ = {
-			isa = PBXGroup;
-			children = (
-				374818EF24FCE5A3AF15700A /* PerformanceUITests.swift */,
-				5AFFB1C5FFE255B283D6769E /* StudioUITests.swift */,
-			);
-			path = UITests;
-			sourceTree = "<group>";
-		};
 		F2356134AEAD3EDC720007DE /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */,
 				3C480DAB8EE878E0069F36AD /* SquircleOverlay.framework */,
 				7A74125807E9A3E968F73119 /* SquircleTests.xctest */,
-				00483E8542F562C568728AB7 /* SquircleUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -258,24 +235,6 @@
 			productName = Squircle;
 			productReference = D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */;
 			productType = "com.apple.product-type.application";
-		};
-		6EA94D8A1D3A60194650716C /* SquircleUITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 2C25B087647067DCA92909C8 /* Build configuration list for PBXNativeTarget "SquircleUITests" */;
-			buildPhases = (
-				0E48F1EC89DFBAAF9BEE7B72 /* Sources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				AB8233B5EA37DCE287C296C4 /* PBXTargetDependency */,
-			);
-			name = SquircleUITests;
-			packageProductDependencies = (
-			);
-			productName = SquircleUITests;
-			productReference = 00483E8542F562C568728AB7 /* SquircleUITests.xctest */;
-			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 		8288D750D29F968E2804D1E8 /* SquircleOverlay */ = {
 			isa = PBXNativeTarget;
@@ -325,10 +284,6 @@
 						DevelopmentTeam = 2F26US4NAU;
 						ProvisioningStyle = Automatic;
 					};
-					6EA94D8A1D3A60194650716C = {
-						DevelopmentTeam = 2F26US4NAU;
-						TestTargetID = 48CB356BF6191F55960F572B;
-					};
 					8288D750D29F968E2804D1E8 = {
 						DevelopmentTeam = 2F26US4NAU;
 					};
@@ -354,7 +309,6 @@
 				48CB356BF6191F55960F572B /* Squircle */,
 				8288D750D29F968E2804D1E8 /* SquircleOverlay */,
 				90E1BAD7755E3E809A136B1C /* SquircleTests */,
-				6EA94D8A1D3A60194650716C /* SquircleUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -412,15 +366,6 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		0E48F1EC89DFBAAF9BEE7B72 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				058BD3318E055882F53BD862 /* PerformanceUITests.swift in Sources */,
-				EE989663B5478E7DFA4F99A9 /* StudioUITests.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		134999952B6C50207950C0F0 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -462,7 +407,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */,
-				5A543E9E783BC20D7DD0CF3F /* StageMotionTests.swift in Sources */,
+				C5F5AE1D757E9658332F4638 /* SpringTests.swift in Sources */,
 				A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -511,31 +456,9 @@
 			target = 48CB356BF6191F55960F572B /* Squircle */;
 			targetProxy = A0DFCEE923C52BE989C818D1 /* PBXContainerItemProxy */;
 		};
-		AB8233B5EA37DCE287C296C4 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 48CB356BF6191F55960F572B /* Squircle */;
-			targetProxy = F3089C8AD119D77F5E43B706 /* PBXContainerItemProxy */;
-		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		1EB8865B7CB9C8C4F570B6CB /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				GENERATE_INFOPLIST_FILE = YES;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@loader_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleUITests;
-				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Squircle;
-			};
-			name = Debug;
-		};
 		30C260CF3B14EC876154EA87 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -586,23 +509,6 @@
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = Debug;
-		};
-		6F3AC088A124E24BF72604ED /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				BUNDLE_LOADER = "$(TEST_HOST)";
-				GENERATE_INFOPLIST_FILE = YES;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-					"@loader_path/Frameworks",
-				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleUITests;
-				SDKROOT = iphoneos;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Squircle;
-			};
-			name = Release;
 		};
 		7A0EE604B9984F30375FDA9E /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -826,15 +732,6 @@
 			buildConfigurations = (
 				D7F01227085CD5DED1734155 /* Debug */,
 				7A0EE604B9984F30375FDA9E /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Debug;
-		};
-		2C25B087647067DCA92909C8 /* Build configuration list for PBXNativeTarget "SquircleUITests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				1EB8865B7CB9C8C4F570B6CB /* Debug */,
-				6F3AC088A124E24BF72604ED /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

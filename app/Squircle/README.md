@@ -35,24 +35,14 @@ Tailscale is external and user-managed; the app does not install or configure it
 ```sh
 xcodegen generate --spec app/Squircle/project.yml
 xcodebuild -project app/Squircle/Squircle.xcodeproj -scheme Squircle \
-  -destination 'platform=iOS Simulator,id=YOUR_SEPARATE_TEST_RUNNER' \
-  -only-testing:SquircleTests -skip-testing:SquircleTests/T3LiveTests/testClaudeRoundTrip test
+  -destination 'platform=iOS Simulator,id=YOUR_SEPARATE_TEST_RUNNER' test
 ./target/release/squircle --data-dir .squircle build start \
   --project app/Squircle/Squircle.xcodeproj --scheme Squircle \
   --export-options app/Squircle/ExportOptions.plist --allow-provisioning-updates --json
 ```
 
-Live tests intentionally create clearly labelled verification threads in this
-repository's T3 project. They ask the selected provider to run `pwd` and return a
-marker, without editing files. Claude subscription login and its real round trip were verified outside the
-agent sandbox on 2026-10-05. The separate continuous-frame test requires a changing simulator surface and
-`SQUIRCLE_VERIFY_STREAM_MOTION=1`; it skips by default. Run tests in a separate
-simulator from the streamed target: Xcode can reboot its runner, while T3 retains
-capture until its own `device.shutdown` is called. The isolated runner created
-for this check is `35024ED8-E5BF-4DD7-9F25-DDEE9771EC44` (SquircleTransportTests).
-The stream soak verifies paired input/video recovery, duplicate start, cancelled
-startup and a quiet 31-second interval. Deterministic tests cover target validation,
-live delta replay, touch coordinates and preserved app/motion logic.
+The unit tests run in seconds and never touch T3, agents or a simulator stream.
+Check live behavior by running the app and looking at it.
 
 ## Interface (0.3.0)
 

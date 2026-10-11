@@ -35,20 +35,6 @@
                ReferencedContainer = "container:Squircle.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
-         <BuildActionEntry
-            buildForTesting = "YES"
-            buildForRunning = "NO"
-            buildForProfiling = "NO"
-            buildForArchiving = "NO"
-            buildForAnalyzing = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "6EA94D8A1D3A60194650716C"
-               BuildableName = "SquircleUITests.xctest"
-               BlueprintName = "SquircleUITests"
-               ReferencedContainer = "container:Squircle.xcodeproj">
-            </BuildableReference>
-         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction
@@ -75,17 +61,6 @@
                BlueprintIdentifier = "90E1BAD7755E3E809A136B1C"
                BuildableName = "SquircleTests.xctest"
                BlueprintName = "SquircleTests"
-               ReferencedContainer = "container:Squircle.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "NO">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "6EA94D8A1D3A60194650716C"
-               BuildableName = "SquircleUITests.xctest"
-               BlueprintName = "SquircleUITests"
                ReferencedContainer = "container:Squircle.xcodeproj">
             </BuildableReference>
          </TestableReference>

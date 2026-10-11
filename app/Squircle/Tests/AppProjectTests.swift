@@ -22,13 +22,6 @@ final class AppProjectTests: XCTestCase {
     private func metadata(path:String,name:String = "Renamed app",request:AppBuildRequest? = nil) -> AppMetadata {
         AppMetadata(id:"mac-app",name:name,project:path,scheme:"App",bundleID:"test.app",summary:"",updatedAt:10,preview:nil,buildRequest:request)
     }
-    func testNamesNeverMoveT3ProjectOrThreadIdentity() {
-        let snapshot = shell([["id":"t3-one","title":"Old name","workspaceRoot":"/src/App"]])
-        let first = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/App.xcodeproj")],builds:[])
-        let renamed = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/App.xcodeproj",name:"New name")],builds:[])
-        XCTAssertEqual(first.first?.id,"t3-one"); XCTAssertEqual(renamed.first?.id,"t3-one")
-        XCTAssertEqual(renamed.first?.name,"New name"); XCTAssertFalse(first.first!.canBuild)
-    }
     func testNestedCheckoutOwnsItsRecipeAndSimilarPrefixesStaySeparate() throws {
         let snapshot = shell([["id":"parent","title":"Parent","workspaceRoot":"/src/App"],
             ["id":"nested","title":"Nested","workspaceRoot":"/src/App/Child"],
@@ -50,22 +43,5 @@ final class AppProjectTests: XCTestCase {
                             ["id":"probe-t3","title":"Squircle Probe","workspaceRoot":"/src/Repo/examples/Probe"]])
         let rows = T3AppCatalog.projects(shell:nested,metadata:[probe,main],builds:[])
         XCTAssertEqual(rows.map(\.metadataID),["main","probe"])
-    }
-    func testSimulatorJobsDoNotReplaceAnInstallableArchiveRecipe() throws {
-        let snapshot = shell([["id":"app","title":"App","workspaceRoot":"/src/App"]])
-        let archive = try build(id:"archive",title:"App",path:"/src/App/App.xcodeproj",date:10)
-        let sim = try build(id:"sim",title:"App",path:"/src/App/App.xcodeproj",date:20,mode:"simulator")
-        let row = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/App.xcodeproj")],builds:[archive,sim]).first!
-        XCTAssertTrue(row.canBuild); XCTAssertEqual(row.buildRequest?.mode,"archive")
-        let fresh = row.buildRequest!.freshSubmission(id:"new-request")
-        XCTAssertEqual(fresh.requestID,"new-request"); XCTAssertTrue(fresh.capturePreview)
-    }
-    func testImportedMacRecipeOverridesHistoricalBuildSettingsAndDeletedProjectsDisappear() throws {
-        let snapshot = shell([["id":"app","title":"App","workspaceRoot":"/src/App"],
-            ["id":"deleted","title":"Deleted","workspaceRoot":"/src/Deleted","deletedAt":"2026-10-05T10:00:00.000Z"]])
-        let old = try build(id:"old",title:"App",path:"/src/App/App.xcodeproj",scheme:"Old")
-        let imported = try build(id:"import",title:"App",path:"/src/App/App.xcodeproj",scheme:"Current")
-        let rows = T3AppCatalog.projects(shell:snapshot,metadata:[metadata(path:"/src/App/App.xcodeproj",request:imported.request)],builds:[old])
-        XCTAssertEqual(rows.count,1); XCTAssertEqual(rows.first?.buildRequest?.scheme,"Current")
     }
 }

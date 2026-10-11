@@ -36,6 +36,15 @@ Read [README.md](README.md), then only the linked detail relevant to the task. D
   the baseline only goes down (`--update` refuses increases). Remove existing
   uses when you touch them.
 
+- **Tests only where looking can't catch it** (user, 2026-10-11). Do not
+  write tests that restate the code (layout numbers, view text, a filter
+  filters) or exist to show diligence. Test only logic that is easy to get
+  wrong and invisible on screen: parsers, protocol and stream decoding,
+  security checks, state that must survive reconnects. No tests that call
+  live T3, agents, builds or the simulator. Check UI changes by running the
+  app and looking at it. Delete a test when the design it pins changes;
+  don't rewrite it. The suite must stay a few seconds.
+
 ## Documentation discipline
 
 User instructions take precedence. Label proposals and unknowns; do not turn a researched capability into a tested fact. Record evidence and versions when a milestone is actually validated. Update the relevant detail page when a decision changes; keep this entry point short.

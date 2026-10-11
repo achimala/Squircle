@@ -92,23 +92,13 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-  SquircleUITests:
-    type: bundle.ui-testing
-    platform: iOS
-    sources: [UITests]
-    dependencies:
-      - target: Squircle
-    settings:
-      base:
-        GENERATE_INFOPLIST_FILE: YES
 schemes:
   Squircle:
     build:
       targets:
         Squircle: all
         SquircleTests: [test]
-        SquircleUITests: [test]
     test:
-      targets: [SquircleTests, SquircleUITests]
+      targets: [SquircleTests]
     archive:
       config: Release
