@@ -19,6 +19,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private let add = Theme.glassButton(symbol: "plus", identifier: "project.add", accessibilityLabel: "Add app")
     /// One app's threads and controls.
     private let pageHost = UIView()
+    /// The list swings in 3D inside its own layer, and the conversation turns
+    /// inside `threadHost`: separate containers flatten each into its own
+    /// plane, so they layer in order instead of slicing through each other.
+    private let pageSwing = UIView()
+    private let threadHost = PassthroughView()
     private let page = AppPage()
     private let back = Theme.glassButton(symbol: "chevron.left", identifier: "project.back", accessibilityLabel: "Apps")
     private let compose = Theme.glassButton(symbol: "square.and.pencil", title: "New Thread", prominent: true, identifier: "thread.new")
@@ -63,6 +68,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         view.addSubview(stage)
         view.addSubview(home)
         view.addSubview(pageHost)
+        view.addSubview(threadHost)
         view.addSubview(stage.overlay)
 
         grid.alwaysBounceVertical = true
@@ -77,7 +83,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
         page.onScroll = { [weak self] in if self?.staged == true { self?.applyScene() } }
         page.onOpenThread = { [weak self] id in self?.openThread(id) }
-        pageHost.addSubview(page)
+        pageSwing.addSubview(page)
+        pageHost.addSubview(pageSwing)
         [back, compose, builds].forEach(pageHost.addSubview)
         back.addAction(UIAction { [weak self] _ in self?.closeApp() }, for: .touchUpInside)
         compose.addAction(UIAction { [weak self] _ in self?.openThread(nil) }, for: .touchUpInside)
@@ -189,6 +196,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         pageHost.place(in: bounds)
         grid.frame = bounds
         page.frame = bounds
+        threadHost.frame = bounds
+        pageSwing.frame = bounds
         thread?.view.place(in: bounds)
         let current = makeLayout()
         if current != laidOut {
@@ -196,13 +205,15 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             layoutGrid()
             page.layout = current
         }
+        // Controls rise in with transforms; `place` keeps their resting spot exact.
         let safe = view.safeAreaInsets
-        connection.frame = CGRect(x: 16, y: safe.top + 4, width: 44, height: 44)
-        add.frame = CGRect(x: bounds.width - 60, y: safe.top + 4, width: 44, height: 44)
-        back.frame = CGRect(x: 16, y: safe.top + 4, width: 44, height: 44)
+        connection.place(in: CGRect(x: 16, y: safe.top + 4, width: 44, height: 44))
+        add.place(in: CGRect(x: bounds.width - 60, y: safe.top + 4, width: 44, height: 44))
+        back.place(in: CGRect(x: 16, y: safe.top + 4, width: 44, height: 44))
         let barTop = current.pageBottomBarTop, barHeight = StageLayout.bottomBarHeight
-        builds.frame = CGRect(x: bounds.width - 16 - barHeight, y: barTop, width: barHeight, height: barHeight)
-        compose.frame = CGRect(x: 16, y: barTop, width: builds.frame.minX - 26, height: barHeight)
+        let buildsFrame = CGRect(x: bounds.width - 16 - barHeight, y: barTop, width: barHeight, height: barHeight)
+        builds.place(in: buildsFrame)
+        compose.place(in: CGRect(x: 16, y: barTop, width: buildsFrame.minX - 26, height: barHeight))
         applyScene()
     }
 
@@ -556,9 +567,16 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         thread = controller
         addChild(controller)
         controller.view.frame = view.bounds
+        // An opaque page that covers the list as it turns in, never text over text.
+        controller.view.backgroundColor = Theme.paper
+        controller.view.layer.shadowColor = UIColor.black.cgColor
+        controller.view.layer.shadowOpacity = 0.14
+        controller.view.layer.shadowRadius = 18
+        controller.view.layer.shadowOffset = CGSize(width: -6, height: 0)
+        controller.view.layer.shadowPath = UIBezierPath(rect: view.bounds).cgPath
         controller.view.layer.transform = CATransform3DMakeTranslation(view.bounds.width, 0, 0)
         // Conversations pass beneath the devices.
-        view.insertSubview(controller.view, belowSubview: stage.overlay)
+        threadHost.addSubview(controller.view)
         controller.didMove(toParent: self)
         controller.view.layoutIfNeeded()
         phase = .toThread
@@ -711,6 +729,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         case .app: closeApp(); return true
         default: return false
         }
+    }
+}
+
+/// A container that is never itself the target of a touch.
+final class PassthroughView: UIView {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
     }
 }
 

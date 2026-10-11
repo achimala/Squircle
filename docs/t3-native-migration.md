@@ -793,3 +793,15 @@ source key differs, keeping the cached image until the newer one decodes.
 (`squircle-home.json`, written two seconds after changes) and restores them
 at launch. Simulator: a cold relaunch showed the full grid with screenshots
 1.2 s after launch.
+
+**Build 30: thread transitions.** Reproduced from a simulator recording of
+`SQUIRCLE_DEMO=1` at 30 fps. The list's 3D swing and the conversation's 3D
+turn were sibling layers in one 3D rendering context, so Core Animation
+intersected them: a moving vertical line sliced the conversation and the
+faded list showed through it. Each now turns inside its own container
+(`pageSwing`, `threadHost`, which passes touches through), and the
+conversation is an opaque page with a soft edge shadow in the app (the
+overlay keeps it transparent over glass). The bottom/top controls and the
+app name were framed while carrying their rise-in transforms, so they rested
+up to 40 pt off and jumped on the next layout; they are now placed by bounds
+and center. Re-recorded open and close show neither defect.
