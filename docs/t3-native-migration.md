@@ -805,3 +805,15 @@ overlay keeps it transparent over glass). The bottom/top controls and the
 app name were framed while carrying their rise-in transforms, so they rested
 up to 40 pt off and jumped on the next layout; they are now placed by bounds
 and center. Re-recorded open and close show neither defect.
+
+**Build 31: responsive, flat thread push.** The user found every transition
+blocking and the 3D swing into threads out of place. Touch was enabled only
+when a spring settled (about a second with the 0.0005 rest threshold); now
+the screen being arrived at is interactive from the first frame
+(`towardGrid`/`towardPage`/`towardThread`), a tap on another app while one
+returns lands the old one at once, a thread opened while another leaves
+replaces it in place, and Back on the app page works while a thread is
+still sliding away. Threads push flat: the conversation slides in from the
+right over the list, which drifts left by a third. Verified frame by frame
+in a simulator recording; touch-during-transition not yet exercised by a UI
+test.

@@ -19,10 +19,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private let add = Theme.glassButton(symbol: "plus", identifier: "project.add", accessibilityLabel: "Add app")
     /// One app's threads and controls.
     private let pageHost = UIView()
-    /// The list swings in 3D inside its own layer, and the conversation turns
-    /// inside `threadHost`: separate containers flatten each into its own
-    /// plane, so they layer in order instead of slicing through each other.
-    private let pageSwing = UIView()
+    /// Holds the conversation above the list; touches pass through when empty.
     private let threadHost = PassthroughView()
     private let page = AppPage()
     private let back = Theme.glassButton(symbol: "chevron.left", identifier: "project.back", accessibilityLabel: "Apps")
@@ -52,7 +49,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private enum Phase { case grid, toApp, app, toGrid, dragApp, toThread, thread, toPage, dragThread }
     private var phase = Phase.grid
     private var onGrid: Bool { phase == .grid }
-    private var onPage: Bool { phase == .app }
+    /// The screen being arrived at takes touches from the start of its
+    /// transition; nothing waits for a spring to settle.
+    private var towardGrid: Bool { phase == .grid || phase == .toGrid }
+    private var towardPage: Bool { [.app, .toApp, .toPage].contains(phase) }
+    private var towardThread: Bool { phase == .thread || phase == .toThread }
 
     init(model: SquircleModel) {
         self.model = model
@@ -83,8 +84,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
         page.onScroll = { [weak self] in if self?.staged == true { self?.applyScene() } }
         page.onOpenThread = { [weak self] id in self?.openThread(id) }
-        pageSwing.addSubview(page)
-        pageHost.addSubview(pageSwing)
+        pageHost.addSubview(page)
         [back, compose, builds].forEach(pageHost.addSubview)
         back.addAction(UIAction { [weak self] _ in self?.closeApp() }, for: .touchUpInside)
         compose.addAction(UIAction { [weak self] _ in self?.openThread(nil) }, for: .touchUpInside)
@@ -197,7 +197,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         grid.frame = bounds
         page.frame = bounds
         threadHost.frame = bounds
-        pageSwing.frame = bounds
         thread?.view.place(in: bounds)
         let current = makeLayout()
         if current != laidOut {
@@ -394,7 +393,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// The portrait hides only once the stage has drawn it, so neither shows
     /// nothing for a frame; `then` runs at that moment.
     private func stageSelected(hiding portrait: UIView, then: (() -> Void)? = nil) {
-        guard !staged else { then?(); return }
         staged = true
         applyScene()
         stage.afterNextRender { [weak self, weak portrait] in
@@ -465,31 +463,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         compose.transform = CGAffineTransform(translationX: 0, y: (1 - chrome) * 40)
         builds.transform = compose.transform
 
-        // A thread: the list swings away on a hinge at its left edge while the
-        // conversation turns in from the right. The device travels on its own.
-        if layout.reducedMotion {
-            self.page.layer.transform = CATransform3DIdentity
-            self.page.alpha = 1 - t
-        } else {
-            var swing = CATransform3DIdentity
-            swing.m34 = -1 / 900
-            swing = CATransform3DTranslate(swing, -width * 0.18 * t, 0, -120 * t)
-            swing = CATransform3DRotate(swing, 0.32 * t, 0, 1, 0)
-            self.page.layer.transform = swing
-            self.page.alpha = 1 - 0.85 * t
-        }
+        // A thread: a flat push. The conversation slides over from the right
+        // while the list drifts a third as far left. The device travels on its own.
+        self.page.transform = CGAffineTransform(translationX: layout.reducedMotion ? 0 : -width * 0.3 * t, y: 0)
         thread?.setTransitionProgress(t)
-        if let threadView = thread?.view {
-            if layout.reducedMotion {
-                threadView.layer.transform = CATransform3DMakeTranslation(width * (1 - t), 0, 0)
-            } else {
-                var arrive = CATransform3DIdentity
-                arrive.m34 = -1 / 1100
-                arrive = CATransform3DTranslate(arrive, width * (1 - t), 0, 0)
-                arrive = CATransform3DRotate(arrive, -0.38 * (1 - t), 0, 1, 0)
-                threadView.layer.transform = arrive
-            }
-        }
+        thread?.view.transform = CGAffineTransform(translationX: width * (1 - t), y: 0)
     }
 
     // MARK: App page
@@ -498,8 +476,13 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// (verification holds a scrubbed frame).
     private func openApp(_ id: String, begin: Bool = true) {
         let returning = phase == .toGrid && id == selectedID
-        guard onGrid || returning, presentedViewController == nil,
+        guard towardGrid, presentedViewController == nil,
               let project = projects.first(where: { $0.id == id }), let cell = cells[id] else { return }
+        // Another app still on its way back lands at once; the new one takes over.
+        if phase == .toGrid, !returning {
+            appSpring.set(0)
+            appRested(at: 0)
+        }
         Theme.openHaptic()
         if !returning {
             selectedID = id
@@ -521,7 +504,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     func closeApp() {
-        guard [.app, .toApp, .dragApp].contains(phase), presentedViewController == nil else { return }
+        guard [.app, .toApp, .dragApp, .toPage].contains(phase), presentedViewController == nil else { return }
+        // A thread still sliding away is gone at once.
+        if phase == .toPage, let leaving = thread {
+            spring.set(0)
+            removeThread(leaving)
+        }
         Theme.selectionHaptic()
         phase = .toGrid
         beginMotion("app.close")
@@ -557,9 +545,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     // MARK: Threads
 
     private func openThread(_ sessionID: String?, begin: Bool = true) {
-        guard onPage, presentedViewController == nil, let project = selectedProject else { return }
+        guard towardPage, presentedViewController == nil, let project = selectedProject else { return }
         Theme.openHaptic()
         model.selectProject(project)
+        // A thread still leaving is replaced where it is; the new one continues from there.
+        if let leaving = thread { removeThread(leaving) }
         let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage)
         controller.layoutProvider = { [weak self] in self?.layout }
         controller.onBack = { [weak self] in self?.closeThread() }
@@ -574,7 +564,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         controller.view.layer.shadowRadius = 18
         controller.view.layer.shadowOffset = CGSize(width: -6, height: 0)
         controller.view.layer.shadowPath = UIBezierPath(rect: view.bounds).cgPath
-        controller.view.layer.transform = CATransform3DMakeTranslation(view.bounds.width, 0, 0)
+        controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
         // Conversations pass beneath the devices.
         threadHost.addSubview(controller.view)
         controller.didMove(toParent: self)
@@ -604,20 +594,22 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             updateInteractivity()
             UIAccessibility.post(notification: .screenChanged, argument: thread?.view)
         } else if value <= 0, phase == .toPage {
-            if let thread {
-                thread.pausePreview()
-                stage.endLive(for: thread.project.id)
-                thread.willMove(toParent: nil)
-                thread.view.removeFromSuperview()
-                thread.removeFromParent()
-            }
-            thread = nil
+            if let thread { removeThread(thread) }
             phase = .app
             applyScene()
             updateInteractivity()
             unstageSelected(showing: page.portrait)
             UIAccessibility.post(notification: .screenChanged, argument: page.hero)
         }
+    }
+
+    private func removeThread(_ controller: ThreadViewController) {
+        controller.pausePreview()
+        stage.endLive(for: controller.project.id)
+        controller.willMove(toParent: nil)
+        controller.view.removeFromSuperview()
+        controller.removeFromParent()
+        if thread === controller { thread = nil }
     }
 
     // MARK: Back
@@ -680,10 +672,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     /// Only the resting screen is interactive and visible to VoiceOver/UI tests.
     private func updateInteractivity() {
-        home.isUserInteractionEnabled = onGrid
-        home.accessibilityElementsHidden = !onGrid
-        pageHost.isUserInteractionEnabled = onPage
-        pageHost.accessibilityElementsHidden = !onPage
+        home.isUserInteractionEnabled = towardGrid
+        home.accessibilityElementsHidden = !towardGrid
+        pageHost.isUserInteractionEnabled = towardPage
+        pageHost.accessibilityElementsHidden = !towardPage
+        thread?.view.isUserInteractionEnabled = towardThread
         // Hidden at rest so nothing costs anything behind a conversation.
         home.isHidden = phase == .thread || phase == .app
         page.isHidden = phase == .thread
@@ -693,7 +686,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     // MARK: Sheets
 
     private func presentBuilds() {
-        guard let project = selectedProject, presentedViewController == nil, onPage else { return }
+        guard let project = selectedProject, presentedViewController == nil, towardPage else { return }
         Theme.selectionHaptic()
         let controller = BuildsViewController(model: model, project: project)
         controller.onNewThread = { [weak self, weak controller] in
@@ -709,7 +702,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     private func presentImport() {
-        guard onGrid, presentedViewController == nil else { return }
+        guard towardGrid, presentedViewController == nil else { return }
         let importer = AppImportNavigationController(model: model)
         importer.onImport = { [weak self, weak importer] project in
             importer?.dismiss(animated: true) {
