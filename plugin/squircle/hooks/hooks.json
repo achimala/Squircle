@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "{{CLI}} agent context --hook", "timeout": 20 }] }
+    ],
+    "SessionStart": [
+      { "matcher": "compact", "hooks": [{ "type": "command", "command": "{{CLI}} agent context --hook", "timeout": 20 }] }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [{ "type": "command", "command": "echo 'Do not open question dialogs: they stall every worker. Put the question in your reply text and keep working on everything else.' >&2; exit 2" }]
+      }
+    ]
+  }
+}

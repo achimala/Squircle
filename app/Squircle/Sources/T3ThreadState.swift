@@ -59,9 +59,11 @@ struct T3ThreadState: Codable {
             let id = m["id"].string ?? UUID().uuidString
             let reasoning = m["role"].string == "system" && id.hasPrefix("reasoning:")
             guard reasoning || m["role"].string != "system" else { return nil }
-            return (m["createdAt"].string ?? "", ChatMessage(id: id, role: reasoning ? "thinking" : m["role"].string ?? "assistant",
+            var message = ChatMessage(id: id, role: reasoning ? "thinking" : m["role"].string ?? "assistant",
                 content: Self.spoken(m["text"].string ?? ""), isStreaming: m["streaming"].bool, createdAt: m["createdAt"].string ?? "",
-                turnID: m["turnId"].string))
+                turnID: m["turnId"].string)
+            if let update = Self.workerUpdate(m) { message.content = update; message.isUpdate = true }
+            return (m["createdAt"].string ?? "", message)
         }
         let running = isRunning
         var steps: [String: Int] = [:]
@@ -110,6 +112,22 @@ struct T3ThreadState: Codable {
         if let tool = extra["tool"].string, data["toolName"] == nil { data["toolName"] = .string(tool) }
         payload["data"] = .object(data); a["payload"] = .object(payload)
         return .object(a)
+    }
+    /// "Dark mode finished · Launch crash needs you" for Squircle's wake-up
+    /// message to an app agent; nil for anything else.
+    static func workerUpdate(_ message: JSONValue) -> String? {
+        guard message["role"].string == "user",
+              let record = message["context"]["records"].array.first(where: { $0["kind"].string == "squircle-worker-update" })
+        else { return nil }
+        let lines = record["payload"]["workers"].array.map { worker -> String in
+            let title = worker["title"].string ?? "A worker"
+            switch worker["state"].string {
+            case "needs-you": return title + " needs input"
+            case "error": return title + " stopped with an error"
+            default: return title + " finished"
+            }
+        }
+        return lines.isEmpty ? "Workers moved on" : lines.joined(separator: " · ")
     }
     /// What the person typed, without the app context Squircle sends after it.
     static func spoken(_ text: String) -> String {

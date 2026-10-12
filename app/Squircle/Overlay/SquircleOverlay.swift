@@ -1,5 +1,4 @@
 #if SQUIRCLE_OVERLAY || DEBUG
-import Combine
 import UIKit
 
 /// Entry point called from the framework's load-time constructor. The overlay
@@ -11,9 +10,7 @@ public func squircleOverlayStart() {
     guard AppConfiguration.Shared.teamID != nil, !bundleID.isEmpty, bundleID != "ai.dreamslate.Squircle" else { return }
     // Squircle's paired connection; without it the overlay stays off.
     guard let configuration = try? AppConfiguration.Shared.load() else { return }
-    DispatchQueue.main.async {
-        MainActor.assumeIsolated { OverlayHost.shared.start(bundleID: bundleID, configuration: configuration) }
-    }
+    Task { @MainActor in OverlayHost.shared.start(bundleID: bundleID, configuration: configuration) }
 }
 
 /// Attaches one overlay window to the host app's foreground scene.
@@ -115,7 +112,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private var pushStart: CGFloat = 0
     private var keyboardTop = CGFloat.greatestFiniteMagnitude
     private weak var previousKey: UIWindow?
-    private var subscriptions = Set<AnyCancellable>()
+    private var observations: [Task<Void, Never>] = []
     /// Threads working at the last render, so a finish can be shown.
     private var working: [String: String] = [:]
     private var finished: (text: String, until: Date)?
@@ -190,14 +187,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         morph.onRest = { [weak self] value in self?.morphRested(at: value) }
         push.onChange = { [weak self] _ in self?.layoutPages() }
         push.onRest = { [weak self] value in if value <= 0.001 { self?.closeThread() } }
-        model.objectWillChange.receive(on: DispatchQueue.main)
-            .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in self?.render() }
-            .store(in: &subscriptions)
-        NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] note in self?.keyboardMoved(note) }
-            .store(in: &subscriptions)
+        observations = [
+            model.observe(by: self, after: .milliseconds(100)) { $0.render() },
+            Task { [weak self] in
+                for await note in NotificationCenter.default.notifications(named: UIResponder.keyboardWillChangeFrameNotification) {
+                    self?.keyboardMoved(note)
+                }
+            }
+        ]
         render()
     }
 
@@ -227,7 +224,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         for (id, title) in working where !active.contains(where: { $0.id == id }) {
             finished = ("Done · " + title, now.addingTimeInterval(6))
             pulse()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6.1) { [weak self] in self?.render() }
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(6.1))
+                self?.render()
+            }
         }
         working = Dictionary(uniqueKeysWithValues: active.map { ($0.id, $0.displayTitle(in: project)) })
 

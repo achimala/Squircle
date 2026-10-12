@@ -73,6 +73,35 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return reply.data
     }
 
+    /// Each app's agent thread on the Mac, keyed by T3 project ID.
+    func agents() async throws -> [String: String] {
+        struct Agent: Decodable { let project_id: String; let thread_id: String }
+        struct Reply: Decodable { struct Data: Decodable { let agents: [Agent] }; let ok: Bool; let data: Data }
+        do {
+            let reply: Reply = try await get(["v1", "agents"])
+            guard reply.ok else { throw ClientError.response("Squircle") }
+            return Dictionary(reply.data.agents.map { ($0.project_id, $0.thread_id) }, uniquingKeysWith: { _, b in b })
+        } catch let error as ClientError where error.isMissing {
+            return [:] // An older Squircle service has no app agents.
+        }
+    }
+
+    /// Starts (or finds) an app's agent on the Mac and gives it a message.
+    /// Returns its T3 thread ID.
+    func startAgent(projectID: String, message: String, model: String?) async throws -> String {
+        struct Agent: Decodable { let thread_id: String }
+        struct Reply: Decodable { struct Data: Decodable { let agent: Agent }; let ok: Bool; let data: Data }
+        var body = ["project_id": projectID, "message": message]
+        if let model { body["model"] = model }
+        var request = try request(["v1", "agents"])
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.httpBody = try JSONEncoder().encode(body)
+        let reply: Reply = try await perform(request, service: "Squircle", exposeAPIError: true)
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data.agent.thread_id
+    }
+
     func startBuild(_ buildRequest: AppBuildRequest) async throws -> AppBuild {
         struct Reply: Decodable {
             struct Result: Decodable { let job: AppBuild }

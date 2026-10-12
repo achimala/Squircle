@@ -49,6 +49,8 @@ enum ThreadItem: Equatable {
     /// The thread's title, scrolling with the conversation.
     case header(String)
     case user(ChatMessage)
+    /// Squircle telling an app agent that workers finished: a quiet line.
+    case update(ChatMessage)
     case answer(ChatMessage)
     case note(ChatMessage)
     case thought(ChatMessage)
@@ -66,7 +68,7 @@ enum ThreadItem: Equatable {
     var id: String {
         switch self {
         case .header: return "header"
-        case .user(let message), .answer(let message): return message.id
+        case .user(let message), .update(let message), .answer(let message): return message.id
         case .note(let message): return "note:" + message.id
         case .thought(let message): return message.id
         case .step(let message, _, _): return message.id
@@ -95,7 +97,9 @@ enum ThreadItem: Equatable {
         for (index, turn) in turns.enumerated() {
             let live = running && index == turns.count - 1
             let id = turn.user?.id ?? "start"
-            if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { items.append(.user(user)) }
+            if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                items.append(user.isUpdate ? .update(user) : .user(user))
+            }
             let rest = turn.rest.filter { $0.role == "tool" || !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             // The answer is the last thing the agent wrote, once nothing follows it.
             var answer: ChatMessage?

@@ -1,4 +1,3 @@
-import Combine
 import UIKit
 
 /// Secondary sheet: start a build from the app's saved Mac recipe, follow its
@@ -17,7 +16,7 @@ final class BuildsViewController: UIViewController {
     private let install = Theme.glassButton(symbol: "arrow.down.circle", title: "Install", prominent: true, identifier: "build.install")
     private var rowViews: [String: BuildRow] = [:]
     private var renderedOrder: [String] = []
-    private var subscriptions = Set<AnyCancellable>()
+    private var observation: Task<Void, Never>?
     private var isSubmitting = false
     private var latestInstallable: AppBuild?
 
@@ -94,10 +93,7 @@ final class BuildsViewController: UIViewController {
             Task { await self?.model.refresh(); refresh?.endRefreshing() }
         }, for: .valueChanged)
         scroll.refreshControl = refresh
-        model.objectWillChange.receive(on: DispatchQueue.main)
-            .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in self?.render() }
-            .store(in: &subscriptions)
+        observation = model.observe(by: self, after: .milliseconds(100)) { $0.render() }
         render()
     }
 

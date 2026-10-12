@@ -1,5 +1,4 @@
 import AVKit
-import Combine
 import UIKit
 
 /// One conversation with a coding agent, on the same stage as Home. The app's
@@ -19,6 +18,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     var hidesIdleDevice = false
     var hidesDevice: Bool { hidesIdleDevice && stream == nil }
     var currentSessionID: String? { sessionID }
+    /// The app's agent: one conversation per app that runs its threads.
+    let isAgent: Bool
 
     private let model: SquircleModel
     private weak var stage: DeviceStage?
@@ -26,7 +27,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private var selectionReady = false
     private var sending = false
     private let draftScroll = UIScrollView()
-    private var subscriptions = Set<AnyCancellable>()
+    private var observations: [Task<Void, Never>] = []
 
     private let back = Theme.glassButton(symbol: "chevron.left", identifier: "thread.close", accessibilityLabel: "Back to threads")
     private var threadTitle = ""
@@ -95,7 +96,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private var orientation = "portrait"
     private var lastInput: CGPoint?
 
-    init(model: SquircleModel, project: AppProject, sessionID: String?, stage: DeviceStage) {
+    init(model: SquircleModel, project: AppProject, sessionID: String?, stage: DeviceStage, agent: Bool = false) {
+        self.isAgent = agent
         self.model = model
         self.project = project
         self.sessionID = sessionID
@@ -215,6 +217,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
         pickers.model.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.modelMenu() ?? []) }])
         pickers.approvals.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.approvalMenu() ?? []) }])
+        // The app agent always runs with full access on the Mac; it supervises workers.
+        pickers.approvals.isHidden = isAgent
         back.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onBack?() }, for: .touchUpInside)
         [deviceTouch, back, simulatorStatus, divider, home, simulator].forEach(view.addSubview)
 
@@ -310,13 +314,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             self?.stage?.setLive(false, reason: "detent")
         }
 
-        model.objectWillChange.receive(on: DispatchQueue.main)
-            .debounce(for: .milliseconds(50), scheduler: DispatchQueue.main)
-            .sink { [weak self] in self?.render() }.store(in: &subscriptions)
-        NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)
-            .sink { [weak self] _ in self?.pausePreview() }.store(in: &subscriptions)
-        NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)
-            .sink { [weak self] _ in self?.reconcilePreview() }.store(in: &subscriptions)
+        observations = [
+            model.observe(by: self, after: .milliseconds(50)) { $0.render() },
+            Task { [weak self] in
+                for await _ in NotificationCenter.default.notifications(named: UIApplication.didEnterBackgroundNotification) {
+                    self?.pausePreview()
+                }
+            },
+            Task { [weak self] in
+                for await _ in NotificationCenter.default.notifications(named: UIApplication.didBecomeActiveNotification) {
+                    self?.reconcilePreview()
+                }
+            }
+        ]
 
         renderSimulatorControls(interactive: false)
         model.selectProject(project)
@@ -330,7 +340,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         Task { [weak self] in
             // A thread removed before this ran must not take the model's selection.
             guard let self, !tornDown else { return }
-            if let requestedSessionID { await model.selectSession(requestedSessionID) } else { await model.beginDraft() }
+            if let requestedSessionID { await model.selectSession(requestedSessionID) } else { await model.beginDraft(agent: isAgent) }
             selectionReady = true
             render()
         }
@@ -473,6 +483,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             draftScroll.isHidden = true
             return
         }
+        // The Mac may report the app's agent after this opened as a draft.
+        if isAgent, sessionID == nil, !sending, pendingSend == nil, let id = model.agentThreadID(for: project) {
+            sessionID = id
+            model.prepareSession(id)
+            Task { [weak self] in await self?.model.selectSession(id) }
+        }
         composer.send.isEnabled = !sending
         draftScroll.isHidden = showsConversation
         table.isHidden = !showsConversation
@@ -480,7 +496,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
                                       showsConversation ? table : draftScroll, request, notice, jump, pickers.model, pickers.approvals, composer]
         simulator.isEnabled = sessionID != nil
         let session = model.sessions.first { $0.id == sessionID }
-        threadTitle = session?.displayTitle(in: project) ?? ""
+        threadTitle = isAgent ? project.name : session?.displayTitle(in: project) ?? ""
         renderAgent()
         renderSend()
         renderRequest()
@@ -538,7 +554,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private static func reuseIdentifier(for item: ThreadItem) -> String {
         switch item {
         case .header: return "header"
-        case .user, .answer, .note, .thought: return "message"
+        case .user, .update, .answer, .note, .thought: return "message"
         case .step, .earlier: return "step"
         case .gallery: return "gallery"
         case .summary: return "summary"
@@ -704,7 +720,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             let head = table.rectForRow(at: path)
             guard head.minY < top else { continue }
             // The turn ends at its answer or the next message.
-            let end = items[(index + 1)...].firstIndex { if case .answer = $0 { return true }; if case .user = $0 { return true }; return false }
+            let end = items[(index + 1)...].firstIndex { if case .answer = $0 { return true }; if case .user = $0 { return true }; if case .update = $0 { return true }; return false }
             let endY = end.flatMap { dataSource.indexPath(for: items[$0].id) }.map { table.rectForRow(at: $0).minY } ?? table.contentSize.height
             guard endY > top + head.height * 0.5 else { continue }
             pinned = (summary, min(top, endY - head.height), head.height)
@@ -752,6 +768,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .user(let message):
             (cell as? MessageCell)?.configure(message, style: .user, rendered: text(for: message, style: .user), expanded: true)
             cell.contentView.alpha = message.id == flyingID ? 0 : 1
+        case .update(let message):
+            (cell as? MessageCell)?.configure(message, style: .update, rendered: text(for: message, style: .update), expanded: true)
         case .answer(let message):
             (cell as? MessageCell)?.configure(message, style: .answer, rendered: text(for: message, style: .answer), expanded: true)
         case .note(let message):
@@ -791,6 +809,17 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             text = Markdown.render(message.content, font: Theme.font(.subheadline, 15), color: .secondaryLabel)
         case .answer:
             text = Markdown.render(message.content, font: Theme.font(.body, 17), color: message.failed ? Theme.failure : .label)
+        case .update:
+            let font = Theme.font(.footnote, 13, .medium)
+            let line = NSMutableAttributedString()
+            if let symbol = UIImage(systemName: "arrow.triangle.merge", withConfiguration: UIImage.SymbolConfiguration(font: font))?
+                .withTintColor(.secondaryLabel, renderingMode: .alwaysOriginal) {
+                line.append(NSAttributedString(attachment: NSTextAttachment(image: symbol)))
+                line.append(NSAttributedString(string: "  "))
+            }
+            line.append(NSAttributedString(string: message.content))
+            line.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel], range: NSRange(location: 0, length: line.length))
+            text = line
         }
         rendered[key] = (message.content, text)
         return text
@@ -821,6 +850,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         switch itemsByID[id] {
         case .header: return 44
         case .user(let message): return lines(message.content, per: 9.2) * 22 + 42
+        case .update(let message): return lines(message.content, per: 7.2) * 18 + 24
         case .answer(let message): return lines(message.content, per: 8.6) * 23 + 20
         case .note(let message): return min(4, lines(message.content, per: 7.6)) * 20 + 12
         case .thought: return 52
@@ -1284,7 +1314,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     func tearDown() {
         tornDown = true
         pausePreview()
-        subscriptions.removeAll()
+        observations.forEach { $0.cancel() }
+        observations = []
         detent.stop()
         detent.onChange = nil
         stage?.setLive(false, reason: "detent")

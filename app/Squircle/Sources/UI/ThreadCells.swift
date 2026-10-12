@@ -117,7 +117,7 @@ final class HeaderCell: TimelineCell {
 /// Text a person or the agent wrote. Yours sits in a bubble at the trailing
 /// edge; the answer fills the column; notes and thoughts are quieter.
 final class MessageCell: TimelineCell {
-    enum Style { case user, answer, note, thought }
+    enum Style { case user, answer, note, thought, update }
     /// Your words sit in lightly tinted glass.
     let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
     let text = UITextView()
@@ -163,7 +163,7 @@ final class MessageCell: TimelineCell {
         leading.isActive = !user
         minimumLeading.isActive = user
         trailing.constant = user ? -35 : -20
-        top.constant = user ? 14 : style == .answer ? 10 : 6
+        top.constant = user || style == .update ? 14 : style == .answer ? 10 : 6
         accessibilityIdentifier = "thread.message.\(message.role)"
     }
 }

@@ -115,6 +115,95 @@ enum Commands {
         #[command(subcommand)]
         command: DiagnosticCommand,
     },
+    /// Pair this service with your T3 server (its own session, scoped to orchestration).
+    T3 {
+        #[command(subcommand)]
+        command: T3Command,
+    },
+    /// One agent per app: set up T3's Squircle instance, start an app's agent, list agents.
+    #[command(after_help = "The app agent is a T3 thread on T3's \"Squircle agent\" Claude instance, working in an integration worktree (branch squircle/integration). It splits the user's issues into worker threads with `squircle thread`, and the service wakes it when a worker finishes.\nOnce: squircle t3 connect, squircle agent setup. Then: squircle agent start --project T3_PROJECT_ID.")]
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Worker threads of an app agent: spawn, message, read, answer, archive.
+    #[command(after_help = "Workers are ordinary T3 threads, each in its own worktree on a sq/<name> branch from squircle/integration. Do not poll: the app agent receives a [worker update] message when a worker finishes, errors or needs input.")]
+    Thread {
+        #[command(subcommand)]
+        command: ThreadCommand,
+    },
+}
+#[derive(Subcommand)]
+enum T3Command {
+    /// Exchange a one-time T3 pairing token (read from stdin) for the service's own session.
+    #[command(after_help = "Create the pairing token in T3 (pair a new client), then: pbpaste | squircle t3 connect --url http://127.0.0.1:3773. Restart squircle serve afterwards.")]
+    Connect {
+        #[arg(long, default_value = "http://127.0.0.1:3773")]
+        url: String,
+    },
+    /// Whether the running service is connected to T3.
+    Status,
+}
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// Install the app-agent plugin and add T3's "Squircle agent" Claude instance (uses your existing Claude login).
+    Setup {
+        #[arg(long, help = "Remove the T3 instance instead")]
+        remove: bool,
+    },
+    /// Start (or find) the app agent for a T3 project, optionally with a first message.
+    Start {
+        #[arg(long, help = "T3 project ID")]
+        project: String,
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long, help = "Claude model slug; default: the project's default or claude-opus-5-5")]
+        model: Option<String>,
+    },
+    /// List app agents and the service's T3 connection.
+    List,
+    /// The note an app agent gets at the start of each turn (rules and live workers).
+    Context {
+        #[arg(long, help = "Read a Claude Code hook event on stdin and answer in hook JSON")]
+        hook: bool,
+        #[arg(long, help = "Worktree directory; default: current directory")]
+        cwd: Option<PathBuf>,
+    },
+}
+#[derive(Subcommand)]
+enum ThreadCommand {
+    /// Start a worker thread in its own worktree. Its prompt must stand alone.
+    Spawn {
+        #[arg(long, help = "Your (the app agent's) thread ID")]
+        coordinator: String,
+        #[arg(long, help = "Short issue title the user will see")]
+        title: String,
+        #[arg(long, help = "New branch, sq/<short-name>")]
+        branch: String,
+        #[arg(long, help = "Base branch; default squircle/integration")]
+        base: Option<String>,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long, help = "Claude model slug; default: the app agent's model")]
+        model: Option<String>,
+    },
+    /// Message a thread; folds into its turn if it is mid-turn.
+    Send { id: String, text: String },
+    /// Workers and their state: working, needs-you, done, error.
+    Status {
+        #[arg(long)]
+        coordinator: Option<String>,
+    },
+    /// A thread's last reply, diff stat against its base, uncommitted files and pending question.
+    Read { id: String },
+    /// Answer every question in a thread's pending request with this text.
+    Answer { id: String, text: String },
+    /// Archive a worker after its branch is merged; removes its worktree, keeps the branch.
+    Archive {
+        id: String,
+        #[arg(long, help = "Remove the worktree even with uncommitted changes")]
+        force: bool,
+    },
 }
 #[derive(Subcommand)]
 enum MediaCommand {
@@ -429,6 +518,10 @@ async fn get(cli: &Cli, path: &str) -> Result<Value> {
 async fn post(cli: &Cli, path: &str, payload: Value) -> Result<Value> {
     request(cli, reqwest::Method::POST, path, Some(payload), false).await
 }
+fn thread_id(id: &str) -> Result<&str> {
+    uuid::Uuid::parse_str(id).context("Thread ID must be a UUID")?;
+    Ok(id)
+}
 fn valid_id(id: &str) -> Result<&str> {
     uuid::Uuid::parse_str(id).context("Build ID must be a UUID")?;
     Ok(id)
@@ -447,7 +540,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","integration_branch":"squircle/integration","max_working_workers":3,"wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -726,6 +819,65 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 MediaCommand::List { thread } => success(json!({"media":squircle::media::list(&root, thread)?})),
             }
         }
+        Commands::T3 { command } => match command {
+            T3Command::Connect { url } => {
+                let mut token = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut token)?;
+                if token.trim().is_empty() {
+                    bail!("Pipe a T3 pairing token on stdin");
+                }
+                let config = squircle::t3::pair(&root(cli)?, url, &token).await?;
+                success(json!({"url":config.url,"expires_at":config.expires_at,"next":"Restart squircle serve, then run squircle agent setup."}))
+            }
+            T3Command::Status => {
+                let value = get(cli, "/v1/agents").await?;
+                if value["ok"] == false { value } else { success(json!({"t3":value["data"]["t3"]})) }
+            }
+        },
+        Commands::Agent { command } => match command {
+            AgentCommand::Setup { remove } => success(squircle::agents::setup(&root(cli)?, &cli.server, *remove).await?),
+            AgentCommand::Start { project, message, model } => {
+                post(cli, "/v1/agents", json!({"project_id":project,"message":message,"model":model})).await?
+            }
+            AgentCommand::List => get(cli, "/v1/agents").await?,
+            AgentCommand::Context { hook, cwd } => {
+                let mut event = Value::Null;
+                if *hook {
+                    let mut input = String::new();
+                    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+                    event = serde_json::from_str(&input).unwrap_or(Value::Null);
+                }
+                let cwd = cwd.clone()
+                    .or_else(|| event["cwd"].as_str().map(PathBuf::from))
+                    .map_or_else(std::env::current_dir, Ok)?;
+                let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("cwd", &cwd.display().to_string()).finish();
+                // A hook must never fail the agent's turn: without the service,
+                // the rules still arrive, only the live worker list is missing.
+                let context = match get(cli, &format!("/v1/agents/context?{query}")).await {
+                    Ok(value) if value["ok"] == true => value["data"]["context"].as_str().unwrap_or("").to_string(),
+                    _ => "[squircle] The Squircle service is not reachable, so your live worker list is unavailable. Rules still hold: never open question dialogs; never commit to the user's main branch on your own; delegate non-trivial work to workers; do not poll.".into(),
+                };
+                if !*hook {
+                    success(json!({"context":context}))
+                } else {
+                    let name = event["hook_event_name"].as_str().unwrap_or("UserPromptSubmit");
+                    println!("{}", json!({"hookSpecificOutput":{"hookEventName":name,"additionalContext":context}}));
+                    return Ok(None);
+                }
+            }
+        },
+        Commands::Thread { command } => match command {
+            ThreadCommand::Spawn { coordinator, title, branch, base, prompt, model } => post(cli, "/v1/workers",
+                json!({"coordinator":coordinator,"title":title,"branch":branch,"base":base,"prompt":prompt,"model":model})).await?,
+            ThreadCommand::Send { id, text } => post(cli, &format!("/v1/workers/{}/messages", thread_id(id)?), json!({"text":text})).await?,
+            ThreadCommand::Status { coordinator } => {
+                let query = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(coordinator.as_ref().map(|c| ("coordinator", c))).finish();
+                get(cli, &format!("/v1/workers?{query}")).await?
+            }
+            ThreadCommand::Read { id } => get(cli, &format!("/v1/workers/{}", thread_id(id)?)).await?,
+            ThreadCommand::Answer { id, text } => post(cli, &format!("/v1/workers/{}/answer", thread_id(id)?), json!({"text":text})).await?,
+            ThreadCommand::Archive { id, force } => post(cli, &format!("/v1/workers/{}/archive", thread_id(id)?), json!({"force":force})).await?,
+        },
         Commands::Diagnostics {
             command: DiagnosticCommand::Send { file },
         } => {

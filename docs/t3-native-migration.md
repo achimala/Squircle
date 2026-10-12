@@ -864,3 +864,68 @@ the device only while progress is within 3% of where that portrait stands
 scanned), fixed from the code path; stress audit still 0 violations. The
 user disliked the rounded app-name type: app names are now New York
 (`Theme.appNameFont`, `appCaptionFont`); the rounded design is gone. The user then found serif out of place; build 35 uses plain SF (bold 34 title, semibold 15 caption).
+
+## 2026-10-12 one agent per app, 0.3.0 (36)
+
+User request: "a single agent I interact with per app and not all the
+threads … dump issues into it … let it worry about organizing threads,
+coordinating, testing, merging"; they can still open individual threads, but
+the primary interface is chatting with each app's agent.
+
+**Why this shape (researched and tested 2026-10-11/12):** only the real Claude
+Code and Codex CLIs, which T3 runs, use the subscription's included usage;
+per Hermes's own provider docs, a harness calling Anthropic directly bills
+"extra usage" only. So the app agent is a T3 thread, not an outside harness
+(Hermes, agent SDKs). Claude Code subagents show in T3 only as activity inside
+their parent thread (read in T3 0.0.45's code), so workers are real T3
+threads. Built-in T3 0.0.45 facts used: `thread.turn.start` with
+`bootstrap.prepareWorktree` creates a thread and worktree from any client;
+messages sent mid-turn fold into Claude's running turn; T3 launches Claude
+with user/project/local setting sources, so plugins and hooks load; extra
+provider instances with their own launch arguments are supported; custom
+message context records survive.
+
+- **Squircle agent instance.** `squircle agent setup` installs the plugin
+  (`plugin/squircle`: agent definition `app-agent`, hooks) into the data
+  directory and adds T3 instance `squircle` (driver claudeAgent, the default
+  Claude binary and home) launched with `--plugin-dir … --agent
+  squircle:app-agent`. The agent definition is the system prompt.
+- **Staying on track:** a `UserPromptSubmit` hook (and `SessionStart` after
+  compaction) adds the rules, the agent's thread ID and its live workers to
+  every turn from `squircle agent context`; a `PreToolUse` hook refuses
+  question dialogs, which stalled all coordination in the prototype; the
+  service caps working workers at three. State lives in the service, not the
+  conversation.
+- **Service.** Paired with T3 by `squircle t3 connect` (its own session,
+  orchestration read/operate, from a one-time pairing token). It keeps a live
+  copy of T3's shell, `agents.json` (agent per project, worker ownership) and
+  wakes the agent with a tagged `[worker update]` turn when a worker finishes,
+  errors or needs input, once per turn outcome (`turn:state`), so restarts
+  neither repeat nor miss one. The agent works in
+  `<data>/worktrees/<project>` on `squircle/integration`; its thread has no
+  branch so T3's worktree cleanup never removes it. Workers get T3 worktrees
+  on `sq/*` from the integration branch.
+- **CLI:** `t3 connect|status`, `agent setup|start|list|context`,
+  `thread spawn|send|status|read|answer|archive`; HTTP `/v1/agents`,
+  `/v1/agents/context`, `/v1/workers…`.
+- **Phone:** tapping an app opens its agent's conversation (route
+  `thread(app, "agent:<app>")`); the app's threads are one back swipe behind
+  it, with an Agent button, New Thread and Builds. An app without an agent
+  opens a draft; the first message asks the Mac to create the agent.
+  Wake-ups render as one quiet line ("Add CHANGELOG.md finished"). The
+  approvals picker is hidden for the agent. `SquircleModel` no longer uses
+  Combine (`updates`/`observe` are AsyncStream); the Combine/Dispatch
+  baseline went from 50 to 4.
+
+**Verified:** live end to end on a scratch repo through the real service:
+first message → one worker for three related CLI changes → service wake-up
+→ agent reviewed, merged into `squircle/integration`, ran the 69 tests,
+archived the worker; a second round showed the wake-up line on the
+simulator. The prototype runs showed it holding its job and rules after a
+forced compaction (39K→4K tokens) and refusing to commit to main on its own.
+Rust tests and 11 app tests pass; `SQUIRCLE_STRESS=1` for 40 s: `settled=1
+violations=0`. Grid → agent transition inspected frame by frame at 10× slow
+motion: one layered push (threads rise beneath as the conversation slides
+over them; the device travels without a gap). **Not yet checked:** the
+physical phone, merge-conflict round trips, iOS builds from the integration
+worktree, per-worker simulators, Codex as the app agent, weeks-long use.

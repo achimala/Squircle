@@ -37,6 +37,9 @@ struct ChatMessage: Identifiable, Equatable {
     var videoID: String?
     /// The T3 turn this belongs to.
     var turnID: String?
+    /// Squircle's note to an app agent that its workers moved on, not
+    /// something the person wrote.
+    var isUpdate = false
 }
 
 /// What one turn changed in the project, from T3's checkpoint for it.

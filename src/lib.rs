@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod apps;
 pub mod artifact;
 pub mod media;
@@ -8,5 +9,6 @@ pub mod projects;
 pub mod server;
 pub mod store;
 pub mod symbolicate;
+pub mod t3;
 pub mod t3steps;
 pub mod xcode;

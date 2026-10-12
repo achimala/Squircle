@@ -1,0 +1,5 @@
+{
+  "name": "squircle",
+  "version": "{{VERSION}}",
+  "description": "Squircle's app agent: one agent per app that organizes the user's issues into worker threads, merges and verifies their work."
+}

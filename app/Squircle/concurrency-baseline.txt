@@ -1,7 +1,3 @@
-9 Overlay/SquircleOverlay.swift
 2 Sources/SquircleApp.swift
-25 Sources/SquircleModel.swift
-5 Sources/UI/BuildsViewController.swift
 1 Sources/UI/MotionAudit.swift
-7 Sources/UI/ThreadViewController.swift
 1 Sources/UI/UpdateCurtain.swift

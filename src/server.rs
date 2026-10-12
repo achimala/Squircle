@@ -1,4 +1,4 @@
-use crate::{apps, artifact, model::*, preview, projects, store::Store, xcode};
+use crate::{agents::Agents, apps, artifact, model::*, preview, projects, store::Store, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -36,6 +36,7 @@ pub struct AppState {
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
     recovery_jobs: Arc<Mutex<HashMap<String, Job>>>,
+    agents: Option<Arc<Agents>>,
 }
 
 impl AppState {
@@ -48,6 +49,7 @@ impl AppState {
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
             recovery_jobs: Arc::default(),
+            agents: None,
         }
     }
 }
@@ -162,6 +164,13 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/t3/threads/{thread}/media", get(thread_media))
         .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
         .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
+        .route("/v1/agents", get(list_agents).post(ensure_agent))
+        .route("/v1/agents/context", get(agent_context))
+        .route("/v1/workers", get(list_workers).post(spawn_worker))
+        .route("/v1/workers/{id}", get(read_worker))
+        .route("/v1/workers/{id}/messages", post(message_worker))
+        .route("/v1/workers/{id}/answer", post(answer_worker))
+        .route("/v1/workers/{id}/archive", post(archive_worker))
         .route("/v1/import", post(import))
         .route("/v1/diagnostics", post(ingest))
         .route("/v1/install-links/{token}", get(link_status))
@@ -208,7 +217,10 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
             store.save_job(&job)?;
         }
     }
-    let state = AppState::new(store, public_url);
+    let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?))?;
+    tokio::spawn(agents.clone().run());
+    let mut state = AppState::new(store, public_url);
+    state.agents = Some(agents);
     eprintln!(
         "Squircle listening on {}. Keep this process running; HTTPS/Tailscale is managed separately.",
         listener.local_addr()?
@@ -1611,4 +1623,154 @@ mod tests {
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(state.store.lock().unwrap().list_jobs().unwrap().is_empty());
     }
+}
+
+// MARK: App agents
+
+fn agent_error(error: anyhow::Error) -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "agent_failed",
+        message: format!("{error:#}"),
+        next: "Read the message; run squircle agent --help or squircle thread --help.",
+    }
+}
+
+fn agents(state: &AppState) -> ApiResult<Arc<Agents>> {
+    state.agents.clone().ok_or_else(|| agent_error(anyhow::anyhow!("App agents are not running in this service")))
+}
+
+async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let agents = agents(&state)?;
+    Ok(Json(success(json!({"agents": agents.list(), "t3": agents.status()}))))
+}
+
+#[derive(Deserialize)]
+struct EnsureAgent {
+    project_id: String,
+    message: Option<String>,
+    model: Option<String>,
+}
+
+async fn ensure_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<EnsureAgent>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let request = body(payload)?;
+    let agent = agents(&state)?
+        .ensure(&request.project_id, request.message.as_deref(), request.model.as_deref())
+        .await
+        .map_err(agent_error)?;
+    Ok(Json(success(json!({"agent": agent}))))
+}
+
+#[derive(Deserialize)]
+struct ContextQuery {
+    cwd: PathBuf,
+}
+
+async fn agent_context(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    query: std::result::Result<Query<ContextQuery>, QueryRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let Query(query) = query.map_err(|e| ApiError::bad(e.body_text()))?;
+    Ok(Json(success(json!({"context": agents(&state)?.context(&query.cwd)}))))
+}
+
+#[derive(Deserialize)]
+struct WorkerQuery {
+    coordinator: Option<String>,
+}
+
+async fn list_workers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    query: std::result::Result<Query<WorkerQuery>, QueryRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let Query(query) = query.map_err(|e| ApiError::bad(e.body_text()))?;
+    Ok(Json(success(json!({"workers": agents(&state)?.workers(query.coordinator.as_deref())}))))
+}
+
+#[derive(Deserialize)]
+struct SpawnWorker {
+    coordinator: String,
+    title: String,
+    branch: String,
+    base: Option<String>,
+    prompt: String,
+    model: Option<String>,
+}
+
+async fn spawn_worker(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<SpawnWorker>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let r = body(payload)?;
+    let worker = agents(&state)?
+        .spawn(&r.coordinator, &r.title, &r.branch, r.base.as_deref(), &r.prompt, r.model.as_deref())
+        .await
+        .map_err(agent_error)?;
+    Ok(Json(success(worker)))
+}
+
+async fn read_worker(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    Ok(Json(success(agents(&state)?.read(&id).await.map_err(agent_error)?)))
+}
+
+#[derive(Deserialize)]
+struct WorkerText {
+    text: String,
+}
+
+async fn message_worker(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<WorkerText>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let text = body(payload)?.text;
+    if text.trim().is_empty() {
+        return Err(ApiError::bad("Message text is empty"));
+    }
+    agents(&state)?.send(&id, &text).await.map_err(agent_error)?;
+    Ok(Json(success(json!({"sent": id}))))
+}
+
+async fn answer_worker(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<WorkerText>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let text = body(payload)?.text;
+    agents(&state)?.answer(&id, &text).await.map_err(agent_error)?;
+    Ok(Json(success(json!({"answered": id}))))
+}
+
+#[derive(Deserialize)]
+struct ArchiveWorker {
+    #[serde(default)]
+    force: bool,
+}
+
+async fn archive_worker(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<ArchiveWorker>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let force = body(payload)?.force;
+    Ok(Json(success(agents(&state)?.archive(&id, force).await.map_err(agent_error)?)))
 }

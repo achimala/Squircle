@@ -50,6 +50,26 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 flag reflects an authenticated diagnostic event, not independent OS attestation.
 The service does not currently track installation/download completion.
 
+## One agent per app
+
+The app agent is a T3 thread on T3's "squircle" Claude instance, in an
+integration worktree; workers are T3 threads on `sq/*` worktrees. Once per
+Mac: `squircle t3 connect` (pipe a T3 pairing token on stdin; restart
+`serve`), then `squircle agent setup` (installs `plugin/squircle` into the data
+directory and adds the T3 instance; `--remove` takes it out).
+
+| Command | Result |
+| --- | --- |
+| `t3 connect --url URL`, `t3 status` | Service's own T3 session; connection state |
+| `agent start --project T3_ID [--message TEXT]` | Create or find the app's agent and send it a message |
+| `agent list`, `agent context [--hook]` | Agents; the per-turn note (rules, thread ID, live workers) its hooks inject |
+| `thread spawn --coordinator ID --title T --branch sq/x --prompt P` | Worker thread in its own worktree; at most 3 working per agent |
+| `thread send ID TEXT`, `thread read ID`, `thread answer ID TEXT` | Message, inspect (last reply, diff stat, pending question), answer |
+| `thread status [--coordinator ID]`, `thread archive ID [--force]` | Worker states; archive after merge (worktree removed, branch kept) |
+
+The service wakes the agent with a `[worker update]` turn when a worker
+finishes, errors or needs input, once per turn outcome. Agents never poll.
+
 ## Import an existing app
 
 The native **+ → Mac browser or pasted path → scheme/name → Add** flow uses the

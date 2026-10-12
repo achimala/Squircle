@@ -1,33 +1,65 @@
 import AVFoundation
-import Combine
 import Foundation
 import UIKit
 
 @MainActor
-final class SquircleModel: ObservableObject {
-    @Published private(set) var sessions: [ChatSession] = []
-    @Published private(set) var messages: [ChatMessage] = []
-    @Published private(set) var builds: [AppBuild] = []
-    @Published private(set) var projects: [AppProject] = []
-    @Published private(set) var appMetadata: [AppMetadata] = []
-    @Published private(set) var selectedSessionID: String?
-    @Published private(set) var selectedProjectID: String?
-    @Published private(set) var buildingProjectIDs = Set<String>()
-    @Published private(set) var connected = false
-    @Published private(set) var isRunning = false
-    @Published private(set) var isLoading = false
-    @Published private(set) var status = "Connecting"
-    @Published var error: String?
-    @Published var composerPrefill: String?
+final class SquircleModel {
+    private(set) var sessions: [ChatSession] = [] { didSet { changed() } }
+    private(set) var messages: [ChatMessage] = [] { didSet { changed() } }
+    private(set) var builds: [AppBuild] = [] { didSet { changed() } }
+    private(set) var projects: [AppProject] = [] { didSet { changed() } }
+    private(set) var appMetadata: [AppMetadata] = [] { didSet { changed() } }
+    private(set) var selectedSessionID: String? { didSet { changed() } }
+    private(set) var selectedProjectID: String? { didSet { changed() } }
+    private(set) var buildingProjectIDs = Set<String>() { didSet { changed() } }
+    private(set) var connected = false { didSet { changed() } }
+    private(set) var isRunning = false { didSet { changed() } }
+    private(set) var isLoading = false { didSet { changed() } }
+    private(set) var status = "Connecting" { didSet { changed() } }
+    var error: String? { didSet { changed() } }
+    var composerPrefill: String? { didSet { changed() } }
     /// A build of the running app whose installation was just confirmed;
     /// the app steps aside so iOS can replace it.
-    @Published private(set) var updatingTo: AppBuild?
-    @Published private(set) var providers: [JSONValue] = []
-    @Published private(set) var devices: JSONValue = .null
-    @Published private(set) var requests: [JSONValue] = []
-    @Published private(set) var changes: [TurnChanges] = []
-    @Published private(set) var modelSelection: JSONValue = .null
-    @Published private(set) var runtimeMode: T3RuntimeMode = .auto
+    private(set) var updatingTo: AppBuild? { didSet { changed() } }
+    private(set) var providers: [JSONValue] = [] { didSet { changed() } }
+    private(set) var devices: JSONValue = .null { didSet { changed() } }
+    private(set) var requests: [JSONValue] = [] { didSet { changed() } }
+    private(set) var changes: [TurnChanges] = [] { didSet { changed() } }
+    private(set) var modelSelection: JSONValue = .null { didSet { changed() } }
+    private(set) var runtimeMode: T3RuntimeMode = .auto { didSet { changed() } }
+    /// Each app's agent thread, by T3 project ID, from the Mac.
+    private(set) var agents: [String: String] = [:] { didSet { if agents != oldValue { shellChanged() } } }
+    /// The open draft is a first message to the app's agent.
+    private var draftIsAgent = false
+    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// Model changes as an async sequence. A burst coalesces into one element,
+    /// so a slow consumer never falls behind.
+    var updates: AsyncStream<Void> {
+        let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
+        let id = UUID()
+        observers[id] = continuation
+        continuation.onTermination = { [weak self] _ in Task { @MainActor in self?.observers[id] = nil } }
+        return stream
+    }
+    private func changed() { for observer in observers.values { observer.yield() } }
+    /// Calls `action` once a burst of changes has been quiet for `delay`, for
+    /// as long as `owner` lives. Cancel the task to stop sooner.
+    func observe<Owner: AnyObject>(by owner: Owner, after delay: Duration,
+                                   _ action: @escaping @MainActor (Owner) -> Void) -> Task<Void, Never> {
+        Task { [weak owner, updates = self.updates] in
+            var pending: Task<Void, Never>?
+            for await _ in updates {
+                guard owner != nil else { break }
+                pending?.cancel()
+                pending = Task { [weak owner] in
+                    try? await Task.sleep(for: delay)
+                    guard !Task.isCancelled, let owner else { return }
+                    action(owner)
+                }
+            }
+            pending?.cancel()
+        }
+    }
     private var pendingRuntimeModes: [String:T3RuntimeMode] = [:]
     private var pendingModelSelections: [String:JSONValue] = [:]
     var hostName: String { configuration?.t3URL.host ?? "Your Mac" }
@@ -55,10 +87,17 @@ final class SquircleModel: ObservableObject {
     /// Inside another app's debug overlay, only that app is shown.
     let scopeBundleID: String?
     private static let preferredModelKey = "squircle.t3.preferredModel"
+    static let agentInstance = "squircle"
 
     /// Once a thread has an agent session, T3 cannot migrate it to another provider.
     var availableModelProviders: [JSONValue] {
-        guard selectedSessionID != nil else { return providers }
+        guard selectedSessionID != nil else {
+            // An app agent runs on Squircle's own Claude instance; other
+            // threads never do.
+            let agentProviders = providers.filter { $0["instanceId"].string == Self.agentInstance }
+            if draftIsAgent { return agentProviders.isEmpty ? providers : agentProviders }
+            return providers.filter { $0["instanceId"].string != Self.agentInstance }
+        }
         let instance = state.thread["session"]["providerInstanceId"].string
             ?? state.thread["modelSelection"]["instanceId"].string
             ?? sessions.first(where: { $0.id == selectedSessionID })?.modelSelection["instanceId"].string
@@ -140,9 +179,13 @@ final class SquircleModel: ObservableObject {
         if selectedSessionID == nil { restorePreferredModel() }
     }
     private func restorePreferredModel() {
-        if let data = preferences.data(forKey: Self.preferredModelKey),
-           let saved = try? JSONDecoder().decode(JSONValue.self, from: data), isValidModel(saved) {
+        let saved = preferences.data(forKey: Self.preferredModelKey).flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) }
+        // An agent draft keeps your preferred model on Squircle's instance.
+        let agentChoice = saved.map { JSONValue.from(["instanceId": Self.agentInstance, "model": $0["model"].string ?? ""]) }
+        if let saved, isValidModel(saved) {
             modelSelection = saved
+        } else if draftIsAgent, let agentChoice, isValidModel(agentChoice) {
+            modelSelection = agentChoice
         } else { modelSelection = quickModelSelections.first ?? availableModelSelections.first ?? .null }
     }
 
@@ -188,6 +231,7 @@ final class SquircleModel: ObservableObject {
             async let listed = client.builds()
             async let metadata = client.fetchAppMetadata()
             builds = try await listed; appMetadata = try await metadata; reconcileProjects(); scheduleHomeWrite()
+            if let known = try? await client.agents() { agents = known }
             await ensureScopedProject()
             if !launchReported, let id = Bundle.main.object(forInfoDictionaryKey:"SquircleBuildID") as? String, UUID(uuidString:id) != nil {
                 try await client.reportLaunch(buildID:id,eventID:UUID().uuidString,timestamp:Int(Date.now.timeIntervalSince1970)); launchReported = true
@@ -232,7 +276,12 @@ final class SquircleModel: ObservableObject {
     func selectProject(_ project: AppProject) {
         selectedProjectID = project.id; UserDefaults.standard.set(project.id,forKey:"squircle.t3.selectedProject")
     }
-    func sessions(for project: AppProject) -> [ChatSession] { sessions.filter { sessionProjects[$0.id] == project.id } }
+    /// An app's threads; its agent's own thread only when asked for.
+    func sessions(for project: AppProject, includingAgent: Bool = false) -> [ChatSession] {
+        let agent = agents[project.id]
+        return sessions.filter { sessionProjects[$0.id] == project.id && (includingAgent || $0.id != agent) }
+    }
+    func agentThreadID(for project: AppProject) -> String? { agents[project.id] }
     func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
     /// Shows a thread immediately from what was last seen of it (this session
@@ -240,7 +289,7 @@ final class SquircleModel: ObservableObject {
     func prepareSession(_ id: String) {
         guard selectedSessionID != id || state.sequence < 0 else { return }
         saveCurrentThread()
-        selectedSessionID = id; requests = []; isRunning = false
+        selectedSessionID = id; requests = []; isRunning = false; draftIsAgent = false
         stepDetails?.cancel(); stepDetailsCount = -1
         state = threadCache[id] ?? (configuration != nil ? Self.loadThread(id) : nil) ?? T3ThreadState()
         if state.sequence >= 0 { state.fromCache = true }
@@ -267,8 +316,9 @@ final class SquircleModel: ObservableObject {
     }
     /// A new conversation that T3 has not been told about yet. The thread is
     /// created by its first message, so abandoned drafts leave nothing behind.
-    func beginDraft() async {
+    func beginDraft(agent: Bool = false) async {
         saveCurrentThread()
+        draftIsAgent = agent
         selectedSessionID = nil; messages = []; requests = []; changes = []; state = T3ThreadState(); isRunning = false; error = nil
         runtimeMode = .auto
         restorePreferredModel()
@@ -289,7 +339,9 @@ final class SquircleModel: ObservableObject {
     func chooseModel(_ selection: JSONValue) {
         guard !isRunning, !submitting, isValidModel(selection) else { return }
         modelSelection = selection
-        if let data = try? JSONEncoder().encode(selection) { preferences.set(data, forKey: Self.preferredModelKey) }
+        if selection["instanceId"].string != Self.agentInstance, let data = try? JSONEncoder().encode(selection) {
+            preferences.set(data, forKey: Self.preferredModelKey)
+        }
         if let id = selectedSessionID { pendingModelSelections[id] = selection }
     }
     func chooseRuntimeMode(_ mode: T3RuntimeMode) {
@@ -419,14 +471,28 @@ final class SquircleModel: ObservableObject {
         submitting = true
         defer { submitting = false }
         error = nil
+        if selectedSessionID == nil, draftIsAgent {
+            // The Mac creates the agent (its worktree and thread) with this message.
+            guard let client else { error = ClientError.configuration.localizedDescription; return }
+            do {
+                let model = modelSelection["instanceId"].string == Self.agentInstance ? modelSelection["model"].string : nil
+                let id = try await client.startAgent(projectID: project.id, message: text, model: model)
+                agents[project.id] = id; sessionProjects[id] = project.id
+                await selectSession(id)
+                isRunning = true; status = "Working"
+            } catch { self.error = error.localizedDescription }
+            return
+        }
         if selectedSessionID == nil { await createSession(in:project) }
         guard let id = selectedSessionID, error == nil else { return }
         do {
             var message = text
             let instructions = squircleInstructions(for: project, threadID: id)
-            if state.thread["messages"].array.isEmpty {
+            // An app agent has its instructions from Squircle's plugin on the Mac.
+            let agent = agents[project.id] == id || state.thread["modelSelection"]["instanceId"].string == Self.agentInstance
+            if !agent, state.thread["messages"].array.isEmpty {
                 message += "\n\n" + project.agentContext + "\nFor signed builds/install links use /Users/anshu/Documents/ChatGPT/RemoteAppDev/target/release/squircle --data-dir /Users/anshu/Documents/ChatGPT/RemoteAppDev/.squircle. Run help workflow for the documented commands. This app is a native client of T3; T3 manages this thread.\n" + instructions
-            } else if !state.thread["messages"].array.contains(where: { ($0["text"].string ?? "").contains("Squircle shows it with an Install button") }) {
+            } else if !agent, !state.thread["messages"].array.contains(where: { ($0["text"].string ?? "").contains("Squircle shows it with an Install button") }) {
                 // Threads started before these instructions existed get them once.
                 message += AppProject.contextMarker + project.name + ".\n" + instructions
             }
@@ -603,8 +669,9 @@ final class SquircleModel: ObservableObject {
     func stopMetadataUpdates() { monitor?.cancel(); monitor = nil }
     func refreshMetadata() async {
         guard let client else { return }
-        do { async let b = client.builds(); async let m = client.fetchAppMetadata()
+        do { async let b = client.builds(); async let m = client.fetchAppMetadata(); async let a = client.agents()
             builds = try await b; appMetadata = try await m; reconcileProjects()
+            if let known = try? await a { agents = known }
         } catch { /* T3 chat remains usable if the build service is temporarily offline. */ }
     }
     func previewData(for metadata: AppMetadata) async throws -> Data {
@@ -689,16 +756,5 @@ final class SquircleModel: ObservableObject {
             }
             try await ensureOwnProject(record)
         } catch { self.error = error.localizedDescription }
-    }
-}
-
-extension ObservableObject where ObjectWillChangePublisher == ObservableObjectPublisher {
-    /// Model changes as an async sequence. A burst coalesces into one element,
-    /// so a slow consumer never falls behind (Combine's `.values` traps then).
-    var updates: AsyncStream<Void> {
-        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            let subscription = objectWillChange.sink { continuation.yield() }
-            continuation.onTermination = { _ in subscription.cancel() }
-        }
     }
 }

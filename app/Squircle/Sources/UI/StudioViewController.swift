@@ -7,7 +7,8 @@ import UIKit
 enum Route: Equatable {
     case grid
     case app(String)
-    /// `thread` is a T3 thread ID, or `draft:<uuid>` for a new conversation.
+    /// `thread` is a T3 thread ID, `draft:<uuid>` for a new conversation, or
+    /// `agent:<app>` for the app's agent (its thread may not exist yet).
     case thread(app: String, thread: String)
 
     var app: String? {
@@ -20,9 +21,11 @@ enum Route: Equatable {
 }
 
 /// The root: every app's real device. Home is a grid of still portraits of
-/// those devices that scroll natively. Opening an app lifts its device to the
-/// top while the others fall back and its threads rise beneath it; a thread
-/// pushes in over the list while the same device travels into it.
+/// those devices that scroll natively. Opening an app opens the conversation
+/// with its agent: the others fall back, the app's threads rise beneath and
+/// the agent's conversation pushes in over them while the same device travels
+/// into it. Back from the agent shows those threads; any of them pushes in
+/// the same way.
 ///
 /// Navigation is a route plus two springs (`appSpring` grid→app, `spring`
 /// app→thread). Each spring's target is a function of the route and of what
@@ -45,7 +48,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private let threadHost = PassthroughView()
     private let page = AppPage()
     private let back = Theme.glassButton(symbol: "chevron.left", identifier: "project.back", accessibilityLabel: "Apps")
-    private let compose = Theme.glassButton(symbol: "square.and.pencil", title: "New Thread", prominent: true, identifier: "thread.new")
+    private let agent = Theme.glassButton(symbol: "bubble.left.and.text.bubble.right", title: "Agent", prominent: true, identifier: "thread.agent")
+    private let compose = Theme.glassButton(symbol: "square.and.pencil", identifier: "thread.new", accessibilityLabel: "New Thread")
     private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "project.builds", accessibilityLabel: "Builds")
     /// 0 = grid, 1 = app page.
     private let appSpring = SpringDriver()
@@ -110,8 +114,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         page.onScroll = { [weak self] in self?.applyScene() }
         page.onOpenThread = { [weak self] id in self?.openThread(id) }
         pageHost.addSubview(page)
-        [back, compose, builds].forEach(pageHost.addSubview)
+        [back, agent, compose, builds].forEach(pageHost.addSubview)
         back.addAction(UIAction { [weak self] _ in self?.closeApp() }, for: .touchUpInside)
+        agent.addAction(UIAction { [weak self] _ in self?.openAgent() }, for: .touchUpInside)
         compose.addAction(UIAction { [weak self] _ in self?.openThread(nil) }, for: .touchUpInside)
         builds.addAction(UIAction { [weak self] _ in self?.presentBuilds() }, for: .touchUpInside)
 
@@ -183,7 +188,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             guard let self else { return }
             if let y = value("SQUIRCLE_GRID") { grid.contentOffset.y = y; applyScene() }
             guard let name = environment["SQUIRCLE_APP"], let project = projects.first(where: { $0.name == name }) else { return }
-            openApp(project.id)
+            // Held states inside the app start from its threads.
+            let held = ["SQUIRCLE_APP_SCRUB", "SQUIRCLE_EXPAND", "SQUIRCLE_SCRUB"].contains { environment[$0] != nil }
+            openApp(project.id, threads: held || environment["SQUIRCLE_LIST"] == "1")
             if let scrub = value("SQUIRCLE_APP_SCRUB") { hold(appSpring, at: scrub); return }
             appSpring.set(1)
             if let expand = value("SQUIRCLE_EXPAND") { page.contentOffset.y = expand }
@@ -243,9 +250,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 actions.append { [weak self] in self?.endBack(velocity: CGFloat.random(in: -2...2), closing: Bool.random()) }
             } else {
                 switch route {
-                case .grid: for project in projects.prefix(3) { actions.append { [weak self] in self?.openApp(project.id) } }
+                case .grid:
+                    for project in projects.prefix(3) {
+                        actions.append { [weak self] in self?.openApp(project.id) }
+                        actions.append { [weak self] in self?.openApp(project.id, threads: true) }
+                    }
                 case .app:
                     actions.append { [weak self] in self?.closeApp() }
+                    actions.append { [weak self] in self?.openAgent() }
                     if let project = selectedProject {
                         for session in model.sessions(for: project).prefix(2) { actions.append { [weak self] in self?.openThread(session.id) } }
                     }
@@ -314,8 +326,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         back.place(in: CGRect(x: 16, y: safe.top + 4, width: 44, height: 44))
         let barTop = current.pageBottomBarTop, barHeight = StageLayout.bottomBarHeight
         let buildsFrame = CGRect(x: bounds.width - 16 - barHeight, y: barTop, width: barHeight, height: barHeight)
+        let composeFrame = buildsFrame.offsetBy(dx: -barHeight - 10, dy: 0)
         builds.place(in: buildsFrame)
-        compose.place(in: CGRect(x: 16, y: barTop, width: buildsFrame.minX - 26, height: barHeight))
+        compose.place(in: composeFrame)
+        agent.place(in: CGRect(x: 16, y: barTop, width: composeFrame.minX - 26, height: barHeight))
         applyScene()
     }
 
@@ -362,7 +376,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 grid.addSubview(cell)
                 return cell
             }()
-            let sessions = model.sessions(for: project)
+            let sessions = model.sessions(for: project, includingAgent: true)
             cell.configure(name: project.name,
                            phase: sessions.contains { $0.phase == .needsYou } ? .needsYou
                                : sessions.contains { $0.phase == .working } ? .working : .idle)
@@ -406,6 +420,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         ])
         let project = selectedProject
         compose.isEnabled = project != nil
+        agent.isEnabled = project != nil
         let building = project.map { project in
             model.buildingProjectIDs.contains(project.id)
                 || model.builds(for: project).contains { $0.status == "queued" || $0.status == "running" }
@@ -446,10 +461,21 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         appTarget == 1 && route.thread != nil && route.thread == threadKey && thread != nil ? 1 : 0
     }
 
-    func openApp(_ id: String) {
+    /// Opens an app at its agent's conversation, or at its threads.
+    func openApp(_ id: String, threads: Bool = false) {
         guard presentedViewController == nil, projects.contains(where: { $0.id == id }) else { return }
         if route.app != id { Theme.openHaptic() }
-        route = .app(id)
+        route = threads ? .app(id) : .thread(app: id, thread: Self.agentKey(id))
+        sync()
+    }
+
+    private static func agentKey(_ app: String) -> String { "agent:" + app }
+
+    /// The mounted app's agent, from its threads.
+    func openAgent() {
+        guard presentedViewController == nil, let app = selectedID, route.app == app else { return }
+        Theme.openHaptic()
+        route = .thread(app: app, thread: Self.agentKey(app))
         sync()
     }
 
@@ -526,8 +552,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private func mountThread(_ key: String) {
         guard let project = selectedProject else { return }
-        let sessionID = key.hasPrefix("draft:") ? nil : key
-        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage)
+        let isAgent = key == Self.agentKey(project.id)
+        let sessionID = isAgent ? model.agentThreadID(for: project) : key.hasPrefix("draft:") ? nil : key
+        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage, agent: isAgent)
         controller.layoutProvider = { [weak self] in self?.layout }
         controller.onBack = { [weak self] in self?.closeThread() }
         controller.onGeometry = { [weak self] in self?.applyScene() }
@@ -745,9 +772,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         page.isHidden = t >= 1 && !moving
         page.setArrival(a, reduced: layout.reducedMotion)
         let chrome = ((a - 0.5) / 0.5).clamped()
-        for button in [back, compose, builds] { button.alpha = chrome * (1 - t * 2).clamped() }
-        compose.transform = CGAffineTransform(translationX: 0, y: (1 - chrome) * 40)
-        builds.transform = compose.transform
+        for button in [back, agent, compose, builds] { button.alpha = chrome * (1 - t * 2).clamped() }
+        agent.transform = CGAffineTransform(translationX: 0, y: (1 - chrome) * 40)
+        compose.transform = agent.transform
+        builds.transform = agent.transform
 
         // A thread: a flat push. The conversation slides over from the right
         // while the list drifts a third as far left. The device travels on its own.
