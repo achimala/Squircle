@@ -9,7 +9,7 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 **2026-10-12: one agent per app, version 0.3.0 (37).** Tapping an app opens
 its agent, which you tell what to do; it can run worker threads and is woken
-when they finish. Its threads are one back swipe behind it. The agent is a T3
+when they finish. Other threads open over it from its corner menu. The agent is a T3
 thread on a "Squircle agent" Claude instance with Squircle's plugin; the
 service wakes it when workers finish. Verified end to end on a scratch repo
 and in the simulator; not yet on the phone. See

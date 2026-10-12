@@ -40,6 +40,8 @@ struct ChatMessage: Identifiable, Equatable {
     /// Squircle's note to an app agent that its workers moved on, not
     /// something the person wrote.
     var isUpdate = false
+    /// The worker threads an update is about.
+    var threadIDs: [String] = []
 }
 
 /// What one turn changed in the project, from T3's checkpoint for it.

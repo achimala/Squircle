@@ -468,9 +468,20 @@ impl Agents {
                   "next": "The worker is running. End your turn; a [worker update] arrives when it finishes."}))
     }
 
+    /// A thread from the live shell; one just created takes a moment to arrive.
+    async fn wait_thread(&self, id: &str) -> Result<Value> {
+        for _ in 0..100 {
+            if let Some(thread) = self.thread(id) {
+                return Ok(thread);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        bail!("T3 has no thread {id}")
+    }
+
     pub async fn send(&self, thread_id: &str, text: &str) -> Result<()> {
         let client = self.ready().await?;
-        let thread = self.thread(thread_id).with_context(|| format!("T3 has no thread {thread_id}"))?;
+        let thread = self.wait_thread(thread_id).await?;
         client.dispatch(json!({
             "type": "thread.turn.start", "threadId": thread_id,
             "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": []},

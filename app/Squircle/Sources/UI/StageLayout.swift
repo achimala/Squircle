@@ -12,7 +12,6 @@ struct StageLayout: Equatable {
     var reducedMotion: Bool
 
     static let topBarHeight: CGFloat = 52
-    static let bottomBarHeight: CGFloat = 52
     static let dockHeight: CGFloat = 58
     static let dividerHeight: CGFloat = 26
 
@@ -72,30 +71,6 @@ struct StageLayout: Equatable {
 
     /// Opacity of a receding neighbor.
     func recedeAlpha(progress p: CGFloat) -> CGFloat { pow(1 - p.clamped(), 1.4) }
-
-    // MARK: App page
-
-    var pageHeroTop: CGFloat { safe.top + 58 }
-    var pageHeroHeight: CGFloat { min((size.height * 0.40).rounded(), (size.width * 0.6 / PhonePose.aspect).rounded()) }
-    var pageCompactHeight: CGFloat { (size.height * 0.17).rounded() }
-    /// Top of the app's name in the page's content.
-    var pageNameTop: CGFloat { pageHeroTop + pageHeroHeight + 18 }
-    var pageBottomBarTop: CGFloat { size.height - max(safe.bottom, 16) - 6 - Self.bottomBarHeight }
-
-    /// The opened app's device: it shrinks as its threads scroll up beneath
-    /// it, then travels away with them; pulling down enlarges it a little.
-    /// `pagePose(scroll: 0)` at `pageHeroHeight` is the portrait's size.
-    func pagePose(scroll s: CGFloat) -> PhonePose {
-        let room = pageHeroHeight - pageCompactHeight
-        let shrink = s.clamped(0, room)
-        let height = pageHeroHeight - shrink + max(0, -s) * 0.3
-        let top = pageHeroTop - max(0, s - room) + max(0, -s) * 0.5
-        let center = CGPoint(x: size.width / 2, y: top + height / 2)
-        let visible = top + height > -40
-        if reducedMotion { return PhonePose(center: center, height: height, shadow: 0.9, visible: visible) }
-        // One fixed angle, so the resting device is a portrait that scales.
-        return PhonePose(center: center, height: height, yaw: 0.12, pitch: -0.05, shadow: 0.9, visible: visible)
-    }
 
     // MARK: Thread
 

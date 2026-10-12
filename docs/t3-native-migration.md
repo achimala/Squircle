@@ -905,9 +905,8 @@ message context records survive.
 - **CLI:** `t3 connect|status`, `agent setup|start|list|context`,
   `thread spawn|send|status|read|answer|archive`; HTTP `/v1/agents`,
   `/v1/agents/context`, `/v1/workers…`.
-- **Phone:** tapping an app opens its agent's conversation (route
-  `thread(app, "agent:<app>")`); the app's threads are one back swipe behind
-  it, with an Agent button, New Thread and Builds. An app without an agent
+- **Phone (as of build 38):** tapping an app opens its agent's conversation;
+  other threads push over it (see build 38 below). An app without an agent
   opens a draft; the first message asks the Mac to create the agent.
   Wake-ups render as one quiet line ("Add CHANGELOG.md finished"). The
   approvals picker is hidden for the agent. `SquircleModel` no longer uses
@@ -936,3 +935,19 @@ the wake-ups; the hook supplies only its thread ID and live workers; workers
 branch from the checkout's current branch. Verified live: "have a worker add a
 'mod' command … when it's done, merge it into main" → worker, wake-up, the
 agent merged into main itself (78 tests pass).
+
+**Build 38 (user tried 37 on the phone: "can't talk to agent, just errors";
+"you push me two levels deep … ugly").** (1) The first message to a new agent
+failed: the service sent it before its live copy of T3 included the thread it
+had just created; `send` now waits for it. Reproduced on the simulator before
+the fix (message bounced back into the field) and passing after it, first and
+follow-up messages, through the phone's own send path (`SQUIRCLE_SEND`).
+(2) No list between Home and the agent: route `app` is the agent's
+conversation (back returns to Home); `thread` pushes another thread over it,
+from the agent's corner menu (threads, New Thread, Builds) or by tapping a
+worker update line. The model follows one conversation at a time, so the
+covered agent ignores model changes and reselects its thread when the one
+over it closes. The app page (`AppPage`) and its geometry are gone. Verified:
+slow-motion frames of Home → agent (one push) and agent → thread → back;
+returning restores the agent's own conversation; `SQUIRCLE_STRESS=1` 40 s:
+`settled=1 violations=0`.

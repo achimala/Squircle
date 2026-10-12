@@ -20,6 +20,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     var currentSessionID: String? { sessionID }
     /// The app's agent: one conversation per app that runs its threads.
     let isAgent: Bool
+    /// The agent's corner menu and its update lines open the app's other threads (nil: a new one).
+    var onOpenThread: ((String?) -> Void)?
+    var onBuilds: (() -> Void)?
+    private let threads = Theme.glassButton(symbol: "list.bullet", identifier: "agent.threads", accessibilityLabel: "Threads")
+    /// The model follows one conversation at a time; a thread opened over
+    /// this one takes it and gives it back when it closes.
+    private var isActive: Bool { model.selectedSessionID == sessionID }
 
     private let model: SquircleModel
     private weak var stage: DeviceStage?
@@ -219,6 +226,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         pickers.approvals.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.approvalMenu() ?? []) }])
         back.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onBack?() }, for: .touchUpInside)
         [deviceTouch, back, simulatorStatus, divider, home, simulator].forEach(view.addSubview)
+        if isAgent {
+            back.accessibilityLabel = "Apps"
+            threads.showsMenuAsPrimaryAction = true
+            threads.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.threadsMenu() ?? []) }])
+            view.addSubview(threads)
+        }
 
         grabber.backgroundColor = .tertiaryLabel
         grabber.layer.cornerRadius = 2.5
@@ -349,6 +362,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         super.viewDidLayoutSubviews()
         let safe = view.safeAreaInsets
         back.frame = CGRect(x: 16, y: safe.top + 4, width: 44, height: 44)
+        threads.frame = CGRect(x: 70, y: safe.top + 4, width: 44, height: 44)
         layoutStage()
     }
 
@@ -412,6 +426,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     func setTransitionProgress(_ progress: CGFloat) {
         let alpha = ((progress - 0.55) / 0.45).clamped()
         back.alpha = alpha
+        threads.alpha = alpha
         pickers.alpha = alpha
         jump.alpha = jumpShown ? alpha : 0
     }
@@ -472,8 +487,35 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
     // MARK: Content
 
+    /// The app's other threads, newest first, and what else lives beside the agent.
+    private func threadsMenu() -> [UIMenuElement] {
+        let actions = model.sessions(for: project).map { session in
+            UIAction(title: session.displayTitle(in: project),
+                     subtitle: session.phase == .needsYou ? "Needs you" : session.phase == .working ? "Working" : nil,
+                     image: UIImage(systemName: session.phase == .needsYou ? "exclamationmark.bubble" : session.phase == .working ? "ellipsis.bubble" : "bubble")) { [weak self] _ in
+                self?.onOpenThread?(session.id)
+            }
+        }
+        return [UIMenu(options: .displayInline, children: [
+            UIAction(title: "New Thread", image: UIImage(systemName: "square.and.pencil")) { [weak self] _ in self?.onOpenThread?(nil) },
+            UIAction(title: "Builds", image: UIImage(systemName: "shippingbox")) { [weak self] _ in self?.onBuilds?() }
+        ]), UIMenu(options: .displayInline, children: actions)]
+    }
+
+    /// A thread opened over this one closed: take the model back.
+    func reactivate() {
+        Task { [weak self] in
+            guard let self, !tornDown else { return }
+            if let sessionID { await model.selectSession(sessionID) } else { await model.beginDraft(agent: isAgent) }
+            render()
+        }
+        reconcilePreview()
+    }
+    /// A thread is opening over this one.
+    func deactivate() { pausePreview() }
+
     private func render() {
-        guard isViewLoaded else { return }
+        guard isViewLoaded, isActive || !selectionReady else { return }
         guard selectionReady else {
             pickers.model.isEnabled = false
             composer.send.isEnabled = false
@@ -827,6 +869,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         switch item {
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
         case .earlier, .summary, .note, .thought, .changes: return true
+        case .update(let message): return !message.threadIDs.isEmpty && onOpenThread != nil
         default: return false
         }
     }
@@ -880,6 +923,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .summary(let summary): toggle(summary.turn)
         case .changes(let changes, _): showChanges(changes)
         case .note(let message), .thought(let message): toggle(message.id)
+        case .update(let message): if let id = message.threadIDs.first { onOpenThread?(id) }
         default: break
         }
     }
@@ -1348,6 +1392,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             ["id": "media", "header": "Media", "question": "What should appear inline?", "multiSelect": true, "options": [
                 ["label": "Screenshots"], ["label": "Recordings"], ["label": "Diffs"]]]]]])
         renderRequest()
+    }
+    /// Verification only: types and sends a real message, as the composer does.
+    func debugSend(_ text: String) {
+        composer.text = text
+        send()
     }
     /// Verification only: the send animation without dispatching to T3.
     func debugFlySend(_ text: String) {

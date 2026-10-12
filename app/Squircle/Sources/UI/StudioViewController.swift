@@ -6,9 +6,10 @@ import UIKit
 /// somewhere it should not be.
 enum Route: Equatable {
     case grid
+    /// The app's agent: the conversation an app opens to.
     case app(String)
-    /// `thread` is a T3 thread ID, `draft:<uuid>` for a new conversation, or
-    /// `agent:<app>` for the app's agent (its thread may not exist yet).
+    /// Another of the app's threads, over its agent. A T3 thread ID, or
+    /// `draft:<uuid>` for a new conversation.
     case thread(app: String, thread: String)
 
     var app: String? {
@@ -21,18 +22,17 @@ enum Route: Equatable {
 }
 
 /// The root: every app's real device. Home is a grid of still portraits of
-/// those devices that scroll natively. Opening an app opens the conversation
-/// with its agent: the others fall back, the app's threads rise beneath and
-/// the agent's conversation pushes in over them while the same device travels
-/// into it. Back from the agent shows those threads; any of them pushes in
-/// the same way.
+/// those devices that scroll natively. Opening an app pushes in the
+/// conversation with its agent while the others fall back and the same
+/// device travels into it. The app's other threads open from the agent's
+/// corner menu or its update lines, pushing in over it the same way.
 ///
-/// Navigation is a route plus two springs (`appSpring` grid→app, `spring`
-/// app→thread). Each spring's target is a function of the route and of what
-/// is mounted. What is mounted (the app page's app, the thread controller)
-/// changes only while its spring is at zero, i.e. off screen. Every frame is
-/// a pure function of those values, including which views take touches and
-/// whether a portrait or the 3D stage draws the device.
+/// Navigation is a route plus two springs (`appSpring` grid→agent, `spring`
+/// agent→thread). Each spring's target is a function of the route and of what
+/// is mounted. What is mounted (the agent, the thread over it) changes only
+/// while its spring is at zero, i.e. off screen. Every frame is a pure
+/// function of those values, including which views take touches and whether
+/// a portrait or the 3D stage draws the device.
 @MainActor
 final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGestureRecognizerDelegate {
     let model: SquircleModel
@@ -42,18 +42,13 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private let grid = UIScrollView()
     private let connection = Theme.glassButton(symbol: "macbook", identifier: "connection.status", accessibilityLabel: "Mac connection")
     private let add = Theme.glassButton(symbol: "plus", identifier: "project.add", accessibilityLabel: "Add app")
-    /// One app's threads and controls.
-    private let pageHost = UIView()
-    /// Holds the conversation above the list; touches pass through when empty.
+    /// Holds the app's agent; touches pass through when empty.
+    private let agentHost = PassthroughView()
+    /// Holds a thread over the agent; touches pass through when empty.
     private let threadHost = PassthroughView()
-    private let page = AppPage()
-    private let back = Theme.glassButton(symbol: "chevron.left", identifier: "project.back", accessibilityLabel: "Apps")
-    private let agent = Theme.glassButton(symbol: "bubble.left.and.text.bubble.right", title: "Agent", prominent: true, identifier: "thread.agent")
-    private let compose = Theme.glassButton(symbol: "square.and.pencil", identifier: "thread.new", accessibilityLabel: "New Thread")
-    private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "project.builds", accessibilityLabel: "Builds")
-    /// 0 = grid, 1 = app page.
+    /// 0 = grid, 1 = agent.
     private let appSpring = SpringDriver()
-    /// 0 = app page, 1 = thread.
+    /// 0 = agent, 1 = thread over it.
     private let spring = SpringDriver()
     private var cells: [String: GridCell] = [:]
     private var bindings: [String: ScreenshotBinding] = [:]
@@ -71,8 +66,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     // MARK: Navigation state
 
     private var route = Route.grid
-    /// The app whose page (and device) is mounted. Changes only at `appSpring` 0.
+    /// The app whose agent (and device) is mounted. Changes only at `appSpring` 0.
     private(set) var selectedID: String?
+    private(set) var agent: ThreadViewController?
     /// The mounted conversation and its route key. Changes only at `spring` 0.
     private(set) var thread: ThreadViewController?
     private var threadKey: String?
@@ -97,7 +93,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         view.backgroundColor = Theme.paper
         view.addSubview(stage)
         view.addSubview(home)
-        view.addSubview(pageHost)
+        view.addSubview(agentHost)
         view.addSubview(threadHost)
         view.addSubview(stage.overlay)
 
@@ -111,14 +107,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         connection.showsMenuAsPrimaryAction = true
         add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
 
-        page.onScroll = { [weak self] in self?.applyScene() }
-        page.onOpenThread = { [weak self] id in self?.openThread(id) }
-        pageHost.addSubview(page)
-        [back, agent, compose, builds].forEach(pageHost.addSubview)
-        back.addAction(UIAction { [weak self] _ in self?.closeApp() }, for: .touchUpInside)
-        agent.addAction(UIAction { [weak self] _ in self?.openAgent() }, for: .touchUpInside)
-        compose.addAction(UIAction { [weak self] _ in self?.openThread(nil) }, for: .touchUpInside)
-        builds.addAction(UIAction { [weak self] _ in self?.presentBuilds() }, for: .touchUpInside)
 
         let edge = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(backPanned(_:)))
         edge.edges = .left
@@ -175,9 +163,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Verification only (never in Release). Holds real states still for a
     /// screen capture: `SQUIRCLE_GRID` (grid scroll in points), `SQUIRCLE_APP`
     /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it),
-    /// `SQUIRCLE_EXPAND` (its list's scroll in points), `SQUIRCLE_SCRUB` (0…1
-    /// of the thread transition) and `SQUIRCLE_DETENT` (0…2 of the thread's
-    /// divider). `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
+    /// `SQUIRCLE_SCRUB` (0…1 of a thread over its agent) and `SQUIRCLE_DETENT`
+    /// (0…2 of the front conversation's divider). `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
@@ -188,13 +175,16 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             guard let self else { return }
             if let y = value("SQUIRCLE_GRID") { grid.contentOffset.y = y; applyScene() }
             guard let name = environment["SQUIRCLE_APP"], let project = projects.first(where: { $0.name == name }) else { return }
-            // Held states inside the app start from its threads.
-            let held = ["SQUIRCLE_APP_SCRUB", "SQUIRCLE_EXPAND", "SQUIRCLE_SCRUB"].contains { environment[$0] != nil }
-            openApp(project.id, threads: held || environment["SQUIRCLE_LIST"] == "1")
+            openApp(project.id)
             if let scrub = value("SQUIRCLE_APP_SCRUB") { hold(appSpring, at: scrub); return }
             appSpring.set(1)
-            if let expand = value("SQUIRCLE_EXPAND") { page.contentOffset.y = expand }
-            guard let scrub = value("SQUIRCLE_SCRUB") else { return }
+            guard let scrub = value("SQUIRCLE_SCRUB") else {
+                if let detent = value("SQUIRCLE_DETENT") { agent?.debugSetDetent(detent) }
+                if let text = environment["SQUIRCLE_SEND"] {
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
+                }
+                return
+            }
             let sessions = model.sessions(for: project)
             let named = environment["SQUIRCLE_THREAD"].flatMap { title in sessions.first { $0.title == title } }
             openThread(environment["SQUIRCLE_DRAFT"] == "1" ? nil : (named ?? sessions.first)?.id)
@@ -208,6 +198,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if environment["SQUIRCLE_DEMO_PULSE"] == "1" { later { [weak self] in self?.thread?.debugPulse() } }
             if let text = environment["SQUIRCLE_DEMO_SEND"] { later { [weak self] in self?.thread?.debugFlySend(text) } }
             if scrub < 1 { hold(spring, at: scrub) }
+            if environment["SQUIRCLE_THEN_BACK"] == "1" {
+                Task { [weak self] in try? await Task.sleep(for: .seconds(5)); self?.closeThread() }
+            }
         }
         if environment["SQUIRCLE_STRESS"] == "1" {
             let seconds = value("SQUIRCLE_STRESS_SECONDS").map(Double.init) ?? 30
@@ -250,14 +243,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 actions.append { [weak self] in self?.endBack(velocity: CGFloat.random(in: -2...2), closing: Bool.random()) }
             } else {
                 switch route {
-                case .grid:
-                    for project in projects.prefix(3) {
-                        actions.append { [weak self] in self?.openApp(project.id) }
-                        actions.append { [weak self] in self?.openApp(project.id, threads: true) }
-                    }
+                case .grid: for project in projects.prefix(3) { actions.append { [weak self] in self?.openApp(project.id) } }
                 case .app:
                     actions.append { [weak self] in self?.closeApp() }
-                    actions.append { [weak self] in self?.openAgent() }
                     if let project = selectedProject {
                         for session in model.sessions(for: project).prefix(2) { actions.append { [weak self] in self?.openThread(session.id) } }
                     }
@@ -290,13 +278,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         if let id = selectedID, a > 0.001 || route.app == id {
             let cellShows = cells[id].map { !$0.portrait.isHidden } ?? false
-            let pageShows = !page.portrait.isHidden && !page.isHidden && !pageHost.isHidden
-            if !posed && !cellShows && !pageShows { fail("device drawn nowhere") }
+            if !posed && !cellShows { fail("device drawn nowhere") }
         }
         guard !appSpring.isAnimating, !spring.isAnimating, dragging == nil else { return }
         switch route {
         case .grid: if home.isHidden || home.alpha < 0.99 { fail("grid not showing at rest") }
-        case .app: if pageHost.isHidden || page.isHidden || a < 1 || t > 0 { fail("app page not showing at rest") }
+        case .app: if agent == nil || agentHost.isHidden || a < 1 || t > 0 || agent?.view.transform != .identity { fail("agent not showing at rest") }
         case .thread: if thread == nil || t < 1 || thread?.view.transform != .identity { fail("thread not showing at rest") }
         }
     }
@@ -308,28 +295,20 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         stage.frame = bounds
         stage.overlay.frame = bounds
         home.place(in: bounds)
-        pageHost.place(in: bounds)
+        agentHost.frame = bounds
         grid.frame = bounds
-        page.frame = bounds
         threadHost.frame = bounds
+        agent?.view.place(in: bounds)
         thread?.view.place(in: bounds)
         let current = makeLayout()
         if current != laidOut {
             laidOut = current
             layoutGrid()
-            page.layout = current
         }
         // Controls rise in with transforms; `place` keeps their resting spot exact.
         let safe = view.safeAreaInsets
         connection.place(in: CGRect(x: 16, y: safe.top + 4, width: 44, height: 44))
         add.place(in: CGRect(x: bounds.width - 60, y: safe.top + 4, width: 44, height: 44))
-        back.place(in: CGRect(x: 16, y: safe.top + 4, width: 44, height: 44))
-        let barTop = current.pageBottomBarTop, barHeight = StageLayout.bottomBarHeight
-        let buildsFrame = CGRect(x: bounds.width - 16 - barHeight, y: barTop, width: barHeight, height: barHeight)
-        let composeFrame = buildsFrame.offsetBy(dx: -barHeight - 10, dy: 0)
-        builds.place(in: buildsFrame)
-        compose.place(in: composeFrame)
-        agent.place(in: CGRect(x: 16, y: barTop, width: composeFrame.minX - 26, height: barHeight))
         applyScene()
     }
 
@@ -391,10 +370,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             bindings[project.id] = binding
             binding.update(model: model, project: project)
         }
-        if let project = selectedProject {
-            page.update(project: project, sessions: model.sessions(for: project), agentName: model.agentName(for:),
-                        loading: model.isLoading, error: model.error)
-        }
         renderControls()
         if let build = model.updatingTo {
             UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
@@ -418,17 +393,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 Task { await self?.model.refresh() }
             }
         ])
-        let project = selectedProject
-        compose.isEnabled = project != nil
-        agent.isEnabled = project != nil
-        let building = project.map { project in
-            model.buildingProjectIDs.contains(project.id)
-                || model.builds(for: project).contains { $0.status == "queued" || $0.status == "running" }
-        } ?? false
-        if builds.configuration?.showsActivityIndicator != building {
-            builds.configuration?.showsActivityIndicator = building
-            builds.accessibilityValue = building ? "Building" : nil
-        }
     }
 
     private func layoutGrid() {
@@ -461,21 +425,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         appTarget == 1 && route.thread != nil && route.thread == threadKey && thread != nil ? 1 : 0
     }
 
-    /// Opens an app at its agent's conversation, or at its threads.
-    func openApp(_ id: String, threads: Bool = false) {
+    func openApp(_ id: String) {
         guard presentedViewController == nil, projects.contains(where: { $0.id == id }) else { return }
         if route.app != id { Theme.openHaptic() }
-        route = threads ? .app(id) : .thread(app: id, thread: Self.agentKey(id))
-        sync()
-    }
-
-    private static func agentKey(_ app: String) -> String { "agent:" + app }
-
-    /// The mounted app's agent, from its threads.
-    func openAgent() {
-        guard presentedViewController == nil, let app = selectedID, route.app == app else { return }
-        Theme.openHaptic()
-        route = .thread(app: app, thread: Self.agentKey(app))
+        route = .app(id)
         sync()
     }
 
@@ -516,6 +469,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         if appSpring.value <= 0.001, let app = route.app, app != selectedID {
             unmountThread()
+            unmountAgent()
             mountApp(app)
         }
         if spring.value <= 0.001, thread == nil, let key = route.thread, route.app == selectedID {
@@ -533,7 +487,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         guard dragging == nil, !appSpring.isAnimating, !spring.isAnimating else { return }
         let focus: Any? = switch route {
         case .grid: selectedID.flatMap { cells[$0] }
-        case .app: page.hero
+        case .app: agent?.view
         case .thread: thread?.view
         }
         UIAccessibility.post(notification: .screenChanged, argument: focus)
@@ -542,27 +496,29 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private func mountApp(_ id: String) {
         guard let project = projects.first(where: { $0.id == id }) else { return }
         selectedID = id
-        page.reset()
-        page.update(project: project, sessions: model.sessions(for: project), agentName: model.agentName(for:),
-                    loading: model.isLoading, error: model.error)
-        ensureHeroPortrait(id)
-        renderControls()
         model.selectProject(project)
+        let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project),
+                                              stage: stage, agent: true)
+        controller.onOpenThread = { [weak self] id in self?.openThread(id) }
+        controller.onBuilds = { [weak self] in self?.presentBuilds() }
+        host(controller, in: agentHost)
+        controller.onBack = { [weak self] in self?.closeApp() }
+        agent = controller
     }
 
-    private func mountThread(_ key: String) {
-        guard let project = selectedProject else { return }
-        let isAgent = key == Self.agentKey(project.id)
-        let sessionID = isAgent ? model.agentThreadID(for: project) : key.hasPrefix("draft:") ? nil : key
-        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage, agent: isAgent)
+    private func unmountAgent() {
+        guard let controller = agent else { return }
+        agent = nil
+        dismount(controller)
+    }
+
+    /// Adds a conversation as an opaque page that covers what is beneath it
+    /// as it slides in, never text over text.
+    private func host(_ controller: ThreadViewController, in host: UIView) {
         controller.layoutProvider = { [weak self] in self?.layout }
-        controller.onBack = { [weak self] in self?.closeThread() }
         controller.onGeometry = { [weak self] in self?.applyScene() }
-        thread = controller
-        threadKey = key
         addChild(controller)
         controller.view.frame = view.bounds
-        // An opaque page that covers the list as it slides in, never text over text.
         controller.view.backgroundColor = Theme.paper
         controller.view.layer.shadowColor = UIColor.black.cgColor
         controller.view.layer.shadowOpacity = 0.14
@@ -570,20 +526,35 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         controller.view.layer.shadowOffset = CGSize(width: -6, height: 0)
         controller.view.layer.shadowPath = UIBezierPath(rect: view.bounds).cgPath
         controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
-        threadHost.addSubview(controller.view)
+        host.addSubview(controller.view)
         controller.didMove(toParent: self)
         controller.view.layoutIfNeeded()
+    }
+
+    private func dismount(_ controller: ThreadViewController) {
+        controller.tearDown()
+        stage.endLive(for: controller.project.id)
+        controller.willMove(toParent: nil)
+        controller.view.removeFromSuperview()
+        controller.removeFromParent()
+    }
+
+    private func mountThread(_ key: String) {
+        guard let project = selectedProject else { return }
+        agent?.deactivate()
+        let controller = ThreadViewController(model: model, project: project, sessionID: key.hasPrefix("draft:") ? nil : key, stage: stage)
+        controller.onBack = { [weak self] in self?.closeThread() }
+        host(controller, in: threadHost)
+        thread = controller
+        threadKey = key
     }
 
     private func unmountThread() {
         guard let controller = thread else { return }
         thread = nil
         threadKey = nil
-        controller.tearDown()
-        stage.endLive(for: controller.project.id)
-        controller.willMove(toParent: nil)
-        controller.view.removeFromSuperview()
-        controller.removeFromParent()
+        dismount(controller)
+        agent?.reactivate()
     }
 
     // MARK: Back
@@ -641,7 +612,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             guard let thread, threadTarget == 1 else { return false }
             return thread.allowsBackSwipe(at: pan.location(in: thread.view))
         }
-        return appTarget == 1
+        guard let agent, appTarget == 1 else { return false }
+        return agent.allowsBackSwipe(at: pan.location(in: agent.view))
     }
 
     /// Scrolling waits until a touch is known not to be a back swipe, so the
@@ -675,9 +647,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
     }
 
-    /// Draws one stale portrait, the opened app's first. False when none is stale.
+    /// Draws one stale grid portrait. False when none is stale.
     private func drawNextPortrait() -> Bool {
-        if let id = selectedID, ensureHeroPortrait(id) { return true }
         for (index, project) in projects.enumerated() {
             guard let cell = cells[project.id] else { continue }
             let pose = gridPose(index), key = portraitKey(project.id, pose)
@@ -687,16 +658,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             return true
         }
         return false
-    }
-
-    /// Draws the opened app's list portrait if stale. True if it drew.
-    @discardableResult
-    private func ensureHeroPortrait(_ id: String) -> Bool {
-        let pose = layout.pagePose(scroll: 0), key = id + portraitKey(id, pose)
-        guard page.portraitKey != key else { return false }
-        page.portraitKey = key
-        page.portrait.image = stage.portrait(for: id, pose: pose, scale: displayScale)
-        return true
     }
 
     // MARK: Scene
@@ -712,18 +673,18 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let a = appSpring.value.clamped(), t = spring.value.clamped()
         let moving = appSpring.isAnimating || spring.isAnimating || dragging != nil
         let scroll = grid.contentOffset.y
-        var origin = CGPoint(x: width / 2, y: layout.pageHeroTop)
+        var origin = CGPoint(x: width / 2, y: view.safeAreaInsets.top + 58)
         var poses: [String: PhonePose] = [:]
         var hidePortraits = false
         if let id = selectedID, let index = projects.firstIndex(where: { $0.id == id }) {
             let start = layout.gridPose(cell: layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll), column: index % layout.columns)
             origin = start.center
-            var pose = layout.transitionPose(from: start, to: layout.pagePose(scroll: page.offset), progress: a)
+            var pose = layout.transitionPose(from: start, to: agent?.pose ?? start, progress: a)
             if t > 0.0001, let thread { pose = layout.transitionPose(from: pose, to: thread.pose, progress: t) }
-            // A portrait draws the device only where it rests still: in the
-            // grid or at the top of its list. Anywhere else the stage does,
-            // and the portrait hides once the stage has actually drawn it.
-            let resting = !moving && (a == 0 || (a == 1 && t == 0))
+            // A portrait draws the device only where it rests still in the
+            // grid. Anywhere else the stage does, and the portrait hides once
+            // the stage has actually drawn it.
+            let resting = !moving && a == 0
             if !resting {
                 poses[id] = pose
                 hidePortraits = stage.drawn.contains(id)
@@ -744,10 +705,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         portraitsHidden = hidePortraits
         stage.apply(poses)
         stage.setLive(!poses.isEmpty && moving, reason: "navigation")
-        // A portrait may draw the device only while it is (nearly) where that
-        // portrait stands; once the stage has it, neither does.
-        let atCell = a < 0.03 && t < 0.001, atPage = a > 0.97 && t < 0.03
-        page.portrait.isHidden = hidePortraits || !atPage
+        // A portrait may draw the device only while it is (nearly) in its
+        // cell; once the stage has it, it does not.
+        let atCell = a < 0.03 && t < 0.001
         for (id, cell) in cells { cell.portrait.isHidden = id == selectedID && (hidePortraits || !atCell) }
 
         // The other apps drift back and fade; the opened one's name goes first.
@@ -767,32 +727,25 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             }
         }
 
-        // The app's list rises beneath its device, row by row.
-        pageHost.isHidden = a <= 0.001
-        page.isHidden = t >= 1 && !moving
-        page.setArrival(a, reduced: layout.reducedMotion)
-        let chrome = ((a - 0.5) / 0.5).clamped()
-        for button in [back, agent, compose, builds] { button.alpha = chrome * (1 - t * 2).clamped() }
-        agent.transform = CGAffineTransform(translationX: 0, y: (1 - chrome) * 40)
-        compose.transform = agent.transform
-        builds.transform = agent.transform
-
-        // A thread: a flat push. The conversation slides over from the right
-        // while the list drifts a third as far left. The device travels on its own.
-        page.transform = CGAffineTransform(translationX: layout.reducedMotion ? 0 : -width * 0.3 * t, y: 0)
+        // Flat pushes. The agent's conversation slides over Home; a thread
+        // slides over the agent while the agent drifts a third as far left.
+        // The device travels on its own.
+        agentHost.isHidden = a <= 0.001
+        agent?.setTransitionProgress(a * (1 - t))
+        agent?.view.transform = CGAffineTransform(translationX: width * (1 - a) - (layout.reducedMotion ? 0 : width * 0.3 * t), y: 0)
         thread?.setTransitionProgress(t)
         thread?.view.transform = CGAffineTransform(translationX: width * (1 - t), y: 0)
 
         // Touches go to the screen the route names, from the first frame of its
-        // transition. A conversation on its way out still covers the list, so
-        // touches on it stop there instead of reaching rows hidden beneath.
+        // transition. A conversation on its way out still covers the one
+        // beneath, so touches on it stop there.
         let onGrid = route == .grid
-        let onPage = route.app != nil && route.app == selectedID && route.thread == nil
+        let onAgent = route.app != nil && route.app == selectedID && route.thread == nil
         let onThread = threadTarget == 1
         home.isUserInteractionEnabled = onGrid
         home.accessibilityElementsHidden = !onGrid
-        pageHost.isUserInteractionEnabled = onPage
-        pageHost.accessibilityElementsHidden = !onPage
+        agent?.view.isUserInteractionEnabled = onAgent
+        agent?.view.accessibilityElementsHidden = !onAgent
         thread?.view.isUserInteractionEnabled = onThread
         thread?.view.accessibilityElementsHidden = !onThread
         threadHost.swallowsTouches = thread != nil && !onThread
@@ -920,169 +873,5 @@ final class GridCell: UIControl {
                 self.portrait.transform = CGAffineTransform(scaleX: scale, y: scale)
             }
         }
-    }
-}
-
-/// One opened app: its device, its name beneath and its threads beneath that.
-/// At rest the device is a portrait in the list's content that shrinks to
-/// make room as the list scrolls up; in motion the stage draws it.
-@MainActor
-final class AppPage: UIScrollView, UIScrollViewDelegate {
-    private(set) var project: AppProject?
-    var onScroll: (() -> Void)?
-    var onOpenThread: ((String) -> Void)?
-    var layout: StageLayout? { didSet { if layout != oldValue { arrange() } } }
-    /// Tappable, accessible stand-in for the device.
-    let hero = UIControl()
-    /// The device at rest: a still portrait that scales as the list scrolls.
-    let portrait = UIImageView()
-    var portraitKey = ""
-    private let nameLabel = Theme.label("", Theme.appNameFont())
-    private let rows = UIStackView()
-    private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
-    private var rowViews: [String: ThreadRow] = [:]
-    private var renderedOrder: [String] = []
-
-    /// Distance scrolled from the resting position.
-    var offset: CGFloat { contentOffset.y }
-
-    init() {
-        super.init(frame: .zero)
-        delegate = self
-        alwaysBounceVertical = true
-        showsVerticalScrollIndicator = false
-        contentInsetAdjustmentBehavior = .never
-        accessibilityIdentifier = "workspace.threads"
-        nameLabel.textAlignment = .center
-        nameLabel.adjustsFontSizeToFitWidth = true
-        nameLabel.minimumScaleFactor = 0.6
-        nameLabel.accessibilityTraits = .header
-        rows.axis = .vertical
-        notice.textAlignment = .center
-        hero.isAccessibilityElement = true
-        hero.accessibilityIdentifier = "project.hero"
-        hero.accessibilityTraits = .button
-        hero.accessibilityHint = "Shows threads"
-        hero.addAction(UIAction { [weak self] _ in self?.toggle() }, for: .touchUpInside)
-        portrait.isUserInteractionEnabled = false
-        [portrait, hero, nameLabel, rows, notice].forEach(addSubview)
-        if #available(iOS 26.0, *) {
-            topEdgeEffect.style = .soft
-            bottomEdgeEffect.style = .soft
-        }
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    func reset() {
-        layer.removeAllAnimations()
-        contentOffset = .zero
-    }
-
-    func update(project: AppProject, sessions: [ChatSession], agentName: (JSONValue) -> String, loading: Bool, error: String?) {
-        if self.project?.id != project.id {
-            rowViews.values.forEach { $0.removeFromSuperview() }
-            rowViews = [:]
-            renderedOrder = []
-        }
-        self.project = project
-        if nameLabel.text != project.name { nameLabel.text = project.name }
-        hero.accessibilityLabel = project.name
-        hero.accessibilityValue = project.id
-        let ids = sessions.map(\.id)
-        for id in Array(rowViews.keys) where !ids.contains(id) { rowViews.removeValue(forKey: id)?.removeFromSuperview() }
-        for session in sessions {
-            let row = rowViews[session.id] ?? {
-                let row = ThreadRow(sessionID: session.id)
-                row.addAction(UIAction { [weak self] _ in self?.onOpenThread?(session.id) }, for: .touchUpInside)
-                rowViews[session.id] = row
-                return row
-            }()
-            row.configure(title: session.displayTitle(in: project), agent: agentName(session.modelSelection),
-                          date: session.updatedAt, phase: session.phase)
-        }
-        let message: String? = sessions.isEmpty ? (error ?? (loading ? "Loading threads…" : "No threads yet")) : nil
-        let changed = ids != renderedOrder || notice.text != message
-        if ids != renderedOrder {
-            renderedOrder = ids
-            rows.arrangedSubviews.forEach { rows.removeArrangedSubview($0) }
-            for (index, id) in ids.enumerated() {
-                guard let row = rowViews[id] else { continue }
-                rows.addArrangedSubview(row)
-                row.showsSeparator = index < ids.count - 1
-            }
-        }
-        notice.text = message
-        notice.isHidden = message == nil
-        notice.textColor = error == nil ? .secondaryLabel : Theme.failure
-        notice.accessibilityIdentifier = error == nil ? "workspace.empty" : "workspace.error"
-        if changed { arrange() }
-    }
-
-    private func arrange() {
-        guard let layout, bounds.width > 0 else { return }
-        let width = bounds.width
-        // Rows rise in with a transform; bounds and center ignore it, frame would not.
-        place(nameLabel, CGRect(x: 28, y: layout.pageNameTop, width: width - 56, height: layout.titleHeight))
-        let rowsTop = layout.pageNameTop + layout.titleHeight + 12
-        let rowsHeight = renderedOrder.isEmpty ? 0
-            : rows.systemLayoutSizeFitting(CGSize(width: width - 24, height: 0), withHorizontalFittingPriority: .required,
-                                           verticalFittingPriority: .fittingSizeLevel).height
-        rows.frame = CGRect(x: 12, y: rowsTop, width: width - 24, height: rowsHeight)
-        rows.layoutIfNeeded()
-        let noticeHeight = notice.isHidden ? 0 : notice.sizeThatFits(CGSize(width: width - 64, height: .greatestFiniteMagnitude)).height
-        place(notice, CGRect(x: 32, y: rowsTop + 6, width: width - 64, height: noticeHeight))
-        let bottom = bounds.height - layout.pageBottomBarTop + 12
-        contentInset.bottom = bottom
-        let natural = rowsTop + rowsHeight + noticeHeight
-        // Any app with threads can be pulled up until its device is compact.
-        let room = layout.pageHeroHeight - layout.pageCompactHeight
-        contentSize = CGSize(width: width, height: renderedOrder.isEmpty ? natural : max(natural, bounds.height - bottom + room))
-        placeHero()
-    }
-
-    private func place(_ view: UIView, _ frame: CGRect) {
-        view.bounds = CGRect(origin: .zero, size: frame.size)
-        view.center = CGPoint(x: frame.midX, y: frame.midY)
-    }
-
-    override var frame: CGRect {
-        didSet { if frame.size != oldValue.size { arrange() } }
-    }
-
-    private func placeHero() {
-        guard let layout else { return }
-        let pose = layout.pagePose(scroll: offset)
-        let width = pose.height * PhonePose.aspect
-        hero.frame = CGRect(x: pose.center.x - width / 2, y: pose.center.y - pose.height / 2 + offset, width: width, height: pose.height)
-        portrait.bounds = CGRect(origin: .zero, size: DeviceStage.portraitSize(height: pose.height))
-        portrait.center = CGPoint(x: pose.center.x, y: pose.center.y + offset)
-    }
-
-    /// 0 = still in the grid, 1 = arrived. The name and rows rise in after
-    /// the device, each a little later than the one above it.
-    func setArrival(_ a: CGFloat, reduced: Bool) {
-        let views: [UIView] = [nameLabel, notice] + rows.arrangedSubviews
-        for (index, view) in views.enumerated() {
-            let order = CGFloat(view === notice ? 1 : (index == 0 ? 0 : index - 1))
-            let local = ((a - 0.25 - min(order, 8) * 0.045) / 0.55).clamped()
-            let eased = 1 - pow(1 - local, 3)
-            view.alpha = eased
-            view.transform = reduced ? .identity : CGAffineTransform(translationX: 0, y: (1 - eased) * (70 + min(order, 8) * 14))
-        }
-    }
-
-    /// Tapping the device moves between its large and compact sizes.
-    private func toggle() {
-        guard let layout, !renderedOrder.isEmpty else { return }
-        Theme.selectionHaptic()
-        let room = layout.pageHeroHeight - layout.pageCompactHeight
-        setContentOffset(CGPoint(x: 0, y: offset > room * 0.5 ? 0 : room), animated: !Motion.reduced)
-    }
-
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        placeHero()
-        onScroll?()
     }
 }
