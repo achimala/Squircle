@@ -30,7 +30,7 @@ matching app record rather than independent native picker entries.
 
 **App agents (2026-10-12):** each app's agent is a T3 thread on T3's
 "squircle" Claude instance (Squircle's plugin supplies its system prompt and
-per-turn hooks) in an integration worktree; its workers are ordinary T3
+a per-turn hook) in the project's folder; its workers are ordinary T3
 threads. The service holds its own paired T3 session, records which agent owns
 which worker, and wakes an agent when a worker finishes. It runs no model.
 

@@ -865,7 +865,7 @@ scanned), fixed from the code path; stress audit still 0 violations. The
 user disliked the rounded app-name type: app names are now New York
 (`Theme.appNameFont`, `appCaptionFont`); the rounded design is gone. The user then found serif out of place; build 35 uses plain SF (bold 34 title, semibold 15 caption).
 
-## 2026-10-12 one agent per app, 0.3.0 (36)
+## 2026-10-12 one agent per app, 0.3.0 (36–37)
 
 User request: "a single agent I interact with per app and not all the
 threads … dump issues into it … let it worry about organizing threads,
@@ -901,10 +901,7 @@ message context records survive.
   copy of T3's shell, `agents.json` (agent per project, worker ownership) and
   wakes the agent with a tagged `[worker update]` turn when a worker finishes,
   errors or needs input, once per turn outcome (`turn:state`), so restarts
-  neither repeat nor miss one. The agent works in
-  `<data>/worktrees/<project>` on `squircle/integration`; its thread has no
-  branch so T3's worktree cleanup never removes it. Workers get T3 worktrees
-  on `sq/*` from the integration branch.
+  neither repeat nor miss one. (Superseded the same day: see the simplification below.)
 - **CLI:** `t3 connect|status`, `agent setup|start|list|context`,
   `thread spawn|send|status|read|answer|archive`; HTTP `/v1/agents`,
   `/v1/agents/context`, `/v1/workers…`.
@@ -929,3 +926,13 @@ motion: one layered push (threads rise beneath as the conversation slides
 over them; the device travels without a gap). **Not yet checked:** the
 physical phone, merge-conflict round trips, iOS builds from the integration
 worktree, per-worker simulators, Codex as the app agent, weeks-long use.
+
+**Same day, simplified (user: "just let me tell it what to do … are you
+overengineering this").** Removed the integration branch and worktree (the
+agent works in the project's folder), the per-turn rule list, the
+question-dialog block, the three-worker cap and the prescribed workflow. The
+plugin's agent definition now states only the agent's role, its tools and
+the wake-ups; the hook supplies only its thread ID and live workers; workers
+branch from the checkout's current branch. Verified live: "have a worker add a
+'mod' command … when it's done, merge it into main" → worker, wake-up, the
+agent merged into main itself (78 tests pass).

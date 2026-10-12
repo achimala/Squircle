@@ -121,13 +121,13 @@ enum Commands {
         command: T3Command,
     },
     /// One agent per app: set up T3's Squircle instance, start an app's agent, list agents.
-    #[command(after_help = "The app agent is a T3 thread on T3's \"Squircle agent\" Claude instance, working in an integration worktree (branch squircle/integration). It splits the user's issues into worker threads with `squircle thread`, and the service wakes it when a worker finishes.\nOnce: squircle t3 connect, squircle agent setup. Then: squircle agent start --project T3_PROJECT_ID.")]
+    #[command(after_help = "The app agent is a T3 thread on T3's \"Squircle agent\" Claude instance, in the project's folder. It can run worker threads with `squircle thread`; the service wakes it when a worker finishes.\nOnce: squircle t3 connect, squircle agent setup. Then: squircle agent start --project T3_PROJECT_ID.")]
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
     },
     /// Worker threads of an app agent: spawn, message, read, answer, archive.
-    #[command(after_help = "Workers are ordinary T3 threads, each in its own worktree on a sq/<name> branch from squircle/integration. Do not poll: the app agent receives a [worker update] message when a worker finishes, errors or needs input.")]
+    #[command(after_help = "Workers are ordinary T3 threads, each in its own worktree on a new branch. Do not poll: the app agent receives a [worker update] message when a worker finishes, errors or needs input.")]
     Thread {
         #[command(subcommand)]
         command: ThreadCommand,
@@ -178,9 +178,9 @@ enum ThreadCommand {
         coordinator: String,
         #[arg(long, help = "Short issue title the user will see")]
         title: String,
-        #[arg(long, help = "New branch, sq/<short-name>")]
+        #[arg(long, help = "New branch for the worker")]
         branch: String,
-        #[arg(long, help = "Base branch; default squircle/integration")]
+        #[arg(long, help = "Base branch; default: the project checkout's current branch")]
         base: Option<String>,
         #[arg(long)]
         prompt: String,
@@ -540,7 +540,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","integration_branch":"squircle/integration","max_working_workers":3,"wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -851,11 +851,10 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                     .or_else(|| event["cwd"].as_str().map(PathBuf::from))
                     .map_or_else(std::env::current_dir, Ok)?;
                 let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("cwd", &cwd.display().to_string()).finish();
-                // A hook must never fail the agent's turn: without the service,
-                // the rules still arrive, only the live worker list is missing.
+                // A hook must never fail the agent's turn.
                 let context = match get(cli, &format!("/v1/agents/context?{query}")).await {
                     Ok(value) if value["ok"] == true => value["data"]["context"].as_str().unwrap_or("").to_string(),
-                    _ => "[squircle] The Squircle service is not reachable, so your live worker list is unavailable. Rules still hold: never open question dialogs; never commit to the user's main branch on your own; delegate non-trivial work to workers; do not poll.".into(),
+                    _ => "[squircle] The Squircle service is not reachable; worker commands will fail until it is back.".into(),
                 };
                 if !*hook {
                     success(json!({"context":context}))

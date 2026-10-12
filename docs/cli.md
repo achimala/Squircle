@@ -52,8 +52,9 @@ The service does not currently track installation/download completion.
 
 ## One agent per app
 
-The app agent is a T3 thread on T3's "squircle" Claude instance, in an
-integration worktree; workers are T3 threads on `sq/*` worktrees. Once per
+The app agent is a T3 thread on T3's "squircle" Claude instance, in the
+project's folder; workers are T3 threads in their own worktrees. How it works
+is up to what you tell it. Once per
 Mac: `squircle t3 connect` (pipe a T3 pairing token on stdin; restart
 `serve`), then `squircle agent setup` (installs `plugin/squircle` into the data
 directory and adds the T3 instance; `--remove` takes it out).
@@ -62,8 +63,8 @@ directory and adds the T3 instance; `--remove` takes it out).
 | --- | --- |
 | `t3 connect --url URL`, `t3 status` | Service's own T3 session; connection state |
 | `agent start --project T3_ID [--message TEXT]` | Create or find the app's agent and send it a message |
-| `agent list`, `agent context [--hook]` | Agents; the per-turn note (rules, thread ID, live workers) its hooks inject |
-| `thread spawn --coordinator ID --title T --branch sq/x --prompt P` | Worker thread in its own worktree; at most 3 working per agent |
+| `agent list`, `agent context [--hook]` | Agents; the per-turn note (thread ID, live workers) its hook injects |
+| `thread spawn --coordinator ID --title T --branch B --prompt P` | Worker thread in its own worktree, branched from the checkout's current branch |
 | `thread send ID TEXT`, `thread read ID`, `thread answer ID TEXT` | Message, inspect (last reply, diff stat, pending question), answer |
 | `thread status [--coordinator ID]`, `thread archive ID [--force]` | Worker states; archive after merge (worktree removed, branch kept) |
 

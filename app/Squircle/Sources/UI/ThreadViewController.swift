@@ -217,8 +217,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
         pickers.model.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.modelMenu() ?? []) }])
         pickers.approvals.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.approvalMenu() ?? []) }])
-        // The app agent always runs with full access on the Mac; it supervises workers.
-        pickers.approvals.isHidden = isAgent
         back.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onBack?() }, for: .touchUpInside)
         [deviceTouch, back, simulatorStatus, divider, home, simulator].forEach(view.addSubview)
 

@@ -1,10 +1,9 @@
 //! One agent per app. The app agent is an ordinary T3 thread on Squircle's
-//! own Claude instance (see `setup`), checked out in an integration worktree.
-//! The issues it splits off are ordinary T3 worker threads, each in its own
-//! worktree. Squircle adds only what T3 lacks: who owns which worker, a
-//! context note at the start of every agent turn, and a wake-up when a worker
-//! finishes or needs input. No model runs here; every token is spent inside
-//! T3's provider sessions.
+//! own Claude instance (see `setup`), in the project's folder. It can run
+//! ordinary T3 worker threads, each in its own worktree. Squircle adds only
+//! what T3 lacks: who owns which worker, the agent's thread ID and workers at
+//! the start of each turn, and a wake-up when a worker finishes or needs
+//! input. How to work is up to the user and the agent. No model runs here.
 
 use crate::store::{atomic_json, private_dir, read_json};
 use crate::t3::{T3, T3Config};
@@ -22,17 +21,12 @@ use tokio::sync::RwLock;
 
 /// The T3 provider instance `squircle agent setup` creates.
 pub const INSTANCE: &str = "squircle";
-pub const INTEGRATION_BRANCH: &str = "squircle/integration";
-/// Workers working at once per app: subscription quota, simulators and RAM.
-pub const MAX_WORKING: usize = 3;
 const DEFAULT_MODEL: &str = "claude-opus-5-5";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub project_id: String,
     pub thread_id: String,
-    pub worktree: PathBuf,
-    pub branch: String,
     pub created_at: u64,
 }
 
@@ -341,8 +335,8 @@ impl Agents {
         self.registry.lock().unwrap().agents.values().cloned().collect()
     }
 
-    /// The app agent for a T3 project, created on first use: an integration
-    /// worktree next to the user's checkout and a thread on Squircle's instance.
+    /// The app agent for a T3 project, created on first use: a thread on
+    /// Squircle's instance in the project's folder.
     pub async fn ensure(&self, project_id: &str, message: Option<&str>, model: Option<&str>) -> Result<Agent> {
         let client = self.ready().await?;
         let existing = self.registry.lock().unwrap().agents.get(project_id).cloned();
@@ -364,43 +358,19 @@ impl Agents {
             .any(|p| p["instanceId"] == INSTANCE && p["status"] == "ready");
         ensure!(ready, "T3 has no ready \"{INSTANCE}\" agent instance. Run: squircle agent setup");
 
-        let checkout = PathBuf::from(project["workspaceRoot"].as_str().context("project has no folder")?);
-        let repo = PathBuf::from(git(&checkout, &["rev-parse", "--show-toplevel"]).await
-            .context("The app agent needs the project to be a Git repository")?);
-        let worktree = self.root.join("worktrees").join(project_id);
-        if !worktree.join(".git").exists() {
-            private_dir(&self.root.join("worktrees"))?;
-            let worktree_text = worktree.display().to_string();
-            let has_branch = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{INTEGRATION_BRANCH}")]).await.is_ok();
-            if has_branch {
-                git(&repo, &["worktree", "add", &worktree_text, INTEGRATION_BRANCH]).await?;
-            } else {
-                let base = git(&repo, &["symbolic-ref", "--short", "HEAD"]).await.unwrap_or_else(|_| "HEAD".into());
-                git(&repo, &["worktree", "add", "-b", INTEGRATION_BRANCH, &worktree_text, &base]).await?;
-            }
-        }
-        // T3 runs the thread in the same folder inside the worktree as the
-        // project sits inside its repository.
-        let relative = checkout.canonicalize()?.strip_prefix(repo.canonicalize()?).map(Path::to_path_buf).unwrap_or_default();
-        let cwd = if relative.as_os_str().is_empty() { worktree } else { worktree.join(relative) };
         let model = model.map(str::to_string)
             .or_else(|| project["defaultModelSelection"]["model"].as_str().filter(|_| project["defaultModelSelection"]["instanceId"] == "claudeAgent").map(str::to_string))
             .unwrap_or_else(|| DEFAULT_MODEL.into());
         let thread_id = uuid::Uuid::new_v4().to_string();
         let name = project["title"].as_str().unwrap_or("App");
-        // No branch on the thread: T3's storage cleanup only removes worktrees
-        // of threads that own a branch, and this one must outlive any session.
         client.dispatch(json!({
             "type": "thread.create", "threadId": thread_id, "projectId": project_id,
             "title": format!("{name} agent"),
             "modelSelection": {"instanceId": INSTANCE, "model": model},
             "runtimeMode": "full-access", "interactionMode": "default",
-            "branch": null, "worktreePath": cwd.display().to_string(),
+            "branch": null, "worktreePath": null,
         })).await?;
-        let agent = Agent {
-            project_id: project_id.into(), thread_id, worktree: cwd, branch: INTEGRATION_BRANCH.into(),
-            created_at: crate::model::now(),
-        };
+        let agent = Agent { project_id: project_id.into(), thread_id, created_at: crate::model::now() };
         let mut registry = self.registry.lock().unwrap();
         registry.agents.insert(project_id.into(), agent.clone());
         self.save(&registry)?;
@@ -411,32 +381,27 @@ impl Agents {
         self.registry.lock().unwrap().agents.values().find(|a| a.thread_id == thread_id).cloned()
     }
 
-    /// The note at the start of each agent turn: who it is, the rules that
-    /// must hold, and its workers right now, so nothing depends on memory.
+    /// Facts at the start of each agent turn: its thread ID (needed to spawn
+    /// workers) and its workers right now.
     pub fn context(&self, cwd: &Path) -> String {
-        let agent = self.registry.lock().unwrap().agents.values()
-            .find(|a| same_path(&a.worktree, cwd) || cwd.starts_with(&a.worktree)).cloned();
+        let agents = self.list();
+        let shell = self.shell.lock().unwrap();
+        let agent = agents.into_iter().find(|a| {
+            shell.projects.get(&a.project_id).and_then(|p| p["workspaceRoot"].as_str())
+                .is_some_and(|root| same_path(Path::new(root), cwd) || cwd.starts_with(root))
+        });
+        drop(shell);
         let Some(agent) = agent else {
-            return "[squircle] This folder is not an app agent's worktree; Squircle has no workers for it.".into();
+            return "[squircle] No app agent works in this folder.".into();
         };
         let workers = self.workers(Some(&agent.thread_id));
         let board = if workers.is_empty() {
-            "- none".to_string()
+            "none".to_string()
         } else {
-            workers.iter().map(|w| format!("- {} [{}] {} ({})", w["title"].as_str().unwrap_or(""), w["branch"].as_str().unwrap_or(""),
-                w["state"].as_str().unwrap_or(""), w["id"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n")
+            workers.iter().map(|w| format!("\n- {} [{}] {} ({})", w["title"].as_str().unwrap_or(""), w["branch"].as_str().unwrap_or(""),
+                w["state"].as_str().unwrap_or(""), w["id"].as_str().unwrap_or(""))).collect()
         };
-        format!(
-            "[squircle] You are the app agent. Your thread id: {}. Your integration worktree: {} on {}.\n\
-             Rules for this turn:\n\
-             1. Never block: no question dialogs. Ask in your reply text and keep working on everything else.\n\
-             2. Never commit to the user's main branch on your own initiative. Merge finished worker branches into {} and run the checks.\n\
-             3. One- or two-line obvious fixes you do yourself; everything else goes to a worker. Work on the same code goes to the same worker.\n\
-             4. At most {MAX_WORKING} workers working at once. Do not poll; end your turn and wait for a [worker update].\n\
-             5. End with one line per open issue: title — queued / working / merged / needs you.\n\
-             Workers now:\n{board}",
-            agent.thread_id, agent.worktree.display(), agent.branch, agent.branch
-        )
+        format!("[squircle] Your thread id: {}. Your workers: {board}", agent.thread_id)
     }
 
     // MARK: Workers
@@ -462,20 +427,19 @@ impl Agents {
         let agent = self.agent_for_thread(coordinator)
             .with_context(|| format!("{coordinator} is not an app agent's thread"))?;
         ensure!(!title.trim().is_empty() && !prompt.trim().is_empty(), "A worker needs a title and a prompt");
-        ensure!(branch.starts_with("sq/") && !branch.contains(char::is_whitespace) && !branch.contains(".."),
-                "Worker branches are named sq/<short-name>");
-        let working = self.workers(Some(coordinator)).iter().filter(|w| w["state"] == "working").count();
-        ensure!(working < MAX_WORKING, "{working} workers are already working. Queue this issue and spawn it when a [worker update] says one finished.");
+        ensure!(!branch.is_empty() && !branch.contains(char::is_whitespace) && !branch.contains(".."), "Invalid branch name");
         let project = self.shell.lock().unwrap().projects.get(&agent.project_id).cloned().context("The app's T3 project is gone")?;
         let coordinator_thread = self.thread(coordinator).context("The app agent's thread is gone")?;
         let model = model.map(str::to_string)
             .or_else(|| coordinator_thread["modelSelection"]["model"].as_str().map(str::to_string))
             .unwrap_or_else(|| DEFAULT_MODEL.into());
         let selection = json!({"instanceId": "claudeAgent", "model": model});
-        let base = base.unwrap_or(&agent.branch);
+        let checkout = PathBuf::from(project["workspaceRoot"].as_str().context("The project has no folder")?);
+        let current = git(&checkout, &["symbolic-ref", "--short", "HEAD"]).await.unwrap_or_else(|_| "HEAD".into());
+        let base = base.unwrap_or(&current);
         let id = uuid::Uuid::new_v4().to_string();
         let text = format!(
-            "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. Commit your work on this branch when it is done and verified, then reply with a two-line summary; the app agent reviews and merges it. \
+            "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. \
              To show the app running, use T3's device tools (device_list, device_open) so the user can watch. To publish a recording or screenshot into this thread: {cli} media add --thread {id} --file PATH --caption TEXT. \
              For signed builds: {cli} build start --help.",
             cli = self.cli
@@ -543,7 +507,7 @@ impl Agents {
         let mut diff = Value::Null;
         let mut uncommitted = Value::Null;
         if let Some(path) = thread["worktreePath"].as_str().map(PathBuf::from) {
-            let base = worker.as_ref().map_or(INTEGRATION_BRANCH, |w| w.base.as_str());
+            let base = worker.as_ref().map_or("HEAD", |w| w.base.as_str());
             diff = git(&path, &["diff", "--shortstat", &format!("{base}...HEAD")]).await.map(Value::from).unwrap_or(Value::Null);
             uncommitted = git(&path, &["status", "--porcelain"]).await
                 .map(|s| json!(s.lines().count())).unwrap_or(Value::Null);
