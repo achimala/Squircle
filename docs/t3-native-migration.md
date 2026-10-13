@@ -813,7 +813,9 @@ glass stretches. Verified in the simulator (iPhone 17 Pro, iOS 27.0) from
 (open, mini → full, thread push and back, full → mini, close, interrupted
 open/close): continuous, no clipping, no black; insets measured 12 pt in mini
 and full. Not re-checked: dragging the bubble or panel by finger (the gesture
-code only changed coordinate space).
+code only changed coordinate space). Letters Abroad build with this overlay:
+job `760e6572-a8b8-43ce-9899-3fcd25eb81e9` (overlay key `b82197f2…`, built from
+main at `efa4bf6`); not yet on the phone.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
