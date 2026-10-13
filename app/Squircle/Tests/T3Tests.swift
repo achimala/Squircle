@@ -105,4 +105,25 @@ final class T3Tests: XCTestCase {
             XCTAssertThrowsError(try JSONDecoder().decode(AppConfiguration.self,from:JSONSerialization.data(withJSONObject:bad)))
         }
     }
+
+    func testMarkdownMediaSplitsAtLocalPicturesAndClipsOnly() {
+        let text = """
+        **Before → after:**
+        ![before](/tmp/a.png)
+        ![after](</tmp/b c.png> "title") and more
+        [Real-speed clip](file:///tmp/clip.mp4)
+        [docs](https://example.com/x.png) and [notes](/tmp/notes.md)
+        ```
+        ![code](/tmp/code.png)
+        ```
+        """
+        XCTAssertEqual(Markdown.segments(text), [
+            .text("**Before → after:**"),
+            .media(MediaReference(path: "/tmp/a.png", video: false)),
+            .text(" and more"),
+            .media(MediaReference(path: "/tmp/b c.png", video: false)),
+            .media(MediaReference(path: "/tmp/clip.mp4", video: true)),
+            .text("[docs](https://example.com/x.png) and [notes](/tmp/notes.md)\n```\n![code](/tmp/code.png)\n```")
+        ])
+    }
 }

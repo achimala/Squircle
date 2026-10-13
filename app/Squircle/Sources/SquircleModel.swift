@@ -585,6 +585,15 @@ final class SquircleModel {
     /// becomes the gallery picture.
     func loadVideo(_ stepID: String) async -> URL? {
         if let url = StepVideos.url(for: stepID) { return url }
+        if stepID.hasPrefix("file:") {
+            let path = String(stepID.dropFirst("file:".count))
+            guard let data = await mediaFileData(path) else { return nil }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString).appendingPathExtension((path as NSString).pathExtension)
+            guard (try? data.write(to: url)) != nil else { return nil }
+            StepVideos.set(url, for: stepID)
+            return url
+        }
         let id = String(stepID.dropFirst("media:".count))
         guard let client, let thread = selectedSessionID,
               let data = try? await client.mediaFile(threadID: thread, id: id) else { return nil }
@@ -598,6 +607,19 @@ final class SquircleModel {
         if let attachment {
             guard let data = await attachmentData(attachment) else { return nil }
             StepImages.set(data, for: stepID, index: index)
+            return data
+        }
+        if stepID.hasPrefix("file:") {
+            var data: Data?
+            if MediaFiles.isVideo(stepID) {
+                if let video = await loadVideo(stepID) { data = await Self.poster(of: video) }
+            } else {
+                data = await mediaFileData(String(stepID.dropFirst("file:".count)))
+            }
+            if let data, let image = UIImage(data: data) {
+                MediaFiles.sizes[stepID] = image.size
+                StepImages.set(data, for: stepID, index: index)
+            }
             return data
         }
         if stepID.hasPrefix("media:") {
@@ -618,10 +640,43 @@ final class SquircleModel {
     }
     /// An image sent with a message, through a short-lived URL T3 signs.
     private func attachmentData(_ id: String) async -> Data? {
-        guard let gateway, let base = configuration?.t3URL else { return nil }
-        guard let asset = try? await gateway.call("assets.createUrl", .from(["resource":["_tag":"attachment","attachmentId":id]])),
+        guard let url = await signedURL(["_tag":"attachment","attachmentId":id])?.url else { return nil }
+        return await signedData(url)
+    }
+    /// The pixel size of a picture the agent's Markdown shows, from T3
+    /// before its bytes arrive, so its place in the conversation is reserved.
+    func mediaSize(_ stepID: String) async -> CGSize? {
+        if let size = MediaFiles.sizes[stepID] { return size }
+        guard !MediaFiles.isVideo(stepID), let size = await mediaFileURL(String(stepID.dropFirst("file:".count)))?.size else { return nil }
+        MediaFiles.sizes[stepID] = size
+        return size
+    }
+    /// A file on the Mac the agent's Markdown shows. T3 signs a short-lived
+    /// URL for it as it does for its own web client, and only for pictures,
+    /// video and documents it can preview.
+    private func mediaFileURL(_ path: String) async -> (url: URL, size: CGSize?)? {
+        if let signed = MediaFiles.urls[path], signed.expires > .now.addingTimeInterval(30) { return (signed.url, MediaFiles.sizes["file:" + path]) }
+        guard let thread = selectedSessionID,
+              let signed = await signedURL(["_tag":"media-file","threadId":thread,"path":path]) else { return nil }
+        if let expires = signed.expires { MediaFiles.urls[path] = (signed.url, expires) }
+        return (signed.url, signed.size)
+    }
+    private func mediaFileData(_ path: String) async -> Data? {
+        guard let url = await mediaFileURL(path)?.url else { return nil }
+        return await signedData(url)
+    }
+    private func signedURL(_ resource: [String:Any]) async -> (url: URL, expires: Date?, size: CGSize?)? {
+        guard let gateway, let base = configuration?.t3URL,
+              let asset = try? await gateway.call("assets.createUrl", .from(["resource":resource])),
               let relative = asset["relativeUrl"].string, let url = URL(string: relative, relativeTo: base),
               url.host == base.host else { return nil }
+        let size = asset["imageDimensions"]["width"].double.flatMap { width in
+            asset["imageDimensions"]["height"].double.map { CGSize(width: width, height: $0) }
+        }
+        return (url, asset["expiresAt"].double.map { Date(timeIntervalSince1970: $0 / 1000) }, size)
+    }
+    private func signedData(_ url: URL) async -> Data? {
+        guard let gateway else { return nil }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(gateway.http.token)", forHTTPHeaderField: "Authorization")
         guard let (data, response) = try? await gateway.http.session.data(for: request),

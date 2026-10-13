@@ -1298,3 +1298,27 @@ thread over it, and the overlay docked (unchanged from the overlay's design A);
 `a7292357-04cf-4aa5-8a8f-d192f615a730` (0.3.0 41, main at `8174ff2`); not yet on
 the phone.
 
+
+## 2026-10-13 inline media in agent text, 0.3.0 (42)
+
+User: "Inline photos and stuff seem broken." Agents write Markdown with
+absolute Mac paths (`![after](/Users/…/cmp-after.png)`,
+`[clip](/Users/…/capture.mp4)`); the phone showed only the alt text.
+
+- `Markdown.segments` cuts an answer or note at local pictures (`![alt](path)`
+  or a link straight to an image file) and clips (`.mp4`, `.mov`, `.m4v`);
+  alt text is dropped as a caption, web URLs and code fences stay text.
+- Consecutive media form one `.figure` row (`FigureCell`): an album layout at
+  the text's width and each file's own proportions, rows no taller than 440 pt
+  and no shorter than 190 pt, so phone screenshots pair up and a wide composite
+  keeps its own row. Clips play inline, muted and looping; a tap opens a picture
+  full screen (zoomable) or a clip with sound.
+- Files load through T3's own signed asset URLs (`assets.createUrl` with a
+  `media-file` resource for the thread and path), as T3's web client does; T3
+  serves only previewable media types. Its `imageDimensions` reserve each
+  picture's box before the bytes arrive. No Squircle service change.
+
+Checked in the simulator on the Squircle agent thread and a worker thread over
+it: before, "before", "after" and "drag" showed as words; after, the composites,
+screenshots and the clip show in place, the clip plays, and both tap through to
+full screen. Images you send were unaffected (none in that thread).

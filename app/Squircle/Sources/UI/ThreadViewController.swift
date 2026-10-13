@@ -213,6 +213,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.register(HeaderCell.self, forCellReuseIdentifier: "header")
         table.register(StepCell.self, forCellReuseIdentifier: "step")
         table.register(GalleryCell.self, forCellReuseIdentifier: "gallery")
+        table.register(FigureCell.self, forCellReuseIdentifier: "figure")
         table.register(SummaryCell.self, forCellReuseIdentifier: "summary")
         table.register(LiveCell.self, forCellReuseIdentifier: "live")
         table.register(BuildCell.self, forCellReuseIdentifier: "build")
@@ -496,6 +497,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .user, .update, .answer, .note, .thought: return "message"
         case .step, .earlier: return "step"
         case .gallery: return "gallery"
+        case .figure: return "figure"
         case .summary: return "summary"
         case .live: return "live"
         case .build: return "build"
@@ -731,6 +733,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                            trailing: id.hasPrefix("gallery:sent:"))
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
             for shot in shots where GalleryCell.image(for: shot) == nil { loadImage(shot, item: id) }
+        case .figure(let id, let shots):
+            guard let cell = cell as? FigureCell else { return }
+            cell.configure(shots, width: table.bounds.width)
+            cell.onTap = { [weak self] shot in self?.showImage(shot) }
+            for shot in shots where FigureCell.image(for: shot) == nil { loadFigure(shot, item: id) }
         case .summary(let summary):
             (cell as? SummaryCell)?.configure(summary)
         case .live(let status):
@@ -852,6 +859,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .thought: return 52
         case .step, .earlier: return 36
         case .gallery: return GalleryCell.height + 20
+        case .figure(_, let shots): return FigureCell.height(shots, width: tableView.bounds.width)
         case .summary: return 54
         case .live: return 72
         case .build: return 74
@@ -935,6 +943,26 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             await dataSource.apply(snapshot, animatingDifferences: false)
             if pinToBottom { scrollToBottom(animated: true) }
         }
+    }
+
+    /// Its size first, so the conversation makes room once, then the picture.
+    private func loadFigure(_ shot: Shot, item: String) {
+        guard loadingImages.insert(shot.step).inserted else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            if MediaFiles.sizes[shot.step] == nil, await model.mediaSize(shot.step) != nil { await reconfigure(item) }
+            let data = await model.loadStepImage(shot.step, index: shot.index)
+            loadingImages.remove(shot.step)
+            if data != nil { await reconfigure(item) }
+        }
+    }
+
+    private func reconfigure(_ item: String) async {
+        guard dataSource.indexPath(for: item) != nil else { return }
+        var snapshot = dataSource.snapshot()
+        snapshot.reconfigureItems([item])
+        await dataSource.apply(snapshot, animatingDifferences: false)
+        if pinToBottom { scrollToBottom(animated: true) }
     }
 
     private func showImage(_ shot: Shot) {
