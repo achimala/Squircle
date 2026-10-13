@@ -388,9 +388,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         sync()
     }
 
-    /// The point where the panel starts to cover the host app. Image
-    /// attachments capture the app's screen here and hand it to the agent.
-    private func hostWillBeCovered() {}
+    /// The panel starts to cover the host app: its screen goes into the
+    /// message field as an attachment first.
+    private func hostWillBeCovered() {
+        if let window = view.window { HostCapture.attach(below: window, to: model) }
+    }
 
     private func close() {
         guard route.open else { return }

@@ -123,8 +123,7 @@ final class BuildsViewController: UIViewController {
                 let row = BuildRow(buildID: build.id)
                 row.addAction(UIAction { [weak self, weak row] _ in
                     guard let self, let build = row?.build else { return }
-                    if build.canInstall { self.installBuild(build) }
-                    else { self.showMessage(title: BuildRow.statusText(for: build), message: build.previewError) }
+                    self.showDetail(build)
                 }, for: .touchUpInside)
                 rowViews[build.id] = row
                 return row
@@ -181,6 +180,16 @@ final class BuildsViewController: UIViewController {
         }
     }
 
+    private func showDetail(_ build: AppBuild) {
+        guard presentedViewController == nil else { return }
+        Theme.selectionHaptic()
+        let navigation = UINavigationController(rootViewController: BuildDetailViewController(model: model, build: build))
+        navigation.modalPresentationStyle = .pageSheet
+        navigation.sheetPresentationController?.detents = [.large()]
+        navigation.sheetPresentationController?.prefersGrabberVisible = true
+        present(navigation, animated: true)
+    }
+
     private func showMessage(title: String, message: String?) {
         guard presentedViewController == nil, view.window != nil else { return }
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
@@ -189,7 +198,7 @@ final class BuildsViewController: UIViewController {
     }
 }
 
-/// Version, real job state and age. Tapping a finished IPA installs it.
+/// Version, real job state and age. Tapping opens the build's detail.
 @MainActor
 final class BuildRow: UIControl {
     let buildID: String
@@ -199,7 +208,7 @@ final class BuildRow: UIControl {
     private let spinner = UIActivityIndicatorView(style: .medium)
     private let titleLabel = Theme.label("", Theme.font(.headline, 17, .semibold))
     private let detailLabel = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel, lines: 2)
-    private let actionLabel = Theme.label("", Theme.font(.subheadline, 15, .semibold), color: Theme.accent)
+    private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
     private let separator = UIView()
     private let highlight = UIView()
     private static let formatter: RelativeDateTimeFormatter = {
@@ -222,14 +231,15 @@ final class BuildRow: UIControl {
         symbol.contentMode = .scaleAspectFit
         symbol.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .title3)
         spinner.hidesWhenStopped = true
-        actionLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        actionLabel.setContentHuggingPriority(.required, for: .horizontal)
+        chevron.tintColor = .tertiaryLabel
+        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .footnote, scale: .medium)
+        chevron.setContentHuggingPriority(.required, for: .horizontal)
         let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
         text.axis = .vertical
         text.spacing = 3
         let glyph = UIView()
         [symbol, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glyph.addSubview($0) }
-        let content = UIStackView(arrangedSubviews: [glyph, text, actionLabel])
+        let content = UIStackView(arrangedSubviews: [glyph, text, chevron])
         content.alignment = .center
         content.spacing = 14
         content.isUserInteractionEnabled = false
@@ -265,6 +275,7 @@ final class BuildRow: UIControl {
         case "succeeded": return "Succeeded"
         case "failed": return "Failed"
         case "cancelled": return "Cancelled"
+        case "interrupted": return "Interrupted"
         default: return build.status.capitalized
         }
     }
@@ -278,7 +289,7 @@ final class BuildRow: UIControl {
         switch build.status {
         case "succeeded": symbolName = "checkmark.circle.fill"; tint = Theme.success
         case "failed": symbolName = "xmark.octagon.fill"; tint = Theme.failure
-        case "cancelled": symbolName = "minus.circle.fill"; tint = .secondaryLabel
+        case "cancelled", "interrupted": symbolName = "minus.circle.fill"; tint = .secondaryLabel
         case "queued": symbolName = "clock.fill"; tint = .secondaryLabel
         case "running": symbolName = nil; tint = .secondaryLabel
         default: symbolName = "circle.dashed"; tint = .secondaryLabel
@@ -286,8 +297,6 @@ final class BuildRow: UIControl {
         symbol.image = symbolName.map { UIImage(systemName: $0) } ?? nil
         symbol.tintColor = tint
         if symbolName == nil { spinner.startAnimating() } else { spinner.stopAnimating() }
-        actionLabel.text = build.canInstall ? "Install" : nil
-        actionLabel.isHidden = !build.canInstall
         updateDate()
     }
 
@@ -298,7 +307,7 @@ final class BuildRow: UIControl {
         if build.date.timeIntervalSince1970 > 0 { parts.append(Self.formatter.localizedString(for: build.date, relativeTo: .now)) }
         let detail = parts.joined(separator: " · ")
         if detailLabel.text != detail { detailLabel.text = detail }
-        accessibilityLabel = [titleLabel.text, detail, build.canInstall ? "Install" : nil].compactMap { $0 }.joined(separator: ", ")
+        accessibilityLabel = [titleLabel.text, detail].compactMap { $0 }.joined(separator: ", ")
     }
 
     override var isHighlighted: Bool {

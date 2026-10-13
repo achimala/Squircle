@@ -26,7 +26,7 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `init`, `serve` | Private state/credentials; foreground HTTP service |
 | `auth show --scope diagnostics` | Explicitly reveal the phone upload credential |
 | `build start` | Durable job ID; archive/export or unsigned simulator mode. Non-App-Store device exports get the debug overlay injected unless `--no-overlay` |
-| `build list`, `build status ID` | Persisted job records and launch acknowledgement |
+| `build list`, `build status ID` | Persisted job records and launch acknowledgement; `status` of a failed job adds `failure` (failing step, exit status, Xcode `error:` lines with file, line and source excerpt, failed commands) read from its log |
 | `build wait ID --timeout 60` | Completion or bounded timeout; no implicit cancellation |
 | `build cancel ID` | Cancel that queued/running job |
 | `build log ID --offset N --limit N` | Bounded compiler log, byte cursor |
