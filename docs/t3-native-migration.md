@@ -958,3 +958,75 @@ gone. Beside back sit two glass buttons: Threads opens a full-height sheet
 listing the app's other threads (title, status, model, age) with a New Thread
 button; picking one closes the sheet and pushes the thread over the agent.
 Builds opens the builds sheet.
+
+## 2026-10-13 simulator jank and agent PiP: findings and proposal (not yet approved)
+
+User report: opening or resizing the simulator tray (divider docked/half/full)
+drops frames; simulator use feels janky; wanted: the simulator only as a PiP
+while an agent (the app agent or its workers, possibly several) is using it,
+otherwise no simulator UI, and the transcript showing where a simulator was
+used, live while in use and the recording afterwards.
+
+**Measured (simulator only, iOS 27.0 on the Mac, optimized DEBUG build, live
+H.264 stream of Cards-Verify, 9 runs of each detent move):** main-thread work
+per divider frame mean 0.6–1.2 ms, worst 6.9 ms (`layoutStage`; `applyScene`
+≤0.65 ms and runs twice per frame because the table's inset change re-enters
+layout); SceneKit encode ≤0.65 ms. Dropped frames were rare (0–5 per 1.4 s
+move). The CPU is therefore not the cause; the simulator draws on the Mac's
+GPU and cannot show the phone's GPU/compositor cost. Not measured on the phone
+(that requires replacing the installed build with an instrumented one).
+
+**Why it is heavy on the phone (from the code, sizes for iPhone 17 Pro Max at
+120 Hz):** the stage is one full-screen, non-opaque `SCNView` at native scale
+(1320×2868) with 4× MSAA and jittering, physically based materials, IBL, a
+directional light and three area lights, composited over all UIKit content.
+While a stream is live it re-renders the whole scene for every decoded frame,
+even at rest (measured: 85 renders in 1.4 s idle at half, i.e. every frame).
+During a divider move, on top of that, the conversation's clip view is
+resized under a `CAGradientLayer` mask (an offscreen pass over the
+conversation every frame), the table's content inset changes and it
+re-scrolls to the bottom with forced layout, and the glass buttons on the
+divider move and rescale. The 3D tilt of a tap-driven move adds more screen
+area. Opening also starts the stream and decoder in the same moment.
+
+**Signals available today.** T3 0.0.45 `subscribeDeviceState` lists
+`sessions: {threadId, hostId, deviceId, platform, openedAt}` for every thread
+(Squircle currently reads only the selected thread's), plus `bootingDevices`.
+A session lasts until `device_close`, so "in use" = an open session and that
+thread's turn running. agent-device keeps per-session `events.ndjson` (every
+command with timestamps) and `screen-recording.resource.json` under
+`~/.t3/userdata/device/agent-device/sessions/`. T3 has no device recording
+API; agent recordings exist only when the agent runs `agent-device record`
+and `squircle media add` (Squircle's media endpoint then serves them).
+`device_open`/`device_screenshot` tool calls are in `state.sqlite`, so the
+steps endpoint can place a simulator span in its turn.
+
+**Proposal (needs the user's sign-off; replaces the divider/detent design and
+the live simulator on the 3D device).**
+
+1. No simulator in a conversation at rest: no divider, docked device or
+   simulator menu. Home keeps its still 3D portraits.
+2. While any thread of the app has an open device session and a running turn,
+   a flat PiP floats over the conversation: a rounded `AVSampleBufferDisplayLayer`
+   fed by the existing H.264 stream (no SceneKit), draggable to any corner
+   with velocity snapping like FaceTime. Several agents: one PiP per simulator,
+   stacked, each captioned with its thread; tapping a worker's PiP opens that
+   thread. Tap expands it large and interactive (touch input, Home); swipe
+   down shrinks it back. Optional: system PiP (`AVPictureInPictureController`
+   with the sample-buffer layer) so it keeps playing outside Squircle.
+3. When the turn ends or the session closes, the PiP flies into its turn in
+   the transcript and becomes the recording.
+4. Transcript: a simulator block in the turn where use began: live while in
+   use (the PiP docks into it when that row is on screen, so one decoder),
+   then the recording, inline and muted, full screen on tap.
+5. Recording: the Squircle service records each (thread, simulator) span
+   itself with `simctl io recordVideo`, starting at the session/turn and
+   stopping at turn end or `device_close`, and stores it as thread media
+   tagged with the turn. Agent-published clips stay. Unknown: simctl
+   recording alongside agent-device's own recording of the same simulator,
+   and two threads sharing one simulator (one recording, shown in both).
+6. The device no longer travels into the conversation: the push is flat and
+   the tapped portrait goes with Home.
+
+Unmeasured risks: several H.264 streams over cellular (T3 0.0.45 offers no
+stream size control), and decoder cost of 2–3 streams on the phone.
