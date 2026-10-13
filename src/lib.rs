@@ -7,6 +7,7 @@ pub mod overlay;
 pub mod preview;
 pub mod projects;
 pub mod server;
+pub mod sims;
 pub mod store;
 pub mod symbolicate;
 pub mod t3;

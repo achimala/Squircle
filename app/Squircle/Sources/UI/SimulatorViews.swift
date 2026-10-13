@@ -1,0 +1,649 @@
+import AVFoundation
+import AVKit
+import UIKit
+
+/// A simulator an agent is using now, or used in a turn and recorded.
+struct SimulatorUse: Equatable {
+    /// Squircle's session ID, or `t3:<thread>:<device>` for a device T3
+    /// opened for a working thread without Squircle recording it.
+    let id: String
+    let threadID: String
+    let target: SimulatorTarget
+    let deviceName: String
+    let started: Date
+    var live: Bool
+    /// The recording in the thread's media, once filed.
+    var recordingID: String?
+}
+
+/// Draws decoded simulator pictures flat, through the system's video layer:
+/// no 3D scene, no per-frame drawing of our own.
+@MainActor
+final class SimulatorScreen: UIView {
+    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+    private var display: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+    private var format: CMVideoFormatDescription?
+    /// Pixel size of the latest picture; zero before the first.
+    private(set) var pictureSize: CGSize = .zero
+    fileprivate(set) var target: SimulatorTarget?
+    var onPictureSize: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        display.videoGravity = .resizeAspect
+        backgroundColor = UIColor(white: 0.06, alpha: 1)
+        isUserInteractionEnabled = false
+        accessibilityIgnoresInvertColors = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Height over width of what is shown, or a phone's when nothing has arrived.
+    var aspect: CGFloat { pictureSize.width > 0 ? pictureSize.height / pictureSize.width : 2.17 }
+
+    func show(_ buffer: CVPixelBuffer) {
+        if format == nil || !CMVideoFormatDescriptionMatchesImageBuffer(format!, imageBuffer: buffer) {
+            var next: CMVideoFormatDescription?
+            CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: buffer, formatDescriptionOut: &next)
+            format = next
+        }
+        guard let format else { return }
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                                        decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: buffer, formatDescription: format,
+                                                 sampleTiming: &timing, sampleBufferOut: &sample)
+        guard let sample else { return }
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true), CFArrayGetCount(attachments) > 0 {
+            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+        }
+        let renderer = display.sampleBufferRenderer
+        if renderer.status == .failed { renderer.flush() }
+        renderer.enqueue(sample)
+        let size = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
+        if size != pictureSize {
+            pictureSize = size
+            onPictureSize?()
+        }
+    }
+}
+
+/// One T3 stream per simulator, shared by every screen showing it (a PiP
+/// and the turn it belongs to), running only while some screen shows it.
+@MainActor
+final class SimulatorFeeds {
+    private struct Weak { weak var screen: SimulatorScreen? }
+    private final class Feed {
+        let stream: T3DeviceStream
+        var screens: [Weak] = []
+        var last: CVPixelBuffer?
+        var orientation = "portrait"
+        var lastInput: CGPoint?
+        init(stream: T3DeviceStream) { self.stream = stream }
+    }
+    private var feeds: [SimulatorTarget: Feed] = [:]
+    private let model: SquircleModel
+    private var active = true
+    /// A feed's interactivity changed (input became ready or was lost).
+    var onInteractive: (() -> Void)?
+
+    init(model: SquircleModel) {
+        self.model = model
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: UIApplication.didEnterBackgroundNotification) {
+                self?.setActive(false)
+            }
+        }
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: UIApplication.didBecomeActiveNotification) {
+                self?.setActive(true)
+            }
+        }
+    }
+
+    private func setActive(_ value: Bool) {
+        active = value
+        for feed in feeds.values { if value { feed.stream.start() } else { feed.stream.stop() } }
+    }
+
+    /// Shows `target` on `screen` (nil: nothing), sharing a running stream.
+    func attach(_ screen: SimulatorScreen, to target: SimulatorTarget?) {
+        guard screen.target != target else { return }
+        if let old = screen.target, let feed = feeds[old] {
+            feed.screens.removeAll { $0.screen == nil || $0.screen === screen }
+            release(old)
+        }
+        screen.target = target
+        guard let target, let feed = feeds[target] ?? makeFeed(target) else { return }
+        feed.screens.append(Weak(screen: screen))
+        if let last = feed.last { screen.show(last) }
+    }
+
+    private func release(_ target: SimulatorTarget) {
+        guard let feed = feeds[target] else { return }
+        feed.screens.removeAll { $0.screen == nil }
+        if feed.screens.isEmpty {
+            feed.stream.stop()
+            feeds[target] = nil
+        }
+    }
+
+    private func makeFeed(_ target: SimulatorTarget) -> Feed? {
+        guard let http = model.gateway?.http else { return nil }
+        let feed = Feed(stream: T3DeviceStream(http: http, base: model.devices["hubBasePath"].string ?? "/api/device-hub", target: target))
+        feed.stream.onFrame = { [weak self, weak feed] buffer in
+            guard let feed else { return }
+            feed.last = buffer
+            for weak in feed.screens { weak.screen?.show(buffer) }
+            if feed.screens.contains(where: { $0.screen == nil }) { self?.release(target) }
+        }
+        feed.stream.onScreen = { [weak feed] in feed?.orientation = $0["orientation"].string ?? "portrait" }
+        feed.stream.onInteractive = { [weak self] _ in self?.onInteractive?() }
+        feeds[target] = feed
+        if active { feed.stream.start() }
+        return feed
+    }
+
+    func isInteractive(_ target: SimulatorTarget) -> Bool { feeds[target]?.stream.isInteractive == true }
+
+    /// A touch on `screen`, in its own coordinates. False when it missed the picture.
+    @discardableResult
+    func touch(_ phase: String, at point: CGPoint, on screen: SimulatorScreen) -> Bool {
+        guard let target = screen.target, let feed = feeds[target], feed.stream.isInteractive, screen.pictureSize.width > 0 else { return false }
+        let mapped = SimulatorSurface.point(point, bounds: screen.bounds, size: screen.pictureSize, orientation: feed.orientation)
+        guard let input = mapped ?? (phase == "begin" ? nil : feed.lastInput) else { return false }
+        feed.lastInput = phase == "end" ? nil : input
+        feed.stream.touch(phase, point: input)
+        return true
+    }
+
+    func home(_ target: SimulatorTarget) {
+        guard let stream = feeds[target]?.stream else { return }
+        Task { try? await stream.send(tag: 4, payload: .from(["button": "home"])) }
+    }
+}
+
+/// Floating pictures of the simulators this app's agents are using right
+/// now, stacked in a corner the person drags them to. Tapping one brings it
+/// large and touchable; it shrinks back with a swipe down or a tap outside.
+/// Everything shown is derived from `uses`, the corner, and two springs.
+@MainActor
+final class SimulatorDock: UIView {
+    enum Corner: String { case topLeft, topRight, bottomLeft, bottomRight }
+
+    var onOpenThread: ((String) -> Void)?
+    /// Uses whose own block in the conversation is on screen show there instead.
+    var docked = Set<String>() { didSet { if docked != oldValue { animateLayout() } } }
+    var bottomInset: CGFloat = 120 { didSet { if bottomInset != oldValue { setNeedsLayout() } } }
+    private(set) var uses: [SimulatorUse] = []
+    private var currentThread: String?
+    private var titles: [String: String] = [:]
+    private let feeds: SimulatorFeeds
+    private var pips: [String: PiP] = [:]
+    private var order: [String] = []
+
+    private var corner: Corner
+    /// The stack's top-left while it is dragged or settling into a corner.
+    private let originX = SpringDriver()
+    private let originY = SpringDriver()
+    private var dragging = false
+    private var dragStart = CGPoint.zero
+    /// 0 = in the stack, 1 = large. `expanded` changes only at 0.
+    private let expansion = SpringDriver()
+    private var expanded: String?
+    private var wantExpanded: String?
+    private var collapseStart: CGFloat = 0
+
+    private let backdrop = UIView()
+    private let home = Theme.glassButton(symbol: "house", identifier: "simulator.home", accessibilityLabel: "Simulator Home")
+    private let open = Theme.glassButton(symbol: "bubble.left.and.text.bubble.right", identifier: "simulator.thread", accessibilityLabel: "Open thread")
+    private let shrink = Theme.glassButton(symbol: "chevron.down", identifier: "simulator.shrink", accessibilityLabel: "Shrink simulator")
+
+    init(feeds: SimulatorFeeds) {
+        self.feeds = feeds
+        corner = Corner(rawValue: UserDefaults.standard.string(forKey: "squircle.simulator.corner") ?? "") ?? .topRight
+        super.init(frame: .zero)
+        backdrop.backgroundColor = UIColor.black
+        backdrop.alpha = 0
+        backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(collapse)))
+        backdrop.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(collapsePanned(_:))))
+        addSubview(backdrop)
+        for button in [home, open, shrink] { addSubview(button) }
+        home.addAction(UIAction { [weak self] _ in
+            guard let self, let use = uses.first(where: { $0.id == self.expanded }) else { return }
+            Theme.selectionHaptic()
+            feeds.home(use.target)
+        }, for: .touchUpInside)
+        open.addAction(UIAction { [weak self] _ in
+            guard let self, let use = uses.first(where: { $0.id == self.expanded }) else { return }
+            Theme.selectionHaptic()
+            collapse()
+            onOpenThread?(use.threadID)
+        }, for: .touchUpInside)
+        shrink.addAction(UIAction { [weak self] _ in self?.collapse() }, for: .touchUpInside)
+        expansion.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.86)
+        originX.parameters = SpringDriver.Parameters(response: 0.38, damping: 0.8)
+        originY.parameters = originX.parameters
+        for driver in [expansion, originX, originY] {
+            driver.onChange = { [weak self] _ in self?.layoutDock() }
+            driver.onRest = { [weak self] _ in self?.sync() }
+        }
+        feeds.onInteractive = { [weak self] in self?.layoutDock() }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Simulators in use, the conversation on screen and thread titles.
+    func update(uses next: [SimulatorUse], currentThread: String?, titles: [String: String]) {
+        self.currentThread = currentThread
+        self.titles = titles
+        let ids = next.map(\.id)
+        guard next != uses || ids != order else { layoutDock(); return }
+        uses = next
+        for (id, pip) in pips where !ids.contains(id) {
+            pips[id] = nil
+            feeds.attach(pip.screen, to: nil)
+            UIView.animate(springDuration: 0.35, bounce: 0) {
+                pip.alpha = 0
+                pip.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+            } completion: { _ in pip.removeFromSuperview() }
+        }
+        for use in next where pips[use.id] == nil {
+            let pip = PiP(use: use)
+            pip.screen.onPictureSize = { [weak self] in self?.animateLayout() }
+            pip.onTap = { [weak self] in self?.expand(use.id) }
+            pip.onPan = { [weak self] gesture in self?.panned(gesture) }
+            pip.onTouch = { [weak self, weak pip] phase, point in
+                guard let self, let pip, expanded == pip.use.id, expansion.target == 1 else { return false }
+                return feeds.touch(phase, at: point, on: pip.screen)
+            }
+            insertSubview(pip, belowSubview: home)
+            pips[use.id] = pip
+            feeds.attach(pip.screen, to: use.target)
+            pip.alpha = 0
+            pip.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+        }
+        order = ids
+        if let wanted = wantExpanded, !ids.contains(wanted) { wantExpanded = nil }
+        sync()
+        animateLayout()
+    }
+
+    // MARK: State
+
+    /// Brings a simulator large (from its PiP or its block in the conversation).
+    func expand(_ id: String) {
+        guard expansion.target == 0 || expanded == id else { return }
+        Theme.openHaptic()
+        wantExpanded = id
+        sync()
+    }
+
+    @objc private func collapse() {
+        guard wantExpanded != nil else { return }
+        Theme.selectionHaptic()
+        wantExpanded = nil
+        sync()
+    }
+
+    /// What is expanded changes only while nothing is; the spring heads to
+    /// whatever `wantExpanded` implies.
+    private func sync() {
+        if expansion.value <= 0.001, !expansion.isAnimating, expanded != wantExpanded {
+            expanded = wantExpanded
+        }
+        let target: CGFloat = expanded != nil && expanded == wantExpanded ? 1 : 0
+        if expansion.target != target || (!expansion.isAnimating && expansion.value != target) {
+            expansion.redirect(to: target)
+        }
+        if !dragging, !originX.isAnimating, !originY.isAnimating {
+            let rest = cornerOrigin(corner)
+            originX.set(rest.x)
+            originY.set(rest.y)
+        }
+        layoutDock()
+    }
+
+    // MARK: Geometry
+
+    private var pipWidth: CGFloat { uses.count > 2 ? 78 : 96 }
+    private static let gap: CGFloat = 10
+    private static let captionHeight: CGFloat = 16
+
+    private var shown: [SimulatorUse] { uses.filter { !docked.contains($0.id) || $0.id == expanded } }
+
+    private func showsCaption(_ use: SimulatorUse) -> Bool { uses.count > 1 || use.threadID != currentThread }
+
+    private func pipHeight(_ use: SimulatorUse) -> CGFloat {
+        (pips[use.id].map { pipWidth * $0.screen.aspect } ?? pipWidth * 2.17).rounded()
+    }
+
+    private var stackSize: CGSize {
+        let heights = shown.map { pipHeight($0) + (showsCaption($0) ? Self.captionHeight + 4 : 0) }
+        return CGSize(width: pipWidth, height: heights.reduce(0, +) + Self.gap * CGFloat(max(0, heights.count - 1)))
+    }
+
+    private var area: CGRect {
+        CGRect(x: 12, y: safeAreaInsets.top + 56, width: bounds.width - 24,
+               height: max(0, bounds.height - bottomInset - safeAreaInsets.top - 56))
+    }
+
+    private func cornerOrigin(_ corner: Corner) -> CGPoint {
+        let area = self.area, size = stackSize
+        let x = corner == .topLeft || corner == .bottomLeft ? area.minX : area.maxX - size.width
+        let y = corner == .topLeft || corner == .topRight ? area.minY : max(area.minY, area.maxY - size.height)
+        return CGPoint(x: x, y: y)
+    }
+
+    private var bigFrame: CGRect {
+        let top = safeAreaInsets.top + 12
+        let available = CGRect(x: 16, y: top, width: bounds.width - 32, height: bounds.height - top - safeAreaInsets.bottom - 84)
+        let aspect = expanded.flatMap { pips[$0]?.screen.aspect } ?? 2.17
+        let height = min(available.height, available.width * aspect)
+        let width = height / aspect
+        return CGRect(x: available.midX - width / 2, y: available.minY, width: width, height: height)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        backdrop.frame = bounds
+        sync()
+    }
+
+    private func animateLayout() {
+        UIView.animate(springDuration: 0.4, bounce: 0.12, initialSpringVelocity: 0, delay: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) {
+            self.sync()
+        }
+    }
+
+    /// Every PiP's frame, the backdrop and controls, from the state alone.
+    private func layoutDock() {
+        guard bounds.width > 0 else { return }
+        let e = expansion.value.clamped()
+        var y = originY.value
+        let x = originX.value
+        let shown = self.shown
+        for use in uses {
+            guard let pip = pips[use.id] else { continue }
+            let visible = shown.contains(use)
+            let height = pipHeight(use)
+            var frame = CGRect(x: x, y: y, width: pipWidth, height: height)
+            if visible { y += height + (showsCaption(use) ? Self.captionHeight + 4 : 0) + Self.gap }
+            let isExpanded = use.id == expanded
+            if isExpanded { frame = frame.lerp(to: bigFrame, e) }
+            pip.transform = .identity
+            pip.frame = frame
+            pip.cornerRadius = .lerp(12, 30, isExpanded ? e : 0)
+            pip.caption.text = titles[use.threadID] ?? "Thread"
+            pip.caption.alpha = showsCaption(use) && !(isExpanded && e > 0.05) ? 1 : 0
+            pip.alpha = visible ? (isExpanded ? 1 : 1 - e) : 0
+            pip.isUserInteractionEnabled = visible && (e < 0.01 || isExpanded)
+            pip.interactive = isExpanded && e > 0.99
+            pip.accessibilityLabel = (titles[use.threadID] ?? "Agent") + " simulator, " + use.deviceName
+        }
+        backdrop.alpha = 0.42 * e
+        backdrop.isUserInteractionEnabled = expansion.target == 1
+        let big = bigFrame
+        let buttonY = big.maxY + 16
+        let showsOpen = expanded.flatMap { id in uses.first { $0.id == id } }.map { $0.threadID != currentThread } ?? false
+        let buttons = [home] + (showsOpen ? [open] : []) + [shrink]
+        let total = CGFloat(buttons.count) * 48 + CGFloat(buttons.count - 1) * 16
+        for (index, button) in [home, open, shrink].enumerated() {
+            let slot = buttons.firstIndex(of: button)
+            button.isHidden = slot == nil
+            let left = bounds.midX - total / 2 + CGFloat(slot ?? index) * 64
+            button.transform = .identity
+            button.frame = CGRect(x: left, y: buttonY, width: 48, height: 48)
+            button.alpha = e
+            button.transform = CGAffineTransform(translationX: 0, y: (1 - e) * 24)
+            button.isUserInteractionEnabled = expansion.target == 1
+        }
+        if let id = expanded, let use = uses.first(where: { $0.id == id }) { home.isEnabled = feeds.isInteractive(use.target) }
+        accessibilityElements = expansion.target == 1
+            ? [expanded.flatMap { pips[$0] }, home, showsOpen ? open : nil, shrink].compactMap { $0 }
+            : uses.compactMap { pips[$0.id] }.filter { $0.alpha > 0 }
+    }
+
+    // MARK: Gestures
+
+    /// Collapsed: the whole stack follows the finger, then springs to the
+    /// corner it was thrown toward.
+    private func panned(_ gesture: UIPanGestureRecognizer) {
+        guard expansion.target == 0 else { return }
+        switch gesture.state {
+        case .began:
+            dragging = true
+            originX.stop(); originY.stop()
+            dragStart = CGPoint(x: originX.value, y: originY.value)
+        case .changed:
+            let t = gesture.translation(in: self)
+            originX.set(dragStart.x + t.x)
+            originY.set(dragStart.y + t.y)
+        case .ended, .cancelled, .failed:
+            dragging = false
+            let v = gesture.velocity(in: self)
+            let size = stackSize
+            let projected = CGPoint(x: originX.value + size.width / 2 + v.x * 0.2, y: originY.value + size.height / 2 + v.y * 0.2)
+            let area = self.area
+            let left = projected.x < area.midX, top = projected.y < area.midY
+            let next: Corner = top ? (left ? .topLeft : .topRight) : (left ? .bottomLeft : .bottomRight)
+            if next != corner { Theme.selectionHaptic() }
+            corner = next
+            UserDefaults.standard.set(next.rawValue, forKey: "squircle.simulator.corner")
+            let rest = cornerOrigin(next)
+            originX.animate(to: rest.x, initialVelocity: v.x)
+            originY.animate(to: rest.y, initialVelocity: v.y)
+        default: break
+        }
+    }
+
+    /// Expanded: dragging down outside the picture shrinks it with the finger.
+    @objc private func collapsePanned(_ gesture: UIPanGestureRecognizer) {
+        let span = max(1, bounds.height * 0.5)
+        switch gesture.state {
+        case .began:
+            expansion.stop()
+            collapseStart = expansion.value
+        case .changed:
+            expansion.set((collapseStart - gesture.translation(in: self).y / span).clamped())
+        case .ended, .cancelled, .failed:
+            let velocity = -gesture.velocity(in: self).y / span
+            let closing = expansion.value + velocity * 0.2 < 0.6
+            if closing { wantExpanded = nil; Theme.selectionHaptic() }
+            expansion.animate(to: closing ? 0 : 1, initialVelocity: velocity)
+        default: break
+        }
+    }
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        return hit === self ? nil : hit
+    }
+}
+
+/// One floating simulator picture with its thread's name beneath.
+@MainActor
+private final class PiP: UIView {
+    let use: SimulatorUse
+    let screen = SimulatorScreen()
+    let caption = Theme.label("", Theme.font(.caption2, 11, .semibold), color: .secondaryLabel)
+    private let frameView = UIView()
+    private let dot = UIView()
+    var onTap: (() -> Void)?
+    var onPan: ((UIPanGestureRecognizer) -> Void)?
+    var onTouch: ((_ phase: String, _ point: CGPoint) -> Bool)?
+    /// Large: raw touches go to the simulator instead of moving the PiP.
+    var interactive = false {
+        didSet { tap.isEnabled = !interactive; pan.isEnabled = !interactive }
+    }
+    var cornerRadius: CGFloat = 12 {
+        didSet { frameView.layer.cornerRadius = cornerRadius; screen.layer.cornerRadius = cornerRadius }
+    }
+    private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+    private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+    private var tracking = false
+
+    init(use: SimulatorUse) {
+        self.use = use
+        super.init(frame: .zero)
+        frameView.layer.cornerCurve = .continuous
+        frameView.layer.shadowColor = UIColor.black.cgColor
+        frameView.layer.shadowOpacity = 0.22
+        frameView.layer.shadowRadius = 14
+        frameView.layer.shadowOffset = CGSize(width: 0, height: 6)
+        frameView.isUserInteractionEnabled = false
+        screen.layer.cornerCurve = .continuous
+        screen.clipsToBounds = true
+        dot.backgroundColor = .systemRed
+        dot.layer.cornerRadius = 3.5
+        dot.isUserInteractionEnabled = false
+        caption.textAlignment = .center
+        caption.lineBreakMode = .byTruncatingTail
+        [frameView, screen, dot, caption].forEach(addSubview)
+        addGestureRecognizer(tap)
+        addGestureRecognizer(pan)
+        isAccessibilityElement = true
+        accessibilityTraits = [.button, .allowsDirectInteraction]
+        accessibilityIdentifier = "simulator.pip"
+        isMultipleTouchEnabled = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let picture = CGRect(origin: .zero, size: CGSize(width: bounds.width, height: bounds.height))
+        frameView.frame = picture
+        frameView.layer.shadowPath = UIBezierPath(roundedRect: picture, cornerRadius: cornerRadius).cgPath
+        screen.frame = picture
+        dot.frame = CGRect(x: 8, y: 8, width: 7, height: 7)
+        caption.frame = CGRect(x: -10, y: picture.maxY + 4, width: bounds.width + 20, height: 16)
+    }
+
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -4, dy: -4).contains(point)
+    }
+
+    @objc private func tapped() { onTap?() }
+    @objc private func panned(_ gesture: UIPanGestureRecognizer) { onPan?(gesture) }
+
+    private func forward(_ touches: Set<UITouch>, _ phase: String) {
+        guard interactive, let touch = touches.first else { return }
+        let point = touch.location(in: screen)
+        if phase == "begin" { tracking = onTouch?(phase, point) ?? false }
+        else if tracking { _ = onTouch?(phase, point) }
+        if phase == "end" { tracking = false }
+    }
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "begin"); super.touchesBegan(touches, with: event) }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "move"); super.touchesMoved(touches, with: event) }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "end"); super.touchesEnded(touches, with: event) }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "end"); super.touchesCancelled(touches, with: event) }
+}
+
+/// The simulator a turn used: live while the agent uses it, then the
+/// recording, playing muted in place. Tapping it opens it large.
+final class SimulatorCell: TimelineCell {
+    static let height: CGFloat = 300
+    var onTap: (() -> Void)?
+    private(set) var use: SimulatorUse?
+    let screen = SimulatorScreen()
+    private let frameView = UIView()
+    private let playerLayer = AVPlayerLayer()
+    private var player: AVQueuePlayer?
+    private var looper: AVPlayerLooper?
+    private var playing: URL?
+    private let dot = UIView()
+    private let button = UIControl()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        frameView.layer.cornerRadius = 22
+        frameView.layer.cornerCurve = .continuous
+        frameView.clipsToBounds = true
+        frameView.layer.borderWidth = 2.5
+        frameView.backgroundColor = UIColor(white: 0.06, alpha: 1)
+        frameView.isUserInteractionEnabled = false
+        playerLayer.videoGravity = .resizeAspect
+        frameView.layer.addSublayer(playerLayer)
+        frameView.addSubview(screen)
+        dot.backgroundColor = .systemRed
+        dot.layer.cornerRadius = 4
+        frameView.addSubview(dot)
+        button.addSubview(frameView)
+        button.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onTap?() }, for: .touchUpInside)
+        button.isAccessibilityElement = true
+        button.accessibilityTraits = .button
+        button.accessibilityIdentifier = "thread.simulator"
+        contentView.addSubview(button)
+        updateBorder()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (cell: SimulatorCell, _: UITraitCollection) in cell.updateBorder() }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(_ use: SimulatorUse, feeds: SimulatorFeeds?, video: URL?) {
+        self.use = use
+        screen.isHidden = !use.live
+        dot.isHidden = !use.live
+        feeds?.attach(screen, to: use.live ? use.target : nil)
+        button.accessibilityLabel = (use.live ? "Live simulator, " : "Simulator recording, ") + use.deviceName
+        if use.live || video == nil {
+            player?.pause(); player = nil; looper = nil; playerLayer.player = nil; playing = nil
+        } else if let video, playing != video, !Motion.reduced {
+            let queue = AVQueuePlayer()
+            queue.isMuted = true
+            queue.preventsDisplaySleepDuringVideoPlayback = false
+            looper = AVPlayerLooper(player: queue, templateItem: AVPlayerItem(url: video))
+            playerLayer.player = queue
+            player = queue
+            playing = video
+            if window != nil { queue.play() }
+        }
+        setNeedsLayout()
+    }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        player?.pause()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { player?.pause() } else { player?.play() }
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let height = Self.height
+        let width = (height / 2.17).rounded()
+        button.frame = CGRect(x: 20, y: 6, width: width, height: height)
+        frameView.frame = button.bounds
+        screen.frame = frameView.bounds
+        dot.frame = CGRect(x: 12, y: 12, width: 8, height: 8)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        playerLayer.frame = frameView.bounds
+        CATransaction.commit()
+    }
+
+    override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.height + 16) }
+    override func systemLayoutSizeFitting(_ targetSize: CGSize, withHorizontalFittingPriority h: UILayoutPriority,
+                                          verticalFittingPriority v: UILayoutPriority) -> CGSize {
+        CGSize(width: targetSize.width, height: Self.height + 16)
+    }
+
+    private func updateBorder() { frameView.layer.borderColor = UIColor.label.resolvedColor(with: traitCollection).withAlphaComponent(0.85).cgColor }
+}
+
+private extension CGRect {
+    func lerp(to other: CGRect, _ t: CGFloat) -> CGRect {
+        CGRect(x: .lerp(minX, other.minX, t), y: .lerp(minY, other.minY, t),
+               width: .lerp(width, other.width, t), height: .lerp(height, other.height, t))
+    }
+}

@@ -46,17 +46,16 @@ Check live behavior by running the app and looking at it.
 
 ## Interface (0.3.0)
 
-`StudioViewController` owns one `DeviceStage` (SceneKit) and Home: a paging
-carousel of `AppPage` lists. `StageLayout` is the single source of geometry: the
-device fills the space above the content, on Home (above the app name, shrinking
-as the list scrolls) and in a thread (above the divider). `ThreadViewController`
-is a child on the same stage with three divider detents; `ThreadViews.swift`
-holds conversation rows, composer and the device touch surface; `Markdown.swift`
-renders agent text. Decoded simulator pictures are BGRA pixel buffers wrapped as
-Metal textures on the device's display material; touches are mapped by
-hit-testing the scene, so any pose is exact. DEBUG-only `SQUIRCLE_APP`,
-`SQUIRCLE_EXPAND`, `SQUIRCLE_SCRUB`, `SQUIRCLE_DETENT`, `SQUIRCLE_THREAD` hold
-real states still for captures.
+`StudioViewController` owns Home's grid of still device portraits
+(`DeviceStage` renders them once with SceneKit; nothing draws continuously),
+the app's conversations (`ThreadViewController`, full height) and
+`SimulatorDock`, the PiPs of simulators the app's agents are using.
+`SimulatorFeeds` shares one T3 H.264 stream per simulator; `SimulatorScreen`
+shows decoded frames through `AVSampleBufferDisplayLayer` and maps touches
+by aspect fit. `ThreadViews.swift` holds conversation rows and the composer;
+`Markdown.swift` renders agent text. DEBUG-only `SQUIRCLE_APP`,
+`SQUIRCLE_SCRUB`, `SQUIRCLE_THREAD` and `SQUIRCLE_SIM_EXPAND` hold real
+states still for captures.
 
 `T3Gateway` implements Effect RPC; `T3ThreadState` reduces snapshots/events.
 `T3DeviceStream` owns one native H.264 connection and an input socket as a pair.

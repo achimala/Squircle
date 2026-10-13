@@ -7,6 +7,15 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-13: agent simulators, version 0.3.0 (40).** A simulator shows only
+while an agent uses it: agents run `squircle sim start`, Squircle records the
+simulator, and the phone shows it as a draggable PiP over the app's
+conversations (several at once, tap for large and touchable) and live in the
+turn, then the recording there. The divider and the live 3D device are gone;
+on the simulator the compositor's CPU with a live stream on screen fell from
+21% to 6–9%. Not yet on the phone. See
+[agent simulators](docs/t3-native-migration.md#2026-10-13-agent-simulators-030-40).
+
 **2026-10-12: one agent per app, version 0.3.0 (37).** Tapping an app opens
 its agent, which you tell what to do; it can run worker threads and is woken
 when they finish. Other threads open over it from its Threads list; Builds has its own button. The agent is a T3

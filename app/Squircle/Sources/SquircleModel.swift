@@ -22,7 +22,10 @@ final class SquircleModel {
     /// the app steps aside so iOS can replace it.
     private(set) var updatingTo: AppBuild? { didSet { changed() } }
     private(set) var providers: [JSONValue] = [] { didSet { changed() } }
-    private(set) var devices: JSONValue = .null { didSet { changed() } }
+    private(set) var devices: JSONValue = .null { didSet { changed(); scheduleSimulatorRefresh() } }
+    /// Sessions Squircle is recording for agents, from the Mac.
+    private(set) var recording: [JSONValue] = [] { didSet { if recording != oldValue { changed() } } }
+    private var simulatorRefresh: Task<Void, Never>?
     private(set) var requests: [JSONValue] = [] { didSet { changed() } }
     private(set) var changes: [TurnChanges] = [] { didSet { changed() } }
     private(set) var modelSelection: JSONValue = .null { didSet { changed() } }
@@ -492,7 +495,7 @@ final class SquircleModel {
             let agent = agents[project.id] == id || state.thread["modelSelection"]["instanceId"].string == Self.agentInstance
             if !agent, state.thread["messages"].array.isEmpty {
                 message += "\n\n" + project.agentContext + "\nFor signed builds/install links use /Users/anshu/Documents/ChatGPT/RemoteAppDev/target/release/squircle --data-dir /Users/anshu/Documents/ChatGPT/RemoteAppDev/.squircle. Run help workflow for the documented commands. This app is a native client of T3; T3 manages this thread.\n" + instructions
-            } else if !agent, !state.thread["messages"].array.contains(where: { ($0["text"].string ?? "").contains("Squircle shows it with an Install button") }) {
+            } else if !agent, !state.thread["messages"].array.contains(where: { ($0["text"].string ?? "").contains("sim start --thread") }) {
                 // Threads started before these instructions existed get them once.
                 message += AppProject.contextMarker + project.name + ".\n" + instructions
             }
@@ -534,11 +537,13 @@ final class SquircleModel {
     /// T3's conversation with the thread's published recordings in time order.
     private func conversation() -> [ChatMessage] {
         let rows = state.messages
-        guard !media.isEmpty else { return rows }
+        guard media.contains(where: { $0["simulator"]["session_id"].string == nil }) else { return rows }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let clips = media.compactMap { item -> ChatMessage? in
-            guard let id = item["id"].string, let seconds = item["created_at"].double else { return nil }
+            // Simulator recordings show as the turn's simulator instead.
+            guard item["simulator"]["session_id"].string == nil,
+                  let id = item["id"].string, let seconds = item["created_at"].double else { return nil }
             let caption = item["caption"].string.flatMap { $0.isEmpty ? nil : $0 }
             let video = item["kind"].string == "video"
             var message = ChatMessage(id: "media:" + id, role: "tool", content: caption ?? (video ? "Recording" : "Image"),
@@ -612,51 +617,75 @@ final class SquircleModel {
             try await dispatch(c); requests.removeAll { $0["id"] == request["id"] }
         } catch { self.error = error.localizedDescription }
     }
-    func openDevice(_ device: JSONValue, restart: Bool = false) async -> SimulatorTarget? {
-        guard let id = selectedSessionID, let gateway else { return nil }
-        do {
-            guard let chosen = SimulatorTarget(deviceID:device["id"].string,hostID:device["hostId"].string) else { throw ClientError.response("Simulator selection") }
-            if restart {
-                _ = try await gateway.call("device.shutdown",.from(["hostId":chosen.hostID,"deviceId":chosen.deviceID,"platform":"ios"]))
-            }
-            let opened = try await gateway.call("device.open",.from(["threadId":id,"hostId":chosen.hostID,
-                "deviceId":chosen.deviceID,"platform":"ios","boot":true]))
-            guard let target = SimulatorTarget(deviceID:opened["deviceId"].string,hostID:opened["hostId"].string) else { throw ClientError.response("Simulator session") }
-            var inventory = devices.object
-            var sessions = devices["sessions"].array.filter {
-                !($0["threadId"].string == id && $0["hostId"].string == target.hostID && $0["deviceId"].string == target.deviceID)
-            }
-            sessions.append(opened); inventory["sessions"] = .array(sessions); devices = .object(inventory)
-            return target
-        } catch { self.error = error.localizedDescription; return nil }
-    }
-    /// The simulator this app's agents should use: the one last used for it,
-    /// one named after it, or any booted iPhone simulator.
-    func simulator(for project: AppProject) -> JSONValue? {
-        let simulators = devices["devices"].array.filter { $0["platform"].string == "ios" && !$0["physical"].bool }
-        if let saved = preferences.string(forKey: "squircle.simulator." + project.id),
-           let match = simulators.first(where: { $0["id"].string == saved }) { return match }
-        if let named = simulators.first(where: { ($0["name"].string ?? "").localizedCaseInsensitiveContains(project.name) }) { return named }
-        return simulators.first { $0["booted"].bool } ?? simulators.first
-    }
-    func rememberSimulator(_ deviceID: String, for project: AppProject) {
-        preferences.set(deviceID, forKey: "squircle.simulator." + project.id)
-    }
     /// Tells the agent it is being watched in Squircle and how to show its
     /// work there: the simulator, screenshots and recordings.
     func squircleInstructions(for project: AppProject, threadID: String) -> String {
         let cli = "/Users/anshu/Documents/ChatGPT/RemoteAppDev/target/release/squircle --data-dir /Users/anshu/Documents/ChatGPT/RemoteAppDev/.squircle"
-        var device = "Call device_list, then device_open for an iOS simulator"
-        if let simulator = simulator(for: project), let id = simulator["id"].string {
-            device = "Call device_open with deviceId \(id) and hostId \(simulator["hostId"].string ?? "local") (\(simulator["name"].string ?? "this app's simulator"), this app's simulator)"
-        }
         return """
-        Squircle shows this thread on the user's iPhone with the simulator live on a 3D device. Whenever you run, check or demonstrate the app in a simulator, use T3's device tools so the user watches it happen: \(device), then drive it with the agent-device command device_open returns. Use device_screenshot to look at the screen; those screenshots appear in the conversation. To show a flow, record it: agent-device record start /tmp/NAME.mp4 --scope device (with the --config and --session flags device_open gave you), perform the flow, agent-device record stop, then publish the clip into this thread with \(cli) media add --thread \(threadID) --file /tmp/NAME.mp4 --caption 'What it shows'. When you make a signed build for the user, include its build job ID in your final reply; Squircle shows it with an Install button.
+        Squircle shows this thread on the user's iPhone. Whenever you run, check or demonstrate the app in a simulator, first run \(cli) sim start --thread \(threadID) (see sim --help): it opens and boots a simulator, records it, and the user watches it live; the recording appears in your turn. Drive it with the agent-device command it returns and use device_screenshot to look; those screenshots appear in the conversation. Run \(cli) sim stop --thread \(threadID) when done. Don't run agent-device record or device_open yourself. When you make a signed build for the user, include its build job ID in your final reply; Squircle shows it with an Install button.
         """
     }
-    var activeDevice: JSONValue? {
-        devices["sessions"].array.filter { $0["threadId"].string == selectedSessionID }
-            .max { ($0["openedAt"].string ?? "") < ($1["openedAt"].string ?? "") }
+    /// Simulators this app's threads are using right now: sessions Squircle
+    /// records for agents, and devices T3 opened for a thread whose turn is
+    /// running (an agent or person using T3's device tools directly).
+    func activeSimulators(for project: AppProject) -> [SimulatorUse] {
+        let threads = Dictionary(sessions(for: project, includingAgent: true).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return activeSimulators(threads: Set(threads.keys), working: Set(threads.values.filter { $0.phase == .working }.map(\.id)))
+    }
+
+    private func activeSimulators(threads: Set<String>, working: Set<String>) -> [SimulatorUse] {
+        let names = Dictionary(devices["devices"].array.compactMap { d in d["id"].string.map { ($0, d["name"].string ?? "Simulator") } },
+                               uniquingKeysWith: { a, _ in a })
+        var uses: [SimulatorUse] = recording.compactMap { session in
+            guard let thread = session["thread_id"].string, threads.contains(thread), let id = session["id"].string,
+                  let target = SimulatorTarget(deviceID: session["device_id"].string, hostID: session["host_id"].string) else { return nil }
+            return SimulatorUse(id: id, threadID: thread, target: target, deviceName: session["device_name"].string ?? "Simulator",
+                                started: Date(timeIntervalSince1970: session["started_at"].double ?? 0), live: true)
+        }
+        for session in devices["sessions"].array {
+            guard let thread = session["threadId"].string, threads.contains(thread), working.contains(thread),
+                  let target = SimulatorTarget(deviceID: session["deviceId"].string, hostID: session["hostId"].string),
+                  !uses.contains(where: { $0.threadID == thread && $0.target == target }) else { continue }
+            uses.append(SimulatorUse(id: "t3:\(thread):\(target.deviceID)", threadID: thread, target: target,
+                                     deviceName: names[target.deviceID] ?? "Simulator",
+                                     started: session["openedAt"].string.flatMap(ThreadItem.date) ?? .now, live: true))
+        }
+        return uses.sorted { $0.started < $1.started }
+    }
+
+    /// The selected thread's simulator use: live now, and recorded earlier.
+    var threadSimulators: [SimulatorUse] {
+        guard let id = selectedSessionID else { return [] }
+        let working = isRunning ? Set([id]) : []
+        var uses = activeSimulators(threads: [id], working: working)
+        for item in media {
+            let clip = item["simulator"]
+            guard let session = clip["session_id"].string, let mediaID = item["id"].string,
+                  let target = SimulatorTarget(deviceID: clip["device_id"].string, hostID: "local") else { continue }
+            uses.removeAll { $0.id == session }
+            uses.append(SimulatorUse(id: session, threadID: id, target: target, deviceName: clip["device_name"].string ?? "Simulator",
+                                     started: Date(timeIntervalSince1970: clip["started_at"].double ?? 0), live: false, recordingID: mediaID))
+        }
+        return uses.sorted { $0.started < $1.started }
+    }
+
+    /// T3 reports every device opened or closed; Squircle's recordings start
+    /// and stop with those, so its list is fetched again after each change.
+    private func scheduleSimulatorRefresh() {
+        simulatorRefresh?.cancel()
+        simulatorRefresh = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            await self?.refreshSimulators()
+        }
+    }
+
+    func refreshSimulators() async {
+        guard let client, let active = try? await client.simulatorSessions() else { return }
+        let ended = Set(recording.compactMap { $0["thread_id"].string }).subtracting(active.compactMap { $0["thread_id"].string })
+        recording = active
+        // A recording just filed belongs in the conversation on screen.
+        if let id = selectedSessionID, ended.contains(id) { scheduleStepDetails() }
     }
     func startMetadataUpdates() {
         guard monitor == nil else { return }
@@ -672,6 +701,7 @@ final class SquircleModel {
         do { async let b = client.builds(); async let m = client.fetchAppMetadata(); async let a = client.agents()
             builds = try await b; appMetadata = try await m; reconcileProjects()
             if let known = try? await a { agents = known }
+            await refreshSimulators()
         } catch { /* T3 chat remains usable if the build service is temporarily offline. */ }
     }
     func previewData(for metadata: AppMetadata) async throws -> Data {

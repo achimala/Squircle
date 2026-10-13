@@ -23,20 +23,23 @@ enum Route: Equatable {
 
 /// The root: every app's real device. Home is a grid of still portraits of
 /// those devices that scroll natively. Opening an app pushes in the
-/// conversation with its agent while the others fall back and the same
-/// device travels into it. The app's other threads open from the agent's
-/// Threads page or its update lines, pushing in over it the same way.
+/// conversation with its agent while Home falls back beneath it. The app's
+/// other threads open from the agent's Threads page or its update lines,
+/// pushing in over it the same way. Simulators the app's agents are using
+/// float over its conversations (`SimulatorDock`).
 ///
 /// Navigation is a route plus two springs (`appSpring` grid→agent, `spring`
 /// agent→thread). Each spring's target is a function of the route and of what
 /// is mounted. What is mounted (the agent, the thread over it) changes only
 /// while its spring is at zero, i.e. off screen. Every frame is a pure
-/// function of those values, including which views take touches and whether
-/// a portrait or the 3D stage draws the device.
+/// function of those values, including which views take touches.
 @MainActor
 final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGestureRecognizerDelegate {
     let model: SquircleModel
+    /// Renders the grid's still device portraits.
     private let stage = DeviceStage()
+    private lazy var feeds = SimulatorFeeds(model: model)
+    private lazy var dock = SimulatorDock(feeds: feeds)
     /// The grid and its controls.
     private let home = UIView()
     private let grid = UIScrollView()
@@ -55,10 +58,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Display order. It changes only while the grid is out of sight, so
     /// nothing rearranges under a finger.
     private var projects: [AppProject] = []
-    /// Pending model render (debounced), portrait drawing and handback.
+    /// Pending model render (debounced) and portrait drawing.
     private var renderTask: Task<Void, Never>?
     private var portraitTask: Task<Void, Never>?
-    private var handbackTask: Task<Void, Never>?
     private var laidOut: StageLayout?
     /// Bumped whenever an app's screen changes; part of each portrait's key.
     private var screenVersions: [String: Int] = [:]
@@ -75,8 +77,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// A finger on the back edge owns one spring; targets wait for release.
     private var dragging: SpringDriver?
     private var dragStart: CGFloat = 0
-    /// Portraits were hidden in the last frame (the stage had the device).
-    private var portraitsHidden = false
     /// Inside `sync()`: the scene is drawn once, from the finished state.
     private var syncing = false
 
@@ -95,7 +95,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         view.addSubview(home)
         view.addSubview(agentHost)
         view.addSubview(threadHost)
-        view.addSubview(stage.overlay)
+        view.addSubview(dock)
+        dock.onOpenThread = { [weak self] id in
+            guard let self else { return }
+            if id == agent?.currentSessionID { closeThread() } else if route.thread != id { openThread(id) }
+        }
 
         grid.alwaysBounceVertical = true
         grid.showsVerticalScrollIndicator = false
@@ -121,7 +125,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             }
             driver.onRest = { [weak self] _ in self?.rested() }
         }
-        stage.onRendered = { [weak self] in self?.applyScene() }
 
         Task { [weak self, updates = model.updates] in
             for await _ in updates {
@@ -162,9 +165,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     #if DEBUG
     /// Verification only (never in Release). Holds real states still for a
     /// screen capture: `SQUIRCLE_GRID` (grid scroll in points), `SQUIRCLE_APP`
-    /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it),
-    /// `SQUIRCLE_SCRUB` (0…1 of a thread over its agent) and `SQUIRCLE_DETENT`
-    /// (0…2 of the front conversation's divider). `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
+    /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it)
+    /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` brings
+    /// the first simulator large. `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
@@ -179,7 +182,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if let scrub = value("SQUIRCLE_APP_SCRUB") { hold(appSpring, at: scrub); return }
             appSpring.set(1)
             guard let scrub = value("SQUIRCLE_SCRUB") else {
-                if let detent = value("SQUIRCLE_DETENT") { agent?.debugSetDetent(detent) }
                 if let text = environment["SQUIRCLE_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
                 }
@@ -188,18 +190,23 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             let sessions = model.sessions(for: project)
             let named = environment["SQUIRCLE_THREAD"].flatMap { title in sessions.first { $0.title == title } }
             openThread(environment["SQUIRCLE_DRAFT"] == "1" ? nil : (named ?? sessions.first)?.id)
-            if let detent = value("SQUIRCLE_DETENT") { thread?.debugSetDetent(detent) }
             if environment["SQUIRCLE_DEMO_QUESTION"] == "1" { thread?.debugShowQuestion() }
             let later: (@escaping @MainActor () -> Void) -> Void = { work in
                 Task { try? await Task.sleep(for: .seconds(2.5)); work() }
             }
-            if environment["SQUIRCLE_DEMO_TAP"] == "1" { later { [weak self] in self?.thread?.debugTapDevice() } }
             if environment["SQUIRCLE_DEMO_LENS"] == "1" { later { [weak self] in self?.thread?.debugLens() } }
             if environment["SQUIRCLE_DEMO_PULSE"] == "1" { later { [weak self] in self?.thread?.debugPulse() } }
             if let text = environment["SQUIRCLE_DEMO_SEND"] { later { [weak self] in self?.thread?.debugFlySend(text) } }
             if scrub < 1 { hold(spring, at: scrub) }
             if environment["SQUIRCLE_THEN_BACK"] == "1" {
                 Task { [weak self] in try? await Task.sleep(for: .seconds(5)); self?.closeThread() }
+            }
+        }
+        if environment["SQUIRCLE_SIM_EXPAND"] == "1" {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(9))
+                guard let self, let first = dock.uses.first else { return }
+                dock.expand(first.id)
             }
         }
         if environment["SQUIRCLE_STRESS"] == "1" {
@@ -269,17 +276,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private var auditViolations = 0
 
-    /// Every frame: the selected device is drawn somewhere, and at rest exactly
-    /// the routed screen is showing.
-    private func audit(a: CGFloat, t: CGFloat, posed: Bool) {
+    /// Every frame: at rest exactly the routed screen is showing, and the
+    /// simulators float only over the app's screens.
+    private func audit(a: CGFloat, t: CGFloat) {
         func fail(_ what: String) {
             auditViolations += 1
             NSLog("AUDIT %@ route=%@ a=%.3f t=%.3f", what, "\(route)", a, t)
         }
-        if let id = selectedID, a > 0.001 || route.app == id {
-            let cellShows = cells[id].map { !$0.portrait.isHidden } ?? false
-            if !posed && !cellShows { fail("device drawn nowhere") }
-        }
+        if route == .grid, !appSpring.isAnimating, dragging == nil, dock.alpha > 0.001 { fail("simulators over Home") }
         guard !appSpring.isAnimating, !spring.isAnimating, dragging == nil else { return }
         switch route {
         case .grid: if home.isHidden || home.alpha < 0.99 { fail("grid not showing at rest") }
@@ -293,7 +297,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         super.viewDidLayoutSubviews()
         let bounds = view.bounds
         stage.frame = bounds
-        stage.overlay.frame = bounds
+        dock.frame = bounds
+        dock.bottomInset = view.safeAreaInsets.bottom + 150
         home.place(in: bounds)
         agentHost.frame = bounds
         grid.frame = bounds
@@ -371,12 +376,23 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             binding.update(model: model, project: project)
         }
         renderControls()
+        renderSimulators()
         if let build = model.updatingTo {
             UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
         }
         if laidOut != nil { layoutGrid() }
         sync()
         schedulePortraits()
+    }
+
+    /// The simulators the open app's agents are using, over its conversations.
+    private func renderSimulators() {
+        guard let project = selectedProject else { dock.update(uses: [], currentThread: nil, titles: [:]); return }
+        var titles: [String: String] = [:]
+        for session in model.sessions(for: project, includingAgent: true) { titles[session.id] = session.displayTitle(in: project) }
+        if let agent = model.agentThreadID(for: project) { titles[agent] = project.name }
+        let front = route.thread != nil ? thread : agent
+        dock.update(uses: model.activeSimulators(for: project), currentThread: front?.currentSessionID, titles: titles)
     }
 
     private func renderControls() {
@@ -461,6 +477,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         syncing = true
         defer {
             syncing = false
+            renderSimulators()
             applyScene()
         }
         // The thread level only exists inside its app; it leaves first.
@@ -497,8 +514,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         guard let project = projects.first(where: { $0.id == id }) else { return }
         selectedID = id
         model.selectProject(project)
-        let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project),
-                                              stage: stage, agent: true)
+        let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
         controller.onThreads = { [weak self] in self?.presentThreads() }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
@@ -516,8 +532,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Adds a conversation as an opaque page that covers what is beneath it
     /// as it slides in, never text over text.
     private func host(_ controller: ThreadViewController, in host: UIView) {
-        controller.layoutProvider = { [weak self] in self?.layout }
-        controller.onGeometry = { [weak self] in self?.applyScene() }
+        controller.feeds = feeds
+        controller.onExpandSimulator = { [weak self] use in self?.dock.expand(use.id) }
+        controller.onVisibleSimulators = { [weak self, weak controller] ids in
+            guard let self, let controller, controller === (thread ?? agent) else { return }
+            dock.docked = ids
+        }
         addChild(controller)
         controller.view.frame = view.bounds
         controller.view.backgroundColor = Theme.paper
@@ -534,7 +554,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private func dismount(_ controller: ThreadViewController) {
         controller.tearDown()
-        stage.endLive(for: controller.project.id)
+        dock.docked = []
         controller.willMove(toParent: nil)
         controller.view.removeFromSuperview()
         controller.removeFromParent()
@@ -543,7 +563,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private func mountThread(_ key: String) {
         guard let project = selectedProject else { return }
         agent?.deactivate()
-        let controller = ThreadViewController(model: model, project: project, sessionID: key.hasPrefix("draft:") ? nil : key, stage: stage)
+        let controller = ThreadViewController(model: model, project: project, sessionID: key.hasPrefix("draft:") ? nil : key)
         controller.onBack = { [weak self] in self?.closeThread() }
         host(controller, in: threadHost)
         thread = controller
@@ -672,61 +692,26 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let layout = self.layout
         // A spring may overshoot its end a little; screens never travel past it.
         let a = appSpring.value.clamped(), t = spring.value.clamped()
-        let moving = appSpring.isAnimating || spring.isAnimating || dragging != nil
         let scroll = grid.contentOffset.y
         var origin = CGPoint(x: width / 2, y: view.safeAreaInsets.top + 58)
-        var poses: [String: PhonePose] = [:]
-        var hidePortraits = false
         if let id = selectedID, let index = projects.firstIndex(where: { $0.id == id }) {
-            let start = layout.gridPose(cell: layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll), column: index % layout.columns)
-            origin = start.center
-            var pose = layout.transitionPose(from: start, to: agent?.pose ?? start, progress: a)
-            if t > 0.0001, let thread { pose = layout.transitionPose(from: pose, to: thread.pose, progress: t) }
-            // A portrait draws the device only where it rests still in the
-            // grid. Anywhere else the stage does, and the portrait hides once
-            // the stage has actually drawn it.
-            let resting = !moving && a == 0
-            if !resting {
-                poses[id] = pose
-                hidePortraits = stage.drawn.contains(id)
-                if !hidePortraits { stage.requestRender() }
-            } else if portraitsHidden || handbackTask != nil {
-                // Handing back: the portrait shows now; the stage keeps the
-                // device beneath it until the next frame has put it on screen.
-                poses[id] = pose
-                if handbackTask == nil {
-                    handbackTask = Task { [weak self] in
-                        await DisplayFrame.next()
-                        self?.handbackTask = nil
-                        self?.applyScene()
-                    }
-                }
-            }
+            let cell = layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll)
+            origin = CGPoint(x: cell.midX, y: cell.minY + layout.gridPhoneHeight / 2)
         }
-        portraitsHidden = hidePortraits
-        stage.apply(poses)
-        stage.setLive(!poses.isEmpty && moving, reason: "navigation")
-        // A portrait may draw the device only while it is (nearly) in its
-        // cell; once the stage has it, it does not.
-        let atCell = a < 0.03 && t < 0.001
-        for (id, cell) in cells { cell.portrait.isHidden = id == selectedID && (hidePortraits || !atCell) }
 
-        // The other apps drift back and fade; the opened one's name goes first.
+        // Home falls back as the conversation slides over it: every device
+        // drifts away from the opened one, shrinks and fades.
         home.alpha = (1 - a * 1.6).clamped()
-        home.isHidden = a >= 1 && !moving
+        home.isHidden = a >= 1 && !appSpring.isAnimating && dragging == nil
         for (index, project) in projects.enumerated() {
             guard let cell = cells[project.id] else { continue }
-            if project.id == selectedID {
-                cell.layer.transform = CATransform3DIdentity
-                cell.alpha = 1
-                cell.captionAlpha = (1 - a * 4).clamped()
-            } else {
-                let frame = layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll)
-                cell.layer.transform = layout.recede(frame, from: origin, progress: a)
-                cell.alpha = layout.recedeAlpha(progress: a)
-                cell.captionAlpha = 1
-            }
+            let frame = layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll)
+            cell.layer.transform = layout.recede(frame, from: origin, progress: a)
+            cell.alpha = layout.recedeAlpha(progress: a)
+            cell.captionAlpha = project.id == selectedID ? (1 - a * 4).clamped() : 1
         }
+        dock.alpha = a
+        dock.isUserInteractionEnabled = route.app != nil && a > 0.5
 
         // Flat pushes. The agent's conversation slides over Home; a thread
         // slides over the agent while the agent drifts a third as far left.
@@ -751,7 +736,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         thread?.view.accessibilityElementsHidden = !onThread
         threadHost.swallowsTouches = thread != nil && !onThread
         #if DEBUG
-        audit(a: a, t: t, posed: !poses.isEmpty)
+        audit(a: a, t: t)
         #endif
     }
 

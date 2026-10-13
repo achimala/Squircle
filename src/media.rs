@@ -21,6 +21,20 @@ pub struct Media {
     /// Seconds since 1970, fractional.
     pub created_at: f64,
     pub file: PathBuf,
+    /// Set when Squircle recorded a simulator session (`squircle sim`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulator: Option<SimulatorClip>,
+}
+
+/// Which simulator session a recording covers, so the phone can show it in
+/// the turn where it began.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SimulatorClip {
+    pub session_id: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub started_at: f64,
+    pub ended_at: f64,
 }
 
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
@@ -50,6 +64,23 @@ fn kind(path: &Path) -> Result<(&'static str, &'static str)> {
 
 /// Copies `file` into the thread's media; returns its record.
 pub fn add(root: &Path, thread: &str, file: &Path, caption: Option<&str>) -> Result<Media> {
+    store(root, thread, file, caption, None, false)
+}
+
+/// Moves a finished simulator recording into the thread's media.
+pub fn add_recording(root: &Path, thread: &str, file: &Path, clip: SimulatorClip) -> Result<Media> {
+    store(root, thread, file, None, Some(clip), true)
+}
+
+/// Where a recording in progress is written: beside the media it will join,
+/// hidden from listings until it is moved in.
+pub fn recording_path(root: &Path, thread: &str, session: &str) -> Result<PathBuf> {
+    let dir = directory(root, thread)?;
+    fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!(".{session}.recording.mp4")))
+}
+
+fn store(root: &Path, thread: &str, file: &Path, caption: Option<&str>, simulator: Option<SimulatorClip>, take: bool) -> Result<Media> {
     let dir = directory(root, thread)?;
     let (kind, content_type) = kind(file)?;
     let size = fs::metadata(file).with_context(|| format!("Reading {}", file.display()))?.len();
@@ -61,9 +92,17 @@ pub fn add(root: &Path, thread: &str, file: &Path, caption: Option<&str>) -> Res
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_ascii_lowercase();
     let stored = dir.join(format!("{id}.{ext}"));
     let partial = dir.join(format!(".{id}.partial"));
-    fs::copy(file, &partial).context("Copying media")?;
-    fs::rename(&partial, &stored)?;
-    let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64();
+    if take {
+        fs::rename(file, &stored).context("Moving the recording into media")?;
+    } else {
+        fs::copy(file, &partial).context("Copying media")?;
+        fs::rename(&partial, &stored)?;
+    }
+    // A recording belongs where its session began.
+    let created_at = match &simulator {
+        Some(clip) => clip.started_at,
+        None => SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
+    };
     let media = Media {
         id: id.clone(),
         thread_id: thread.into(),
@@ -73,6 +112,7 @@ pub fn add(root: &Path, thread: &str, file: &Path, caption: Option<&str>) -> Res
         bytes: size,
         created_at,
         file: stored,
+        simulator,
     };
     let record = dir.join(format!("{id}.json"));
     let partial = dir.join(format!(".{id}.json.partial"));

@@ -110,6 +110,12 @@ enum Commands {
         #[command(subcommand)]
         command: MediaCommand,
     },
+    /// Use an iOS simulator so the user can watch: start records it, stop files the recording in your turn.
+    #[command(after_help = "Start a session before you run, check or demo the app in a simulator:\n  squircle sim start --thread YOUR_T3_THREAD_ID [--device NAME_OR_UDID]\nIt opens the simulator for your thread, boots it, records its screen and returns the agent-device command to drive it. The user sees it live as a picture-in-picture on their phone and in your turn. When done: squircle sim stop --thread YOUR_T3_THREAD_ID; the recording appears in your turn. A session also stops when your turn ends.")]
+    Sim {
+        #[command(subcommand)]
+        command: SimCommand,
+    },
     /// Submit a JSON diagnostic fixture; useful for checking the phone-to-Mac contract.
     Diagnostics {
         #[command(subcommand)]
@@ -204,6 +210,31 @@ enum ThreadCommand {
         #[arg(long, help = "Remove the worktree even with uncommitted changes")]
         force: bool,
     },
+}
+#[derive(Subcommand)]
+enum SimCommand {
+    /// Open, boot and start recording a simulator for your thread; returns the agent-device command to drive it.
+    #[command(after_help = "Idempotent: starting again on the same simulator returns the running session. Without --device: the simulator this thread used last, else a booted one no other agent is using, else any free one.")]
+    Start {
+        #[arg(long, help = "Your T3 thread ID")]
+        thread: String,
+        #[arg(long, help = "Simulator name or UDID (squircle sim devices)")]
+        device: Option<String>,
+    },
+    /// Stop your thread's session; the recording is added to your current turn.
+    Stop {
+        #[arg(long, help = "Your T3 thread ID")]
+        thread: Option<String>,
+        #[arg(long, help = "A session ID instead of a thread")]
+        id: Option<String>,
+    },
+    /// Running sessions and recent recordings, optionally for one thread.
+    Status {
+        #[arg(long)]
+        thread: Option<String>,
+    },
+    /// This Mac's iOS simulators and which thread is recording each.
+    Devices,
 }
 #[derive(Subcommand)]
 enum MediaCommand {
@@ -540,7 +571,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -819,6 +850,20 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 MediaCommand::List { thread } => success(json!({"media":squircle::media::list(&root, thread)?})),
             }
         }
+        Commands::Sim { command } => match command {
+            SimCommand::Start { thread, device } => post(cli, "/v1/sims", json!({"thread_id":thread_id(thread)?,"device":device})).await?,
+            SimCommand::Stop { thread, id } => {
+                if thread.is_none() && id.is_none() {
+                    bail!("Pass --thread (your T3 thread ID) or --id");
+                }
+                post(cli, "/v1/sims/stop", json!({"thread_id":thread,"id":id})).await?
+            }
+            SimCommand::Status { thread } => {
+                let query = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(thread.as_ref().map(|t| ("thread", t))).finish();
+                get(cli, &format!("/v1/sims?{query}")).await?
+            }
+            SimCommand::Devices => get(cli, "/v1/sims/devices").await?,
+        },
         Commands::T3 { command } => match command {
             T3Command::Connect { url } => {
                 let mut token = String::new();

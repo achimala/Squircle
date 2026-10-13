@@ -175,6 +175,14 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return reply.data["media"].array
     }
 
+    /// Simulator sessions Squircle is recording for agents (`squircle sim`).
+    func simulatorSessions() async throws -> [JSONValue] {
+        struct Reply: Decodable { let ok: Bool; let data: JSONValue }
+        let reply: Reply = try await get(["v1", "sims"])
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data["active"].array
+    }
+
     func mediaFile(threadID: String, id: String) async throws -> Data {
         let request = try request(["v1", "t3", "threads", threadID, "media", id])
         let (data, response) = try await session.data(for: request)

@@ -959,7 +959,7 @@ listing the app's other threads (title, status, model, age) with a New Thread
 button; picking one closes the sheet and pushes the thread over the agent.
 Builds opens the builds sheet.
 
-## 2026-10-13 simulator jank and agent PiP: findings and proposal (not yet approved)
+## 2026-10-13 simulator jank and agent PiP: findings and proposal
 
 User report: opening or resizing the simulator tray (divider docked/half/full)
 drops frames; simulator use feels janky; wanted: the simulator only as a PiP
@@ -1002,8 +1002,7 @@ and `squircle media add` (Squircle's media endpoint then serves them).
 `device_open`/`device_screenshot` tool calls are in `state.sqlite`, so the
 steps endpoint can place a simulator span in its turn.
 
-**Proposal (needs the user's sign-off; replaces the divider/detent design and
-the live simulator on the 3D device).**
+**Proposal** (approved the same day with changes; see the next section).
 
 1. No simulator in a conversation at rest: no divider, docked device or
    simulator menu. Home keeps its still 3D portraits.
@@ -1031,3 +1030,77 @@ the live simulator on the 3D device).**
 
 Unmeasured risks: several H.264 streams over cellular (T3 0.0.45 offers no
 stream size control), and decoder cost of 2–3 streams on the phone.
+
+## 2026-10-13 agent simulators, 0.3.0 (40)
+
+The user approved the proposal with these changes: Squircle drives recording
+(the agent starts a session through a discoverable CLI command and Squircle
+records it and shows it), every active simulator must stay reachable
+(including the user's own use), no system PiP for now, nothing installed on
+the phone; optimize what the simulator can measure.
+
+**Service and CLI.** `squircle sim start --thread ID [--device NAME|UDID]`,
+`sim stop --thread ID`, `sim status [--thread ID]`, `sim devices` (HTTP
+`POST /v1/sims`, `POST /v1/sims/stop`, `GET /v1/sims`, `GET /v1/sims/devices`;
+`src/sims.rs`). Start opens the simulator for the thread with T3's own
+`device.open` (so T3 and the phone stream it), waits for boot, and records
+with `xcrun simctl io UDID recordVideo --codec=h264`. It returns the
+agent-device command; the `--config`/`--session` values are derived exactly as
+T3 0.0.45 does (sha256 prefixes of the host and of `[thread,host,device]`,
+checked against a real `device_open` result). Stop, the thread's turn not
+working for 8 s, a dead recorder or 30 minutes end the session: SIGINT to
+simctl, `avconvert --preset Preset1280x720` (raw simctl output is about 6 Mbit/s,
+17 MB for 23 s; after conversion, 9- and 12-minute sessions were 5.1 and
+1.1 MB, still 1206×2622), then
+the file joins the thread's media with a `simulator` record (session, device,
+start, end) dated at its start, and T3's `device.close` ends the device
+session. Sessions left recording by a previous service run are finished at
+startup. The plugin's agent definition, worker prompts and the phone's
+per-thread instructions tell agents to use `sim start/stop` and not
+`device_open` or `agent-device record`: CoreSimulator allows one host
+recording per simulator (`DEVICE_IN_USE`, observed).
+
+**Phone.** No live SceneKit: `DeviceStage` only renders grid portraits. The
+divider, detents, travelling device, simulator menu and manual simulator
+choice are gone; conversations are full height and an app opening is a flat
+push while Home falls back. `SimulatorFeeds` runs one T3 H.264 stream per
+simulator while any screen shows it; `SimulatorScreen` draws decoded frames
+through `AVSampleBufferDisplayLayer`. `SimulatorDock` floats over the app's
+conversations: one PiP per active simulator (Squircle sessions of the app's
+threads, and T3 device sessions of its working threads), stacked in a corner
+the stack is dragged to (two springs, velocity-projected), captioned with the
+thread when it is not the one on screen or there are several. Tap brings it
+large over a dimmed conversation with Home, Open thread and Shrink; tap
+outside or drag down shrinks it with the finger (one spring; what is
+expanded changes only at rest). Touches on the large picture go to the
+simulator. In the conversation, `ThreadItem.simulator` places each use in
+the turn that began before it: live with a red dot while active (its PiP
+steps aside while that block is on screen), then the recording, muted and
+looping, full screen on tap. Simulator recordings no longer appear as
+gallery clips.
+
+**Measured (simulator, iOS 27.0, Debug builds, live H.264 stream of
+Cards-Verify on screen in a thread, 10 s samples, two runs each):** app CPU
+14.3% → 9.7–10.2%; the simulator's compositor (backboardd) 20.8% → 5.6–9.3%
+(old: 3D device at half size; new: the turn's live block). The old build
+re-rendered the whole full-screen scene for every decoded frame; the new one
+only enqueues the frame. Physical-phone frame rate remains unmeasured (not
+installed, by the user's choice).
+
+**Verified by running it (simulator, against a second service on loopback
+with a copy of the data directory; the loopback HTTP allowance was a local
+patch, not committed):** `sim start` → PiP with the live picture over the
+agent screen; two simulators stack; a real drag moved the stack and it
+snapped to the bottom-left; tap expanded it large; the turn showed the live
+block, then the recording after `sim stop`; an idle thread's session ended by
+itself ("turn ended", recording filed). `SQUIRCLE_STRESS=1` for 40 s:
+`settled=1 violations=0` (the audit now also fails if the PiPs show over
+Home). Rust tests pass, including a check that the agent-device session name
+matches T3's; app unit tests pass. **Not verified:** touches on the large
+picture reached the stream (logged), but Cards-Verify did not react; the old
+build's 3D device failed the same way in the same setup, so this is a
+host-side input problem (the build-12 notes describe T3 capture needing a
+`device.shutdown`/`device.open`), not fixed here. Also unverified: the
+PiP-to-turn flight was not built (the PiP fades; the block becomes the
+recording), cellular bandwidth of several streams, and the phone.
+

@@ -152,37 +152,6 @@ final class Composer: UIView, UITextViewDelegate {
     }
 }
 
-/// Covers the device in a thread. While the simulator is live and large enough
-/// to use, raw touches go to it; otherwise the device itself is a handle.
-@MainActor
-final class DeviceTouchView: UIView {
-    /// Returns false when the touch is not for the simulator.
-    var onTouch: ((_ phase: String, _ point: CGPoint) -> Bool)?
-    private var tracking = false
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isMultipleTouchEnabled = false
-        isAccessibilityElement = true
-        accessibilityIdentifier = "simulator.surface"
-        accessibilityTraits = .allowsDirectInteraction
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    private func forward(_ touches: Set<UITouch>, _ phase: String) {
-        guard let touch = touches.first, let superview else { return }
-        if phase == "begin" { tracking = onTouch?(phase, touch.location(in: superview)) ?? false }
-        else if tracking { _ = onTouch?(phase, touch.location(in: superview)) }
-        if phase == "end" { tracking = false }
-    }
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "begin") }
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "move") }
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "end") }
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "end") }
-}
-
 /// A flat, full-width thread row: its title, who is working on it, and when.
 @MainActor
 final class ThreadRow: UIControl {

@@ -44,79 +44,33 @@ enum PhoneScreen: Equatable {
     var hasScreenshot: Bool { if case .image = self { return true }; return false }
 }
 
-/// One SceneKit view renders a device while it moves between places or shows
-/// a live simulator. At rest in lists, devices are still portraits rendered
-/// from the same scene (`portrait`) that UIKit places in scrolling content,
-/// so they scroll, clip and blur exactly like the views around them.
+/// Renders each app's device as a still portrait, lit by a small SceneKit
+/// studio, for UIKit to place in scrolling content. Nothing here draws
+/// continuously: a portrait is drawn once per screenshot, size and appearance.
+/// Simulators are shown flat (`SimulatorScreen`), never on this device.
 @MainActor
-final class DeviceStage: UIView, SCNSceneRendererDelegate {
+final class DeviceStage: UIView {
     static let cameraDistance: CGFloat = 30
     static let fieldOfView: CGFloat = 22
     static let modelHeight: CGFloat = 7.42
 
-    private let backdrop = CALayer()
-    private let sceneView = SCNView(frame: .zero, options: [
-        SCNView.Option.preferredRenderingAPI.rawValue: SCNRenderingAPI.metal.rawValue
-    ])
-    private let scene = SCNScene()
-    private let cameraNode = SCNNode()
-    private var phones: [String: StagePhone] = [:]
-    /// The rendered devices, kept separate from the backdrop so the host can
-    /// place them above everything else: the phone always sits on top.
-    let overlay = UIView()
-    private var liveReasons = Set<String>()
-
-    private var textureCache: CVMetalTextureCache?
-    /// Which devices were visible in the poses being rendered, handed from
-    /// the main thread to the render thread and back.
-    private let frames = RenderedDevices()
-    /// Devices visible in the poses the last completed render started from:
-    /// drawn for certain, not merely posed.
-    private(set) var drawn = Set<String>()
-    /// Called on the main thread after each completed render.
-    var onRendered: (() -> Void)?
-
-    /// Renders single devices for `portrait`, lit exactly like the stage.
+    private var screens: [String: PhoneScreen] = [:]
     private let portraitScene = SCNScene()
     private let portraitCamera = SCNNode()
     private let sitter = StagePhone()
     private lazy var portraitRenderer: SCNRenderer = {
-        let renderer = SCNRenderer(device: sceneView.device ?? MTLCreateSystemDefaultDevice(), options: nil)
+        let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
         renderer.scene = portraitScene
         renderer.pointOfView = portraitCamera
         renderer.autoenablesDefaultLighting = false
         return renderer
     }()
 
-    /// Off where the stage sits on glass over another app (the overlay).
-    var showsBackdrop = true {
-        didSet { backdrop.isHidden = !showsBackdrop }
-    }
-
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
+        isHidden = true
         accessibilityElementsHidden = true
-        layer.addSublayer(backdrop)
-
-        scene.background.contents = UIColor.clear
-        sceneView.scene = scene
-        sceneView.backgroundColor = .clear
-        sceneView.isOpaque = false
-        sceneView.autoenablesDefaultLighting = false
-        sceneView.allowsCameraControl = false
-        sceneView.isUserInteractionEnabled = false
-        sceneView.antialiasingMode = .multisampling4X
-        // At rest, extra jittered passes smooth thin bezel highlights.
-        sceneView.isJitteringEnabled = true
-        sceneView.rendersContinuously = false
-        sceneView.isPlaying = false
-        sceneView.delegate = self
-        overlay.isUserInteractionEnabled = false
-        overlay.accessibilityElementsHidden = true
-        overlay.addSubview(sceneView)
-        buildStudio(scene, camera: cameraNode, fieldOfView: Self.fieldOfView)
-        sceneView.pointOfView = cameraNode
         portraitScene.background.contents = UIColor.clear
         buildStudio(portraitScene, camera: portraitCamera, fieldOfView: Self.fieldOfView)
         portraitScene.rootNode.addChildNode(sitter.shadow)
@@ -130,26 +84,6 @@ final class DeviceStage: UIView, SCNSceneRendererDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
 
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        backdrop.frame = bounds
-        CATransaction.commit()
-        overlay.frame = frame
-        if sceneView.frame != bounds {
-            sceneView.frame = bounds
-            sceneView.setNeedsDisplay()
-        }
-    }
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        sceneView.preferredFramesPerSecond = window?.windowScene?.screen.maximumFramesPerSecond ?? 60
-        // Render at the display's native pixel density.
-        if let screen = window?.windowScene?.screen { sceneView.contentScaleFactor = screen.nativeScale }
-    }
-
     /// Scene units per point at zero depth; the camera looks down -z.
     var unitsPerPoint: CGFloat {
         guard bounds.height > 0 else { return 0.01 }
@@ -160,22 +94,16 @@ final class DeviceStage: UIView, SCNSceneRendererDelegate {
 
     func sync(ids: [String]) {
         let wanted = Set(ids)
-        for (id, phone) in phones where !wanted.contains(id) {
-            phone.root.removeFromParentNode()
-            phone.shadow.removeFromParentNode()
-            phones[id] = nil
-        }
-        for id in ids where phones[id] == nil {
-            let phone = StagePhone()
-            phone.root.isHidden = true
-            phone.shadow.isHidden = true
-            scene.rootNode.addChildNode(phone.shadow)
-            scene.rootNode.addChildNode(phone.root)
-            phones[id] = phone
-        }
+        for id in screens.keys where !wanted.contains(id) { screens[id] = nil }
+        for id in ids where screens[id] == nil { screens[id] = .off }
     }
 
-    func screen(for id: String) -> PhoneScreen { phones[id]?.screen ?? .off }
+    func screen(for id: String) -> PhoneScreen { screens[id] ?? .off }
+
+    func setScreen(_ screen: PhoneScreen, for id: String) {
+        guard screens[id] != nil else { return }
+        screens[id] = screen
+    }
 
     private var dark: Bool { traitCollection.userInterfaceStyle == .dark }
 
@@ -187,15 +115,12 @@ final class DeviceStage: UIView, SCNSceneRendererDelegate {
         CGSize(width: (height * PhonePose.aspect * 1.36).rounded(.up), height: (height * 1.34).rounded(.up))
     }
 
-    /// One device alone, still, as an image with a transparent background.
-    /// Drawn with the stage's own lights and perspective, so a portrait placed
-    /// centered on a pose's center matches the stage rendering that pose.
+    /// One device alone, still, as an image with a transparent background,
+    /// in the perspective it would have centered in this view.
     func portrait(for id: String, pose: PhonePose, scale: CGFloat) -> UIImage? {
-        guard let phone = phones[id], pose.height > 4, bounds.height > 0 else { return nil }
+        guard let screen = screens[id], pose.height > 4, bounds.height > 0 else { return nil }
         let size = Self.portraitSize(height: pose.height)
-        sitter.setScreen(phone.screen, dark: dark)
-        // Same scene units per point as the stage, with a camera narrowed to
-        // the portrait: identical perspective, smaller frame.
+        sitter.setScreen(screen, dark: dark)
         let u = unitsPerPoint
         portraitCamera.camera?.fieldOfView = 2 * atan(size.height * u / 2 / Self.cameraDistance) * 180 / .pi
         var centered = pose
@@ -212,92 +137,8 @@ final class DeviceStage: UIView, SCNSceneRendererDelegate {
         return UIImage(cgImage: cgImage, scale: scale, orientation: .up)
     }
 
-    nonisolated func renderer(_ renderer: SCNSceneRenderer, willRenderScene scene: SCNScene, atTime time: TimeInterval) {
-        frames.beginRender()
-    }
-
-    nonisolated func renderer(_ renderer: SCNSceneRenderer, didRenderScene scene: SCNScene, atTime time: TimeInterval) {
-        let rendered = frames.endRender()
-        Task { @MainActor [weak self] in
-            guard let self, rendered != drawn else { return }
-            drawn = rendered
-            onRendered?()
-        }
-    }
-
-    /// Asks for a render even when nothing moved, so `drawn` catches up.
-    func requestRender() { sceneView.setNeedsDisplay() }
-
-    // MARK: Live display
-
-    /// Shows a decoded simulator picture on the device's display, in the scene.
-    func setLiveFrame(_ buffer: CVPixelBuffer, for id: String) {
-        guard let phone = phones[id], let device = sceneView.device ?? MTLCreateSystemDefaultDevice() else { return }
-        if textureCache == nil { CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache) }
-        guard let textureCache else { return }
-        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
-        var wrapped: CVMetalTexture?
-        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, buffer, nil, .bgra8Unorm_srgb,
-                                                  width, height, 0, &wrapped)
-        guard let wrapped, let texture = CVMetalTextureGetTexture(wrapped), height > 0 else { return }
-        phone.setLive(texture, backing: wrapped, aspect: CGFloat(width) / CGFloat(height))
-        sceneView.setNeedsDisplay()
-    }
-
-    /// Returns the display to the published screenshot.
-    func endLive(for id: String) {
-        guard let phone = phones[id], phone.isLive else { return }
-        phone.setScreen(phone.screen, dark: dark)
-        sceneView.setNeedsDisplay()
-    }
-
-    func isLive(_ id: String) -> Bool { phones[id]?.isLive ?? false }
-
-    /// Maps a point in this view to the picture shown on a device's display:
-    /// normalized source coordinates with the origin at the top left. Exact
-    /// for any pose because the scene itself is hit-tested.
-    func displayPoint(at point: CGPoint, for id: String) -> CGPoint? {
-        guard let phone = phones[id], !phone.root.isHidden else { return nil }
-        let hit = sceneView.hitTest(point, options: [.rootNode: phone.displayNode, .ignoreHiddenNodes: true]).first
-        guard let uv = hit?.textureCoordinates(withMappingChannel: 0) else { return nil }
-        let crop = phone.display.diffuse.contentsTransform
-        return CGPoint(x: CGFloat(crop.m41) + uv.x * CGFloat(crop.m11), y: CGFloat(crop.m42) + uv.y * CGFloat(crop.m22))
-    }
-
-    func setScreen(_ screen: PhoneScreen, for id: String) {
-        guard let phone = phones[id], phone.screen != screen else { return }
-        if phone.isLive { phone.remember(screen); return }
-        phone.setScreen(screen, dark: dark)
-        sceneView.setNeedsDisplay()
-    }
-
-    /// Phones absent from `poses` are hidden and cost nothing to render.
-    func apply(_ poses: [String: PhonePose]) {
-        let u = unitsPerPoint
-        let size = bounds.size
-        var changed = false
-        SCNTransaction.begin()
-        SCNTransaction.disableActions = true
-        for (id, phone) in phones {
-            let pose = poses[id]
-            guard pose != phone.pose else { continue }
-            changed = true
-            phone.pose = pose
-            guard let pose, pose.visible, pose.height > 1, pose.opacity > 0.005 else {
-                phone.root.isHidden = true
-                phone.shadow.isHidden = true
-                continue
-            }
-            Self.place(phone, pose: pose, unitsPerPoint: u, size: size)
-        }
-        SCNTransaction.commit()
-        frames.applied(Set(phones.compactMap { id, phone in phone.root.isHidden ? nil : id }))
-        if changed { sceneView.setNeedsDisplay() }
-    }
-
     /// Positions a device for a pose in a view of `size`. The device is turned
-    /// to face the camera as it would at the center of the view, so the same
-    /// pose looks identical anywhere on screen and in a centered portrait.
+    /// to face the camera as it would at the center of the view.
     private static func place(_ phone: StagePhone, pose: PhonePose, unitsPerPoint u: CGFloat, size: CGSize) {
         let scale = Float(pose.height * u / modelHeight)
         let position = SIMD3(Float((pose.center.x - size.width / 2) * u), Float((size.height / 2 - pose.center.y) * u),
@@ -319,27 +160,10 @@ final class DeviceStage: UIView, SCNSceneRendererDelegate {
         phone.shadow.opacity = (pose.shadow * pose.opacity).clamped()
     }
 
-    /// Continuous rendering only while something is actually moving.
-    func setLive(_ live: Bool, reason: String) {
-        if live { liveReasons.insert(reason) } else { liveReasons.remove(reason) }
-        let continuous = !liveReasons.isEmpty
-        guard sceneView.rendersContinuously != continuous else { return }
-        sceneView.rendersContinuously = continuous
-        if !continuous { sceneView.setNeedsDisplay() }
-    }
-
-    var isLive: Bool { sceneView.rendersContinuously }
-
     // MARK: Studio
 
     private func updateColors() {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        backdrop.backgroundColor = Theme.paper.resolvedColor(with: traitCollection).cgColor
-        CATransaction.commit()
         PhoneAssets.contactMaterial.transparency = dark ? 1 : 0.85
-        for phone in phones.values where !phone.isLive { phone.setScreen(phone.screen, dark: dark) }
-        sceneView.setNeedsDisplay()
     }
 
     private func buildStudio(_ scene: SCNScene, camera cameraNode: SCNNode, fieldOfView: CGFloat) {
@@ -395,10 +219,7 @@ private final class StagePhone {
     let shadow = SCNNode()
     let display = SCNMaterial()
     let displayNode: SCNNode
-    var pose: PhonePose?
     private(set) var screen: PhoneScreen = .off
-    private(set) var isLive = false
-    private var liveBacking: CVMetalTexture?
 
     init() {
         root.addChildNode(PhoneAssets.body.clone())
@@ -418,23 +239,8 @@ private final class StagePhone {
         setScreen(.off, dark: true)
     }
 
-    /// A screenshot published while live is shown once the stream ends.
-    func remember(_ next: PhoneScreen) { screen = next }
-
-    func setLive(_ texture: MTLTexture, backing: CVMetalTexture, aspect: CGFloat) {
-        SCNTransaction.begin()
-        SCNTransaction.disableActions = true
-        display.diffuse.contents = texture
-        display.diffuse.contentsTransform = PhoneAssets.crop(sourceAspect: aspect)
-        SCNTransaction.commit()
-        liveBacking = backing
-        isLive = true
-    }
-
     func setScreen(_ next: PhoneScreen, dark: Bool) {
         screen = next
-        isLive = false
-        liveBacking = nil
         SCNTransaction.begin()
         SCNTransaction.disableActions = true
         let contents: Any
@@ -793,14 +599,4 @@ private enum PhoneModel {
     float3 studioRadiance = float3(1.0, 0.988, 0.972) * 1.45 * studioFresnel;
     _output.color.rgb = mix(_output.color.rgb, studioRadiance, saturate(studioCoverage * studioReflectionStrength));
     """
-}
-
-/// The visible set as last applied on the main thread, captured by the
-/// render thread when a frame starts and returned when it completes.
-private final class RenderedDevices: @unchecked Sendable {
-    private struct State { var applied = Set<String>(); var rendering = Set<String>() }
-    private let lock = OSAllocatedUnfairLock(initialState: State())
-    func applied(_ ids: Set<String>) { lock.withLock { $0.applied = ids } }
-    func beginRender() { lock.withLock { $0.rendering = $0.applied } }
-    func endRender() -> Set<String> { lock.withLock { $0.rendering } }
 }

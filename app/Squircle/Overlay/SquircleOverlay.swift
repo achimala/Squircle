@@ -72,6 +72,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private enum Size { case bubble, mini, full }
 
     private let model: SquircleModel
+    private lazy var feeds = SimulatorFeeds(model: model)
     private var size = Size.bubble
     /// 0 shows the thread list, 1 the open thread; a finger can scrub it.
     private let push = SpringDriver(value: 0)
@@ -96,7 +97,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Paper under the text, so it reads over any app.
     private let veil = UIView()
     private let list = OverlayListView()
-    private var thread: (controller: ThreadViewController, stage: DeviceStage, page: UIView)?
+    private var thread: (controller: ThreadViewController, page: UIView)?
     private let grabber = UIView()
     private let resizeButton = OverlayController.iconButton("arrow.up.left.and.arrow.down.right", "Full screen", "overlay.resize")
     private let minimizeButton = OverlayController.iconButton("chevron.down", "Minimize", "overlay.minimize")
@@ -422,19 +423,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             thread.page.transform = .identity
             thread.page.frame = bounds
             thread.page.transform = CGAffineTransform(translationX: bounds.width * (1 - p), y: 0)
-            thread.stage.frame = thread.page.bounds
-            // Full screen, the conversation sits on Squircle's own lit
-            // backdrop, which its glass is drawn for.
-            thread.stage.showsBackdrop = size == .full
             thread.controller.view.frame = thread.page.bounds
             thread.controller.view.layoutIfNeeded()
-            stagePose()
         }
-    }
-
-    private func stagePose() {
-        guard let thread, let project else { return }
-        thread.stage.apply(thread.controller.hidesDevice ? [:] : [project.id: thread.controller.pose])
     }
 
     // MARK: Moves
@@ -491,22 +482,16 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         Theme.openHaptic()
         view.endEditing(true)
         if let thread { tearDown(thread) }
-        let stage = DeviceStage()
-        stage.showsBackdrop = false
-        stage.sync(ids: [project.id])
-        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID, stage: stage)
-        controller.hidesIdleDevice = true
+        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID)
+        controller.feeds = feeds
         controller.onBack = { [weak self] in self?.push.animate(to: 0) }
-        controller.onGeometry = { [weak self] in self?.stagePose() }
         let page = UIView()
         page.clipsToBounds = true
         addChild(controller)
-        page.addSubview(stage)
         page.addSubview(controller.view)
-        page.addSubview(stage.overlay)
         content.insertSubview(page, belowSubview: grabber)
         controller.didMove(toParent: self)
-        thread = (controller, stage, page)
+        thread = (controller, page)
         controller.setTransitionProgress(1)
         layoutPages()
         push.animate(to: 1)
@@ -519,9 +504,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         render()
     }
 
-    private func tearDown(_ thread: (controller: ThreadViewController, stage: DeviceStage, page: UIView)) {
-        thread.controller.pausePreview()
-        thread.stage.endLive(for: thread.controller.project.id)
+    private func tearDown(_ thread: (controller: ThreadViewController, page: UIView)) {
+        thread.controller.tearDown()
         thread.controller.willMove(toParent: nil)
         thread.page.removeFromSuperview()
         thread.controller.removeFromParent()

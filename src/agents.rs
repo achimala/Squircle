@@ -233,6 +233,21 @@ impl Agents {
         self.shell.lock().unwrap().threads.get(id).cloned()
     }
 
+    /// A thread's row in T3's shell, if T3 has sent it.
+    pub fn thread_row(&self, id: &str) -> Option<Value> {
+        self.thread(id)
+    }
+
+    /// The live T3 connection once its thread list has arrived.
+    pub async fn connection(&self) -> Result<Arc<T3>> {
+        self.ready().await
+    }
+
+    /// The squircle invocation agents are told to use.
+    pub fn cli(&self) -> &str {
+        &self.cli
+    }
+
     async fn ready(&self) -> Result<Arc<T3>> {
         let client = self.client().await?;
         for _ in 0..50 {
@@ -440,7 +455,7 @@ impl Agents {
         let id = uuid::Uuid::new_v4().to_string();
         let text = format!(
             "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. \
-             To show the app running, use T3's device tools (device_list, device_open) so the user can watch. To publish a recording or screenshot into this thread: {cli} media add --thread {id} --file PATH --caption TEXT. \
+             To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Drive it with the agent-device command it returns; run {cli} sim stop --thread {id} when done. Don't run agent-device record or device_open. \
              For signed builds: {cli} build start --help.",
             cli = self.cli
         );

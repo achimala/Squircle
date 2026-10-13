@@ -2,7 +2,7 @@ import UIKit
 import CoreMedia
 import VideoToolbox
 
-struct SimulatorTarget: Equatable {
+struct SimulatorTarget: Hashable {
     let deviceID: String
     let hostID: String
     init?(deviceID: String?, hostID: String?) {
@@ -360,7 +360,7 @@ final class T3DeviceStream {
     #endif
 }
 /// Coordinate mapping between a displayed simulator picture and T3's input
-/// contract. The picture itself is drawn on the 3D device by `DeviceStage`.
+/// contract. The picture itself is drawn flat by `SimulatorScreen`.
 enum SimulatorSurface {
     /// Aspect-fit placement of a `size` picture inside `bounds`.
     static func point(_ point: CGPoint, bounds: CGRect, size: CGSize, orientation: String) -> CGPoint? {

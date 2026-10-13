@@ -41,6 +41,8 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `install-link ID --ttl-seconds 3600` | Expiring HTML page, manifest and IPA URLs |
 | `media add --thread T3_ID --file PATH --caption TEXT` | Publish an mp4/mov/png/jpg into a T3 thread; Squircle shows it inline |
 | `media list --thread T3_ID` | Media published into that thread |
+| `sim start --thread T3_ID [--device NAME\|UDID]` | Open, boot and record a simulator for that thread; returns the agent-device command. The phone shows it live |
+| `sim stop --thread T3_ID`, `sim status [--thread T3_ID]`, `sim devices` | File the recording in the turn and close T3's device session (also when the turn ends); sessions; simulators in use |
 | `logs ID --since N --limit N` | Persisted diagnostic events, record cursor |
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
 | `symbolicate --report PATH --dsym PATH` | Local Xcode symbolication attempt for Apple-text reports |

@@ -63,6 +63,8 @@ enum ThreadItem: Equatable {
     case changes(TurnChanges, turn: String)
     /// A build the agent made or mentioned in this turn, installable here.
     case build(AppBuild, turn: String)
+    /// A simulator the turn used: live now, or its recording.
+    case simulator(SimulatorUse)
     case live(LiveStatus)
 
     var id: String {
@@ -77,6 +79,7 @@ enum ThreadItem: Equatable {
         case .summary(let summary): return "summary:" + summary.turn
         case .build(let build, let turn): return "build:\(turn):\(build.id)"
         case .changes(_, let turn): return "changes:" + turn
+        case .simulator(let use): return "simulator:" + use.id
         case .live: return "live"
         }
     }
@@ -85,13 +88,20 @@ enum ThreadItem: Equatable {
     static let liveWindow = 4
 
     static func items(messages: [ChatMessage], running: Bool, expanded: Set<String> = [], builds: [AppBuild] = [],
-                      changes: [TurnChanges] = [], now: Date = .now) -> [ThreadItem] {
+                      changes: [TurnChanges] = [], simulators: [SimulatorUse] = [], now: Date = .now) -> [ThreadItem] {
         // Split into turns at each of your messages.
         var turns: [(user: ChatMessage?, rest: [ChatMessage])] = []
         for message in messages {
             if message.role == "user" { turns.append((message, [])) }
             else if turns.isEmpty { turns.append((nil, [message])) }
             else { turns[turns.count - 1].rest.append(message) }
+        }
+        // Each simulator use belongs to the last turn that began before it.
+        let starts = turns.map { $0.user.flatMap { date($0.createdAt) } ?? .distantPast }
+        var used: [Int: [SimulatorUse]] = [:]
+        for use in simulators {
+            let index = starts.lastIndex { $0 <= use.started } ?? 0
+            used[index, default: []].append(use)
         }
         var items: [ThreadItem] = []
         for (index, turn) in turns.enumerated() {
@@ -116,6 +126,7 @@ enum ThreadItem: Equatable {
                 items.append(.summary(summary(turn: id, user: turn.user, work: work, answer: answer, expanded: open)))
                 items += open ? allRows(work) : gallery("gallery:" + id, work)
             }
+            items += (used[index] ?? []).map { .simulator($0) }
             if let answer { items.append(.answer(answer)) }
             if !live {
                 let turnIDs = Set(([turn.user] + rest).compactMap { $0?.turnID })

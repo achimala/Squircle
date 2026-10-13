@@ -1,4 +1,4 @@
-use crate::{agents::Agents, apps, artifact, model::*, preview, projects, store::Store, xcode};
+use crate::{agents::Agents, apps, sims::Sims, artifact, model::*, preview, projects, store::Store, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -37,6 +37,7 @@ pub struct AppState {
     draining: Arc<AtomicBool>,
     recovery_jobs: Arc<Mutex<HashMap<String, Job>>>,
     agents: Option<Arc<Agents>>,
+    sims: Option<Arc<Sims>>,
 }
 
 impl AppState {
@@ -50,6 +51,7 @@ impl AppState {
             draining: Arc::new(AtomicBool::new(false)),
             recovery_jobs: Arc::default(),
             agents: None,
+            sims: None,
         }
     }
 }
@@ -164,6 +166,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/t3/threads/{thread}/media", get(thread_media))
         .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
         .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
+        .route("/v1/sims", get(list_sims).post(start_sim))
+        .route("/v1/sims/stop", post(stop_sim))
+        .route("/v1/sims/devices", get(sim_devices))
         .route("/v1/agents", get(list_agents).post(ensure_agent))
         .route("/v1/agents/context", get(agent_context))
         .route("/v1/workers", get(list_workers).post(spawn_worker))
@@ -219,8 +224,11 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     }
     let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?))?;
     tokio::spawn(agents.clone().run());
+    let sims = Sims::open(&store.root, agents.clone())?;
+    tokio::spawn(sims.clone().run());
     let mut state = AppState::new(store, public_url);
     state.agents = Some(agents);
+    state.sims = Some(sims);
     eprintln!(
         "Squircle listening on {}. Keep this process running; HTTPS/Tailscale is managed separately.",
         listener.local_addr()?
@@ -777,7 +785,7 @@ async fn thread_media(
     let items = crate::media::list(&root, &thread).map_err(ApiError::bad)?;
     let items: Vec<Value> = items
         .into_iter()
-        .map(|m| json!({"id":m.id,"kind":m.kind,"caption":m.caption,"content_type":m.content_type,"bytes":m.bytes,"created_at":m.created_at}))
+        .map(|m| json!({"id":m.id,"kind":m.kind,"caption":m.caption,"content_type":m.content_type,"bytes":m.bytes,"created_at":m.created_at,"simulator":m.simulator}))
         .collect();
     Ok(Json(success(json!({"thread_id":thread,"media":items}))))
 }
@@ -1623,6 +1631,76 @@ mod tests {
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(state.store.lock().unwrap().list_jobs().unwrap().is_empty());
     }
+}
+
+// MARK: Simulator sessions
+
+fn sims(state: &AppState) -> ApiResult<Arc<Sims>> {
+    state.sims.clone().ok_or_else(|| sim_error(anyhow::anyhow!("Simulator sessions are not running in this service")))
+}
+
+fn sim_error(error: anyhow::Error) -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "simulator_failed",
+        message: format!("{error:#}"),
+        next: "Read the message; run squircle sim --help.",
+    }
+}
+
+#[derive(Deserialize)]
+struct SimQuery {
+    thread: Option<String>,
+}
+
+async fn list_sims(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    query: std::result::Result<Query<SimQuery>, QueryRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let Query(query) = query.map_err(|e| ApiError::bad(e.body_text()))?;
+    Ok(Json(success(sims(&state)?.list(query.thread.as_deref()))))
+}
+
+#[derive(Deserialize)]
+struct StartSim {
+    thread_id: String,
+    device: Option<String>,
+}
+
+async fn start_sim(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<StartSim>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let request = body(payload)?;
+    let started = sims(&state)?.start(&request.thread_id, request.device.as_deref()).await.map_err(sim_error)?;
+    Ok(Json(success(started)))
+}
+
+#[derive(Deserialize)]
+struct StopSim {
+    thread_id: Option<String>,
+    id: Option<String>,
+}
+
+async fn stop_sim(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<StopSim>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let request = body(payload)?;
+    let session = sims(&state)?.stop(request.thread_id.as_deref(), request.id.as_deref()).await.map_err(sim_error)?;
+    let next = if session.media_id.is_some() { "The recording now shows in this turn on the phone." } else { "No recording was saved; see error." };
+    Ok(Json(success(json!({"session": session, "next": next}))))
+}
+
+async fn sim_devices(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    Ok(Json(success(sims(&state)?.devices().await.map_err(sim_error)?)))
 }
 
 // MARK: App agents

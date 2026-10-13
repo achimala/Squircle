@@ -1,23 +1,20 @@
 import AVKit
 import UIKit
 
-/// One conversation with a coding agent, on the same stage as Home. The app's
-/// device stays with it: docked beside the title, sharing the screen, or nearly
-/// full size. A divider between device and conversation moves among those
-/// three detents; the device always fills the space above it and shows the
-/// thread's live simulator when one is open.
+/// One conversation with a coding agent, full height. A simulator the agent
+/// uses shows in the turn that used it (live, then its recording) and as a
+/// floating picture the app shows over every conversation (`SimulatorDock`).
 @MainActor
-final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestureRecognizerDelegate {
+final class ThreadViewController: UIViewController, UITableViewDelegate {
     let project: AppProject
     var onBack: (() -> Void)?
-    /// The divider moved; the stage should re-pose the device.
-    var onGeometry: (() -> Void)?
-    var layoutProvider: (() -> StageLayout?)?
-    /// In the debug overlay you are already in the app: the thread opens
-    /// docked and the device shows only while its simulator is live.
-    var hidesIdleDevice = false
-    var hidesDevice: Bool { hidesIdleDevice && stream == nil }
     var currentSessionID: String? { sessionID }
+    /// Shared simulator streams; the turn's simulator plays from them.
+    var feeds: SimulatorFeeds?
+    /// A live simulator in the conversation was tapped: show it large.
+    var onExpandSimulator: ((SimulatorUse) -> Void)?
+    /// Live simulators whose block is on screen, so their PiP can step aside.
+    var onVisibleSimulators: ((Set<String>) -> Void)?
     /// The app's agent: one conversation per app that runs its threads.
     let isAgent: Bool
     /// The agent's update lines open the app's other threads (nil: a new one).
@@ -31,7 +28,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private var isActive: Bool { model.selectedSessionID == sessionID }
 
     private let model: SquircleModel
-    private weak var stage: DeviceStage?
     private var sessionID: String?
     private var selectionReady = false
     private var sending = false
@@ -46,12 +42,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private let clip = UIView()
     private let fade = CAGradientLayer()
     private let table = UITableView(frame: .zero, style: .plain)
-    private let divider = UIView()
-    private let grabber = UIView()
-    private let deviceTouch = DeviceTouchView()
-    private let home = Theme.glassButton(symbol: "house", identifier: "simulator.home", accessibilityLabel: "Simulator Home")
-    private let simulator = Theme.glassButton(symbol: "iphone", identifier: "thread.simulator", accessibilityLabel: "Simulator")
-    private let simulatorStatus = Theme.label("", Theme.font(.caption1, 12), color: .secondaryLabel)
     private let composer = Composer(placeholder: "Message")
     private let notice = Theme.label("", Theme.font(.footnote, 13), color: Theme.failure, lines: 3)
     private let request = Theme.glassSurface(cornerRadius: 22)
@@ -90,78 +80,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     private var expanded = Set<String>()
     private var pinToBottom = true
 
-    private let detent = SpringDriver(value: 0)
-    private var dragStart: CGFloat = 0
-    private static let detentKey = "squircle.thread.detent"
-
-    private enum Preview { case automatic, hidden, paused(SimulatorTarget), restarting(SimulatorTarget), visible(SimulatorTarget, T3DeviceStream) }
-    private var previewState = Preview.automatic
-    /// The agent's open simulator as last seen; nil until first observed.
-    private var followedDevice: String??
-    /// The device rose to show what the agent opened; it settles back after.
-    private var raisedForDevice = false
-    private var stream: T3DeviceStream? { if case .visible(_, let stream) = previewState { return stream }; return nil }
-    private var frameSize = CGSize(width: 440, height: 956)
-    private var orientation = "portrait"
-    private var lastInput: CGPoint?
-
-    init(model: SquircleModel, project: AppProject, sessionID: String?, stage: DeviceStage, agent: Bool = false) {
+    init(model: SquircleModel, project: AppProject, sessionID: String?, agent: Bool = false) {
         self.isAgent = agent
         self.model = model
         self.project = project
         self.sessionID = sessionID
-        self.stage = stage
         super.init(nibName: nil, bundle: nil)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    private var layout: StageLayout {
-        layoutProvider?() ?? StageLayout(size: view.bounds.size, safe: view.safeAreaInsets, titleHeight: 41, reducedMotion: Motion.reduced)
-    }
-
-    // MARK: Geometry shared with the stage
-
-    /// The lowest the divider may sit: just above the composer.
-    private var dividerLimit: CGFloat {
-        var floor = request.isHidden ? pickers.frame.minY : request.frame.minY
-        // Before the keyboard guide resolves (a thread's first frame on screen)
-        // the controls report the top of the view; use where they rest instead.
-        let layout = self.layout
-        if floor < layout.size.height * 0.5 { floor = layout.size.height - max(layout.safe.bottom, 16) - 100 }
-        return floor - 6 - StageLayout.dividerHeight
-    }
-
-    var dividerY: CGFloat { layout.divider(detent: detent.value, limit: dividerLimit) }
-    var pose: PhonePose {
-        guard let morph else { return layout.threadPose(divider: dividerY) }
-        // A tap moves the device in one gesture: straight from where it was to
-        // where it is going, lifting toward you and turning to show its body.
-        let span = morph.to - morph.from
-        let t = span == 0 ? 1 : ((detent.value - morph.from) / span).clamped(-0.1, 1.1)
-        let end = layout.threadPose(divider: layout.divider(detent: morph.to, limit: dividerLimit))
-        var pose = PhonePose.interpolate(morph.pose, end, t)
-        let arc = sin(.pi * t.clamped())
-        if !layout.reducedMotion {
-            pose.depth -= arc * min(morph.pose.height, end.height) * 0.35
-            pose.yaw += arc * (morph.to > morph.from ? -0.55 : 0.55)
-            pose.pitch -= arc * 0.08
-        }
-        return pose
-    }
-    /// The tap-driven move in progress: from which detent and pose, to which detent.
-    private var morph: (from: CGFloat, to: CGFloat, pose: PhonePose)?
-
-    /// The simulator owns touches on its display once it is large and live.
-    private var simulatorOwnsTouches: Bool { stream?.isInteractive == true && detent.value > 0.6 }
-
-    /// Horizontal back swipes must not start on the live device or the divider.
-    func allowsBackSwipe(at point: CGPoint) -> Bool {
-        if divider.frame.insetBy(dx: 0, dy: -10).contains(point) { return false }
-        if simulatorOwnsTouches, deviceTouch.frame.contains(point) { return false }
-        return true
-    }
+    /// Back swipes start anywhere along the left edge.
+    func allowsBackSwipe(at point: CGPoint) -> Bool { true }
 
     func focusComposer() { composer.input.becomeFirstResponder() }
 
@@ -187,6 +118,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         table.register(LiveCell.self, forCellReuseIdentifier: "live")
         table.register(BuildCell.self, forCellReuseIdentifier: "build")
         table.register(ChangesCell.self, forCellReuseIdentifier: "changes")
+        table.register(SimulatorCell.self, forCellReuseIdentifier: "simulator")
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] table, indexPath, id in
             guard let self, let item = itemsByID[id] else { return UITableViewCell() }
             let cell = table.dequeueReusableCell(withIdentifier: Self.reuseIdentifier(for: item), for: indexPath)
@@ -195,9 +127,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         }
         dataSource.defaultRowAnimation = .fade
         table.accessibilityIdentifier = "thread.messages"
-        fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
-        fade.startPoint = CGPoint(x: 0.5, y: 0)
-        clip.layer.mask = fade
+        // iOS 26 blurs the top scroll edge itself; earlier systems fade it.
+        if #unavailable(iOS 26.0) {
+            fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
+            fade.startPoint = CGPoint(x: 0.5, y: 0)
+            clip.layer.mask = fade
+        }
         clip.addSubview(table)
         draftScroll.backgroundColor = .clear
         draftScroll.keyboardDismissMode = .interactive
@@ -227,37 +162,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         pickers.model.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.modelMenu() ?? []) }])
         pickers.approvals.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.approvalMenu() ?? []) }])
         back.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onBack?() }, for: .touchUpInside)
-        [deviceTouch, back, simulatorStatus, divider, home, simulator].forEach(view.addSubview)
+        view.addSubview(back)
         if isAgent {
             back.accessibilityLabel = "Apps"
             threads.addAction(UIAction { [weak self] _ in self?.onThreads?() }, for: .touchUpInside)
             builds.addAction(UIAction { [weak self] _ in self?.onBuilds?() }, for: .touchUpInside)
             [threads, builds].forEach(view.addSubview)
         }
-
-        grabber.backgroundColor = .tertiaryLabel
-        grabber.layer.cornerRadius = 2.5
-        grabber.isUserInteractionEnabled = false
-        divider.addSubview(grabber)
-        divider.isAccessibilityElement = true
-        divider.accessibilityIdentifier = "thread.divider"
-        divider.accessibilityLabel = "Device size"
-        divider.accessibilityTraits = .adjustable
-        divider.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(dividerPanned(_:))))
-        let devicePan = UIPanGestureRecognizer(target: self, action: #selector(dividerPanned(_:)))
-        let deviceTap = UITapGestureRecognizer(target: self, action: #selector(deviceTapped))
-        devicePan.delegate = self
-        deviceTap.delegate = self
-        deviceTouch.addGestureRecognizer(devicePan)
-        deviceTouch.addGestureRecognizer(deviceTap)
-        deviceTouch.onTouch = { [weak self] phase, point in self?.simulatorTouch(phase, at: point) ?? false }
-        simulatorStatus.textAlignment = .center
-        home.addAction(UIAction { [weak self] _ in
-            Theme.selectionHaptic()
-            Task { try? await self?.stream?.send(tag: 4, payload: .from(["button": "home"])) }
-        }, for: .touchUpInside)
-        simulator.showsMenuAsPrimaryAction = true
-        simulator.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.simulatorMenu() ?? []) }])
 
         requestDetail.lineBreakMode = .byTruncatingTail
         requestButtons.spacing = 8
@@ -316,34 +227,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             bottom.edge = .bottom
             composer.addInteraction(bottom)
         }
-        view.accessibilityElements = [back, deviceTouch, home, simulator, divider, draftScroll, table, request, notice, jump, pickers.model, pickers.approvals, composer]
+        view.accessibilityElements = [back, draftScroll, table, request, notice, jump, pickers.model, pickers.approvals, composer]
 
-        detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84)
-        detent.onChange = { [weak self] _ in self?.layoutStage() }
-        detent.onRest = { [weak self] value in
-            self?.morph = nil
-            self?.detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84)
-            UserDefaults.standard.set(Double(min(1, value.rounded())), forKey: Self.detentKey)
-            self?.stage?.setLive(false, reason: "detent")
-        }
-
-        observations = [
-            model.observe(by: self, after: .milliseconds(50)) { $0.render() },
-            Task { [weak self] in
-                for await _ in NotificationCenter.default.notifications(named: UIApplication.didEnterBackgroundNotification) {
-                    self?.pausePreview()
-                }
-            },
-            Task { [weak self] in
-                for await _ in NotificationCenter.default.notifications(named: UIApplication.didBecomeActiveNotification) {
-                    self?.reconcilePreview()
-                }
-            }
-        ]
-
-        renderSimulatorControls(interactive: false)
+        observations = [model.observe(by: self, after: .milliseconds(50)) { $0.render() }]
         model.selectProject(project)
-        detent.set(hidesIdleDevice ? 0 : sessionID == nil ? 1 : CGFloat(UserDefaults.standard.double(forKey: Self.detentKey)).clamped())
         let requestedSessionID = sessionID
         if let requestedSessionID {
             // Show what was last seen of this thread right away, at the bottom.
@@ -366,62 +253,28 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         back.frame = CGRect(x: 16, y: safe.top + 4, width: 44, height: 44)
         threads.frame = CGRect(x: 70, y: safe.top + 4, width: 44, height: 44)
         builds.frame = CGRect(x: 124, y: safe.top + 4, width: 44, height: 44)
-        layoutStage()
+        layoutConversation()
     }
 
-    /// Everything that follows the divider. Runs every frame it moves.
-    private func layoutStage() {
+    /// The conversation runs the full height beneath the floating controls.
+    private func layoutConversation() {
         guard isViewLoaded, view.bounds.width > 0 else { return }
-        let layout = self.layout
         let width = view.bounds.width, height = view.bounds.height
-        let y = dividerY
-        let rowHeight = StageLayout.dividerHeight
-        // The divider and the simulator's controls arrive as the device
-        // leaves its dock; docked, the conversation starts right below it.
-        let arrive = ((y - layout.chatDivider) / 150).clamped()
-        divider.frame = CGRect(x: 0, y: y, width: width, height: rowHeight)
-        divider.alpha = arrive
-        divider.isUserInteractionEnabled = arrive > 0.05
-        grabber.frame = CGRect(x: (width - 36) / 2, y: (rowHeight - 5) / 2, width: 36, height: 5)
-        divider.accessibilityValue = detent.value < 0.5 ? "Docked" : detent.value < 1.5 ? "Half" : "Full"
-
-        // Docked, the conversation runs to the top of the screen beneath the
-        // floating back button and the device, which floats like a PiP. As
-        // the device grows the conversation starts below the divider.
-        let clipTop = (y + rowHeight) * arrive
-        clip.frame = CGRect(x: 0, y: clipTop, width: width, height: max(0, height - clipTop))
-        table.frame = CGRect(x: 0, y: -clipTop, width: width, height: height)
-        let fadeLength = CGFloat.lerp(view.safeAreaInsets.top + 20, 14, arrive)
+        clip.frame = view.bounds
+        table.frame = view.bounds
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         fade.frame = clip.bounds
-        fade.endPoint = CGPoint(x: 0.5, y: min(1, fadeLength / max(1, clip.bounds.height)))
+        fade.endPoint = CGPoint(x: 0.5, y: min(1, (view.safeAreaInsets.top + 20) / max(1, height)))
         CATransaction.commit()
         let floor = request.isHidden ? (notice.isHidden ? pickers.frame.minY : notice.frame.minY) : request.frame.minY
-        draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - clipTop - 8))
-        let insets = UIEdgeInsets(top: .lerp(view.safeAreaInsets.top + 54, clipTop + 2, arrive), left: 0, bottom: height - floor + 10, right: 0)
+        draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
+        let insets = UIEdgeInsets(top: view.safeAreaInsets.top + 54, left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
             if pinned { scrollToBottom() }
         }
-
-        let pose = self.pose
-        let phoneWidth = pose.height * PhonePose.aspect
-        deviceTouch.frame = CGRect(x: pose.center.x - phoneWidth / 2, y: pose.center.y - pose.height / 2,
-                                   width: phoneWidth, height: pose.height).insetBy(dx: -6, dy: -4)
-        deviceTouch.isHidden = hidesDevice
-        // The simulator's buttons ride on the divider, either side of its grabber.
-        for (button, x) in [(home, 20), (simulator, width - 56)] {
-            button.transform = .identity
-            button.frame = CGRect(x: x, y: y + (rowHeight - 36) / 2, width: 36, height: 36)
-            button.transform = CGAffineTransform(scaleX: 0.4 + 0.6 * arrive, y: 0.4 + 0.6 * arrive)
-            button.alpha = arrive
-            button.isUserInteractionEnabled = arrive > 0.5
-        }
-        simulatorStatus.frame = CGRect(x: 64, y: y + (rowHeight - 16) / 2 + 14, width: width - 128, height: 16)
-        simulatorStatus.alpha = arrive
-        onGeometry?()
     }
 
     /// Floating controls fade as the thread leaves, so they never cross
@@ -435,60 +288,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         jump.alpha = jumpShown ? alpha : 0
     }
 
-    private func setDetent(_ value: CGFloat, velocity: CGFloat? = nil) {
-        stage?.setLive(true, reason: "detent")
-        detent.animate(to: value, initialVelocity: velocity)
-    }
-
-    // MARK: Divider
-
-    @objc private func dividerPanned(_ gesture: UIPanGestureRecognizer) {
-        let layout = self.layout, limit = dividerLimit
-        switch gesture.state {
-        case .began:
-            if morph != nil { morph = nil; detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84) }
-            raisedForDevice = false
-            detent.stop()
-            dragStart = dividerY
-            stage?.setLive(true, reason: "detent")
-        case .changed:
-            let y = min(max(dragStart + gesture.translation(in: view).y, layout.chatDivider), max(layout.chatDivider, limit))
-            detent.set(layout.detent(divider: y, limit: limit))
-        case .ended, .cancelled, .failed:
-            let velocity = gesture.velocity(in: view).y
-            let projected = dividerY + velocity * 0.16
-            let stops = (0...2).map { (CGFloat($0), layout.divider(detent: CGFloat($0), limit: limit)) }
-            let target = stops.min { abs($0.1 - projected) < abs($1.1 - projected) }?.0 ?? 0
-            let span = max(120, (stops[2].1 - stops[0].1) / 2)
-            if target != detent.value.rounded() { Theme.selectionHaptic() }
-            setDetent(target, velocity: velocity / span)
-        default: break
-        }
-    }
-
-    @objc private func deviceTapped() {
-        Theme.selectionHaptic()
-        view.endEditing(true)
-        let target: CGFloat = detent.target < 0.5 ? 1 : detent.target < 1.5 ? 2 : 1
-        morph = (detent.value, target, pose)
-        detent.parameters = SpringDriver.Parameters(response: 0.62, damping: 0.86)
-        setDetent(target)
-    }
-
-    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        !simulatorOwnsTouches
-    }
-
-    private func simulatorTouch(_ phase: String, at point: CGPoint) -> Bool {
-        guard simulatorOwnsTouches, let stage, let stream else { return false }
-        let picture = stage.displayPoint(at: view.convert(point, to: stage), for: project.id)
-        let mapped = picture.map { SimulatorSurface.input($0, size: frameSize, orientation: orientation) }
-        guard let input = mapped ?? (phase == "begin" ? nil : lastInput) else { return false }
-        lastInput = phase == "end" ? nil : input
-        stream.touch(phase, point: input)
-        return true
-    }
-
     // MARK: Content
 
     /// A thread opened over this one closed: take the model back.
@@ -498,10 +297,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             if let sessionID { await model.selectSession(sessionID) } else { await model.beginDraft(agent: isAgent) }
             render()
         }
-        reconcilePreview()
     }
     /// A thread is opening over this one.
-    func deactivate() { pausePreview() }
+    func deactivate() {}
 
     private func render() {
         guard isViewLoaded, isActive || !selectionReady else { return }
@@ -521,9 +319,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         composer.send.isEnabled = !sending
         draftScroll.isHidden = showsConversation
         table.isHidden = !showsConversation
-        view.accessibilityElements = [back, deviceTouch, home, simulator, divider,
-                                      showsConversation ? table : draftScroll, request, notice, jump, pickers.model, pickers.approvals, composer]
-        simulator.isEnabled = sessionID != nil
+        view.accessibilityElements = [back, showsConversation ? table : draftScroll, request, notice, jump,
+                                      pickers.model, pickers.approvals, composer]
         let session = model.sessions.first { $0.id == sessionID }
         threadTitle = isAgent ? project.name : session?.displayTitle(in: project) ?? ""
         renderAgent()
@@ -537,8 +334,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             view.setNeedsLayout()
         }
         renderItems()
-        followAgentDevice()
-        reconcilePreview()
     }
 
     private func renderAgent() {
@@ -590,13 +385,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .live: return "live"
         case .build: return "build"
         case .changes: return "changes"
+        case .simulator: return "simulator"
         }
     }
 
     private func renderItems(animated: Bool = false) {
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
         let next = header + ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
-                                             builds: model.builds(for: project), changes: model.changes)
+                                             builds: model.builds(for: project), changes: model.changes,
+                                             simulators: model.threadSimulators)
         guard next != items else { return }
         let previous = itemsByID
         let first = items.isEmpty
@@ -632,6 +429,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && view.window != nil) }
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
         updateSticky()
+        reportVisibleSimulators()
         if previous["live"] != nil, itemsByID["live"] == nil, let finished = next.last(where: { if case .summary = $0 { return true }; return false }) {
             celebrate(finished.id)
         }
@@ -732,6 +530,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateSticky()
+        reportVisibleSimulators()
         guard scrollView.isTracking || scrollView.isDecelerating else { return }
         let bottom = scrollView.contentSize.height + scrollView.contentInset.bottom - scrollView.bounds.height
         pinToBottom = bottom - scrollView.contentOffset.y < 60
@@ -824,8 +623,57 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             guard let cell = cell as? BuildCell else { return }
             cell.configure(build, installing: installingBuild == build.id)
             cell.onInstall = { [weak self] build in self?.install(build) }
+        case .simulator(let use):
+            guard let cell = cell as? SimulatorCell else { return }
+            let stepID = use.recordingID.map { "media:" + $0 }
+            cell.configure(use, feeds: feeds, video: stepID.flatMap(StepVideos.url(for:)))
+            cell.onTap = { [weak self] in self?.openSimulator(use) }
+            if let stepID, StepVideos.url(for: stepID) == nil { loadRecording(stepID, item: item.id) }
         }
     }
+
+    private var loadingRecordings = Set<String>()
+    private func loadRecording(_ stepID: String, item: String) {
+        guard loadingRecordings.insert(stepID).inserted else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let url = await model.loadVideo(stepID)
+            loadingRecordings.remove(stepID)
+            guard url != nil, dataSource.indexPath(for: item) != nil else { return }
+            var snapshot = dataSource.snapshot()
+            snapshot.reconfigureItems([item])
+            await dataSource.apply(snapshot, animatingDifferences: false)
+        }
+    }
+
+    /// Live: large over the conversation. Recorded: the recording, full screen.
+    private func openSimulator(_ use: SimulatorUse) {
+        if use.live { onExpandSimulator?(use); return }
+        guard let id = use.recordingID, presentedViewController == nil else { return }
+        Task { [weak self] in
+            guard let self, let url = await model.loadVideo("media:" + id) else { return }
+            let player = AVPlayerViewController()
+            player.player = AVPlayer(url: url)
+            present(player, animated: true) { player.player?.play() }
+        }
+    }
+
+    /// Live simulator blocks at least half on screen.
+    private func reportVisibleSimulators() {
+        guard let onVisibleSimulators else { return }
+        let visible = table.bounds.inset(by: table.contentInset)
+        var ids = Set<String>()
+        for cell in table.visibleCells {
+            guard let cell = cell as? SimulatorCell, let use = cell.use, use.live else { continue }
+            let frame = cell.convert(cell.screen.frame, to: table)
+            if frame.intersection(visible).height > frame.height * 0.5 { ids.insert(use.id) }
+        }
+        if ids != reportedSimulators {
+            reportedSimulators = ids
+            onVisibleSimulators(ids)
+        }
+    }
+    private var reportedSimulators = Set<String>()
 
     private func text(for message: ChatMessage, style: MessageCell.Style) -> NSAttributedString {
         let key = message.id + "\(style)"
@@ -890,6 +738,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         case .live: return 72
         case .build: return 74
         case .changes: return 46
+        case .simulator: return SimulatorCell.height + 16
         case nil: return 60
         }
     }
@@ -1223,152 +1072,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         }
     }
 
-    // MARK: Simulator
-
-    private func simulatorMenu() -> [UIMenuElement] {
-        var current: SimulatorTarget?
-        switch previewState {
-        case .visible(let target, _), .paused(let target), .restarting(let target): current = target
-        case .automatic, .hidden: break
-        }
-        let devices = model.devices["devices"].array.filter { $0["platform"].string == "ios" && !$0["physical"].bool }.map { device in
-            UIAction(title: device["name"].string ?? "Simulator", image: UIImage(systemName: "iphone"),
-                     state: device["id"].string == current?.deviceID ? .on : .off) { [weak self] _ in self?.open(device) }
-        }
-        var elements: [UIMenuElement] = [UIMenu(title: devices.isEmpty ? "No simulators on this Mac" : "Simulator", options: .displayInline, children: devices)]
-        if case .visible(let target, _) = previewState {
-            elements.append(UIMenu(options: .displayInline, children: [
-                UIAction(title: "Disconnect", image: UIImage(systemName: "eye.slash")) { [weak self] _ in self?.hidePreview() },
-                UIAction(title: "Restart Simulator", subtitle: "Closes its running apps", image: UIImage(systemName: "arrow.clockwise"),
-                         attributes: .destructive) { [weak self] _ in self?.restart(target) }
-            ]))
-        }
-        return elements
-    }
-
-    private func open(_ device: JSONValue) {
-        Task { [weak self] in
-            guard let self else { return }
-            guard selectionReady, sessionID != nil else { return }
-            guard let target = await model.openDevice(device) else { return }
-            model.rememberSimulator(target.deviceID, for: project)
-            pausePreview()
-            previewState = .paused(target)
-            reconcilePreview()
-            if detent.target < 0.5 { setDetent(1) }
-        }
-    }
-
-    private func restart(_ target: SimulatorTarget) {
-        pausePreview()
-        previewState = .restarting(target)
-        simulator.isEnabled = false
-        simulatorStatus.text = "Restarting simulator…"
-        Task { [weak self] in
-            guard let self else { return }
-            let reopened = await model.openDevice(.from(["id": target.deviceID, "hostId": target.hostID]), restart: true)
-            previewState = .paused(reopened ?? target)
-            simulator.isEnabled = true
-            reconcilePreview()
-        }
-    }
-
-    /// When the agent opens a simulator, it goes live on the device and the
-    /// device rises to show it; when the agent closes it, the device settles.
-    private func followAgentDevice() {
-        guard selectionReady, sessionID != nil else { return }
-        let active = model.activeDevice
-        let key = active.map { ($0["deviceId"].string ?? "") + "@" + ($0["openedAt"].string ?? "") }
-        guard let previous = followedDevice else { followedDevice = .some(key); return }
-        guard key != previous else { return }
-        followedDevice = .some(key)
-        if let active, let target = SimulatorTarget(deviceID: active["deviceId"].string, hostID: active["hostId"].string) {
-            model.rememberSimulator(target.deviceID, for: project)
-            switch previewState {
-            case .visible(let current, let stream) where current != target:
-                stream.stop()
-                previewState = .automatic
-            case .visible, .restarting: break
-            default: previewState = .automatic
-            }
-            if detent.target < 0.5 {
-                raisedForDevice = true
-                Theme.openHaptic()
-                setDetent(1)
-            }
-        } else {
-            pausePreview()
-            previewState = .automatic
-            if raisedForDevice, detent.target > 0.5, detent.target < 1.5 { setDetent(0) }
-            raisedForDevice = false
-        }
-    }
-
-    private func reconcilePreview() {
-        guard selectionReady, sessionID != nil else { return }
-        guard UIApplication.shared.applicationState == .active, view.window != nil, parent != nil else { return }
-        let target: SimulatorTarget?
-        switch previewState {
-        case .hidden, .visible, .restarting: return
-        case .paused(let chosen): target = chosen
-        case .automatic:
-            target = model.activeDevice.flatMap { SimulatorTarget(deviceID: $0["deviceId"].string, hostID: $0["hostId"].string) }
-        }
-        guard let target, let http = model.gateway?.http else { return }
-        let stream = T3DeviceStream(http: http, base: model.devices["hubBasePath"].string ?? "/api/device-hub", target: target)
-        previewState = .visible(target, stream)
-        stream.onFrame = { [weak self] buffer in
-            guard let self else { return }
-            frameSize = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
-            stage?.setLiveFrame(buffer, for: project.id)
-        }
-        stream.onScreen = { [weak self] in self?.orientation = $0["orientation"].string ?? "portrait" }
-        stream.onStatus = { [weak self] in self?.simulatorStatus.text = $0 }
-        stream.onInteractive = { [weak self] ready in self?.renderSimulatorControls(interactive: ready) }
-        renderSimulatorControls(interactive: false)
-        stream.start()
-    }
-
-    private func renderSimulatorControls(interactive: Bool) {
-        home.isEnabled = interactive
-        home.isHidden = stream == nil
-        simulator.configuration?.image = UIImage(systemName: stream == nil ? "iphone" : "ellipsis")
-        deviceTouch.accessibilityLabel = interactive ? "Live simulator. Touch to interact." : "\(project.name) device"
-    }
-
-    /// Stops the stream but keeps its last picture on the device.
     /// Removed from the screen for good: stops everything that could still
-    /// move the shared stage or the device (a removed controller can outlive
-    /// its view while a load finishes).
+    /// change shared state (a removed controller can outlive its view while
+    /// a load finishes).
     private var tornDown = false
 
     func tearDown() {
         tornDown = true
-        pausePreview()
         observations.forEach { $0.cancel() }
         observations = []
-        detent.stop()
-        detent.onChange = nil
-        stage?.setLive(false, reason: "detent")
-        stage = nil
-        onGeometry = nil
         onBack = nil
-    }
-
-    func pausePreview() {
-        if case .visible(let target, let stream) = previewState {
-            stream.stop()
-            previewState = .paused(target)
-        }
-        lastInput = nil
-        simulatorStatus.text = nil
-        renderSimulatorControls(interactive: false)
-    }
-
-    private func hidePreview() {
-        pausePreview()
-        previewState = .hidden
-        stage?.endLive(for: project.id)
+        onExpandSimulator = nil
+        onVisibleSimulators?([])
+        onVisibleSimulators = nil
     }
 
     #if DEBUG
@@ -1405,7 +1121,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         guard let cell = table.visibleCells.compactMap({ $0 as? LiveCell }).first else { return }
         cell.configure(LiveStatus(headline: "Running the unit tests", started: nil))
     }
-    func debugTapDevice() { deviceTapped() }
     /// Verification only: replays the finished-turn pulse on the last summary.
     func debugPulse() {
         guard let last = items.last(where: { if case .summary = $0 { return true }; return false }),
@@ -1414,10 +1129,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         table.scrollToRow(at: index, at: .middle, animated: false)
         table.layoutIfNeeded()
         (table.cellForRow(at: index) as? SummaryCell)?.celebrate()
-    }
-    func debugSetDetent(_ value: CGFloat) {
-        view.layoutIfNeeded()
-        detent.set(value)
     }
     #endif
 
