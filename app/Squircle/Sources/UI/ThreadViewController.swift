@@ -23,6 +23,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     var onBuilds: (() -> Void)?
     private let threads = Theme.glassButton(symbol: "list.bullet", identifier: "agent.threads", accessibilityLabel: "Threads")
     private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "agent.builds", accessibilityLabel: "Builds")
+    /// The floating buttons at the top left, in reading order.
+    private var topControls: [UIView] { isAgent ? [back, threads, builds] : [back] }
     /// The model follows one conversation at a time; a thread opened over
     /// this one takes it and gives it back when it closes.
     private var isActive: Bool { model.selectedSessionID == sessionID }
@@ -31,6 +33,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var sessionID: String?
     private var selectionReady = false
     private var sending = false
+    private var shownAttachments = 0
     private let draftScroll = UIScrollView()
     private var observations: [Task<Void, Never>] = []
 
@@ -43,6 +46,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private let fade = CAGradientLayer()
     private let table = UITableView(frame: .zero, style: .plain)
     private let composer = Composer(placeholder: "Message")
+    private lazy var picker = AttachmentPicker(host: self) { [weak self] image in
+        if let attachment = ImageAttachment(image) { self?.model.attach(attachment) }
+    }
     private let notice = Theme.label("", Theme.font(.footnote, 13), color: Theme.failure, lines: 3)
     private let request = Theme.glassSurface(cornerRadius: 22)
     private let requestTitle = Theme.label("", Theme.font(.subheadline, 15, .semibold), lines: 2)
@@ -55,7 +61,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var questionPicks: [String] = []
 
     /// A message on its way to the Mac, shown before T3 echoes it back.
-    private var pendingSend: (id: String, text: String, known: Set<String>)?
+    private var pendingSend: (id: String, text: String, images: Int, known: Set<String>)?
     /// Echoed messages keep the row identity of their local copy.
     private var aliases: [String: String] = [:]
     private var flyingID: String?
@@ -95,6 +101,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     func allowsBackSwipe(at point: CGPoint) -> Bool { true }
 
     func focusComposer() { composer.input.becomeFirstResponder() }
+
+    /// The debug overlay's agent closes the overlay instead of going back.
+    func setBackButton(symbol: String, label: String) {
+        loadViewIfNeeded()
+        back.configuration?.image = UIImage(systemName: symbol)
+        back.accessibilityLabel = label
+    }
 
     // MARK: View
 
@@ -186,6 +199,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         notice.accessibilityIdentifier = "thread.error"
         composer.onSend = { [weak self] in self?.send() }
         composer.onChange = { [weak self] in self?.renderSend() }
+        composer.attachMenu = picker.menu
+        composer.onRemoveAttachment = { [weak self] id in self?.model.removeAttachment(id) }
         jump.alpha = 0
         jump.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
         jump.addAction(UIAction { [weak self] _ in
@@ -227,7 +242,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             bottom.edge = .bottom
             composer.addInteraction(bottom)
         }
-        view.accessibilityElements = [back, draftScroll, table, request, notice, jump, pickers.model, pickers.approvals, composer]
+        view.accessibilityElements = topControls + [draftScroll, table, request, notice, jump, pickers.model, pickers.approvals, composer]
 
         observations = [model.observe(by: self, after: .milliseconds(50)) { $0.render() }]
         model.selectProject(project)
@@ -319,11 +334,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         composer.send.isEnabled = !sending
         draftScroll.isHidden = showsConversation
         table.isHidden = !showsConversation
-        view.accessibilityElements = [back, showsConversation ? table : draftScroll, request, notice, jump,
-                                      pickers.model, pickers.approvals, composer]
+        view.accessibilityElements = topControls + [showsConversation ? table : draftScroll, request, notice, jump,
+                                                    pickers.model, pickers.approvals, composer]
         let session = model.sessions.first { $0.id == sessionID }
         threadTitle = isAgent ? project.name : session?.displayTitle(in: project) ?? ""
         renderAgent()
+        let attached = model.attachments.count
+        composer.show(model.attachments)
+        if attached != shownAttachments, view.window != nil {
+            UIView.animate(springDuration: 0.4, bounce: 0.15, initialSpringVelocity: 0, delay: 0, options: [.allowUserInteraction]) {
+                self.view.layoutIfNeeded()
+            }
+        }
+        shownAttachments = attached
         renderSend()
         renderRequest()
         let error = model.error ?? (model.connected ? nil : "Reconnecting…")
@@ -366,7 +389,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func renderSend() {
-        let stop = model.isRunning && composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let stop = model.isRunning && composer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.attachments.isEmpty
         let symbol = stop ? "stop.fill" : "arrow.up"
         if composer.send.accessibilityValue != symbol {
             composer.send.accessibilityValue = symbol
@@ -445,8 +468,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 aliases[echo.id] = pending.id
                 pendingSend = nil
             } else {
-                messages.append(ChatMessage(id: pending.id, role: "user", content: pending.text,
-                                            createdAt: ISO8601DateFormatter().string(from: .now)))
+                var message = ChatMessage(id: pending.id, role: "user", content: pending.text,
+                                          createdAt: ISO8601DateFormatter().string(from: .now))
+                message.attachments = (0..<pending.images).map { "local-\($0)" }
+                messages.append(message)
             }
         }
         guard !aliases.isEmpty else { return messages }
@@ -610,7 +635,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             (cell as? StepCell)?.configureEarlier(count: count, expanded: count == 0)
         case .gallery(let id, let shots):
             guard let cell = cell as? GalleryCell else { return }
-            cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? 56 : 20, id: id)
+            cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? 56 : 20, id: id,
+                           trailing: id.hasPrefix("gallery:sent:"))
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
             for shot in shots where GalleryCell.image(for: shot) == nil { loadImage(shot, item: id) }
         case .summary(let summary):
@@ -809,7 +835,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard loadingImages.insert(key).inserted else { return }
         Task { [weak self] in
             guard let self else { return }
-            let data = await model.loadStepImage(shot.step, index: shot.index)
+            let data = await model.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment)
             loadingImages.remove(key)
             guard data != nil, dataSource.indexPath(for: item) != nil else { return }
             var snapshot = dataSource.snapshot()
@@ -839,7 +865,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func send() {
         guard selectionReady, !sending else { return }
         let text = composer.text
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        let images = model.attachments
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, images.isEmpty {
             if model.isRunning { Task { await model.stop() } }
             return
         }
@@ -848,7 +875,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         Theme.openHaptic()
         let source = composer.textOrigin(in: view)
         let local = "local:" + UUID().uuidString
-        pendingSend = (local, text, Set(model.messages.filter { $0.role == "user" }.map(\.id)))
+        // Your pictures show in the conversation from the bytes on hand.
+        for (index, image) in images.enumerated() { StepImages.set(image.data, for: local, index: index) }
+        pendingSend = (local, text, images.count, Set(model.messages.filter { $0.role == "user" }.map(\.id)))
         flyingID = Motion.reduced ? nil : local
         composer.text = ""
         pinToBottom = true
@@ -1109,7 +1138,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         view.layoutIfNeeded()
         let source = composer.textOrigin(in: view)
         let local = "local:debug"
-        pendingSend = (local, text, Set(model.messages.filter { $0.role == "user" }.map(\.id)))
+        pendingSend = (local, text, 0, Set(model.messages.filter { $0.role == "user" }.map(\.id)))
         flyingID = local
         composer.text = ""
         pinToBottom = true

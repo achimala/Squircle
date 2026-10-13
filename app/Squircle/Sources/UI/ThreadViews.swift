@@ -64,6 +64,23 @@ final class Composer: UIView, UITextViewDelegate {
     var onChange: (() -> Void)?
     let input = UITextView()
     let send = Theme.glassButton(symbol: "arrow.up", prominent: true, identifier: "thread.send", accessibilityLabel: "Send message")
+    /// Adds pictures; shown once it has somewhere to get them from.
+    var attachMenu: UIMenu? {
+        didSet {
+            attach.menu = attachMenu
+            attach.showsMenuAsPrimaryAction = true
+            attach.isHidden = attachMenu == nil
+            inputLeading.constant = attachMenu == nil ? 6 : 44
+        }
+    }
+    var onRemoveAttachment: ((String) -> Void)?
+    private let attach = Theme.glassButton(symbol: "plus", identifier: "thread.attach", accessibilityLabel: "Add image")
+    /// Pictures waiting to be sent, above the text.
+    private let tray = UIScrollView()
+    private let thumbs = UIStackView()
+    private var shown: [String] = []
+    private var trayHeight: NSLayoutConstraint!
+    private var inputLeading: NSLayoutConstraint!
     var placeholderText: String {
         get { placeholder.text ?? "" }
         set { if placeholder.text != newValue { placeholder.text = newValue } }
@@ -91,22 +108,44 @@ final class Composer: UIView, UITextViewDelegate {
         input.accessibilityIdentifier = "thread.input"
         input.accessibilityLabel = "Message the coding agent"
         send.addAction(UIAction { [weak self] _ in self?.onSend?() }, for: .touchUpInside)
+        attach.isHidden = true
+        tray.showsHorizontalScrollIndicator = false
+        tray.alwaysBounceHorizontal = true
+        tray.contentInset = UIEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
+        thumbs.spacing = 8
+        thumbs.alignment = .bottom
+        thumbs.translatesAutoresizingMaskIntoConstraints = false
+        tray.addSubview(thumbs)
         glass.translatesAutoresizingMaskIntoConstraints = false
         group.translatesAutoresizingMaskIntoConstraints = false
         group.clipsToBounds = false
         group.contentView.clipsToBounds = false
         addSubview(group)
         group.contentView.addSubview(glass)
-        [input, placeholder, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
+        [tray, input, placeholder, attach, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         height = input.heightAnchor.constraint(equalToConstant: 48)
+        trayHeight = tray.heightAnchor.constraint(equalToConstant: 0)
+        inputLeading = input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6)
         NSLayoutConstraint.activate([
             group.topAnchor.constraint(equalTo: topAnchor), group.bottomAnchor.constraint(equalTo: bottomAnchor),
             group.leadingAnchor.constraint(equalTo: leadingAnchor), group.trailingAnchor.constraint(equalTo: trailingAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            input.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
+            tray.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
+            tray.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor),
+            tray.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor),
+            trayHeight,
+            thumbs.topAnchor.constraint(equalTo: tray.contentLayoutGuide.topAnchor),
+            thumbs.bottomAnchor.constraint(equalTo: tray.contentLayoutGuide.bottomAnchor),
+            thumbs.leadingAnchor.constraint(equalTo: tray.contentLayoutGuide.leadingAnchor),
+            thumbs.trailingAnchor.constraint(equalTo: tray.contentLayoutGuide.trailingAnchor),
+            thumbs.heightAnchor.constraint(equalTo: tray.frameLayoutGuide.heightAnchor),
+            input.topAnchor.constraint(equalTo: tray.bottomAnchor),
             input.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
-            input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
+            inputLeading,
+            attach.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
+            attach.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
+            attach.widthAnchor.constraint(equalToConstant: 36), attach.heightAnchor.constraint(equalToConstant: 36),
             input.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -4),
             height,
             placeholder.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 17),
@@ -120,6 +159,30 @@ final class Composer: UIView, UITextViewDelegate {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Shows the pictures waiting to be sent, each with its own remove button.
+    func show(_ attachments: [ImageAttachment]) {
+        let ids = attachments.map(\.id)
+        guard ids != shown else { return }
+        let added = Set(ids).subtracting(shown)
+        shown = ids
+        thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for attachment in attachments {
+            let thumb = AttachmentThumb(attachment) { [weak self] id in
+                Theme.selectionHaptic()
+                self?.onRemoveAttachment?(id)
+            }
+            thumbs.addArrangedSubview(thumb)
+            if added.contains(attachment.id), window != nil, !Motion.reduced {
+                thumb.alpha = 0
+                thumb.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
+                UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.75, initialSpringVelocity: 0,
+                               options: [.allowUserInteraction]) { thumb.alpha = 1; thumb.transform = .identity }
+            }
+        }
+        trayHeight.constant = attachments.isEmpty ? 0 : 84
+        onChange?()
+    }
 
     /// Where the first line of typed text begins, in `view`'s coordinates.
     func textOrigin(in view: UIView) -> CGPoint {
@@ -150,6 +213,50 @@ final class Composer: UIView, UITextViewDelegate {
         if height.constant != next { height.constant = next }
         onChange?()
     }
+}
+
+/// A picture in the message field, with a button that takes it out.
+@MainActor
+final class AttachmentThumb: UIView {
+    init(_ attachment: ImageAttachment, remove: @escaping (String) -> Void) {
+        super.init(frame: .zero)
+        let image = UIImageView(image: attachment.thumbnail)
+        image.contentMode = .scaleAspectFill
+        image.clipsToBounds = true
+        image.layer.cornerCurve = .continuous
+        image.layer.cornerRadius = 12
+        image.layer.borderWidth = 1
+        image.layer.borderColor = UIColor.separator.cgColor
+        image.isAccessibilityElement = true
+        image.accessibilityLabel = "Attached image"
+        var config = UIButton.Configuration.plain()
+        // A white cross on a dark disc reads over light and dark pictures alike.
+        config.image = UIImage(systemName: "xmark.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+            .applying(UIImage.SymbolConfiguration(paletteColors: [.white, UIColor.black.withAlphaComponent(0.6)])))
+        config.contentInsets = .zero
+        let close = UIButton(configuration: config)
+        close.layer.shadowColor = UIColor.black.cgColor
+        close.layer.shadowOpacity = 0.35
+        close.layer.shadowRadius = 3
+        close.layer.shadowOffset = .zero
+        close.accessibilityLabel = "Remove image"
+        close.accessibilityIdentifier = "thread.attachment.remove"
+        close.addAction(UIAction { _ in remove(attachment.id) }, for: .touchUpInside)
+        [image, close].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
+        let ratio = attachment.thumbnail.size.width / max(1, attachment.thumbnail.size.height)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 72),
+            widthAnchor.constraint(equalToConstant: min(120, max(48, 72 * ratio))),
+            image.topAnchor.constraint(equalTo: topAnchor), image.bottomAnchor.constraint(equalTo: bottomAnchor),
+            image.leadingAnchor.constraint(equalTo: leadingAnchor), image.trailingAnchor.constraint(equalTo: trailingAnchor),
+            close.topAnchor.constraint(equalTo: topAnchor), close.trailingAnchor.constraint(equalTo: trailingAnchor),
+            close.widthAnchor.constraint(equalToConstant: 32), close.heightAnchor.constraint(equalToConstant: 32)
+        ])
+        accessibilityIdentifier = "thread.attachment"
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 /// A flat, full-width thread row: its title, who is working on it, and when.

@@ -754,6 +754,50 @@ panel's content (on its paper) is blurred, and the live bubble line (masked
 shimmer) is swapped for a plain copy during the morph. Probe
 `1b6ebe57-95b3-4449-ba9c-babb90327c7c`.
 
+**Agent overlay (user request, 2026-10-13):** "not updated at all for the new
+unified single agent design … has a separate glass container that gets out of
+sync with the rest of the ui". The installed Letters Abroad build
+(`05e83365`, overlay cache `62fc26ae…`) already carried build-39 shared code;
+the overlay's own controller had not changed since build 26. Now:
+
+- Opening the overlay shows the app's agent conversation (the same
+  `ThreadViewController` as the app, `agent: true`) with Threads and Builds
+  beside a minimize button, and a full-screen toggle. Threads opens the
+  threads sheet; a thread (or a worker update line) pushes in over the agent
+  inside the panel; back or a left-edge swipe returns. The agent is mounted
+  once and kept, so the panel opens already showing it. The bubble shows who
+  needs you, else the agent's live step, else a working thread.
+- One glass view holds everything: the bubble's line and the conversation are
+  in its `contentView`, clipped by its corners. Its frame is one vector spring
+  (`FrameSpring`: x, y, width, height in one display link, velocity kept when
+  retargeted, held by a finger while dragged). Bubble ↔ mini ↔ full, side
+  changes, keyboard and bubble width all retarget that spring; every frame
+  derives the corner radius, the line's fade and the conversation's place
+  from the presented frame. The conversation is laid out at least at mini
+  size, pinned to the bubble's corner (the glass reveals it), and never
+  larger than where the glass is headed (an overshoot shows paper, not a
+  relayout). Removed: the separate content layer, stretch and Gaussian blur,
+  and the `UIView.animate` resize, drag and keyboard animations.
+- Opening first captures the host app into the message field (`hostWillBeCovered()`, `HostCapture`).
+- DEBUG: `SQUIRCLE_OVERLAY_OPEN=mini|full`, `SQUIRCLE_OVERLAY_CYCLE=1`
+  (with `SQUIRCLE_SLOW`) under `SQUIRCLE_OVERLAY_DEMO`.
+
+Verified in the simulator (Squircle Debug scoped to Squircle, iPhone 17 Pro,
+iOS 27.0) from a 4× slow recording at 4 fps: open, mini → full, thread push
+and back, close and bubble width changes are one continuous shape with no
+content outside it. Letters Abroad build with this overlay: job
+`7cc921b4-50e4-49dc-ac12-9ba479bd03c9` (built from this branch's overlay sources,
+key `ebaea9fe…`, then imported). Not yet on the phone.
+
+**How the overlay reaches apps.** It is compiled into each app when Squircle
+signs it; an installed app keeps that overlay until the app is built and
+installed again. The service compiles it from the checkout its binary was
+built in (`CARGO_MANIFEST_DIR`) unless `SQUIRCLE_OVERLAY_PROJECT` is set, so a
+service running from a worker's worktree injects that branch's overlay.
+Proposed, not built: compile from the main checkout, and stamp the source key
+into the framework so the overlay can show "Overlay outdated · Rebuild" when
+the Mac's key differs.
+
 ## 2026-10-11 Home grid, 0.3.0 (28)
 
 The user tried build 27 (first grid) and confirmed the grid is better than
@@ -958,6 +1002,44 @@ gone. Beside back sit two glass buttons: Threads opens a full-height sheet
 listing the app's other threads (title, status, model, age) with a New Thread
 button; picking one closes the sheet and pushes the thread over the agent.
 Builds opens the builds sheet.
+Verified in the simulator: docked, the three buttons sit clear of the PiP;
+the sheet lists threads with status, opens a thread over the agent, and New
+Thread opens an empty draft; Builds opens. Two fixes from looking: out of its
+dock the device covered Threads and Builds (and full size overlapped back), so
+the undocked device now starts below the button row (`undockedTop`); and the
+explicit VoiceOver order omitted both buttons. `SQUIRCLE_STRESS=1` 30 s:
+`settled=1 violations=0`.
+
+## 2026-10-13 image attachments
+
+User request: image uploads in Squircle generally, and opening the in-app
+overlay pre-attaches a screenshot of the app that is easy to delete.
+
+- **T3's own mechanism.** `thread.turn.start` takes
+  `message.attachments: [{type:"image", name, mimeType, sizeBytes, dataUrl}]`
+  (T3 0.0.45 limits: 10 MiB per image, 80 MiB per message). T3 writes each to
+  `~/.t3/userdata/attachments/<thread>-<uuid>.jpg` and gives the provider its
+  path. Sent images come back as `{type:"image", id, …}` on the message and are
+  fetched through `assets.createUrl` (`resource: {_tag:"attachment", attachmentId}`),
+  a short-lived signed URL. No separate upload server. T3's alternative
+  `attachments.createUploadUrl` two-step upload is not used.
+- **Composer.** A `+` menu (Photo Library; Camera where the app declares camera
+  use) adds images as thumbnails above the text, each with a remove button.
+  Pending images live on `SquircleModel.attachments`, so any composer bound to
+  the model shows them; sending takes them and returns them if T3 refuses.
+  Images resize to a 2000 px long side, JPEG. Sent images show under your
+  bubble, right-aligned, and open full screen on tap.
+- **Overlay.** Opening the bubble draws the scene's windows below the overlay
+  (`drawHierarchy`, overlay window excluded) and attaches the picture under a
+  fixed ID, so reopening replaces it instead of piling up (`Overlay/HostCapture.swift`).
+- **New app agent with images:** the Mac creates the agent with no message and
+  the phone sends the first message itself, so the images go through T3.
+- Verified 2026-10-13 in the simulator (iOS 27.0, T3 0.0.45) on the Squircle
+  Probe agent: two photos attached, one removed, sent with text; T3 stored a
+  53 KB JPEG and the agent answered with the image's text; after a relaunch
+  the image reloaded from T3. Overlay demo (`SQUIRCLE_OVERLAY_DEMO`) attached the
+  app beneath on open, in both the list and a thread; remove worked. Not yet
+  on the phone.
 
 ## 2026-10-13 simulator jank and agent PiP: findings and proposal
 

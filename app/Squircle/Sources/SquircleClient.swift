@@ -23,6 +23,22 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return reply.data
     }
 
+    func build(id: String) async throws -> (AppBuild, BuildFailure?) {
+        struct Reply: Decodable { struct Data: Decodable { let job: AppBuild; let failure: BuildFailure? }; let ok: Bool; let data: Data }
+        let reply: Reply = try await get(["v1", "builds", id])
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return (reply.data.job, reply.data.failure)
+    }
+
+    func buildLog(id: String, offset: Int, limit: Int) async throws -> BuildLogPage {
+        struct Reply: Decodable { let ok: Bool; let data: BuildLogPage }
+        let reply: Reply = try await get(["v1", "builds", id, "log"], query: [
+            URLQueryItem(name: "offset", value: String(offset)), URLQueryItem(name: "limit", value: String(limit))
+        ])
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data
+    }
+
     func fetchAppMetadata() async throws -> [AppMetadata] {
         struct Reply: Decodable { let ok: Bool; let data: [AppMetadata] }
         do {

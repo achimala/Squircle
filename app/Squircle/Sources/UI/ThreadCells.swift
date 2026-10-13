@@ -300,6 +300,9 @@ final class GalleryCell: TimelineCell {
     private let row = UIStackView()
     private var shots: [Shot] = []
     private var galleryID: String?
+    /// Your own pictures sit at the right, under your message.
+    private var trailing = false
+    private var indent: CGFloat = 20
     private static let cache = NSCache<NSString, UIImage>()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -340,7 +343,9 @@ final class GalleryCell: TimelineCell {
     /// Oldest to newest, resting on the newest. Only screenshots added to
     /// this same gallery while it is on screen animate in; scrolling back
     /// through history never replays them.
-    func configure(_ shots: [Shot], indent: CGFloat, id: String) {
+    func configure(_ shots: [Shot], indent: CGFloat, id: String, trailing: Bool = false) {
+        self.indent = indent
+        self.trailing = trailing
         scroll.contentInset = UIEdgeInsets(top: 0, left: indent, bottom: 0, right: 20)
         let same = id == galleryID
         galleryID = id
@@ -367,6 +372,23 @@ final class GalleryCell: TimelineCell {
             scroll.setContentOffset(CGPoint(x: end, y: 0), animated: animate)
         }
         for case let view as ShotView in row.arrangedSubviews { view.update() }
+        alignTrailing()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        alignTrailing()
+    }
+
+    /// A row narrower than the cell rests against its right edge.
+    private func alignTrailing() {
+        guard trailing, scroll.bounds.width > 0 else { return }
+        row.layoutIfNeeded()
+        let width = row.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width
+        let left = max(indent, scroll.bounds.width - 20 - width)
+        guard scroll.contentInset.left != left else { return }
+        scroll.contentInset.left = left
+        scroll.contentOffset.x = -left
     }
 }
 

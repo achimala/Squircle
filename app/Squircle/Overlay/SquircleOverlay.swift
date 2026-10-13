@@ -53,72 +53,75 @@ final class OverlayHost {
     }
 }
 
-/// Touches that miss the overlay's own controls reach the app beneath.
+/// Touches that miss the overlay's glass reach the app beneath.
 final class OverlayWindow: UIWindow {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let view = super.hitTest(point, with: event)
-        return view?.accessibilityIdentifier == OverlayController.passthrough || view === rootViewController?.view ? nil : view
+        return view === rootViewController?.view ? nil : view
     }
 }
 
-/// The overlay over the host app. A glass bubble shows what the agent is
-/// doing in this app; the same glass reshapes into a panel at the same place
-/// and back, on one spring. The panel shows the app's threads or one
-/// thread, each either mini (floating over the app while you use it) or full
-/// screen; size and content change independently.
+/// Where the overlay is. Everything on screen is derived from it and from
+/// two springs that move toward what it implies.
+struct OverlayRoute: Equatable {
+    var open = false
+    var full = false
+    /// A thread over the agent: a T3 thread ID, or `draft:<uuid>` for a new
+    /// one. Kept while the overlay is closed, so it reopens where you were.
+    var thread: String?
+}
+
+/// The app's agent, over the app. One piece of glass is the bubble (what the
+/// agent and its workers are doing) and, tapped, the panel holding the
+/// agent's conversation with its Threads and Builds buttons; the panel floats
+/// over the app (mini) or fills the screen. Other threads push in over the
+/// agent inside the panel.
+///
+/// The glass's frame is one spring (`FrameSpring`); the bubble's line and the
+/// conversation live inside the glass, laid out from that frame on every
+/// frame, so nothing can drift from the shape. A finger takes the spring over
+/// (drag, back swipe) and hands it back with its velocity.
 @MainActor
 final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
-    static let passthrough = "overlay.passthrough"
-    private enum Size { case bubble, mini, full }
-
     private let model: SquircleModel
+    /// Simulator streams for the turns' live simulators.
     private lazy var feeds = SimulatorFeeds(model: model)
-    private var size = Size.bubble
-    /// 0 shows the thread list, 1 the open thread; a finger can scrub it.
-    private let push = SpringDriver(value: 0)
-    /// The morph between bubble (0) and panel (1). Slightly underdamped, so
-    /// the glass overshoots and stretches as it lands.
-    private let morph = SpringDriver(value: 0)
-    /// The panel's frame for the morph in progress.
-    private var morphFrame = CGRect.zero
+    private var route = OverlayRoute()
 
-    /// One piece of glass: the bubble, and the panel it morphs into.
-    private let shell = UIVisualEffectView(effect: Theme.glassEffect(interactive: true))
+    private let glass = UIVisualEffectView(effect: Theme.glassEffect())
+    private let frame = FrameSpring()
+    /// 0 = the agent, 1 = a thread over it.
+    private let push = SpringDriver()
     private let bubble = LiveCapsule(glass: false)
-    /// A plain copy of the bubble's line that stretches and fades during the
-    /// morph, in place of the live line with its masked shimmer.
-    private let morphLine = UIView()
-    private let morphDot = UIView()
-    private let morphText = Theme.label("", Theme.font(.subheadline, 15, .semibold), color: .secondaryLabel)
-    /// Everything on the panel, above the glass so the conversation's glass
-    /// controls stay their own glass. Laid out at the panel's final size and
-    /// shown as the glass arrives there, so nothing is clipped mid-morph.
-    private let content = UIView()
-    /// Paper under the text, so it reads over any app.
+    /// The panel's content, inside the glass and clipped by it.
+    private let page = UIView()
+    /// Paper under the conversation, so it reads over any app.
     private let veil = UIView()
-    private let list = OverlayListView()
-    private var thread: (controller: ThreadViewController, page: UIView)?
-    private let grabber = UIView()
-    private let resizeButton = OverlayController.iconButton("arrow.up.left.and.arrow.down.right", "Full screen", "overlay.resize")
-    private let minimizeButton = OverlayController.iconButton("chevron.down", "Minimize", "overlay.minimize")
+    private let resizeButton = Theme.glassButton(symbol: "arrow.up.left.and.arrow.down.right",
+                                                 identifier: "overlay.resize", accessibilityLabel: "Full screen")
 
-    /// Bubble center; the panel opens from the bubble's corner and the two
-    /// always share this place.
-    private var anchor: CGPoint?
-    /// The finger's offset while the bubble or panel is being dragged; the
-    /// glass and its content move together by it.
-    private var dragOffset = CGPoint.zero
-    private var movePan: UIPanGestureRecognizer!
-    private var backPan: UIPanGestureRecognizer!
+    private typealias Mounted = (controller: ThreadViewController, host: UIView)
+    /// Mounted once the app is known and kept, so opening shows it at once.
+    private var agent: Mounted?
+    /// Changes only while `push` is at 0, i.e. off screen.
+    private var thread: Mounted?
+    private var threadKey: String?
+
+    /// Bubble side and height; the panel opens from the bubble's corner.
+    private var anchor: (right: Bool, y: CGFloat)?
+    private var dragStart = CGRect.zero
     private var pushStart: CGFloat = 0
+    private var draggingPush = false
     private var keyboardTop = CGFloat.greatestFiniteMagnitude
     private weak var previousKey: UIWindow?
     private var observations: [Task<Void, Never>] = []
-    /// Threads working at the last render, so a finish can be shown.
+    /// Sessions working at the last render, so a finish can be shown.
     private var working: [String: String] = [:]
     private var finished: (text: String, until: Date)?
-    /// A new thread is being created; don't follow another meanwhile.
-    private var starting = false
+    private var bubblePan: UIPanGestureRecognizer!
+    private var bubbleTap: UITapGestureRecognizer!
+    private var movePan: UIPanGestureRecognizer!
+    private var backPan: UIPanGestureRecognizer!
 
     init(model: SquircleModel) {
         self.model = model
@@ -128,66 +131,42 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { size == .full ? .portrait : .all }
-
-    static func iconButton(_ symbol: String, _ label: String, _ identifier: String) -> UIButton {
-        var config = UIButton.Configuration.plain()
-        config.image = UIImage(systemName: symbol)
-        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
-        config.baseForegroundColor = .secondaryLabel
-        let button = UIButton(configuration: config)
-        button.accessibilityLabel = label
-        button.accessibilityIdentifier = identifier
-        return button
-    }
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { route.open && route.full ? .portrait : .all }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
-        shell.accessibilityIdentifier = "overlay.bubble"
-        shell.isAccessibilityElement = true
-        shell.accessibilityTraits = .button
+        glass.accessibilityIdentifier = "overlay.bubble"
+        glass.contentView.clipsToBounds = true
+        glass.contentView.layer.cornerCurve = .continuous
+        view.addSubview(glass)
         bubble.isUserInteractionEnabled = false
         bubble.showsTime = false
-        shell.contentView.addSubview(bubble)
-        morphLine.isHidden = true
-        morphLine.isUserInteractionEnabled = false
-        morphDot.layer.cornerRadius = 4.5
-        morphDot.layer.cornerCurve = .continuous
-        [morphDot, morphText].forEach(morphLine.addSubview)
-        view.addSubview(shell)
-        view.addSubview(content)
-        view.addSubview(morphLine)
-        content.isHidden = true
-        content.alpha = 0
-        // The panel's own rounded shape; content follows its bounds.
-        content.clipsToBounds = true
-        content.layer.cornerCurve = .continuous
+        bubble.isAccessibilityElement = true
+        bubble.accessibilityTraits = .button
+        bubble.accessibilityLabel = "Squircle"
+        glass.contentView.addSubview(bubble)
         veil.isUserInteractionEnabled = false
-        grabber.backgroundColor = .tertiaryLabel
-        grabber.layer.cornerRadius = 2.5
-        [veil, list, grabber, resizeButton, minimizeButton].forEach(content.addSubview)
+        glass.contentView.addSubview(veil)
+        page.addSubview(resizeButton)
+        glass.contentView.addSubview(page)
+        resizeButton.addAction(UIAction { [weak self] _ in self?.toggleFull() }, for: .touchUpInside)
 
-        list.onOpenThread = { [weak self] id in self?.openThread(id) }
-        list.onBuilds = { [weak self] in self?.presentBuilds() }
-        list.onStart = { [weak self] text in self?.startThread(text) }
-        resizeButton.addAction(UIAction { [weak self] _ in self?.resize() }, for: .touchUpInside)
-        minimizeButton.addAction(UIAction { [weak self] _ in self?.minimize() }, for: .touchUpInside)
-
-        shell.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(open)))
-        shell.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(bubbleDragged(_:))))
-        movePan = UIPanGestureRecognizer(target: self, action: #selector(panelDragged(_:)))
-        movePan.delegate = self
-        content.addGestureRecognizer(movePan)
+        bubbleTap = UITapGestureRecognizer(target: self, action: #selector(openTapped))
+        bubblePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
+        movePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
         backPan = UIPanGestureRecognizer(target: self, action: #selector(backDragged(_:)))
-        backPan.delegate = self
-        content.addGestureRecognizer(backPan)
+        for gesture in [bubbleTap, bubblePan, movePan, backPan] as [UIGestureRecognizer] {
+            gesture.delegate = self
+            glass.addGestureRecognizer(gesture)
+        }
 
-        morph.parameters = SpringDriver.Parameters(response: 0.5, damping: 0.72)
-        morph.onChange = { [weak self] _ in self?.applyMorph() }
-        morph.onRest = { [weak self] value in self?.morphRested(at: value) }
-        push.onChange = { [weak self] _ in self?.layoutPages() }
-        push.onRest = { [weak self] value in if value <= 0.001 { self?.closeThread() } }
+        frame.onChange = { [weak self] in self?.applyScene() }
+        frame.onRest = { [weak self] in self?.rested() }
+        push.onChange = { [weak self] value in
+            if value <= 0.001 { self?.sync() } else { self?.applyScene() }
+        }
+        push.onRest = { [weak self] _ in self?.rested() }
         observations = [
             model.observe(by: self, after: .milliseconds(100)) { $0.render() },
             Task { [weak self] in
@@ -197,69 +176,62 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             }
         ]
         render()
+        #if DEBUG
+        startVerificationHooks()
+        #endif
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        place()
+        // Rotation or a first layout: rest exactly where the route says.
+        if !frame.isAnimating, !frame.isHeld { frame.set(targetFrame) } else { applyScene() }
     }
 
-    // MARK: State
+    // MARK: Model
 
     private var project: AppProject? { model.projects.first }
 
     private func render() {
         guard let project else {
-            list.update(project: nil, sessions: [], model: model, live: nil)
+            bubble.configure(headline: model.error, started: nil, tone: model.error == nil ? .idle : .needsYou)
+            retarget()
             return
         }
-        let sessions = model.sessions(for: project)
+        if agent == nil { mountAgent(project) }
+        let sessions = model.sessions(for: project, includingAgent: true)
+        let agentID = model.agentThreadID(for: project)
+        func title(_ session: ChatSession) -> String { session.id == agentID ? project.name : session.displayTitle(in: project) }
         let active = sessions.filter { $0.phase != .idle }
-        let target = active.first { $0.phase == .needsYou } ?? active.first
-        // Follow the active thread live, as its conversation does, while no
-        // thread is open in the panel.
-        if !starting, thread == nil, let target, model.selectedSessionID != target.id {
-            Task { await model.selectSession(target.id) }
-        }
         let now = Date.now
-        for (id, title) in working where !active.contains(where: { $0.id == id }) {
-            finished = ("Done · " + title, now.addingTimeInterval(6))
+        for (id, name) in working where !active.contains(where: { $0.id == id }) {
+            finished = ("Done · " + name, now.addingTimeInterval(6))
             pulse()
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(6.1))
                 self?.render()
             }
         }
-        working = Dictionary(uniqueKeysWithValues: active.map { ($0.id, $0.displayTitle(in: project)) })
+        working = Dictionary(active.map { ($0.id, title($0)) }, uniquingKeysWith: { a, _ in a })
 
-        // The open thread, else the one followed.
-        let shown = thread.flatMap { open in sessions.first { $0.id == open.controller.currentSessionID } } ?? target
-        var status: (headline: String?, started: Date?, tone: LiveCapsule.Tone, session: String?) = (nil, nil, .idle, nil)
-        if let shown, shown.phase != .idle {
-            if shown.phase == .needsYou {
-                status = ("Needs you · " + shown.displayTitle(in: project), nil, .needsYou, shown.id)
-            } else {
-                let live = model.selectedSessionID == shown.id ? liveStatus() : nil
-                status = (live?.headline ?? shown.displayTitle(in: project), live?.started, .working, shown.id)
-            }
+        // What the bubble says: whoever needs you, else what the agent is
+        // doing (its live step), else a working thread.
+        let headline: String?, tone: LiveCapsule.Tone, started: Date?
+        if let waiting = active.first(where: { $0.phase == .needsYou }) {
+            (headline, tone, started) = ("Needs you · " + title(waiting), .needsYou, nil)
+        } else if let busy = active.first(where: { $0.id == agentID }) ?? active.first {
+            let live = model.selectedSessionID == busy.id ? liveStatus() : nil
+            (headline, tone, started) = (live?.headline ?? title(busy), .working, live?.started)
         } else if let finished, finished.until > now {
-            status = (finished.text, nil, .done, nil)
+            (headline, tone, started) = (finished.text, .done, nil)
+        } else {
+            (headline, tone, started) = (nil, .idle, nil)
         }
-        let width = bubble.headline == status.headline ? nil : bubble.bounds.width
-        bubble.configure(headline: status.headline, started: status.started, tone: status.tone)
-        shell.accessibilityLabel = "Squircle"
-        shell.accessibilityValue = status.headline ?? "Idle"
-        list.update(project: project, sessions: sessions, model: model,
-                    live: target.map { _ in (status.headline, status.started, status.tone, target?.id) })
+        bubble.configure(headline: headline, started: started, tone: tone)
+        bubble.accessibilityValue = headline ?? "Idle"
         if let build = model.updatingTo {
             UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
         }
-        if size == .bubble, let width, abs(bubbleSize.width - width) > 0.5, !Motion.reduced {
-            UIView.animate(springDuration: 0.5, bounce: 0.15, initialSpringVelocity: 0, delay: 0,
-                           options: [.allowUserInteraction, .beginFromCurrentState]) { self.place() }
-        } else {
-            place()
-        }
+        retarget()
     }
 
     private func liveStatus() -> LiveStatus? {
@@ -279,194 +251,231 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private var bubbleFrame: CGRect {
         let size = bubbleSize, safe = safeBounds
-        var center = anchor ?? CGPoint(x: safe.maxX, y: safe.maxY - 90)
-        center.x = center.x < view.bounds.midX ? safe.minX + size.width / 2 : safe.maxX - size.width / 2
-        center.y = center.y.clamped(safe.minY + size.height / 2, max(safe.minY + size.height / 2, safe.maxY - size.height / 2))
-        return CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
+        let right = anchor?.right ?? true
+        let y = (anchor?.y ?? safe.maxY - 90).clamped(safe.minY + size.height / 2, max(safe.minY + size.height / 2, safe.maxY - size.height / 2))
+        return CGRect(x: right ? safe.maxX - size.width : safe.minX, y: y - size.height / 2, width: size.width, height: size.height)
     }
 
-    /// The mini panel grows from the bubble's corner: the same side, and the
-    /// same bottom (or top) edge.
+    /// The bubble sits in the lower half: the panel grows up from it.
+    private var lower: Bool { bubbleFrame.midY > view.bounds.midY }
+
+    /// The mini panel shares the bubble's side and its bottom (or top) edge,
+    /// and rises above the keyboard.
     private var miniFrame: CGRect {
         let safe = safeBounds, bubble = bubbleFrame
-        let size = CGSize(width: min(view.bounds.width - 20, 380), height: min(safe.height * 0.62, 560))
-        let right = bubble.midX > view.bounds.midX
-        var y = bubble.midY > view.bounds.midY ? bubble.maxY - size.height : bubble.minY
+        let size = CGSize(width: min(view.bounds.width - 20, 390), height: min(safe.height * 0.66, 600))
+        var y = lower ? bubble.maxY - size.height : bubble.minY
         y = y.clamped(safe.minY, max(safe.minY, min(safe.maxY, keyboardTop - 8) - size.height))
-        return CGRect(x: right ? safe.maxX - size.width : safe.minX, y: y, width: size.width, height: size.height)
+        return CGRect(x: bubble.midX > view.bounds.midX ? safe.maxX - size.width : safe.minX, y: y,
+                      width: size.width, height: size.height)
     }
 
-    private var panelFrame: CGRect { size == .full ? view.bounds : miniFrame }
+    private var targetFrame: CGRect { !route.open ? bubbleFrame : route.full ? view.bounds : miniFrame }
 
-    /// Places everything for the current size, without animating by itself.
-    private func place() {
-        guard view.bounds.width > 0, !morph.isAnimating else { return }
-        let bubbleFrame = self.bubbleFrame
-        let panelFrame = self.panelFrame.offsetBy(dx: dragOffset.x, dy: dragOffset.y)
-        let glass = size == .bubble ? bubbleFrame.offsetBy(dx: dragOffset.x, dy: dragOffset.y) : panelFrame
-        shell.frame = glass
-        Theme.setGlassCorner(shell, radius: size == .bubble ? glass.height / 2 : size == .full ? 0 : 30)
-        bubble.transform = .identity
-        bubble.frame = CGRect(origin: .zero, size: bubbleFrame.size)
-        layoutContent(in: panelFrame)
+    /// Sends the glass toward wherever the route and anchor now put it.
+    private func retarget(velocity: CGPoint? = nil) {
+        guard view.bounds.width > 0, !frame.isHeld else { return }
+        let target = targetFrame
+        if frame.target != target || velocity != nil { frame.animate(to: target, velocity: velocity) }
     }
 
-    /// The panel's content at a panel frame, untransformed.
-    private func layoutContent(in frame: CGRect) {
-        content.transform = .identity
-        content.layer.cornerRadius = size == .full ? 0 : 30
-        content.bounds = CGRect(origin: .zero, size: frame.size)
-        content.center = CGPoint(x: frame.midX, y: frame.midY)
-        veil.frame = content.bounds
-        veil.backgroundColor = Theme.paper.withAlphaComponent(size == .full ? 1 : 0.72)
-        let top: CGFloat = size == .full ? view.safeAreaInsets.top + 2 : 8
-        grabber.frame = CGRect(x: (frame.width - 36) / 2, y: 6, width: 36, height: 5)
-        grabber.alpha = size == .full ? 0 : 1
-        minimizeButton.frame = CGRect(x: frame.width - 46, y: top, width: 38, height: 38)
-        resizeButton.frame = minimizeButton.frame.offsetBy(dx: -38, dy: 0)
-        resizeButton.configuration?.image = UIImage(systemName: size == .full
-            ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-        resizeButton.accessibilityLabel = size == .full ? "Make small" : "Full screen"
-        layoutPages()
+    // MARK: Scene
+
+    /// Every frame, from the glass's presented frame and the push alone.
+    private func applyScene() {
+        guard view.bounds.width > 0 else { return }
+        let rect = frame.value
+        let mini = miniFrame, bounds = view.bounds
+        let bubbleSize = self.bubbleSize
+        // 0 at bubble size, 1 at mini size and beyond; 0…1 mini → full.
+        let opened = ((rect.height - bubbleSize.height) / max(1, mini.height - bubbleSize.height)).clamped()
+        let fullness = ((rect.height - mini.height) / max(1, bounds.height - mini.height)).clamped()
+        glass.frame = rect
+        let radius = min(rect.height / 2, rect.width / 2, .lerp(30, 0, fullness))
+        Theme.setGlassCorner(glass, radius: radius)
+        glass.contentView.layer.cornerRadius = radius
+
+        // The bubble's line stays where it was on screen as the glass grows
+        // from its corner, fading as soon as the shape leaves it.
+        let right = rect.midX > bounds.midX || (anchor?.right ?? true)
+        let low = lower
+        bubble.frame = CGRect(x: right ? rect.width - bubbleSize.width : 0, y: low ? rect.height - bubbleSize.height : 0,
+                              width: bubbleSize.width, height: bubbleSize.height)
+        bubble.alpha = (1 - opened * 4).clamped()
+        bubble.isHidden = bubble.alpha == 0
+
+        // The conversation is laid out at least at mini size and pinned to
+        // the same corner, so the glass reveals it instead of squeezing it.
+        // Opening, it never grows past where it is headed: the glass's
+        // overshoot shows paper, not a relayout.
+        var size = CGSize(width: max(rect.width, mini.width), height: max(rect.height, mini.height))
+        if route.open {
+            let target = frame.target.size
+            size = CGSize(width: max(mini.width, min(size.width, target.width)), height: max(mini.height, min(size.height, target.height)))
+        }
+        page.frame = CGRect(x: right ? rect.width - size.width : 0, y: low ? rect.height - size.height : 0,
+                            width: size.width, height: size.height)
+        page.alpha = ((opened - 0.2) / 0.6).clamped()
+        page.isHidden = page.alpha == 0 && !route.open
+        veil.frame = glass.contentView.bounds
+        veil.alpha = page.alpha
+        let paper = Theme.paper.withAlphaComponent(.lerp(0.74, 1, fullness))
+        veil.backgroundColor = paper
+        let full = route.full
+        resizeButton.configuration?.image = UIImage(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+        resizeButton.accessibilityLabel = full ? "Make small" : "Full screen"
+        resizeButton.frame = CGRect(x: page.bounds.width - 60, y: page.safeAreaInsets.top + 4, width: 44, height: 44)
+
+        // Flat push: a thread slides in on its own paper over the agent, which
+        // drifts a third as far left and fades out first, so text never sits
+        // over text.
+        let t = push.value.clamped(), width = page.bounds.width
+        if let agent {
+            place(agent, offset: -width * 0.3 * t)
+            agent.host.alpha = (1 - t * 2).clamped()
+            agent.controller.setTransitionProgress(1 - t)
+        }
+        if let thread {
+            place(thread, offset: width * (1 - t))
+            // Only while the agent still shows beneath it.
+            thread.host.backgroundColor = paper.withAlphaComponent(paper.cgColor.alpha * ((1 - t) * 2).clamped())
+            thread.controller.setTransitionProgress(t)
+        }
+
+        // Touches go where the route is headed, from the first frame.
+        let onThread = route.thread != nil && route.thread == threadKey && thread != nil
+        page.isUserInteractionEnabled = route.open
+        agent?.host.isUserInteractionEnabled = route.open && !onThread
+        thread?.host.isUserInteractionEnabled = route.open && onThread
+        page.accessibilityElementsHidden = !route.open
+        bubble.accessibilityElementsHidden = route.open
     }
 
-    /// One frame of the morph: the glass takes a shape between bubble and
-    /// panel (past the panel while it overshoots), and both contents stretch
-    /// to that shape, the old one blurring out as the new one blurs in.
-    private func applyMorph() {
-        let p = morph.value
-        let bubble = bubbleFrame, panel = morphFrame
-        let glass = CGRect(x: .lerp(bubble.minX, panel.minX, p), y: .lerp(bubble.minY, panel.minY, p),
-                           width: max(1, .lerp(bubble.width, panel.width, p)), height: max(1, .lerp(bubble.height, panel.height, p)))
-        shell.frame = glass
-        Theme.setGlassCorner(shell, radius: max(0, .lerp(bubble.height / 2, panel == view.bounds ? 0 : 30, p.clamped())))
-
-        morphLine.transform = .identity
-        morphLine.bounds = CGRect(origin: .zero, size: bubble.size)
-        morphLine.center = CGPoint(x: glass.midX, y: glass.midY)
-        // The line stretches mostly along its length; tall glyphs smear.
-        morphLine.transform = CGAffineTransform(scaleX: glass.width / bubble.width, y: min(1.5, glass.height / bubble.height))
-        // Only near bubble size, so it never smears across a wide shape.
-        // No blur here: the filter turns the transparent area around text
-        // black. The panel's content, on its paper, carries the cross blur.
-        morphLine.alpha = (1 - p * 5).clamped()
-
-        content.center = CGPoint(x: glass.midX, y: glass.midY)
-        content.transform = CGAffineTransform(scaleX: glass.width / panel.width, y: glass.height / panel.height)
-        content.alpha = ((p - 0.15) * 1.6).clamped()
-        Self.blur(content.layer, radius: (1 - p).clamped() * 22)
-        content.isUserInteractionEnabled = p > 0.9
+    private func place(_ mounted: Mounted, offset: CGFloat) {
+        let bounds = page.bounds
+        if mounted.host.bounds.size != bounds.size {
+            mounted.host.transform = .identity
+            mounted.host.frame = bounds
+            mounted.controller.view.frame = bounds
+        }
+        mounted.host.transform = CGAffineTransform(translationX: offset, y: 0)
     }
 
-    /// Puts the plain copy of the bubble's line in place of the live one.
-    private func beginMorph() {
-        let size = bubbleFrame.size
-        morphLine.transform = .identity
-        morphLine.bounds = CGRect(origin: .zero, size: size)
-        let inset = max(12, (size.height - 14) / 2 + 1)
-        morphDot.frame = CGRect(x: inset, y: (size.height - 14) / 2, width: 14, height: 14)
-        morphDot.backgroundColor = bubble.tone == .needsYou ? Theme.warning : bubble.tone == .done ? Theme.success : Theme.accent
-        morphText.text = bubble.headline
-        morphText.frame = CGRect(x: morphDot.frame.maxX + 11, y: 0, width: max(0, size.width - morphDot.frame.maxX - 11 - inset), height: size.height)
-        bubble.isHidden = true
-        morphLine.isHidden = false
-    }
-
-    private func morphRested(at value: CGFloat) {
-        morphLine.isHidden = true
-        bubble.isHidden = false
-        Self.blur(content.layer, radius: 0)
-        if value <= 0.001 {
-            content.isHidden = true
-            bubble.alpha = 1
+    private func rested() {
+        sync()
+        guard !frame.isAnimating, !push.isAnimating else { return }
+        if !route.open {
             previousKey?.makeKey()
             previousKey = nil
-            render()
-        } else {
-            content.alpha = 1
-            bubble.alpha = 0
         }
-        content.isUserInteractionEnabled = true
-        place()
         setNeedsUpdateOfSupportedInterfaceOrientations()
     }
 
-    /// Core Animation's Gaussian blur on a layer, by radius; nil clears it.
-    /// Private, as UIKit has no public variable blur on arbitrary views; this
-    /// code exists only in the debug overlay and Debug builds.
-    private static func blur(_ layer: CALayer, radius: CGFloat) {
-        guard radius > 0.3 else {
-            if layer.filters != nil { layer.filters = nil }
-            return
-        }
-        if layer.filters == nil {
-            guard let type = NSClassFromString("CAFilter") as? NSObject.Type,
-                  let filter = type.perform(NSSelectorFromString("filterWithType:"), with: "gaussianBlur")?
-                    .takeUnretainedValue() as? NSObject else { return }
-            filter.setValue(true, forKey: "inputNormalizeEdges")
-            layer.filters = [filter]
-        }
-        layer.setValue(radius, forKeyPath: "filters.gaussianBlur.inputRadius")
-    }
+    // MARK: Navigation
 
-    private func layoutPages() {
-        let bounds = content.bounds
-        let p = push.value
-        list.headerTop = size == .full ? view.safeAreaInsets.top : 0
-        list.keyboardInset = size == .full && keyboardTop < .greatestFiniteMagnitude ? view.bounds.height - keyboardTop : 0
-        list.transform = .identity
-        list.frame = bounds
-        list.transform = CGAffineTransform(translationX: -bounds.width * 0.3 * p, y: 0)
-        list.alpha = 1 - p
-        list.isHidden = p > 0.999
-        if let thread {
-            thread.page.transform = .identity
-            thread.page.frame = bounds
-            thread.page.transform = CGAffineTransform(translationX: bounds.width * (1 - p), y: 0)
-            thread.controller.view.frame = thread.page.bounds
-            thread.controller.view.layoutIfNeeded()
-        }
-    }
-
-    // MARK: Moves
-
-    /// The bubble morphs into the panel.
-    @objc private func open() {
-        guard size == .bubble else { return }
+    private func open() {
+        guard !route.open, project != nil else { return }
         Theme.openHaptic()
-        size = .mini
-        morphFrame = panelFrame
-        content.isHidden = false
-        layoutContent(in: morphFrame)
-        content.layoutIfNeeded()
+        hostWillBeCovered()
         makeKey()
-        beginMorph()
-        applyMorph()
-        morph.animate(to: 1)
+        route.open = true
+        sync()
     }
 
-    /// The panel morphs back into the bubble, from whatever size it is.
-    private func minimize() {
-        guard size != .bubble else { return }
-        view.endEditing(true)
-        morphFrame = panelFrame
-        size = .bubble
-        beginMorph()
-        morph.animate(to: 0)
+    /// The panel starts to cover the host app: its screen goes into the
+    /// message field as an attachment first.
+    private func hostWillBeCovered() {
+        if let window = view.window { HostCapture.attach(below: window, to: model) }
     }
 
-    /// Mini ↔ full screen, for whichever page is showing; the content lays
-    /// itself out at each size as the glass grows.
-    private func resize() {
-        guard size != .bubble else { return }
+    private func close() {
+        guard route.open else { return }
         Theme.selectionHaptic()
         view.endEditing(true)
-        size = size == .full ? .mini : .full
+        route.open = false
+        sync()
+    }
+
+    private func toggleFull() {
+        guard route.open else { return }
+        Theme.selectionHaptic()
+        route.full.toggle()
         setNeedsUpdateOfSupportedInterfaceOrientations()
-        UIView.animate(springDuration: 0.5, bounce: 0.1, initialSpringVelocity: 0, delay: 0, options: [.allowUserInteraction]) {
-            self.place()
-            self.content.layoutIfNeeded()
-        }
+        sync()
+    }
+
+    private func openThread(_ id: String?) {
+        guard route.open, agent != nil else { return }
+        Theme.openHaptic()
+        view.endEditing(true)
+        route.thread = id ?? "draft:" + UUID().uuidString
+        sync()
+    }
+
+    private func closeThread() {
+        guard route.thread != nil else { return }
+        view.endEditing(true)
+        route.thread = nil
+        sync()
+    }
+
+    /// Makes what is mounted and where the springs head agree with the route.
+    /// Safe to call at any moment, any number of times.
+    private func sync() {
+        guard !draggingPush else { return }
+        if push.value <= 0.001, threadKey != nil, route.thread != threadKey { unmountThread() }
+        if push.value <= 0.001, thread == nil, let key = route.thread { mountThread(key) }
+        let target: CGFloat = route.thread != nil && route.thread == threadKey && thread != nil ? 1 : 0
+        if push.target != target || (!push.isAnimating && push.value != target) { push.redirect(to: target) }
+        retarget()
+        applyScene()
+    }
+
+    private func mountAgent(_ project: AppProject) {
+        let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
+        controller.setBackButton(symbol: "chevron.down", label: "Minimize")
+        controller.onBack = { [weak self] in self?.close() }
+        controller.onOpenThread = { [weak self] id in self?.openThread(id) }
+        controller.onThreads = { [weak self] in self?.presentThreads() }
+        controller.onBuilds = { [weak self] in self?.presentBuilds() }
+        agent = host(controller)
+    }
+
+    private func mountThread(_ key: String) {
+        guard let project else { return }
+        agent?.controller.deactivate()
+        let controller = ThreadViewController(model: model, project: project, sessionID: key.hasPrefix("draft:") ? nil : key)
+        controller.onBack = { [weak self] in self?.closeThread() }
+        thread = host(controller)
+        threadKey = key
+    }
+
+    private func unmountThread() {
+        guard let mounted = thread else { return }
+        thread = nil
+        threadKey = nil
+        mounted.controller.tearDown()
+        mounted.controller.willMove(toParent: nil)
+        mounted.host.removeFromSuperview()
+        mounted.controller.removeFromParent()
+        agent?.controller.reactivate()
+    }
+
+    /// A conversation; a simulator the agent uses shows in its turn (you are
+    /// already in the app, so no picture-in-picture).
+    private func host(_ controller: ThreadViewController) -> Mounted {
+        controller.feeds = feeds
+        let host = UIView()
+        host.clipsToBounds = true
+        addChild(controller)
+        host.addSubview(controller.view)
+        page.insertSubview(host, belowSubview: resizeButton)
+        controller.didMove(toParent: self)
+        let mounted = (controller, host)
+        host.frame = page.bounds
+        controller.view.frame = host.bounds
+        controller.setTransitionProgress(1)
+        return mounted
     }
 
     private func makeKey() {
@@ -475,56 +484,25 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         window.makeKey()
     }
 
-    // MARK: Pages
+    // MARK: Sheets
 
-    private func openThread(_ sessionID: String?) {
-        guard let project else { return }
-        Theme.openHaptic()
-        view.endEditing(true)
-        if let thread { tearDown(thread) }
-        let controller = ThreadViewController(model: model, project: project, sessionID: sessionID)
-        controller.feeds = feeds
-        controller.onBack = { [weak self] in self?.push.animate(to: 0) }
-        let page = UIView()
-        page.clipsToBounds = true
-        addChild(controller)
-        page.addSubview(controller.view)
-        content.insertSubview(page, belowSubview: grabber)
-        controller.didMove(toParent: self)
-        thread = (controller, page)
-        controller.setTransitionProgress(1)
-        layoutPages()
-        push.animate(to: 1)
-    }
-
-    private func closeThread() {
-        guard let thread else { return }
-        tearDown(thread)
-        self.thread = nil
-        render()
-    }
-
-    private func tearDown(_ thread: (controller: ThreadViewController, page: UIView)) {
-        thread.controller.tearDown()
-        thread.controller.willMove(toParent: nil)
-        thread.page.removeFromSuperview()
-        thread.controller.removeFromParent()
-    }
-
-    private func startThread(_ text: String) {
-        guard let project else { return }
-        starting = true
-        Task {
-            await model.beginDraft()
-            await model.send(text, in: project)
-            starting = false
-            if let id = model.selectedSessionID { openThread(id) }
-            render()
+    private func presentThreads() {
+        guard let project, presentedViewController == nil, route.open, route.thread == nil else { return }
+        Theme.selectionHaptic()
+        let controller = ThreadsViewController(model: model, project: project)
+        controller.onOpen = { [weak self, weak controller] id in
+            controller?.dismiss(animated: true) { self?.openThread(id) }
         }
+        controller.modalPresentationStyle = .pageSheet
+        if let sheet = controller.sheetPresentationController {
+            sheet.detents = [.large()]
+            sheet.prefersGrabberVisible = true
+        }
+        present(controller, animated: true)
     }
 
     private func presentBuilds() {
-        guard let project, presentedViewController == nil else { return }
+        guard let project, presentedViewController == nil, route.open else { return }
         Theme.selectionHaptic()
         let controller = BuildsViewController(model: model, project: project)
         controller.onNewThread = { [weak self, weak controller] in
@@ -541,221 +519,219 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     // MARK: Gestures
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+        if gesture === bubbleTap || gesture === bubblePan { return !route.open }
         // Where the finger went down, not where it is once the pan is
         // recognized: a quick drag has already left the strip by then.
-        var point = gesture.location(in: content)
+        var point = gesture.location(in: page)
         if let pan = gesture as? UIPanGestureRecognizer {
-            let moved = pan.translation(in: content)
+            let moved = pan.translation(in: page)
             point = CGPoint(x: point.x - moved.x, y: point.y - moved.y)
         }
         if gesture === backPan {
-            // Back: from the panel's left edge, rightward, while a thread is open.
-            let velocity = backPan.velocity(in: content)
-            return thread != nil && point.x < 28 && velocity.x > abs(velocity.y)
+            let velocity = backPan.velocity(in: page)
+            return route.open && thread != nil && point.x < 28 && velocity.x > abs(velocity.y)
         }
         if gesture === movePan {
-            // Move: by the panel's top while it floats over the app.
-            return size == .mini && point.y < 44 && point.x > 60 && point.x < content.bounds.width - 90
+            // Move the mini panel by its top, between its buttons.
+            return route.open && !route.full && point.y < 52 && point.x > 176 && point.x < page.bounds.width - 64
         }
         return true
     }
 
-    @objc private func bubbleDragged(_ gesture: UIPanGestureRecognizer) { drag(gesture, frame: bubbleFrame) }
+    func gestureRecognizer(_ gesture: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { false }
 
-    /// Moving the panel moves the bubble with it: they share one place.
-    @objc private func panelDragged(_ gesture: UIPanGestureRecognizer) { drag(gesture, frame: miniFrame) }
+    @objc private func openTapped() { open() }
 
-    /// The glass and everything on it follow the finger together; on
-    /// release they spring to the nearer side, carrying the finger's speed.
-    private func drag(_ gesture: UIPanGestureRecognizer, frame: CGRect) {
+    /// The glass and everything in it follow the finger; on release they
+    /// spring to the nearer side with the finger's speed.
+    @objc private func glassDragged(_ gesture: UIPanGestureRecognizer) {
         let t = gesture.translation(in: view)
         switch gesture.state {
+        case .began:
+            dragStart = frame.value
+            frame.hold(dragStart)
         case .changed:
-            dragOffset = t
-            place()
-        case .ended, .cancelled:
+            frame.hold(dragStart.offsetBy(dx: t.x, dy: t.y))
+        case .ended, .cancelled, .failed:
             let v = gesture.velocity(in: view)
-            // Where it would coast to, then which side and height it rests at.
-            let rest = frame.offsetBy(dx: t.x + v.x * 0.12, dy: t.y + v.y * 0.12)
-            let lower = rest.midY > view.bounds.midY
-            let bubble = bubbleSize
-            anchor = CGPoint(x: rest.midX > view.bounds.midX ? view.bounds.maxX : 0,
-                             y: size == .bubble ? rest.midY : lower ? rest.maxY - bubble.height / 2 : rest.minY + bubble.height / 2)
-            let before = shell.center
-            dragOffset = .zero
-            UIView.performWithoutAnimation { place() }
-            let after = shell.center
-            let distance = hypot(after.x - before.x, after.y - before.y)
-            let speed = distance > 1 ? hypot(v.x, v.y) / distance : 0
-            // Start from where the finger left it.
-            dragOffset = CGPoint(x: before.x - after.x, y: before.y - after.y)
-            UIView.performWithoutAnimation { place() }
-            dragOffset = .zero
-            UIView.animate(springDuration: 0.5, bounce: 0.18, initialSpringVelocity: min(speed, 8), delay: 0,
-                           options: [.allowUserInteraction, .beginFromCurrentState]) { self.place() }
+            // Where it would coast to decides the side and height it rests at.
+            let rest = dragStart.offsetBy(dx: t.x + v.x * 0.12, dy: t.y + v.y * 0.12)
+            let bubbleHeight = bubbleSize.height
+            let y = !route.open ? rest.midY
+                : rest.midY > view.bounds.midY ? rest.maxY - bubbleHeight / 2 : rest.minY + bubbleHeight / 2
+            anchor = (rest.midX > view.bounds.midX, y)
+            frame.release()
+            retarget(velocity: v)
         default: break
         }
     }
 
     @objc private func backDragged(_ gesture: UIPanGestureRecognizer) {
-        let width = max(1, content.bounds.width)
+        let width = max(1, page.bounds.width)
         switch gesture.state {
         case .began:
+            draggingPush = true
             pushStart = push.value
             push.stop()
         case .changed:
-            push.set((pushStart - gesture.translation(in: content).x / width).clamped())
+            push.set((pushStart - gesture.translation(in: page).x / width).clamped())
         case .ended, .cancelled, .failed:
-            let velocity = -gesture.velocity(in: content).x / width
-            let back = gesture.state == .ended && push.value + velocity * 0.18 < 0.5
-            if back { view.endEditing(true) }
-            push.animate(to: back ? 0 : 1, initialVelocity: velocity)
+            draggingPush = false
+            let velocity = -gesture.velocity(in: page).x / width
+            if gesture.state == .ended, push.value + velocity * 0.18 < 0.5 { route.thread = nil; view.endEditing(true) }
+            push.animate(to: route.thread == nil ? 0 : 1, initialVelocity: velocity)
+            sync()
         default: break
         }
     }
 
     /// A soft beat when a turn finishes.
     private func pulse() {
-        guard !Motion.reduced, size == .bubble else { return }
+        guard !Motion.reduced, !route.open else { return }
         let beat = CAKeyframeAnimation(keyPath: "transform.scale")
         beat.values = [1, 1.08, 1]
         beat.keyTimes = [0, 0.35, 1]
         beat.duration = 0.6
         beat.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        shell.layer.add(beat, forKey: "pulse")
+        glass.layer.add(beat, forKey: "pulse")
     }
 
     private func keyboardMoved(_ note: Notification) {
         guard let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue else { return }
         let frame = view.convert(end, from: nil)
         keyboardTop = frame.minY >= view.bounds.maxY - 1 ? .greatestFiniteMagnitude : frame.minY
-        let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-        UIView.animate(withDuration: duration, delay: 0, options: [.beginFromCurrentState]) {
-            self.place()
-            self.content.layoutIfNeeded()
-        }
-    }
-}
-
-/// The app's threads in the overlay: what's running now, every thread, and a
-/// field to start a new one.
-@MainActor
-final class OverlayListView: UIView {
-    var onOpenThread: ((String?) -> Void)?
-    var onBuilds: (() -> Void)?
-    var onStart: ((String) -> Void)?
-    /// Room above the header (the status bar at full screen).
-    var headerTop: CGFloat = 0 { didSet { if headerTop != oldValue { setNeedsLayout() } } }
-    var keyboardInset: CGFloat = 0 { didSet { if keyboardInset != oldValue { setNeedsLayout() } } }
-
-    private let nameLabel = Theme.label("", Theme.font(.headline, 17, .semibold))
-    private let buildsButton = OverlayController.iconButton("shippingbox", "Builds", "overlay.builds")
-    private let live = LiveCapsule(glass: false)
-    private var liveSession: String?
-    private let scroll = UIScrollView()
-    private let rows = UIStackView()
-    private var rowViews: [String: ThreadRow] = [:]
-    private var rowOrder: [String] = []
-    private let notice = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel, lines: 3)
-    private let composer = Composer(placeholder: "New thread")
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        nameLabel.lineBreakMode = .byTruncatingTail
-        notice.textAlignment = .center
-        live.backgroundColor = Theme.pressedFill
-        live.layer.cornerCurve = .continuous
-        live.accessibilityIdentifier = "overlay.live"
-        live.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(openLive)))
-        scroll.showsVerticalScrollIndicator = false
-        scroll.alwaysBounceVertical = true
-        rows.axis = .vertical
-        scroll.addSubview(rows)
-        buildsButton.addAction(UIAction { [weak self] _ in self?.onBuilds?() }, for: .touchUpInside)
-        composer.onSend = { [weak self] in self?.send() }
-        composer.onChange = { [weak self] in self?.setNeedsLayout() }
-        [scroll, notice, live, nameLabel, buildsButton, composer].forEach(addSubview)
+        retarget()
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
+    override func accessibilityPerformEscape() -> Bool {
+        if route.thread != nil { closeThread(); return true }
+        if route.open { close(); return true }
+        return false
+    }
 
-    func update(project: AppProject?, sessions: [ChatSession], model: SquircleModel,
-                live status: (headline: String?, started: Date?, tone: LiveCapsule.Tone, session: String?)?) {
-        nameLabel.text = project?.name
-        buildsButton.isEnabled = project != nil
-        let building = project.map { project in
-            model.builds(for: project).contains { $0.status == "queued" || $0.status == "running" }
-        } ?? false
-        buildsButton.configuration?.baseForegroundColor = building ? Theme.accent : .secondaryLabel
-        live.configure(headline: status?.headline, started: status?.started, tone: status?.tone ?? .idle)
-        liveSession = status?.session
-        live.isHidden = status?.headline == nil
-
-        let shown = Array(sessions.prefix(30))
-        let ids = shown.map(\.id)
-        for id in Array(rowViews.keys) where !ids.contains(id) { rowViews.removeValue(forKey: id)?.removeFromSuperview() }
-        for session in shown {
-            let row = rowViews[session.id] ?? {
-                let row = ThreadRow(sessionID: session.id, compact: true)
-                row.addAction(UIAction { [weak self] _ in self?.onOpenThread?(session.id) }, for: .touchUpInside)
-                rowViews[session.id] = row
-                return row
-            }()
-            row.configure(title: project.map { session.displayTitle(in: $0) } ?? session.title,
-                          agent: model.agentName(for: session.modelSelection), date: session.updatedAt, phase: session.phase)
-        }
-        if ids != rowOrder {
-            rowOrder = ids
-            rows.arrangedSubviews.forEach { rows.removeArrangedSubview($0); $0.removeFromSuperview() }
-            for (index, id) in ids.enumerated() {
-                guard let row = rowViews[id] else { continue }
-                row.showsSeparator = index < ids.count - 1
-                rows.addArrangedSubview(row)
+    #if DEBUG
+    /// Verification only, in Squircle Debug with `SQUIRCLE_OVERLAY_DEMO`:
+    /// `SQUIRCLE_OVERLAY_OPEN=mini|full` opens the overlay after 4 s;
+    /// `SQUIRCLE_OVERLAY_CYCLE=1` loops bubble → mini → full → thread → back
+    /// → mini → bubble for recordings (`SQUIRCLE_SLOW` slows the springs).
+    private func startVerificationHooks() {
+        let environment = ProcessInfo.processInfo.environment
+        if let slow = environment["SQUIRCLE_SLOW"].flatMap(Double.init) { SpringDriver.debugSlowMotion = slow }
+        if let mode = environment["SQUIRCLE_OVERLAY_OPEN"] {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                self?.open()
+                if mode == "full" { self?.toggleFull() }
             }
         }
-        let problem = project == nil && !model.isLoading
-            ? (model.error ?? (model.connected ? "Opening this app in T3…" : model.status)) : model.error
-        notice.text = problem ?? (sessions.isEmpty ? "No threads yet" : nil)
-        notice.textColor = model.error == nil ? .secondaryLabel : Theme.failure
-        notice.isHidden = notice.text == nil
-        setNeedsLayout()
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let width = bounds.width
-        let top = headerTop + 14
-        buildsButton.frame = CGRect(x: width - 46 - 76, y: top - 6, width: 38, height: 38)
-        nameLabel.frame = CGRect(x: 20, y: top, width: buildsButton.frame.minX - 24, height: 26)
-        var y = top + 38
-        if !live.isHidden {
-            live.frame = CGRect(x: 12, y: y, width: width - 24, height: 44)
-            live.layer.cornerRadius = 22
-            y += 52
+        guard environment["SQUIRCLE_OVERLAY_CYCLE"] == "1" else { return }
+        let pause = environment["SQUIRCLE_OVERLAY_PAUSE"].flatMap(Double.init) ?? 2.5
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            let steps: [@MainActor (OverlayController) -> Void] = [
+                { $0.open() }, { $0.toggleFull() }, { overlay in
+                    let sessions = overlay.project.map { overlay.model.sessions(for: $0) } ?? []
+                    overlay.openThread(sessions.first?.id)
+                }, { $0.closeThread() }, { $0.toggleFull() }, { $0.close() },
+                // Interrupted: closing while it opens, opening while it closes.
+                { $0.open() }, { $0.close() }, { $0.open() }, { $0.close() }
+            ]
+            while true {
+                for (index, step) in steps.enumerated() {
+                    guard let self else { return }
+                    step(self)
+                    let interrupted = index >= 6
+                    try? await Task.sleep(for: .seconds(interrupted ? 0.25 * SpringDriver.debugSlowMotion : pause))
+                }
+                try? await Task.sleep(for: .seconds(pause))
+            }
         }
-        let composerHeight = max(48, composer.systemLayoutSizeFitting(CGSize(width: width - 20, height: 0),
-            withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel).height)
-        let bottom = bounds.height - max(safeAreaInsets.bottom, keyboardInset) - 10
-        composer.frame = CGRect(x: 10, y: bottom - composerHeight, width: width - 20, height: composerHeight)
-        let rowsHeight = rowOrder.isEmpty ? 0 : rows.systemLayoutSizeFitting(
-            CGSize(width: width - 8, height: 0), withHorizontalFittingPriority: .required,
-            verticalFittingPriority: .fittingSizeLevel).height
-        rows.frame = CGRect(x: 0, y: 0, width: width - 8, height: rowsHeight)
-        scroll.contentSize = rows.frame.size
-        scroll.frame = CGRect(x: 4, y: y, width: width - 8, height: max(0, composer.frame.minY - 6 - y))
-        let noticeHeight = notice.sizeThatFits(CGSize(width: width - 40, height: .greatestFiniteMagnitude)).height
-        notice.frame = CGRect(x: 20, y: y + 16, width: width - 40, height: noticeHeight)
+    }
+    #endif
+}
+
+/// The glass's frame as one spring: origin and size move together toward a
+/// target, keep their velocity when retargeted, and can be held by a finger.
+@MainActor
+final class FrameSpring {
+    private(set) var value = CGRect.zero
+    private(set) var target = CGRect.zero
+    /// Points per second for x, y, width and height.
+    private var velocity: [CGFloat] = [0, 0, 0, 0]
+    /// Slightly underdamped, so the glass lands with a little give.
+    var parameters = SpringDriver.Parameters(response: 0.46, damping: 0.8)
+    var onChange: (() -> Void)?
+    var onRest: (() -> Void)?
+    var isAnimating: Bool { link != nil }
+    private(set) var isHeld = false
+    private var link: CADisplayLink?
+    private var lastTimestamp: CFTimeInterval?
+
+    /// Jumps there and rests.
+    func set(_ rect: CGRect) {
+        stopLink()
+        velocity = [0, 0, 0, 0]
+        value = rect
+        target = rect
+        onChange?()
     }
 
-    @objc private func openLive() { onOpenThread?(liveSession) }
+    /// A finger holds it here.
+    func hold(_ rect: CGRect) {
+        isHeld = true
+        set(rect)
+    }
 
-    private func send() {
-        let text = composer.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        composer.text = ""
-        endEditing(true)
-        onStart?(text)
+    func release() { isHeld = false }
+
+    /// Retargets from the presented frame, keeping its momentum unless a
+    /// finger's velocity is given.
+    func animate(to rect: CGRect, velocity v: CGPoint? = nil) {
+        target = rect
+        if let v { velocity = [v.x, v.y, 0, 0] }
+        if Motion.reduced {
+            set(rect)
+            onRest?()
+            return
+        }
+        guard link == nil else { return }
+        let proxy = DisplayLinkProxy { [weak self] link in self?.tick(link) }
+        let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        self.link = link
+        lastTimestamp = nil
+    }
+
+    private func stopLink() {
+        link?.invalidate()
+        link = nil
+        lastTimestamp = nil
+    }
+
+    private func tick(_ link: CADisplayLink) {
+        let now = link.targetTimestamp
+        var dt = min(1.0 / 30.0, max(0, now - (lastTimestamp ?? (now - link.duration))))
+        #if DEBUG
+        dt /= SpringDriver.debugSlowMotion
+        #endif
+        lastTimestamp = now
+        var current = [value.minX, value.minY, value.width, value.height]
+        let goal = [target.minX, target.minY, target.width, target.height]
+        var resting = true
+        for i in 0..<4 {
+            (current[i], velocity[i]) = SpringDriver.step(value: current[i], velocity: velocity[i], target: goal[i],
+                                                          dt: CGFloat(dt), parameters: parameters)
+            if abs(current[i] - goal[i]) > 0.2 || abs(velocity[i]) > 2 { resting = false }
+        }
+        if resting {
+            set(target)
+            onRest?()
+        } else {
+            value = CGRect(x: current[0], y: current[1], width: max(1, current[2]), height: max(1, current[3]))
+            onChange?()
+        }
     }
 }
 #endif

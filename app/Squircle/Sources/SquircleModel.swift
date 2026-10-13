@@ -18,6 +18,8 @@ final class SquircleModel {
     private(set) var status = "Connecting" { didSet { changed() } }
     var error: String? { didSet { changed() } }
     var composerPrefill: String? { didSet { changed() } }
+    /// Pictures in the message field, sent with the next message.
+    private(set) var attachments: [ImageAttachment] = [] { didSet { changed() } }
     /// A build of the running app whose installation was just confirmed;
     /// the app steps aside so iOS can replace it.
     private(set) var updatingTo: AppBuild? { didSet { changed() } }
@@ -468,23 +470,36 @@ final class SquircleModel {
             sessionProjects[id] = project.id; await selectSession(id)
         } catch { self.error = error.localizedDescription }
     }
+    /// Adds a picture to the message field; one with the same `id` is replaced.
+    func attach(_ attachment: ImageAttachment) {
+        if let index = attachments.firstIndex(where: { $0.id == attachment.id }) { attachments[index] = attachment }
+        else { attachments.append(attachment) }
+    }
+    func removeAttachment(_ id: String) { attachments.removeAll { $0.id == id } }
+    /// Sends `text` with the field's pictures. Pictures leave the field at
+    /// once and come back if T3 does not take the message.
     func send(_ text: String, in project: AppProject) async {
-        guard !submitting, !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { return }
+        let images = attachments
+        guard !submitting, !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !images.isEmpty else { return }
         guard isValidModel(modelSelection) else { error = "Choose an available model."; return }
         submitting = true
-        defer { submitting = false }
+        attachments = []
+        defer {
+            submitting = false
+            if error != nil { attachments = images + attachments.filter { a in !images.contains { $0.id == a.id } } }
+        }
         error = nil
         if selectedSessionID == nil, draftIsAgent {
-            // The Mac creates the agent (its worktree and thread) with this message.
+            // The Mac creates the agent (its worktree and thread), with this
+            // message unless it carries pictures, which go to T3 from here.
             guard let client else { error = ClientError.configuration.localizedDescription; return }
             do {
                 let model = modelSelection["instanceId"].string == Self.agentInstance ? modelSelection["model"].string : nil
-                let id = try await client.startAgent(projectID: project.id, message: text, model: model)
+                let id = try await client.startAgent(projectID: project.id, message: images.isEmpty ? text : "", model: model)
                 agents[project.id] = id; sessionProjects[id] = project.id
                 await selectSession(id)
-                isRunning = true; status = "Working"
-            } catch { self.error = error.localizedDescription }
-            return
+                if images.isEmpty { isRunning = true; status = "Working"; return }
+            } catch { self.error = error.localizedDescription; return }
         }
         if selectedSessionID == nil { await createSession(in:project) }
         guard let id = selectedSessionID, error == nil else { return }
@@ -499,10 +514,17 @@ final class SquircleModel {
                 // Threads started before these instructions existed get them once.
                 message += AppProject.contextMarker + project.name + ".\n" + instructions
             }
+            // T3 stores each picture under its attachments folder and hands
+            // the provider its path.
+            let uploads: [[String:Any]] = images.enumerated().map { index, image in
+                ["type":"image","name":"image-\(index + 1).jpg","mimeType":"image/jpeg","sizeBytes":image.data.count,
+                 "dataUrl":"data:image/jpeg;base64," + image.data.base64EncodedString()]
+            }
+            let seed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             try await dispatch(["type":"thread.turn.start","threadId":id,
-                "message":["messageId":UUID().uuidString.lowercased(),"role":"user","text":message,"attachments":[]],
+                "message":["messageId":UUID().uuidString.lowercased(),"role":"user","text":message,"attachments":uploads],
                 "modelSelection":modelSelection.foundation,"runtimeMode":runtimeMode.rawValue,
-                "interactionMode":"default","titleSeed":String(text.prefix(120))])
+                "interactionMode":"default","titleSeed":String((seed.isEmpty ? "Image" : seed).prefix(120))])
             isRunning = true; status = "Working"
         } catch { self.error = error.localizedDescription }
     }
@@ -571,8 +593,13 @@ final class SquircleModel {
         StepVideos.set(url, for: stepID)
         return url
     }
-    func loadStepImage(_ stepID: String, index: Int) async -> Data? {
+    func loadStepImage(_ stepID: String, index: Int, attachment: String? = nil) async -> Data? {
         if let data = StepImages.data(for: stepID, index: index) { return data }
+        if let attachment {
+            guard let data = await attachmentData(attachment) else { return nil }
+            StepImages.set(data, for: stepID, index: index)
+            return data
+        }
         if stepID.hasPrefix("media:") {
             let message = messages.first { $0.id == stepID }
             var data: Data?
@@ -587,6 +614,18 @@ final class SquircleModel {
         guard let client, let thread = selectedSessionID,
               let data = try? await client.stepImage(threadID: thread, callID: stepID, index: index) else { return nil }
         StepImages.set(data, for: stepID, index: index)
+        return data
+    }
+    /// An image sent with a message, through a short-lived URL T3 signs.
+    private func attachmentData(_ id: String) async -> Data? {
+        guard let gateway, let base = configuration?.t3URL else { return nil }
+        guard let asset = try? await gateway.call("assets.createUrl", .from(["resource":["_tag":"attachment","attachmentId":id]])),
+              let relative = asset["relativeUrl"].string, let url = URL(string: relative, relativeTo: base),
+              url.host == base.host else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(gateway.http.token)", forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await gateway.http.session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return data
     }
     nonisolated static func poster(of url: URL) async -> Data? {
@@ -742,6 +781,12 @@ final class SquircleModel {
         return true
     }
     func cancelUpdate() { updatingTo = nil }
+    func buildDetail(id: String) async throws -> (AppBuild, BuildFailure?) {
+        guard let client else { throw ClientError.configuration }; return try await client.build(id: id)
+    }
+    func buildLog(id: String, offset: Int, limit: Int) async throws -> BuildLogPage {
+        guard let client else { throw ClientError.configuration }; return try await client.buildLog(id: id, offset: offset, limit: limit)
+    }
     func browseMacProjects(path: String? = nil) async throws -> MacProjectDirectory {
         guard let client else { throw ClientError.configuration }; return try await client.browseMacProjects(path:path)
     }
