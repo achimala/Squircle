@@ -74,12 +74,20 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     let previewState: String?
     let previewError: String?
     let previewCapturedAt: Date?
+    let updatedAt: Date
+    /// The service's error for a job that didn't succeed.
+    let error: String?
+    let sourceRevision: String?
+    let sourceDirty: Bool?
 
     var needsPolling: Bool {
         status == "queued" || status == "running" || previewState == "pending" || previewState == "running"
     }
 
-    enum CodingKeys: String, CodingKey { case id, state, output, createdAt = "created_at", request }
+    enum CodingKeys: String, CodingKey {
+        case id, state, output, request, error
+        case createdAt = "created_at", updatedAt = "updated_at", sourceRevision = "source_revision", sourceDirty = "source_dirty"
+    }
     private struct Output: Decodable {
         let title: String?
         let version: String?
@@ -106,7 +114,37 @@ struct AppBuild: Identifiable, Decodable, Equatable {
         previewCapturedAt = output?.preview_captured_at.map { Date(timeIntervalSince1970: $0) }
         previewAvailable = !(output?.preview_path ?? "").isEmpty && (previewState == nil || previewState == "succeeded")
         date = Date(timeIntervalSince1970: try values.decode(Double.self, forKey: .createdAt))
+        updatedAt = (try values.decodeIfPresent(Double.self, forKey: .updatedAt)).map(Date.init(timeIntervalSince1970:)) ?? date
+        error = try values.decodeIfPresent(String.self, forKey: .error)
+        sourceRevision = try values.decodeIfPresent(String.self, forKey: .sourceRevision)
+        sourceDirty = try values.decodeIfPresent(Bool.self, forKey: .sourceDirty)
     }
+}
+
+/// Why a build failed, as the Mac read it from the build's log.
+struct BuildFailure: Decodable, Equatable {
+    struct Issue: Decodable, Equatable {
+        let message: String
+        let file: String?
+        let line: Int?
+        /// Xcode's hint or the compiler's source excerpt.
+        let detail: String?
+    }
+    let message: String?
+    let step: String?
+    let exitStatus: Int?
+    let errors: [Issue]
+    let failedCommands: [String]
+
+    enum CodingKeys: String, CodingKey { case message, step, errors, exitStatus = "exit_status", failedCommands = "failed_commands" }
+}
+
+struct BuildLogPage: Decodable {
+    let text: String
+    let nextOffset: Int
+    let hasMore: Bool
+    let size: Int?
+    enum CodingKeys: String, CodingKey { case text, size, nextOffset = "next_offset", hasMore = "has_more" }
 }
 
 struct AgentApproval: Identifiable, Equatable {
