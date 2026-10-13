@@ -222,3 +222,36 @@ extension ChatSession {
         return title.hasPrefix(prefix) ? String(title.dropFirst(prefix.count)) : title
     }
 }
+
+/// How a conversation draws itself. The app uses `standard`; the debug
+/// overlay can try lighter alternatives (DEBUG: `SQUIRCLE_OVERLAY_STYLE`).
+enum ChatStyle: String {
+    /// Glass bubbles, pills and cards; Threads, Builds and full screen beside the field.
+    case standard
+    /// A: Messages. Solid bubbles, plain status lines, one ⋯ menu.
+    case messages = "a"
+    /// B: Transcript. No bubbles; turns divided by hairlines; a flat field; the title is the menu.
+    case transcript = "b"
+    /// C: Sheet. A compact opaque sheet at the bottom with a grabber; controls only at full screen.
+    case sheet = "c"
+
+    /// The overlay's style.
+    static var overlay: ChatStyle {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_STYLE"].flatMap(ChatStyle.init(rawValue:)) ?? .standard
+        #else
+        return .standard
+        #endif
+    }
+
+    var isLight: Bool { self != .standard }
+
+    /// A solid fill in place of glass, rounded like the glass was.
+    static func flatten(_ view: UIVisualEffectView, fill: UIColor?, radius: CGFloat) {
+        view.effect = nil
+        view.backgroundColor = fill
+        view.layer.cornerRadius = radius
+        view.layer.cornerCurve = .continuous
+        view.clipsToBounds = true
+    }
+}

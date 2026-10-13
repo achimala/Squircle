@@ -160,6 +160,30 @@ final class Composer: UIView, UITextViewDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Lighter styles: the field is the one piece of glass (Messages), sits
+    /// on the page (Transcript) or is a plain filled field (Sheet); the
+    /// buttons inside it lose their own glass.
+    func apply(_ style: ChatStyle) {
+        guard style.isLight else { return }
+        switch style {
+        case .transcript: ChatStyle.flatten(glass, fill: nil, radius: 0)
+        case .sheet: ChatStyle.flatten(glass, fill: .tertiarySystemFill, radius: 22)
+        default: break
+        }
+        var plus = UIButton.Configuration.plain()
+        plus.image = attach.configuration?.image
+        plus.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)
+        plus.baseForegroundColor = .secondaryLabel
+        attach.configuration = plus
+        var arrow = UIButton.Configuration.filled()
+        arrow.image = send.configuration?.image
+        arrow.cornerStyle = .capsule
+        arrow.baseBackgroundColor = Theme.accent
+        arrow.baseForegroundColor = .white
+        arrow.contentInsets = .zero
+        send.configuration = arrow
+    }
+
     /// Shows the pictures waiting to be sent, each with its own remove button.
     func show(_ attachments: [ImageAttachment]) {
         let ids = attachments.map(\.id)

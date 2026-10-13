@@ -87,6 +87,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Simulator streams for the turns' live simulators.
     private lazy var feeds = SimulatorFeeds(model: model)
     private var route = OverlayRoute()
+    /// DEBUG alternatives to the standard look (`SQUIRCLE_OVERLAY_STYLE`).
+    private let style = ChatStyle.overlay
+    /// Sheet style: the one control while small; drag or tap it to resize.
+    private let grabber = UIView()
+    private var grabberPan: UIPanGestureRecognizer!
 
     private let glass = UIVisualEffectView(effect: Theme.glassEffect())
     private let frame = FrameSpring()
@@ -151,6 +156,22 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         page.addSubview(resizeButton)
         glass.contentView.addSubview(page)
         resizeButton.addAction(UIAction { [weak self] _ in self?.toggleFull() }, for: .touchUpInside)
+        resizeButton.isHidden = style.isLight
+        if style == .sheet {
+            let handle = UIView()
+            handle.backgroundColor = .tertiaryLabel
+            handle.layer.cornerRadius = 2.5
+            handle.isUserInteractionEnabled = false
+            grabber.addSubview(handle)
+            grabber.isAccessibilityElement = true
+            grabber.accessibilityTraits = .button
+            grabber.accessibilityLabel = "Resize"
+            grabber.accessibilityIdentifier = "overlay.grabber"
+            page.addSubview(grabber)
+            grabber.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(grabberTapped)))
+            grabberPan = UIPanGestureRecognizer(target: self, action: #selector(grabberDragged(_:)))
+            grabber.addGestureRecognizer(grabberPan)
+        }
 
         bubbleTap = UITapGestureRecognizer(target: self, action: #selector(openTapped))
         bubblePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
@@ -262,6 +283,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The mini panel shares the bubble's side and its bottom (or top) edge,
     /// and rises above the keyboard.
     private var miniFrame: CGRect {
+        if style == .sheet {
+            // A sheet across the bottom, above the keyboard.
+            let height = min(view.bounds.height * 0.52, 520)
+            let bottom = min(view.bounds.maxY - 6, keyboardTop - 6)
+            return CGRect(x: 6, y: max(safeBounds.minY, bottom - height), width: view.bounds.width - 12, height: height)
+        }
         let safe = safeBounds, bubble = bubbleFrame
         let size = CGSize(width: min(view.bounds.width - 20, 390), height: min(safe.height * 0.66, 600))
         var y = lower ? bubble.maxY - size.height : bubble.minY
@@ -291,7 +318,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let opened = ((rect.height - bubbleSize.height) / max(1, mini.height - bubbleSize.height)).clamped()
         let fullness = ((rect.height - mini.height) / max(1, bounds.height - mini.height)).clamped()
         glass.frame = rect
-        let radius = min(rect.height / 2, rect.width / 2, .lerp(30, 0, fullness))
+        let radius = min(rect.height / 2, rect.width / 2, .lerp(style == .sheet ? 36 : style == .transcript ? 22 : 30, 0, fullness))
         Theme.setGlassCorner(glass, radius: radius)
         glass.contentView.layer.cornerRadius = radius
 
@@ -319,12 +346,20 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         page.isHidden = page.alpha == 0 && !route.open
         veil.frame = glass.contentView.bounds
         veil.alpha = page.alpha
-        let paper = Theme.paper.withAlphaComponent(.lerp(0.74, 1, fullness))
+        // Lighter styles read as a page, not a slab of glass.
+        let paper = Theme.paper.withAlphaComponent(.lerp(style == .standard ? 0.74 : style == .messages ? 0.93 : 1, 1, fullness))
         veil.backgroundColor = paper
         let full = route.full
         resizeButton.configuration?.image = UIImage(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
         resizeButton.accessibilityLabel = full ? "Make small" : "Full screen"
         resizeButton.frame = CGRect(x: page.bounds.width - 60, y: page.safeAreaInsets.top + 4, width: 44, height: 44)
+        if style == .sheet {
+            grabber.frame = CGRect(x: page.bounds.width / 2 - 60, y: full ? page.safeAreaInsets.top : 0, width: 120, height: 26)
+            grabber.subviews.first?.frame = CGRect(x: 42, y: 9, width: 36, height: 5)
+            page.bringSubviewToFront(grabber)
+            agent?.controller.setCompactChrome(!full)
+            thread?.controller.setCompactChrome(!full)
+        }
 
         // Flat push: a thread slides in on its own paper over the agent, which
         // drifts a third as far left and fades out first, so text never sits
@@ -385,6 +420,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The panel starts to cover the host app: its screen goes into the
     /// message field as an attachment first.
     private func hostWillBeCovered() {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_NO_CAPTURE"] == "1" { return }
+        #endif
         if let window = view.window { HostCapture.attach(below: window, to: model) }
     }
 
@@ -433,6 +471,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private func mountAgent(_ project: AppProject) {
         let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
+        controller.chatStyle = style
         controller.setBackButton(symbol: "chevron.down", label: "Minimize")
         controller.onBack = { [weak self] in self?.close() }
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
@@ -445,6 +484,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         guard let project else { return }
         agent?.controller.deactivate()
         let controller = ThreadViewController(model: model, project: project, sessionID: key.hasPrefix("draft:") ? nil : key)
+        controller.chatStyle = style
         controller.onBack = { [weak self] in self?.closeThread() }
         thread = host(controller)
         threadKey = key
@@ -465,6 +505,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// already in the app, so no picture-in-picture).
     private func host(_ controller: ThreadViewController) -> Mounted {
         controller.feeds = feeds
+        controller.onToggleFull = { [weak self] in self?.toggleFull() }
+        controller.isFull = { [weak self] in self?.route.full ?? false }
         let host = UIView()
         host.clipsToBounds = true
         addChild(controller)
@@ -533,8 +575,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         }
         if gesture === movePan {
             // Move the mini panel by its top, between its buttons.
-            return route.open && !route.full && point.y < 52 && point.x > 176 && point.x < page.bounds.width - 64
+            let start: CGFloat = style == .standard ? 176 : style == .transcript ? 200 : 20
+            return route.open && !route.full && style != .sheet && point.y < 52 && point.x > start && point.x < page.bounds.width - 64
         }
+        if gesture === grabberPan { return route.open }
         return true
     }
 
@@ -542,6 +586,38 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { false }
 
     @objc private func openTapped() { open() }
+
+    @objc private func grabberTapped() { toggleFull() }
+
+    /// Sheet style: the sheet's top edge follows the finger; let go, it
+    /// fills the screen, stays small or closes, with the finger's speed.
+    @objc private func grabberDragged(_ gesture: UIPanGestureRecognizer) {
+        let t = gesture.translation(in: view).y
+        switch gesture.state {
+        case .began:
+            dragStart = frame.value
+            frame.hold(dragStart)
+        case .changed:
+            let top = (dragStart.minY + t).clamped(view.bounds.minY, dragStart.maxY - 60)
+            let x = CGFloat.lerp(dragStart.minX, 0, ((dragStart.minY - top) / max(1, dragStart.minY)).clamped())
+            frame.hold(CGRect(x: x, y: top, width: view.bounds.width - 2 * x, height: dragStart.maxY - top))
+        case .ended, .cancelled, .failed:
+            let v = gesture.velocity(in: view).y
+            let rest = frame.value.minY + v * 0.15
+            frame.release()
+            let mini = miniFrame
+            if rest < mini.minY - 80 {
+                if !route.full { toggleFull() } else { retarget() }
+            } else if rest > mini.minY + mini.height * 0.4 {
+                route.full = false
+                close()
+            } else {
+                if route.full { toggleFull() } else { retarget() }
+            }
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+        default: break
+        }
+    }
 
     /// The glass and everything in it follow the finger; on release they
     /// spring to the nearer side with the finger's speed.
@@ -613,6 +689,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     #if DEBUG
     /// Verification only, in Squircle Debug with `SQUIRCLE_OVERLAY_DEMO`:
     /// `SQUIRCLE_OVERLAY_OPEN=mini|full` opens the overlay after 4 s;
+    /// `SQUIRCLE_OVERLAY_STYLE=a|b|c` tries a lighter look (`ChatStyle`);
+    /// `SQUIRCLE_OVERLAY_NO_CAPTURE=1` skips attaching the host's screen;
     /// `SQUIRCLE_OVERLAY_CYCLE=1` loops bubble → mini → full → thread → back
     /// → mini → bubble for recordings (`SQUIRCLE_SLOW` slows the springs).
     private func startVerificationHooks() {

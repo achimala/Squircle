@@ -789,6 +789,24 @@ content outside it. Letters Abroad build with this overlay: job
 `7cc921b4-50e4-49dc-ac12-9ba479bd03c9` (built from this branch's overlay sources,
 key `ebaea9fe…`, then imported). Not yet on the phone.
 
+**Lighter alternatives, proposal (user request, 2026-10-13):** "generally
+heavy feeling … huge glass blobs … all the extra buttons too especially in the
+little docked one". Three DEBUG-only looks for the overlay's conversations,
+`SQUIRCLE_OVERLAY_STYLE=a|b|c` (`ChatStyle`; the app itself is unchanged), for
+the user to choose from; none is adopted yet. All three replace the glass
+"Worked for" and changes pills and the live capsule with plain text lines, and
+move Threads, Builds, full screen, model and approvals out of the docked view
+into one menu. **A, Messages:** solid tinted bubbles, a ⋯ menu as the only
+control, the message field the one piece of glass. **B, Transcript:** no
+bubbles (your messages are bold under a hairline), a flat field under a
+hairline, and a paper header whose app name is the menu, plus minimize.
+**C, Sheet:** an opaque compact sheet across the bottom with only a grabber
+(tap or drag for full screen, drag down to close); the ⋯ menu shows at full
+screen; gray bubbles, slightly smaller text. `SQUIRCLE_OVERLAY_NO_CAPTURE=1`
+keeps verification opens from attaching the host's screen. Captured in the
+simulator (Squircle Debug scoped to Squircle, iOS 27.0) docked and full
+screen; the menus and the sheet drag were not exercised.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
