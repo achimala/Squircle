@@ -62,6 +62,7 @@ struct T3ThreadState: Codable {
             var message = ChatMessage(id: id, role: reasoning ? "thinking" : m["role"].string ?? "assistant",
                 content: Self.spoken(m["text"].string ?? ""), isStreaming: m["streaming"].bool, createdAt: m["createdAt"].string ?? "",
                 turnID: m["turnId"].string)
+            message.attachments = m["attachments"].array.compactMap { $0["type"].string == "image" ? $0["id"].string : nil }
             if let update = Self.workerUpdate(m) {
                 message.content = update; message.isUpdate = true
                 message.threadIDs = m["context"]["records"].array.flatMap { $0["payload"]["workers"].array.compactMap { $0["id"].string } }

@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 struct ChatSession: Identifiable, Equatable {
     /// What a thread is doing right now, from T3's live shell.
@@ -42,6 +43,30 @@ struct ChatMessage: Identifiable, Equatable {
     var isUpdate = false
     /// The worker threads an update is about.
     var threadIDs: [String] = []
+    /// T3's IDs for the images sent with a message of yours.
+    var attachments: [String] = []
+}
+
+/// A picture waiting in the message field, sent with the next message.
+struct ImageAttachment: Identifiable, Equatable {
+    let id: String
+    /// JPEG, small enough for T3's 10 MB per-image limit.
+    let data: Data
+    let thumbnail: UIImage
+
+    /// Scales `image` so its long side is at most 2000 pixels.
+    init?(_ image: UIImage, id: String = UUID().uuidString) {
+        let pixels = CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+        let fit = min(1, 2000 / max(1, max(pixels.width, pixels.height)))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let size = CGSize(width: (pixels.width * fit).rounded(), height: (pixels.height * fit).rounded())
+        let resized = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+        guard let data = resized.jpegData(compressionQuality: 0.82) else { return nil }
+        self.id = id
+        self.data = data
+        thumbnail = resized.preparingThumbnail(of: CGSize(width: 160, height: 160 * size.height / max(1, size.width))) ?? resized
+    }
 }
 
 /// What one turn changed in the project, from T3's checkpoint for it.

@@ -443,6 +443,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     @objc private func open() {
         guard size == .bubble else { return }
         Theme.openHaptic()
+        if let window = view.window { HostCapture.attach(below: window, to: model) }
         size = .mini
         morphFrame = panelFrame
         content.isHidden = false
@@ -704,6 +705,8 @@ final class OverlayListView: UIView {
             model.builds(for: project).contains { $0.status == "queued" || $0.status == "running" }
         } ?? false
         buildsButton.configuration?.baseForegroundColor = building ? Theme.accent : .secondaryLabel
+        composer.show(model.attachments)
+        composer.onRemoveAttachment = { [weak model] id in model?.removeAttachment(id) }
         live.configure(headline: status?.headline, started: status?.started, tone: status?.tone ?? .idle)
         liveSession = status?.session
         live.isHidden = status?.headline == nil

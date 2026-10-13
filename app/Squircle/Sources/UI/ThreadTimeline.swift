@@ -34,6 +34,8 @@ struct Shot: Equatable {
     let index: Int
     let title: String
     var video = false
+    /// T3's ID for an image you sent.
+    var attachment: String?
 }
 
 /// What the agent is doing this moment.
@@ -99,6 +101,11 @@ enum ThreadItem: Equatable {
             let id = turn.user?.id ?? "start"
             if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 items.append(user.isUpdate ? .update(user) : .user(user))
+            }
+            if let user = turn.user, !user.attachments.isEmpty {
+                items.append(.gallery(id: "gallery:sent:" + user.id, shots: user.attachments.enumerated().map {
+                    Shot(step: user.id, index: $0.offset, title: "Your image", attachment: $0.element)
+                }))
             }
             let rest = turn.rest.filter { $0.role == "tool" || !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             // The answer is the last thing the agent wrote, once nothing follows it.
