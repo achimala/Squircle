@@ -785,7 +785,9 @@ the overlay's own controller had not changed since build 26. Now:
 Verified in the simulator (Squircle Debug scoped to Squircle, iPhone 17 Pro,
 iOS 27.0) from a 4× slow recording at 4 fps: open, mini → full, thread push
 and back, close and bubble width changes are one continuous shape with no
-content outside it. Not yet on the phone.
+content outside it. Letters Abroad build with this overlay: job
+`7cc921b4-50e4-49dc-ac12-9ba479bd03c9` (built from this branch's overlay sources,
+key `ebaea9fe…`, then imported). Not yet on the phone.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
