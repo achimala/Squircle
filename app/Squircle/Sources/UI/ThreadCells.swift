@@ -513,6 +513,214 @@ final class ShotView: UIControl {
     }
 }
 
+/// Pictures and clips the agent's text embeds, as wide as the text at their
+/// own proportions. Several in a row share rows the way a photo album does:
+/// phone screenshots sit side by side, a wide picture keeps a row to itself.
+/// Clips play inline, muted and looping; a tap opens either full screen.
+final class FigureCell: TimelineCell {
+    static let maxHeight: CGFloat = 440
+    static let minRowHeight: CGFloat = 190
+    static let gap: CGFloat = 8
+    var onTap: ((Shot) -> Void)?
+    private let canvas = UIView()
+    private var tiles: [FigureTile] = []
+    private var height: NSLayoutConstraint!
+    private var shots: [Shot] = []
+    private var available: CGFloat = 0
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        canvas.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(canvas)
+        height = canvas.heightAnchor.constraint(equalToConstant: 200)
+        height.priority = .required - 1
+        NSLayoutConstraint.activate([
+            canvas.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
+            canvas.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+            canvas.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            canvas.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            height
+        ])
+        accessibilityIdentifier = "thread.figures"
+    }
+
+    /// Each picture's frame for a row width: rows filled left to right, each
+    /// as tall as fits the width, no taller than `maxHeight`, and a new row
+    /// whenever adding the next would make the row shorter than
+    /// `minRowHeight`. Before a size is known, a screen-shaped placeholder.
+    static func layout(_ shots: [Shot], width: CGFloat) -> [CGRect] {
+        let ratios = shots.map { shot in
+            MediaFiles.sizes[shot.step].map { $0.width / max(1, $0.height) } ?? 16 / 10
+        }
+        func rowHeight(_ row: ArraySlice<CGFloat>) -> CGFloat {
+            min(maxHeight, (width - gap * CGFloat(row.count - 1)) / max(0.01, row.reduce(0, +)))
+        }
+        var rows: [Range<Int>] = []
+        var start = 0
+        for index in ratios.indices.dropFirst() where rowHeight(ratios[start...index]) < minRowHeight {
+            rows.append(start..<index)
+            start = index
+        }
+        if !ratios.isEmpty { rows.append(start..<ratios.count) }
+        var frames: [CGRect] = []
+        var y: CGFloat = 0
+        for row in rows {
+            let h = rowHeight(ratios[row])
+            var x: CGFloat = 0
+            for index in row {
+                let w = h * ratios[index]
+                frames.append(CGRect(x: x, y: y, width: w, height: h).integral)
+                x += w + gap
+            }
+            y += h + gap
+        }
+        return frames
+    }
+
+    static func height(_ shots: [Shot], width: CGFloat) -> CGFloat {
+        (layout(shots, width: width - 40).map(\.maxY).max() ?? 0) + 16
+    }
+
+    /// Decoded once at the size it shows, not the file's full resolution.
+    static func image(for shot: Shot) -> UIImage? {
+        let key = shot.step as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        guard let data = StepImages.data(for: shot.step, index: shot.index), let image = UIImage(data: data) else { return nil }
+        let fit = min(1, 1200 / max(1, max(image.size.width, image.size.height)))
+        let picture = image.preparingThumbnail(of: CGSize(width: image.size.width * fit, height: image.size.height * fit)) ?? image
+        cache.setObject(picture, forKey: key)
+        return picture
+    }
+    private static let cache = NSCache<NSString, UIImage>()
+
+    func configure(_ shots: [Shot], width: CGFloat) {
+        if shots != self.shots {
+            self.shots = shots
+            tiles.forEach { $0.removeFromSuperview() }
+            tiles = shots.map { shot in
+                let tile = FigureTile(shot: shot) { [weak self] in self?.onTap?($0) }
+                canvas.addSubview(tile)
+                return tile
+            }
+        }
+        available = width - 40
+        height.constant = Self.layout(shots, width: available).map(\.maxY).max() ?? 0
+        tiles.forEach { $0.update() }
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        for (tile, frame) in zip(tiles, Self.layout(shots, width: canvas.bounds.width > 0 ? canvas.bounds.width : available)) {
+            tile.frame = frame
+        }
+    }
+
+    override func setPressed(_ pressed: Bool) {}
+}
+
+/// One picture or clip in a `FigureCell`.
+final class FigureTile: UIControl {
+    let shot: Shot
+    private let image = UIImageView()
+    private let playerLayer = AVPlayerLayer()
+    private let badge = UIImageView(image: UIImage(systemName: "play.fill"))
+    private var player: AVQueuePlayer?
+    private var looper: AVPlayerLooper?
+
+    init(shot: Shot, action: @escaping (Shot) -> Void) {
+        self.shot = shot
+        super.init(frame: .zero)
+        clipsToBounds = true
+        layer.cornerCurve = .continuous
+        backgroundColor = .secondarySystemFill
+        image.contentMode = .scaleAspectFill
+        image.isUserInteractionEnabled = false
+        image.layer.addSublayer(playerLayer)
+        playerLayer.videoGravity = .resizeAspectFill
+        badge.tintColor = .white
+        badge.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        badge.contentMode = .center
+        badge.backgroundColor = UIColor.black.withAlphaComponent(0.45)
+        badge.layer.cornerRadius = 12
+        badge.isUserInteractionEnabled = false
+        badge.isHidden = !shot.video
+        addSubview(image)
+        addSubview(badge)
+        addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            Theme.selectionHaptic()
+            action(self.shot)
+        }, for: .touchUpInside)
+        isAccessibilityElement = true
+        accessibilityTraits = [.image, .button]
+        accessibilityLabel = shot.video ? "Recording" : "Image"
+        accessibilityIdentifier = "thread.figure"
+        updateBorder()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func update() {
+        if let picture = FigureCell.image(for: shot), image.image !== picture {
+            if window != nil, image.image == nil {
+                UIView.transition(with: image, duration: 0.3, options: [.transitionCrossDissolve, .allowUserInteraction]) { self.image.image = picture }
+            } else {
+                image.image = picture
+            }
+        }
+        startPlaybackIfReady()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Phone screenshots read as phones; everything else as a picture.
+        layer.cornerRadius = bounds.width / max(1, bounds.height) < 0.7 ? min(22, bounds.width * 0.1) : 12
+        image.frame = bounds
+        badge.frame = CGRect(x: bounds.maxX - 32, y: bounds.maxY - 32, width: 24, height: 24)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        playerLayer.frame = image.bounds
+        CATransaction.commit()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { player?.pause() } else { startPlaybackIfReady() }
+    }
+
+    private func startPlaybackIfReady() {
+        guard shot.video, window != nil, !Motion.reduced else { return }
+        if let player { player.play(); return }
+        guard let url = StepVideos.url(for: shot.step) else { return }
+        let queue = AVQueuePlayer()
+        queue.isMuted = true
+        queue.preventsDisplaySleepDuringVideoPlayback = false
+        looper = AVPlayerLooper(player: queue, templateItem: AVPlayerItem(url: url))
+        playerLayer.player = queue
+        player = queue
+        queue.play()
+    }
+
+    override var isHighlighted: Bool {
+        didSet {
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.7, initialSpringVelocity: 0, options: [.allowUserInteraction, .beginFromCurrentState]) {
+                self.transform = self.isHighlighted ? CGAffineTransform(scaleX: 0.97, y: 0.97) : .identity
+            }
+        }
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        updateBorder()
+    }
+
+    private func updateBorder() {
+        layer.borderColor = UIColor.separator.cgColor
+        layer.borderWidth = 1 / max(1, traitCollection.displayScale)
+    }
+}
+
 /// What a turn changed, as a quiet line with its size; opens the diff.
 final class ChangesCell: TimelineCell {
     private let icon = UIImageView(image: UIImage(systemName: "chevron.left.forwardslash.chevron.right"))

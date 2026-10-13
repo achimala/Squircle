@@ -103,3 +103,83 @@ enum Markdown {
         font.fontDescriptor.withSymbolicTraits(.traitBold).map { UIFont(descriptor: $0, size: font.pointSize) } ?? font
     }
 }
+
+/// A picture or clip an agent put in its Markdown, by file path on the Mac.
+struct MediaReference: Equatable {
+    let path: String
+    let video: Bool
+}
+
+extension Markdown {
+    enum Segment: Equatable {
+        case text(String)
+        case media(MediaReference)
+    }
+
+    private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "webp"]
+    private static let videoExtensions: Set<String> = ["mp4", "mov", "m4v"]
+
+    /// Splits a message at the pictures and clips it embeds (`![alt](path)`,
+    /// or a link straight to an image or video file), so each shows in place.
+    /// The alt text is a caption and is dropped; the rest of the line stays.
+    /// Web URLs and references inside code fences stay text.
+    static func segments(_ text: String) -> [Segment] {
+        var segments: [Segment] = []
+        var pending: [String] = []
+        func flush() {
+            let joined = pending.joined(separator: "\n")
+            pending = []
+            guard !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            segments.append(.text(joined))
+        }
+        var inCode = false
+        for line in text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n") {
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inCode.toggle() }
+            guard !inCode else { pending.append(line); continue }
+            let (rest, media) = extractMedia(line)
+            guard !media.isEmpty else { pending.append(line); continue }
+            if !rest.trimmingCharacters(in: .whitespaces).isEmpty { pending.append(rest) }
+            flush()
+            segments += media.map(Segment.media)
+        }
+        flush()
+        return segments
+    }
+
+    private static func extractMedia(_ line: String) -> (String, [MediaReference]) {
+        var rest = ""
+        var media: [MediaReference] = []
+        var index = line.startIndex
+        while index < line.endIndex {
+            let bang = line[index] == "!"
+            let open = bang ? line.index(after: index) : index
+            if open < line.endIndex, line[open] == "[",
+               let close = line[open...].firstIndex(of: "]"),
+               line.index(after: close) < line.endIndex, line[line.index(after: close)] == "(",
+               let end = line[close...].firstIndex(of: ")") {
+                let target = String(line[line.index(close, offsetBy: 2)..<end])
+                if let reference = reference(target) {
+                    media.append(reference)
+                    index = line.index(after: end)
+                    continue
+                }
+            }
+            rest.append(line[index])
+            index = line.index(after: index)
+        }
+        return (rest, media)
+    }
+
+    /// A local file path to an image or video, else nil.
+    private static func reference(_ target: String) -> MediaReference? {
+        var path = target.trimmingCharacters(in: .whitespaces)
+        if path.hasPrefix("<"), let close = path.firstIndex(of: ">") { path = String(path[path.index(after: path.startIndex)..<close]) }
+        else if let space = path.firstIndex(of: " ") { path = String(path[..<space]) }
+        if path.hasPrefix("file://") { path = String(path.dropFirst("file://".count)) }
+        if path.contains("%") { path = path.removingPercentEncoding ?? path }
+        guard !path.isEmpty, !path.contains("://"), !path.hasPrefix("#"), !path.hasPrefix("mailto:") else { return nil }
+        let ext = (path as NSString).pathExtension.lowercased()
+        if videoExtensions.contains(ext) { return MediaReference(path: path, video: true) }
+        return imageExtensions.contains(ext) ? MediaReference(path: path, video: false) : nil
+    }
+}

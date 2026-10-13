@@ -185,3 +185,13 @@ enum StepImages {
     static func data(for id: String, index: Int) -> Data? { store["\(id)#\(index)"] }
     static func set(_ data: Data, for id: String, index: Int) { store["\(id)#\(index)"] = data }
 }
+
+/// Pictures and clips agents embed in their Markdown by path, keyed by
+/// their step ID (`file:` and the path).
+enum MediaFiles {
+    nonisolated(unsafe) static var sizes: [String: CGSize] = [:]
+    nonisolated(unsafe) static var urls: [String: (url: URL, expires: Date)] = [:]
+    static func isVideo(_ stepID: String) -> Bool {
+        ["mp4", "mov", "m4v"].contains((stepID as NSString).pathExtension.lowercased())
+    }
+}

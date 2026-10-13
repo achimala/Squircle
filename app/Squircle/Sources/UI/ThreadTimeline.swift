@@ -36,6 +36,8 @@ struct Shot: Equatable {
     var video = false
     /// T3's ID for an image you sent.
     var attachment: String?
+    /// A file on the Mac the agent's Markdown shows, read through T3.
+    var path: String?
 }
 
 /// What the agent is doing this moment.
@@ -60,6 +62,8 @@ enum ThreadItem: Equatable {
     case earlier(turn: String, count: Int)
     /// Screenshots side by side, scrolling sideways.
     case gallery(id: String, shots: [Shot])
+    /// A picture or clip the agent's text embeds, full width where it sits.
+    case figure(id: String, shots: [Shot])
     case summary(TurnSummary)
     /// What the turn changed in the project; opens its diff.
     case changes(TurnChanges, turn: String)
@@ -77,7 +81,7 @@ enum ThreadItem: Equatable {
         case .thought(let message): return message.id
         case .step(let message, _, _): return message.id
         case .earlier(let turn, _): return "earlier:" + turn
-        case .gallery(let id, _): return id
+        case .gallery(let id, _), .figure(let id, _): return id
         case .summary(let summary): return "summary:" + summary.turn
         case .build(let build, let turn): return "build:\(turn):\(build.id)"
         case .changes(_, let turn): return "changes:" + turn
@@ -134,7 +138,7 @@ enum ThreadItem: Equatable {
                 items += open ? allRows(work) : gallery("gallery:" + id, work)
             }
             items += (used[index] ?? []).map { .simulator($0) }
-            if let answer { items.append(.answer(answer)) }
+            if let answer { items += withMedia(answer, ThreadItem.answer) }
             if !live {
                 let turnIDs = Set(([turn.user] + rest).compactMap { $0?.turnID })
                 if let change = changes.last(where: { turnIDs.contains($0.turnID) || ($0.assistantMessageID != nil && $0.assistantMessageID == answer?.id) }) {
@@ -164,7 +168,7 @@ enum ThreadItem: Equatable {
         rows += gallery("gallery:earlier:" + turn, work.indices.filter { work[$0].role == "tool" && !shown.contains($0) }.map { work[$0] })
         var visible: [ChatMessage] = []
         for (index, message) in work.enumerated() {
-            if index == noteIndex { rows += stepRows(visible); visible = []; rows.append(.note(message)); continue }
+            if index == noteIndex { rows += stepRows(visible); visible = []; rows += withMedia(message, ThreadItem.note); continue }
             if message.role == "tool", shown.contains(index) { visible.append(message) }
         }
         return rows + stepRows(visible)
@@ -176,9 +180,33 @@ enum ThreadItem: Equatable {
         for message in work {
             if message.role == "tool" { run.append(message); continue }
             rows += stepRows(run); run = []
-            rows.append(message.role == "thinking" ? .thought(message) : .note(message))
+            rows += message.role == "thinking" ? [.thought(message)] : withMedia(message, ThreadItem.note)
         }
         return rows + stepRows(run)
+    }
+
+    /// A message cut at the pictures and clips it embeds, each in its place.
+    private static func withMedia(_ message: ChatMessage, _ row: (ChatMessage) -> ThreadItem) -> [ThreadItem] {
+        guard message.content.contains("](") else { return [row(message)] }
+        let segments = Markdown.segments(message.content)
+        guard segments.contains(where: { if case .media = $0 { return true }; return false }) else { return [row(message)] }
+        var rows: [ThreadItem] = []
+        for (index, segment) in segments.enumerated() {
+            switch segment {
+            case .text(let text):
+                var part = message
+                part.content = text
+                // The first piece of text keeps the message's identity.
+                if rows.contains(where: { if case .figure = $0 { return false }; return true }) { part.id = message.id + "#\(index)" }
+                rows.append(row(part))
+            case .media(let media):
+                let shot = Shot(step: "file:" + media.path, index: 0, title: "", video: media.video, path: media.path)
+                // Pictures with nothing between them share one figure.
+                if case .figure(let id, let shots)? = rows.last { rows[rows.count - 1] = .figure(id: id, shots: shots + [shot]) }
+                else { rows.append(.figure(id: "figure:\(message.id)#\(index)", shots: [shot])) }
+            }
+        }
+        return rows
     }
 
     /// A run of steps shares one rail; screenshots sit beneath their step.
