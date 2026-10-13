@@ -23,29 +23,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     var onBuilds: (() -> Void)?
     private let threads = Theme.glassButton(symbol: "list.bullet", identifier: "agent.threads", accessibilityLabel: "Threads")
     private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "agent.builds", accessibilityLabel: "Builds")
-    /// How the conversation draws itself; set before it loads.
-    var chatStyle = ChatStyle.standard
-    /// The overlay's full-screen toggle, offered in the lighter styles' menu.
-    var onToggleFull: (() -> Void)?
-    var isFull: (() -> Bool)?
-    /// Lighter styles: one menu holding Threads, Builds, full screen, model
-    /// and approvals, as a ⋯ button or the title itself.
-    private let more = Theme.glassButton(symbol: "ellipsis", identifier: "agent.more", accessibilityLabel: "More")
-    private let titleButton = UIButton(configuration: .plain())
-    /// The sheet style shows its controls only at full screen.
-    private var compactChrome = false
-    /// Transcript style: the field sits on the page under a hairline.
-    private let composerRule = UIView()
-    private let titleBar = UIView()
-    /// The floating buttons at the top, in reading order.
-    private var topControls: [UIView] {
-        switch chatStyle {
-        case .standard: return isAgent ? [back, threads, builds] : [back]
-        case .messages: return isAgent ? [more] : [back, more]
-        case .transcript: return isAgent ? [titleButton, back] : [back, titleButton]
-        case .sheet: return compactChrome ? (isAgent ? [] : [back]) : (isAgent ? [more] : [back, more])
-        }
-    }
+    /// The floating buttons at the top left, in reading order.
+    private var topControls: [UIView] { isAgent ? [back, threads, builds] : [back] }
     /// The model follows one conversation at a time; a thread opened over
     /// this one takes it and gives it back when it closes.
     private var isActive: Bool { model.selectedSessionID == sessionID }
@@ -106,6 +85,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var rendered: [String: (source: String, text: NSAttributedString)] = [:]
     private var expanded = Set<String>()
     private var pinToBottom = true
+    /// The debug overlay's even inset and the safe area its glass will have
+    /// at rest (the glass stretches, so UIKit's own would change every frame).
+    private var overlayLayout: (inset: CGFloat, safe: UIEdgeInsets)?
+    private var edgeConstraints: [NSLayoutConstraint] = []
+    private var safeArea: UIEdgeInsets { overlayLayout?.safe ?? view.safeAreaInsets }
 
     init(model: SquircleModel, project: AppProject, sessionID: String?, agent: Bool = false) {
         self.isAgent = agent
@@ -130,113 +114,42 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         back.accessibilityLabel = label
     }
 
-    /// The sheet style hides its controls while the overlay is small.
-    func setCompactChrome(_ compact: Bool) {
-        guard compact != compactChrome else { return }
-        compactChrome = compact
-        guard isViewLoaded, chatStyle.isLight else { return }
-        layoutLightChrome()
+    /// Lays the controls out at one inset from every edge of `safe`, for
+    /// the debug overlay's glass.
+    func setOverlayLayout(inset: CGFloat, safe: UIEdgeInsets) {
+        loadViewIfNeeded()
+        guard overlayLayout?.inset != inset || overlayLayout?.safe != safe else { return }
+        overlayLayout = (inset, safe)
+        view.keyboardLayoutGuide.usesBottomSafeArea = false
+        NSLayoutConstraint.deactivate(edgeConstraints)
+        let rest = composer.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        rest.priority = .defaultLow
+        edgeConstraints = [
+            composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+            composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
+            composer.bottomAnchor.constraint(lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor, constant: -inset),
+            composer.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -inset - safe.bottom),
+            rest,
+            pickers.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+            pickers.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
+            request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+            request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset)
+        ]
+        NSLayoutConstraint.activate(edgeConstraints)
+        view.setNeedsLayout()
     }
 
-    // MARK: Lighter styles
-
-    private func setUpLightChrome() {
-        sticky.apply(chatStyle)
-        sticky.backgroundColor = Theme.paper
-        composer.apply(chatStyle)
-        // Model and approvals move into the menu.
-        pickers.model.isHidden = true
-        pickers.approvals.isHidden = true
-        more.showsMenuAsPrimaryAction = true
-        more.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.lightMenu() ?? []) }])
-        titleButton.showsMenuAsPrimaryAction = true
-        titleButton.menu = more.menu
-        titleButton.accessibilityIdentifier = "agent.title"
-        titleButton.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 6, bottom: 8, trailing: 6)
-        titleButton.configuration?.image = UIImage(systemName: "chevron.down")
-        titleButton.configuration?.imagePlacement = .trailing
-        titleButton.configuration?.imagePadding = 5
-        titleButton.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
-        titleButton.configuration?.baseForegroundColor = .label
-        titleButton.configuration?.titleLineBreakMode = .byTruncatingTail
-        titleButton.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes; attributes.font = Theme.font(.headline, 17, .semibold); return attributes
-        }
-        if chatStyle == .transcript {
-            // Plain controls on the page; the minimize chevron sits at the right.
-            var plain = UIButton.Configuration.plain()
-            plain.image = back.configuration?.image
-            plain.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-            plain.baseForegroundColor = .secondaryLabel
-            back.configuration = plain
-            composerRule.backgroundColor = .separator
-            view.addSubview(composerRule)
-            // A page header with a hairline, not text blurring under the title.
-            if #available(iOS 26.0, *) { table.topEdgeEffect.isHidden = true }
-            titleBar.backgroundColor = Theme.paper
-            let line = UIView()
-            line.backgroundColor = .separator
-            line.autoresizingMask = [.flexibleWidth, .flexibleTopMargin]
-            titleBar.addSubview(line)
-            titleBar.isUserInteractionEnabled = false
-            view.insertSubview(titleBar, belowSubview: back)
-        }
-        [more, titleButton].forEach(view.addSubview)
-        if #available(iOS 26.0, *) {
-            for control in [more, titleButton] {
-                let top = UIScrollEdgeElementContainerInteraction()
-                top.scrollView = table
-                top.edge = .top
-                control.addInteraction(top)
-            }
-        }
-    }
-
-    private func layoutLightChrome() {
-        let safe = view.safeAreaInsets, width = view.bounds.width
-        let shown = Set(topControls.map(ObjectIdentifier.init))
-        for control in [back, threads, builds, more, titleButton] as [UIView] {
-            control.isHidden = !shown.contains(ObjectIdentifier(control))
-        }
-        more.frame = CGRect(x: width - 60, y: safe.top + 4, width: 44, height: 44)
-        if chatStyle == .transcript {
-            titleButton.configuration?.title = threadTitle
-            let fitted = titleButton.sizeThatFits(CGSize(width: width - 120, height: 44)).width
-            if isAgent {
-                titleButton.frame = CGRect(x: 14, y: safe.top + 4, width: min(fitted, width - 80), height: 44)
-                back.frame = CGRect(x: width - 56, y: safe.top + 4, width: 44, height: 44)
-            } else {
-                back.frame = CGRect(x: 6, y: safe.top + 4, width: 44, height: 44)
-                titleButton.frame = CGRect(x: 46, y: safe.top + 4, width: min(fitted, width - 110), height: 44)
-            }
-            let line = 1 / max(1, view.window?.screen.scale ?? 3)
-            titleBar.frame = CGRect(x: 0, y: 0, width: width, height: safe.top + 52)
-            titleBar.subviews.first?.frame = CGRect(x: 0, y: titleBar.bounds.height - line, width: width, height: line)
-            composerRule.frame = CGRect(x: 0, y: composer.frame.minY - 4, width: width, height: line)
-        }
-    }
-
-    /// Everything the standard style puts in buttons, in one menu.
-    private func lightMenu() -> [UIMenuElement] {
-        var items: [UIMenuElement] = []
-        if isAgent {
-            items.append(UIAction(title: "Threads", image: UIImage(systemName: "list.bullet")) { [weak self] _ in self?.onThreads?() })
-            items.append(UIAction(title: "Builds", image: UIImage(systemName: "shippingbox")) { [weak self] _ in self?.onBuilds?() })
-        }
-        if let onToggleFull {
-            let full = isFull?() ?? false
-            items.append(UIAction(title: full ? "Make Small" : "Full Screen",
-                                  image: UIImage(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")) { _ in onToggleFull() })
-        }
-        let agent = model.shortAgentName(for: model.modelSelection)
-        items.append(UIMenu(options: .displayInline, children: [
-            UIMenu(title: "Model", subtitle: agent, image: UIImage(systemName: "cpu"), children: modelMenu()),
-            UIMenu(title: "Approvals", subtitle: model.runtimeMode.title, image: UIImage(systemName: model.runtimeMode.symbol), children: approvalMenu())
-        ]))
-        if isAgent, chatStyle != .transcript {
-            items.append(UIAction(title: "Minimize", image: UIImage(systemName: "chevron.down")) { [weak self] _ in self?.onBack?() })
-        }
-        return items
+    /// The system's scroll edge blur can't draw inside a blurred or pictured
+    /// layer, so the debug overlay hides it while the glass morphs; the
+    /// conversation fades out under the top controls instead.
+    func setEdgeEffectsHidden(_ hidden: Bool) {
+        loadViewIfNeeded()
+        guard #available(iOS 26.0, *) else { return }
+        clip.layer.mask = hidden ? fade : nil
+        table.topEdgeEffect.isHidden = hidden
+        table.bottomEdgeEffect.isHidden = hidden
+        table.setNeedsLayout()
+        table.layoutIfNeeded()
     }
 
     // MARK: View
@@ -271,11 +184,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         dataSource.defaultRowAnimation = .fade
         table.accessibilityIdentifier = "thread.messages"
         // iOS 26 blurs the top scroll edge itself; earlier systems fade it.
-        if #unavailable(iOS 26.0) {
-            fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
-            fade.startPoint = CGPoint(x: 0.5, y: 0)
-            clip.layer.mask = fade
-        }
+        fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
+        fade.startPoint = CGPoint(x: 0.5, y: 0)
+        if #unavailable(iOS 26.0) { clip.layer.mask = fade }
         clip.addSubview(table)
         draftScroll.backgroundColor = .clear
         draftScroll.keyboardDismissMode = .interactive
@@ -312,7 +223,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             builds.addAction(UIAction { [weak self] _ in self?.onBuilds?() }, for: .touchUpInside)
             [threads, builds].forEach(view.addSubview)
         }
-        if chatStyle.isLight { setUpLightChrome() }
 
         requestDetail.lineBreakMode = .byTruncatingTail
         requestButtons.spacing = 8
@@ -342,18 +252,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             setJumpShown(false)
         }, for: .touchUpInside)
         [request, notice, pickers, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
-        NSLayoutConstraint.activate([
+        edgeConstraints = [
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
-            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             pickers.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
             pickers.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+            request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12)
+        ]
+        NSLayoutConstraint.activate(edgeConstraints + [
+            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             pickers.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
             notice.bottomAnchor.constraint(equalTo: pickers.topAnchor, constant: -8),
-            request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8),
             requestStack.topAnchor.constraint(equalTo: request.contentView.topAnchor, constant: 14),
             requestStack.bottomAnchor.constraint(equalTo: request.contentView.bottomAnchor, constant: -12),
@@ -395,11 +307,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let safe = view.safeAreaInsets
-        back.frame = CGRect(x: 16, y: safe.top + 4, width: 44, height: 44)
-        threads.frame = CGRect(x: 70, y: safe.top + 4, width: 44, height: 44)
-        builds.frame = CGRect(x: 124, y: safe.top + 4, width: 44, height: 44)
-        if chatStyle.isLight { layoutLightChrome() }
+        let x = overlayLayout?.inset ?? 16, y = safeArea.top + (overlayLayout?.inset ?? 4)
+        back.frame = CGRect(x: x, y: y, width: 44, height: 44)
+        threads.frame = CGRect(x: x + 54, y: y, width: 44, height: 44)
+        builds.frame = CGRect(x: x + 108, y: y, width: 44, height: 44)
         layoutConversation()
     }
 
@@ -412,11 +323,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         fade.frame = clip.bounds
-        fade.endPoint = CGPoint(x: 0.5, y: min(1, (view.safeAreaInsets.top + 20) / max(1, height)))
+        let faded = overlayLayout == nil ? safeArea.top + 20 : back.frame.maxY
+        fade.endPoint = CGPoint(x: 0.5, y: min(1, faded / max(1, height)))
         CATransaction.commit()
         let floor = request.isHidden ? (notice.isHidden ? pickers.frame.minY : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
-        let insets = UIEdgeInsets(top: view.safeAreaInsets.top + (topControls.isEmpty ? 26 : 54), left: 0, bottom: height - floor + 10, right: 0)
+        let insets = UIEdgeInsets(top: back.frame.maxY + 6, left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
@@ -431,8 +343,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         back.alpha = alpha
         threads.alpha = alpha
         builds.alpha = alpha
-        more.alpha = alpha
-        titleButton.alpha = alpha
         pickers.alpha = alpha
         jump.alpha = jumpShown ? alpha : 0
     }
@@ -472,7 +382,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                                                     pickers.model, pickers.approvals, composer]
         let session = model.sessions.first { $0.id == sessionID }
         threadTitle = isAgent ? project.name : session?.displayTitle(in: project) ?? ""
-        if chatStyle == .transcript, titleButton.configuration?.title != threadTitle { view.setNeedsLayout() }
         renderAgent()
         let attached = model.attachments.count
         composer.show(model.attachments)
@@ -548,8 +457,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func renderItems(animated: Bool = false) {
-        // The transcript style's title is its menu, at the top.
-        let header: [ThreadItem] = threadTitle.isEmpty || chatStyle == .transcript ? [] : [.header(threadTitle)]
+        let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
         let next = header + ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
                                              builds: model.builds(for: project), changes: model.changes,
                                              simulators: model.threadSimulators)
@@ -751,7 +659,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func configure(_ cell: UITableViewCell, with item: ThreadItem) {
-        (cell as? TimelineCell)?.apply(chatStyle)
         switch item {
         case .header(let title):
             (cell as? HeaderCell)?.configure(title)
@@ -844,12 +751,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let text: NSAttributedString
         switch style {
         case .user:
-            let font = chatStyle == .transcript ? Theme.font(.body, 17, .semibold) : Theme.font(.body, chatStyle == .sheet ? 16 : 17)
-            text = NSAttributedString(string: message.content, attributes: [.font: font, .foregroundColor: UIColor.label])
+            text = NSAttributedString(string: message.content, attributes: [.font: Theme.font(.body, 17), .foregroundColor: UIColor.label])
         case .note, .thought:
             text = Markdown.render(message.content, font: Theme.font(.subheadline, 15), color: .secondaryLabel)
         case .answer:
-            text = Markdown.render(message.content, font: Theme.font(.body, chatStyle == .sheet ? 16 : 17), color: message.failed ? Theme.failure : .label)
+            text = Markdown.render(message.content, font: Theme.font(.body, 17), color: message.failed ? Theme.failure : .label)
         case .update:
             let font = Theme.font(.footnote, 13, .medium)
             let line = NSMutableAttributedString()
@@ -1056,12 +962,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
         let flyer = UIView(frame: bubble)
         flyer.isUserInteractionEnabled = false
-        let fill: UIView = chatStyle.isLight ? UIView() : Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
-        if chatStyle.isLight {
-            fill.backgroundColor = cell.bubble.isHidden ? nil : cell.bubble.backgroundColor
-            fill.layer.cornerRadius = cell.bubble.layer.cornerRadius
-            fill.layer.cornerCurve = .continuous
-        }
+        let fill = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
         fill.frame = flyer.bounds
         flyer.addSubview(fill)
         words.frame = CGRect(x: textFrame.minX - bubble.minX, y: textFrame.minY - bubble.minY,

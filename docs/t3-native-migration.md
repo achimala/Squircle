@@ -807,6 +807,34 @@ keeps verification opens from attaching the host's screen. Captured in the
 simulator (Squircle Debug scoped to Squircle, iOS 27.0) docked and full
 screen; the menus and the sheet drag were not exercised.
 
+**Stretch and cross blur, even padding (user request, 2026-10-13):** "animation
+is ugly, dont want it clipping like this, just stretch and cross-blur the
+content. need consistent padding around all sides". The glass is still one
+`FrameSpring`, but nothing inside it is laid out from the moving frame any
+more: the bubble's line is laid out at the bubble's size and the conversation
+at the panel's resting size (mini or full, kept while it closes), and both are
+scaled to fill the glass's presented frame every frame, so they stretch with
+it (overshoot included) and are never cut by its edge. The outgoing one blurs
+and fades as the incoming one sharpens (Core Animation's Gaussian blur, as on
+2026-10-07). Mini ↔ full lays the conversation out at the new size and
+cross-blurs it with a snapshot of the old layout, stretched the same way. Paper
+is the blurred layer's own background (the filter turns clear areas black);
+the system's scroll-edge blur can't draw inside a filtered layer or a
+snapshot, so while the glass morphs it is hidden and the conversation fades
+under the top controls with a mask. Padding: one 12 pt inset between the safe
+area and the glass, and between the glass and the controls, composer, model
+pickers and request card on every side; the mini panel's corner radius (34) is
+concentric with the 44 pt buttons. The conversation gets the safe area it
+will have at rest (`setOverlayLayout`), since UIKit's would change as the
+glass stretches. Verified in the simulator (iPhone 17 Pro, iOS 27.0) from
+4×/5×/12× slow screenshot sequences of the full `SQUIRCLE_OVERLAY_CYCLE`
+(open, mini → full, thread push and back, full → mini, close, interrupted
+open/close): continuous, no clipping, no black; insets measured 12 pt in mini
+and full. Not re-checked: dragging the bubble or panel by finger (the gesture
+code only changed coordinate space). Letters Abroad build with this overlay:
+job `760e6572-a8b8-43ce-9899-3fcd25eb81e9` (overlay key `b82197f2…`, built from
+main at `efa4bf6`); not yet on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
