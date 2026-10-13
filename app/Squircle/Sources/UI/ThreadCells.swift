@@ -778,7 +778,7 @@ final class BuildCell: TimelineCell {
         config.title = "Install"
         config.cornerStyle = .capsule
         config.baseBackgroundColor = Theme.accent
-        config.baseForegroundColor = .white
+        config.baseForegroundColor = Theme.onAccent
         let button = UIButton(configuration: config)
         button.accessibilityIdentifier = "thread.build.install"
         return button
