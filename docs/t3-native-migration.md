@@ -839,7 +839,9 @@ from all four of its edges, and the panel 12 pt from the screen's sides.
 Handle drags (taller, full screen, back to docked, collapse to bubble) were
 driven by a throwaway XCUITest and checked in screenshots, including frames
 while the finger held mid-drag. Not checked: the ⋯ menu's items, a pushed
-thread's back + ⋯.
+thread's back + ⋯. Letters Abroad build with this overlay: job
+`5384b535-7a74-4387-8627-05f99a0d1e60` (overlay key `285a1fff…`, main at
+`280b6a8`); not yet on the phone.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
