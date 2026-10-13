@@ -1186,3 +1186,11 @@ host-side input problem (the build-12 notes describe T3 capture needing a
 PiP-to-turn flight was not built (the PiP fades; the block becomes the
 recording), cellular bandwidth of several streams, and the phone.
 
+**Combined build 40** (this work merged with main's overlay agent, image
+attachments and build detail, `8ba2655`): after the merge, `SQUIRCLE_STRESS=1`
+40 s gave `settled=1 violations=0`; the overlay demo opened the app's agent
+with the host screenshot attached and no device, and removing the attachment
+worked. Service restarted on the new binary, `agent setup` rerun. Signed
+build succeeded, job `32c34bb6-178a-479d-b558-8a23523c4fd7`. Not installed
+on the phone.
+
