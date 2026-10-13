@@ -754,6 +754,48 @@ panel's content (on its paper) is blurred, and the live bubble line (masked
 shimmer) is swapped for a plain copy during the morph. Probe
 `1b6ebe57-95b3-4449-ba9c-babb90327c7c`.
 
+**Agent overlay (user request, 2026-10-13):** "not updated at all for the new
+unified single agent design … has a separate glass container that gets out of
+sync with the rest of the ui". The installed Letters Abroad build
+(`05e83365`, overlay cache `62fc26ae…`) already carried build-39 shared code;
+the overlay's own controller had not changed since build 26. Now:
+
+- Opening the overlay shows the app's agent conversation (the same
+  `ThreadViewController` as the app, `agent: true`) with Threads and Builds
+  beside a minimize button, and a full-screen toggle. Threads opens the
+  threads sheet; a thread (or a worker update line) pushes in over the agent
+  inside the panel; back or a left-edge swipe returns. The agent is mounted
+  once and kept, so the panel opens already showing it. The bubble shows who
+  needs you, else the agent's live step, else a working thread.
+- One glass view holds everything: the bubble's line and the conversation are
+  in its `contentView`, clipped by its corners. Its frame is one vector spring
+  (`FrameSpring`: x, y, width, height in one display link, velocity kept when
+  retargeted, held by a finger while dragged). Bubble ↔ mini ↔ full, side
+  changes, keyboard and bubble width all retarget that spring; every frame
+  derives the corner radius, the line's fade and the conversation's place
+  from the presented frame. The conversation is laid out at least at mini
+  size, pinned to the bubble's corner (the glass reveals it), and never
+  larger than where the glass is headed (an overshoot shows paper, not a
+  relayout). Removed: the separate content layer, stretch and Gaussian blur,
+  and the `UIView.animate` resize, drag and keyboard animations.
+- `hostWillBeCovered()` is where image attachments capture the host app.
+- DEBUG: `SQUIRCLE_OVERLAY_OPEN=mini|full`, `SQUIRCLE_OVERLAY_CYCLE=1`
+  (with `SQUIRCLE_SLOW`) under `SQUIRCLE_OVERLAY_DEMO`.
+
+Verified in the simulator (Squircle Debug scoped to Squircle, iPhone 17 Pro,
+iOS 27.0) from a 4× slow recording at 4 fps: open, mini → full, thread push
+and back, close and bubble width changes are one continuous shape with no
+content outside it. Not yet on the phone.
+
+**How the overlay reaches apps.** It is compiled into each app when Squircle
+signs it; an installed app keeps that overlay until the app is built and
+installed again. The service compiles it from the checkout its binary was
+built in (`CARGO_MANIFEST_DIR`) unless `SQUIRCLE_OVERLAY_PROJECT` is set, so a
+service running from a worker's worktree injects that branch's overlay.
+Proposed, not built: compile from the main checkout, and stamp the source key
+into the framework so the overlay can show "Overlay outdated · Rebuild" when
+the Mac's key differs.
+
 ## 2026-10-11 Home grid, 0.3.0 (28)
 
 The user tried build 27 (first grid) and confirmed the grid is better than

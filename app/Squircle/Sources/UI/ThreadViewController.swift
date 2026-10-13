@@ -167,6 +167,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
 
     func focusComposer() { composer.input.becomeFirstResponder() }
 
+    /// The debug overlay's agent closes the overlay instead of going back.
+    func setBackButton(symbol: String, label: String) {
+        loadViewIfNeeded()
+        back.configuration?.image = UIImage(systemName: symbol)
+        back.accessibilityLabel = label
+    }
+
     // MARK: View
 
     override func viewDidLoad() {
