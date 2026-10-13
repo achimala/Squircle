@@ -1,90 +1,57 @@
 import UIKit
 
-/// The agent's model and approval mode, as two glass capsules just above
-/// the message field. Their menus are built when opened, so live updates
-/// never reset a menu you are reading.
-@MainActor
-final class PickerBar: UIView {
-    let model = PickerBar.capsule(identifier: "thread.model")
-    let approvals = PickerBar.capsule(identifier: "thread.approvals")
-    /// Jump to the latest message; sits at the row's trailing end.
-    let jump = Theme.glassButton(symbol: "arrow.down", identifier: "thread.jump", accessibilityLabel: "Jump to latest")
-
-    private static func capsule(identifier: String) -> UIButton {
-        let button = Theme.glassButton(identifier: identifier)
-        button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 7, leading: 12, bottom: 7, trailing: 12)
-        button.configuration?.imagePadding = 6
-        button.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-        button.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes; attributes.font = Theme.font(.subheadline, 14, .semibold); return attributes
-        }
-        button.configuration?.titleLineBreakMode = .byTruncatingTail
-        button.showsMenuAsPrimaryAction = true
-        return button
-    }
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        jump.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
-        jump.configuration?.contentInsets = .zero
-        let row = UIStackView(arrangedSubviews: [model, approvals, UIView(), jump])
-        row.spacing = 8
-        row.alignment = .center
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
-        NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
-            model.heightAnchor.constraint(equalToConstant: 34), approvals.heightAnchor.constraint(equalToConstant: 34),
-            jump.widthAnchor.constraint(equalToConstant: 34), jump.heightAnchor.constraint(equalToConstant: 34)
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    func set(model name: String, mode: T3RuntimeMode) {
-        if model.configuration?.title != name {
-            model.configuration?.title = name
-            model.configuration?.image = UIImage(systemName: "cpu")
-        }
-        if approvals.configuration?.title != mode.title {
-            approvals.configuration?.title = mode.title
-            approvals.configuration?.image = UIImage(systemName: mode.symbol)
-        }
-        model.accessibilityLabel = "Model, " + name
-        approvals.accessibilityLabel = "Approvals, " + mode.title
-    }
-}
-
 /// Glass message field that grows with its text.
 @MainActor
 final class Composer: UIView, UITextViewDelegate {
     var onSend: (() -> Void)?
     var onChange: (() -> Void)?
     let input = UITextView()
-    let send = Theme.glassButton(symbol: "arrow.up", prominent: true, identifier: "thread.send", accessibilityLabel: "Send message")
+    /// The field is the glass; its buttons have none of their own.
+    let send: UIButton = {
+        var config = UIButton.Configuration.filled()
+        config.image = UIImage(systemName: "arrow.up")
+        config.cornerStyle = .capsule
+        config.baseBackgroundColor = Theme.accent
+        config.baseForegroundColor = .white
+        config.contentInsets = .zero
+        let button = UIButton(configuration: config)
+        button.accessibilityIdentifier = "thread.send"
+        button.accessibilityLabel = "Send message"
+        return button
+    }()
     /// Adds pictures; shown once it has somewhere to get them from.
     var attachMenu: UIMenu? {
         didSet {
             attach.menu = attachMenu
             attach.showsMenuAsPrimaryAction = true
             attach.isHidden = attachMenu == nil
-            inputLeading.constant = attachMenu == nil ? buttonEdges[0].constant : buttonEdges[0].constant + buttonSizes[0].constant + 2
+            inputLeading.constant = attachMenu == nil ? Self.edge : Self.edge + Self.button - 4
         }
     }
     var onRemoveAttachment: ((String) -> Void)?
-    private let attach = Theme.glassButton(symbol: "plus", identifier: "thread.attach", accessibilityLabel: "Add image")
+    private let attach: UIButton = {
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "plus")
+        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)
+        config.baseForegroundColor = .secondaryLabel
+        config.contentInsets = .zero
+        let button = UIButton(configuration: config)
+        button.accessibilityIdentifier = "thread.attach"
+        button.accessibilityLabel = "Add image"
+        return button
+    }()
+    /// The + and send buttons' side, each centred on a one-line field as far
+    /// from its edge as from the field's top and bottom.
+    private static let button: CGFloat = 30
+    private static let edge: CGFloat = (48 - button) / 2
     /// Pictures waiting to be sent, above the text.
     private let tray = UIScrollView()
     private let thumbs = UIStackView()
     private var shown: [String] = []
     private var trayHeight: NSLayoutConstraint!
     private var inputLeading: NSLayoutConstraint!
-    private var buttonSizes: [NSLayoutConstraint] = []
-    private var buttonEdges: [NSLayoutConstraint] = []
     /// The send arrow's point size.
-    private(set) var sendSymbolSize: CGFloat = 15
+    let sendSymbolSize: CGFloat = 13
     var placeholderText: String {
         get { placeholder.text ?? "" }
         set { if placeholder.text != newValue { placeholder.text = newValue } }
@@ -129,14 +96,15 @@ final class Composer: UIView, UITextViewDelegate {
         [tray, input, placeholder, attach, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         height = input.heightAnchor.constraint(equalToConstant: 48)
         trayHeight = tray.heightAnchor.constraint(equalToConstant: 0)
-        inputLeading = input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6)
-        buttonSizes = [attach.widthAnchor.constraint(equalToConstant: 36), attach.heightAnchor.constraint(equalToConstant: 36),
-                       send.widthAnchor.constraint(equalToConstant: 36), send.heightAnchor.constraint(equalToConstant: 36)]
-        buttonEdges = [attach.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
-                       attach.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
-                       send.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -6),
-                       send.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6)]
-        NSLayoutConstraint.activate(buttonSizes + buttonEdges + [
+        let side = Self.button, edge = Self.edge
+        inputLeading = input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: edge)
+        NSLayoutConstraint.activate([
+            attach.widthAnchor.constraint(equalToConstant: side), attach.heightAnchor.constraint(equalToConstant: side),
+            send.widthAnchor.constraint(equalToConstant: side), send.heightAnchor.constraint(equalToConstant: side),
+            attach.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: edge),
+            attach.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -edge),
+            send.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -edge),
+            send.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -edge),
             group.topAnchor.constraint(equalTo: topAnchor), group.bottomAnchor.constraint(equalTo: bottomAnchor),
             group.leadingAnchor.constraint(equalTo: leadingAnchor), group.trailingAnchor.constraint(equalTo: trailingAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -163,31 +131,6 @@ final class Composer: UIView, UITextViewDelegate {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
-
-    /// The overlay's lighter field: its buttons lose their own glass.
-    func apply(_ style: ChatStyle) {
-        guard style == .light else { return }
-        var plus = UIButton.Configuration.plain()
-        plus.image = attach.configuration?.image
-        plus.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)
-        plus.baseForegroundColor = .secondaryLabel
-        plus.contentInsets = .zero
-        attach.configuration = plus
-        var arrow = UIButton.Configuration.filled()
-        arrow.image = send.configuration?.image
-        arrow.cornerStyle = .capsule
-        arrow.baseBackgroundColor = Theme.accent
-        arrow.baseForegroundColor = .white
-        arrow.contentInsets = .zero
-        send.configuration = arrow
-        // Smaller buttons, each centred on a one-line field and as far from
-        // its edge as from the field's top and bottom.
-        let side: CGFloat = 30, edge = (48 - side) / 2
-        for constraint in buttonSizes { constraint.constant = side }
-        for constraint in buttonEdges { constraint.constant = constraint.constant < 0 ? -edge : edge }
-        inputLeading.constant = attachMenu == nil ? edge : edge + side - 4
-        sendSymbolSize = 13
-    }
 
     /// Shows the pictures waiting to be sent, each with its own remove button.
     func show(_ attachments: [ImageAttachment]) {

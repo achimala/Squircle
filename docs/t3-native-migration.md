@@ -1270,3 +1270,29 @@ worked. Service restarted on the new binary, `agent setup` rerun. Signed
 build succeeded, job `32c34bb6-178a-479d-b558-8a23523c4fd7`. Not installed
 on the phone.
 
+## 2026-10-13 one look everywhere, 0.3.0 (41)
+
+User: "have we updated its ui to use the new look? I hope it is all shared
+code". Design A (see the overlay section) had been behind an overlay-only
+style flag. It is now the only look, in the app and the overlay alike, with no
+flag (`ChatStyle` and `PickerBar` are gone):
+
+- "Worked for…" (`SummaryCell`), the changes line (`ChangesCell`) and the live
+  step (`LiveCell`, a `LiveCapsule` with no surface of its own) are plain text
+  lines. A finished turn's pulse blooms around the line.
+- A build in the conversation (`BuildCell`) is a plain filled card with a solid
+  Install button.
+- Your messages keep their tinted glass bubbles and the send flight.
+- The field (`Composer`) is the one glass surface at the bottom; its + and send
+  are 30 pt without glass, centred on a one-line field 9 pt from its edges.
+- Model and approvals are in a ⋯ glass button at the top right, which is in
+  every conversation. Jump-to-latest floats above the field's trailing end.
+- Navigation differs, not the look: the app's agent keeps back, Threads and
+  Builds (user, 2026-10-13) beside ⋯; a thread has back and ⋯; the overlay's
+  agent sets `compactControls` and shows only ⋯ (its handle closes it; Threads,
+  Builds and full screen go in the menu).
+
+Checked in the simulator (iPhone 17 Pro, iOS 27.0): the Squircle agent, a
+thread over it, and the overlay docked (unchanged from the overlay's design A);
+`SQUIRCLE_STRESS=1` for 30 s ended with `violations=0`. Not yet on the phone.
+

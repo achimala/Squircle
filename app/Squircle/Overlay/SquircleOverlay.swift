@@ -102,7 +102,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private static let panelRadius: CGFloat = 22 + inset
     /// Stretched with the glass; holds the bubble's line at its own size.
     private let bubbleStage = UIView()
-    private let bubble = LiveCapsule(glass: false)
+    private let bubble = LiveCapsule()
     /// Stretched with the glass; `body` is laid out at `panelSize`.
     private let page = UIView()
     private let body = UIView()
@@ -661,7 +661,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private func mountAgent(_ project: AppProject) {
         let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
-        controller.chatStyle = .light
+        controller.compactControls = true
         controller.setBackButton(symbol: "chevron.down", label: "Minimize")
         controller.onBack = { [weak self] in self?.close() }
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
@@ -674,7 +674,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         guard let project else { return }
         agent?.controller.deactivate()
         let controller = ThreadViewController(model: model, project: project, sessionID: key.hasPrefix("draft:") ? nil : key)
-        controller.chatStyle = .light
         controller.onBack = { [weak self] in self?.closeThread() }
         thread = host(controller)
         threadKey = key

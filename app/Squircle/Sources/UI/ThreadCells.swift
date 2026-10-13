@@ -85,15 +85,6 @@ class TimelineCell: UITableViewCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Set once, before the first `configure`; glass can't come back.
-    private(set) var chatStyle = ChatStyle.standard
-    func apply(_ style: ChatStyle) {
-        guard style != chatStyle else { return }
-        chatStyle = style
-        styleChanged()
-    }
-    func styleChanged() {}
-
     /// Pressed feedback for tappable rows.
     func setPressed(_ pressed: Bool) {
         UIView.animate(withDuration: pressed ? 0.08 : 0.3, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
@@ -522,11 +513,10 @@ final class ShotView: UIControl {
     }
 }
 
-/// What a turn changed: a small glass pill with its size; opens the diff.
+/// What a turn changed, as a quiet line with its size; opens the diff.
 final class ChangesCell: TimelineCell {
-    private let glass = Theme.glassSurface(cornerRadius: 17, interactive: true)
     private let icon = UIImageView(image: UIImage(systemName: "chevron.left.forwardslash.chevron.right"))
-    private let label = Theme.label("", Theme.font(.subheadline, 14, .semibold))
+    private let label = Theme.label("", Theme.font(.footnote, 13, .medium), color: .secondaryLabel)
     private let stats = UILabel()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
 
@@ -542,36 +532,18 @@ final class ChangesCell: TimelineCell {
         row.alignment = .center
         row.setCustomSpacing(10, after: stats)
         row.isUserInteractionEnabled = false
-        glass.isUserInteractionEnabled = false
-        glass.translatesAutoresizingMaskIntoConstraints = false
         row.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(glass)
-        glass.contentView.addSubview(row)
+        contentView.addSubview(row)
         NSLayoutConstraint.activate([
-            glass.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            glass.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            glass.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            glass.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -14),
-            glass.heightAnchor.constraint(equalToConstant: 34),
-            row.centerYAnchor.constraint(equalTo: glass.contentView.centerYAnchor),
-            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 13),
-            row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -13)
+            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            row.heightAnchor.constraint(equalToConstant: 34),
+            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -20)
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
         accessibilityIdentifier = "thread.changes"
-    }
-
-    override func styleChanged() {
-        guard chatStyle == .light else { return }
-        ChatStyle.flatten(glass, fill: nil, radius: 0)
-        // A plain line, aligned with the text.
-        if let row = glass.contentView.subviews.first {
-            NSLayoutConstraint.deactivate(glass.contentView.constraints.filter { $0.firstItem === row && $0.firstAttribute == .leading })
-            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6).isActive = true
-        }
-        label.font = Theme.font(.footnote, 13, .medium)
-        label.textColor = .secondaryLabel
     }
 
     func configure(_ changes: TurnChanges) {
@@ -587,12 +559,22 @@ final class ChangesCell: TimelineCell {
 final class BuildCell: TimelineCell {
     var onInstall: ((AppBuild) -> Void)?
     private var build: AppBuild?
-    private let glass = Theme.glassSurface(cornerRadius: 22)
+    /// A plain card: the row's one control is Install.
+    private let card = UIView()
     private let icon = UIImageView()
     private let spinner = UIActivityIndicatorView(style: .medium)
     private let titleLabel = Theme.label("", Theme.font(.subheadline, 15, .semibold))
     private let detailLabel = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel)
-    private let install = Theme.glassButton(symbol: "arrow.down.circle.fill", title: "Install", prominent: true, identifier: "thread.build.install")
+    private let install: UIButton = {
+        var config = UIButton.Configuration.filled()
+        config.title = "Install"
+        config.cornerStyle = .capsule
+        config.baseBackgroundColor = Theme.accent
+        config.baseForegroundColor = .white
+        let button = UIButton(configuration: config)
+        button.accessibilityIdentifier = "thread.build.install"
+        return button
+    }()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -619,38 +601,27 @@ final class BuildCell: TimelineCell {
         let row = UIStackView(arrangedSubviews: [glyph, text, install])
         row.spacing = 12
         row.alignment = .center
-        glass.translatesAutoresizingMaskIntoConstraints = false
+        card.translatesAutoresizingMaskIntoConstraints = false
         row.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(glass)
-        glass.contentView.addSubview(row)
+        card.backgroundColor = .tertiarySystemFill
+        card.layer.cornerRadius = 18
+        card.layer.cornerCurve = .continuous
+        contentView.addSubview(card)
+        card.addSubview(row)
         NSLayoutConstraint.activate([
-            glass.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
-            glass.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
-            glass.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            glass.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            row.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: 10),
-            row.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -10),
-            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 14),
-            row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -10),
+            card.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
+            card.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+            card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
+            row.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
+            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10),
+            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10),
             glyph.widthAnchor.constraint(equalToConstant: 30), glyph.heightAnchor.constraint(equalToConstant: 30),
             icon.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), icon.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
             spinner.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: glyph.centerYAnchor)
         ])
         accessibilityIdentifier = "thread.build"
-    }
-
-    override func styleChanged() {
-        guard chatStyle == .light else { return }
-        ChatStyle.flatten(glass, fill: .tertiarySystemFill, radius: 18)
-        if var config = install.configuration {
-            // A plain tinted button: the only control in the row.
-            config.background = .clear()
-            config.background.backgroundColor = Theme.accent
-            config.cornerStyle = .capsule
-            config.baseForegroundColor = .white
-            config.image = nil
-            install.configuration = config
-        }
     }
 
     func configure(_ build: AppBuild, installing: Bool) {
@@ -673,17 +644,18 @@ final class BuildCell: TimelineCell {
     }
 }
 
-/// A finished turn's work, folded into one glass line.
+/// A finished turn's work, folded into one quiet line.
 final class SummaryCell: TimelineCell {
-    private let glass = Theme.glassSurface(cornerRadius: 19, interactive: true)
+    /// The line; it pulses when the turn finishes.
+    private let line = UIView()
     private let icon = UIImageView()
-    private let titleLabel = Theme.label("", Theme.font(.subheadline, 14, .semibold))
-    private let detailLabel = Theme.label("", Theme.font(.subheadline, 14), color: .secondaryLabel)
+    private let titleLabel = Theme.label("", Theme.font(.footnote, 13, .medium), color: .secondaryLabel)
+    private let detailLabel = Theme.label("", Theme.font(.footnote, 13), color: .tertiaryLabel)
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.down"))
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
         chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 10, weight: .bold)
         chevron.tintColor = .tertiaryLabel
         detailLabel.lineBreakMode = .byTruncatingTail
@@ -693,62 +665,40 @@ final class SummaryCell: TimelineCell {
         row.alignment = .center
         row.setCustomSpacing(10, after: detailLabel)
         row.isUserInteractionEnabled = false
-        [glass].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
-        row.translatesAutoresizingMaskIntoConstraints = false
-        glass.contentView.addSubview(row)
-        glass.isUserInteractionEnabled = false
+        line.isUserInteractionEnabled = false
+        [line, row].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        contentView.addSubview(line)
+        line.addSubview(row)
         NSLayoutConstraint.activate([
-            glass.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            glass.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            glass.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            glass.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -14),
-            glass.heightAnchor.constraint(greaterThanOrEqualToConstant: 38),
-            row.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: 9),
-            row.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -9),
-            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 13),
-            row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -14)
+            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            line.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -14),
+            row.topAnchor.constraint(equalTo: line.topAnchor, constant: 2),
+            row.bottomAnchor.constraint(equalTo: line.bottomAnchor, constant: -2),
+            row.leadingAnchor.constraint(equalTo: line.leadingAnchor, constant: 6),
+            row.trailingAnchor.constraint(equalTo: line.trailingAnchor, constant: -6)
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
         accessibilityIdentifier = "thread.summary"
     }
 
-    override func styleChanged() {
-        guard chatStyle == .light else { return }
-        // A quiet line of text instead of a glass pill.
-        ChatStyle.flatten(glass, fill: nil, radius: 0)
-        NSLayoutConstraint.deactivate(glass.constraints.filter { $0.firstAttribute == .height })
-        if let row = glass.contentView.subviews.first {
-            NSLayoutConstraint.deactivate(glass.contentView.constraints.filter { $0.firstItem === row })
-            NSLayoutConstraint.activate([
-                row.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: 2),
-                row.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -2),
-                row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
-                row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -6)
-            ])
-        }
-        titleLabel.font = Theme.font(.footnote, 13, .medium)
-        titleLabel.textColor = .secondaryLabel
-        detailLabel.font = Theme.font(.footnote, 13)
-        detailLabel.textColor = .tertiaryLabel
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-    }
-
-    /// A soft pulse: light blooms around the pill and fades as it settles.
+    /// A soft pulse: light blooms around the line and fades as it settles.
     func celebrate() {
         guard !Motion.reduced else { return }
         let bloom = CALayer()
-        bloom.frame = glass.frame
-        bloom.cornerRadius = glass.bounds.height / 2
+        bloom.frame = line.frame
+        bloom.cornerRadius = line.bounds.height / 2
         bloom.cornerCurve = .continuous
         bloom.backgroundColor = Theme.accent.withAlphaComponent(0.18).cgColor
         bloom.shadowColor = Theme.accent.cgColor
         bloom.shadowRadius = 16
         bloom.shadowOffset = .zero
         bloom.shadowOpacity = 0
-        bloom.shadowPath = UIBezierPath(roundedRect: CGRect(origin: .zero, size: glass.bounds.size), cornerRadius: glass.bounds.height / 2).cgPath
+        bloom.shadowPath = UIBezierPath(roundedRect: CGRect(origin: .zero, size: line.bounds.size), cornerRadius: line.bounds.height / 2).cgPath
         bloom.opacity = 0
-        contentView.layer.insertSublayer(bloom, below: glass.layer)
+        contentView.layer.insertSublayer(bloom, below: line.layer)
         let glow = CAKeyframeAnimation(keyPath: "shadowOpacity")
         glow.values = [0, 0.75, 0]
         glow.keyTimes = [0, 0.3, 1]
@@ -766,15 +716,15 @@ final class SummaryCell: TimelineCell {
         CATransaction.setCompletionBlock { bloom.removeFromSuperlayer() }
         bloom.add(pulse, forKey: "pulse")
         CATransaction.commit()
-        glass.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
+        line.transform = CGAffineTransform(scaleX: 0.94, y: 0.94)
         UIView.animate(withDuration: 0.8, delay: 0, usingSpringWithDamping: 0.6, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
-            self.glass.transform = .identity
+            self.line.transform = .identity
         }
     }
 
     func configure(_ summary: TurnSummary) {
-        icon.image = UIImage(systemName: chatStyle == .light ? "checkmark" : "checkmark.circle.fill")
-        icon.tintColor = chatStyle == .light ? .tertiaryLabel : Theme.accent
+        icon.image = UIImage(systemName: "checkmark")
+        icon.tintColor = .tertiaryLabel
         titleLabel.text = summary.title
         detailLabel.text = summary.detail
         chevron.transform = summary.expanded ? CGAffineTransform(rotationAngle: .pi) : .identity
@@ -792,11 +742,11 @@ final class LayoutView: UIView {
     }
 }
 
-/// What the agent is doing now, in a glass capsule. When the agent moves on,
-/// the finished task slides up out of the capsule and the next slides in
-/// from below, clipped by the capsule's shape.
+/// What the agent is doing now, as a line of text. When the agent moves
+/// on, the finished task slides up out of it and the next slides in from
+/// below.
 final class LiveCell: TimelineCell {
-    private var capsule = LiveCapsule()
+    private let capsule = LiveCapsule()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -804,11 +754,11 @@ final class LiveCell: TimelineCell {
         capsule.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(capsule)
         NSLayoutConstraint.activate([
-            capsule.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
-            capsule.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
-            capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            capsule.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            capsule.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+            capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
             capsule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            capsule.heightAnchor.constraint(equalToConstant: 46)
+            capsule.heightAnchor.constraint(equalToConstant: 34)
         ])
         accessibilityIdentifier = "thread.working"
         isAccessibilityElement = true
@@ -816,24 +766,6 @@ final class LiveCell: TimelineCell {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
-
-    override func styleChanged() {
-        guard chatStyle == .light else { return }
-        // The same line without its glass.
-        let plain = LiveCapsule(glass: false)
-        plain.isUserInteractionEnabled = false
-        plain.translatesAutoresizingMaskIntoConstraints = false
-        capsule.removeFromSuperview()
-        contentView.addSubview(plain)
-        NSLayoutConstraint.activate([
-            plain.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            plain.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
-            plain.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
-            plain.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            plain.heightAnchor.constraint(equalToConstant: 34)
-        ])
-        capsule = plain
-    }
 
     func configure(_ status: LiveStatus) {
         capsule.configure(headline: status.headline, started: status.started)
@@ -843,11 +775,10 @@ final class LiveCell: TimelineCell {
 
 /// The live capsule: the app's mark turning while the agent works, the task
 /// in shimmering text that slides vertically as tasks change, and the time
-/// since the turn began. Sized by its owner; any height reads as a capsule.
+/// since the turn began. Sized by its owner; it has no surface of its own
+/// (the overlay's bubble puts it on glass).
 final class LiveCapsule: UIView {
     enum Tone: Equatable { case idle, working, needsYou, done }
-    /// Drawn without its own glass when it already sits on glass.
-    private let glass: UIVisualEffectView?
     /// Clips the sliding lines to the capsule.
     private let track = LayoutView()
     private var line = ShimmerLabel()
@@ -860,8 +791,7 @@ final class LiveCapsule: UIView {
     var showsTime = true { didSet { setNeedsLayout() } }
     var font = Theme.font(.subheadline, 15, .semibold) { didSet { line.font = font; setNeedsLayout() } }
 
-    init(glass: Bool = true) {
-        self.glass = glass ? Theme.glassSurface(cornerRadius: 23) : nil
+    init() {
         super.init(frame: .zero)
         mark.backgroundColor = Theme.accent
         mark.layer.cornerCurve = .continuous
@@ -872,17 +802,7 @@ final class LiveCapsule: UIView {
         track.clipsToBounds = true
         track.layer.cornerCurve = .continuous
         style(line)
-        let host: UIView
-        if let glass = self.glass {
-            glass.isUserInteractionEnabled = false
-            glass.contentView.clipsToBounds = true
-            glass.contentView.layer.cornerCurve = .continuous
-            addSubview(glass)
-            host = glass.contentView
-        } else {
-            host = self
-        }
-        [track, mark, elapsed].forEach(host.addSubview)
+        [track, mark, elapsed].forEach(addSubview)
     }
 
     @available(*, unavailable)
@@ -911,11 +831,6 @@ final class LiveCapsule: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let radius = bounds.height / 2
-        if let glass {
-            glass.frame = bounds
-            Theme.setGlassCorner(glass, radius: radius)
-            glass.contentView.layer.cornerRadius = radius
-        }
         track.frame = bounds
         track.layer.cornerRadius = radius
         mark.frame = CGRect(x: inset, y: (bounds.height - markSide) / 2, width: markSide, height: markSide)

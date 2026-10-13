@@ -23,19 +23,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     var onBuilds: (() -> Void)?
     private let threads = Theme.glassButton(symbol: "list.bullet", identifier: "agent.threads", accessibilityLabel: "Threads")
     private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "agent.builds", accessibilityLabel: "Builds")
-    /// The floating buttons at the top left, in reading order.
+    /// The floating buttons at the top, in reading order.
     private var topControls: [UIView] {
-        switch chatStyle {
-        case .standard: return isAgent ? [back, threads, builds] : [back]
-        case .light: return isAgent ? [more] : [back, more]
-        }
+        guard isAgent else { return [back, more] }
+        return compactControls ? [more] : [back, threads, builds, more]
     }
-    /// How the conversation draws itself; set before it loads.
-    var chatStyle = ChatStyle.standard
-    /// The overlay's full-screen toggle, offered in the light style's menu.
+    /// The debug overlay's agent shows only ⋯ (its handle closes it, and
+    /// Threads and Builds move into the menu). Set before it loads.
+    var compactControls = false
+    /// The overlay's full-screen toggle, offered in the ⋯ menu.
     var onToggleFull: (() -> Void)?
     var isFull: (() -> Bool)?
-    /// Light style: one menu for Threads, Builds, full screen, model and approvals.
+    /// The model, approvals and anything without a button of its own.
     private let more = Theme.glassButton(symbol: "ellipsis", identifier: "agent.more", accessibilityLabel: "More")
     /// The model follows one conversation at a time; a thread opened over
     /// this one takes it and gives it back when it closes.
@@ -51,8 +50,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private let back = Theme.glassButton(symbol: "chevron.left", identifier: "thread.close", accessibilityLabel: "Back to threads")
     private var threadTitle = ""
-    private let pickers = PickerBar()
-    private var jump: UIButton { pickers.jump }
+    /// Jump to the latest message, just above the field at the trailing edge.
+    private let jump = Theme.glassButton(symbol: "arrow.down", identifier: "thread.jump", accessibilityLabel: "Jump to latest")
     private var jumpShown = false
     private let clip = UIView()
     private let fade = CAGradientLayer()
@@ -142,8 +141,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             composer.bottomAnchor.constraint(lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor, constant: -inset),
             composer.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -inset - safe.bottom),
             rest,
-            pickers.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
-            pickers.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
+            jump.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
             request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
             request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset)
         ]
@@ -176,30 +174,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         composer.thumbnailFrame(id, in: view)
     }
 
-    // MARK: Light style
+    // MARK: Menu
 
-    private func setUpLightChrome() {
-        sticky.apply(chatStyle)
-        composer.apply(chatStyle)
-        // Model and approvals move into the menu.
-        pickers.model.isHidden = true
-        pickers.approvals.isHidden = true
-        [back, threads, builds].forEach { $0.isHidden = !topControls.contains($0) }
-        more.showsMenuAsPrimaryAction = true
-        more.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.lightMenu() ?? []) }])
-        view.addSubview(more)
-        if #available(iOS 26.0, *) {
-            let top = UIScrollEdgeElementContainerInteraction()
-            top.scrollView = table
-            top.edge = .top
-            more.addInteraction(top)
-        }
-    }
-
-    /// Everything the standard style puts in buttons, in one menu.
-    private func lightMenu() -> [UIMenuElement] {
+    /// Model and approvals, plus whatever has no button here.
+    private func moreMenu() -> [UIMenuElement] {
         var items: [UIMenuElement] = []
-        if isAgent {
+        if isAgent, compactControls {
             items.append(UIAction(title: "Threads", image: UIImage(systemName: "list.bullet")) { [weak self] _ in self?.onThreads?() })
             items.append(UIAction(title: "Builds", image: UIImage(systemName: "shippingbox")) { [weak self] _ in self?.onBuilds?() })
         }
@@ -276,8 +256,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         clip.addSubview(sticky)
         view.addSubview(clip)
 
-        pickers.model.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.modelMenu() ?? []) }])
-        pickers.approvals.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.approvalMenu() ?? []) }])
+        // Built when opened, so live updates never reset a menu you are reading.
+        more.showsMenuAsPrimaryAction = true
+        more.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.moreMenu() ?? []) }])
         back.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onBack?() }, for: .touchUpInside)
         view.addSubview(back)
         if isAgent {
@@ -286,7 +267,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             builds.addAction(UIAction { [weak self] _ in self?.onBuilds?() }, for: .touchUpInside)
             [threads, builds].forEach(view.addSubview)
         }
-        if chatStyle == .light { setUpLightChrome() }
+        view.addSubview(more)
+        [back, threads, builds, more].forEach { $0.isHidden = !topControls.contains($0) }
 
         requestDetail.lineBreakMode = .byTruncatingTail
         requestButtons.spacing = 8
@@ -315,21 +297,23 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             scrollToBottom(animated: true)
             setJumpShown(false)
         }, for: .touchUpInside)
-        [request, notice, pickers, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        jump.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+        jump.configuration?.contentInsets = .zero
+        [request, notice, jump, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         edgeConstraints = [
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
-            pickers.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
-            pickers.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+            jump.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
             request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12)
         ]
         NSLayoutConstraint.activate(edgeConstraints + [
             notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            pickers.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
-            notice.bottomAnchor.constraint(equalTo: pickers.topAnchor, constant: -8),
+            jump.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
+            jump.widthAnchor.constraint(equalToConstant: 34), jump.heightAnchor.constraint(equalToConstant: 34),
+            notice.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
             request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8),
             requestStack.topAnchor.constraint(equalTo: request.contentView.topAnchor, constant: 14),
             requestStack.bottomAnchor.constraint(equalTo: request.contentView.bottomAnchor, constant: -12),
@@ -340,16 +324,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             table.bottomEdgeEffect.style = .soft
             // Header-less: text scrolling under the floating back button blurs away.
             table.topEdgeEffect.style = .soft
-            let top = UIScrollEdgeElementContainerInteraction()
-            top.scrollView = table
-            top.edge = .top
-            back.addInteraction(top)
+            for control in [back, more] {
+                let top = UIScrollEdgeElementContainerInteraction()
+                top.scrollView = table
+                top.edge = .top
+                control.addInteraction(top)
+            }
             let bottom = UIScrollEdgeElementContainerInteraction()
             bottom.scrollView = table
             bottom.edge = .bottom
             composer.addInteraction(bottom)
         }
-        view.accessibilityElements = topControls + [draftScroll, table, request, notice, jump, pickers.model, pickers.approvals, composer]
+        view.accessibilityElements = topControls + [draftScroll, table, request, notice, jump, composer]
 
         observations = [model.observe(by: self, after: .milliseconds(50)) { $0.render() }]
         model.selectProject(project)
@@ -391,9 +377,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let faded = overlayLayout == nil ? safeArea.top + 20 : back.frame.maxY
         fade.endPoint = CGPoint(x: 0.5, y: min(1, faded / max(1, height)))
         CATransaction.commit()
-        // Light style: the pickers' row holds only the floating jump button.
-        let pickersTop = chatStyle == .light ? composer.frame.minY : pickers.frame.minY
-        let floor = request.isHidden ? (notice.isHidden ? pickersTop : notice.frame.minY) : request.frame.minY
+        // The jump button floats over the conversation; it takes no row.
+        let floor = request.isHidden ? (notice.isHidden ? composer.frame.minY : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
         let insets = UIEdgeInsets(top: back.frame.maxY + 6, left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
@@ -411,7 +396,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         threads.alpha = alpha
         more.alpha = alpha
         builds.alpha = alpha
-        pickers.alpha = alpha
         jump.alpha = jumpShown ? alpha : 0
     }
 
@@ -431,7 +415,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func render() {
         guard isViewLoaded, isActive || !selectionReady else { return }
         guard selectionReady else {
-            pickers.model.isEnabled = false
             composer.send.isEnabled = false
             table.isHidden = true
             draftScroll.isHidden = true
@@ -446,8 +429,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         composer.send.isEnabled = !sending
         draftScroll.isHidden = showsConversation
         table.isHidden = !showsConversation
-        view.accessibilityElements = topControls + [showsConversation ? table : draftScroll, request, notice, jump,
-                                                    pickers.model, pickers.approvals, composer]
+        view.accessibilityElements = topControls + [showsConversation ? table : draftScroll, request, notice, jump, composer]
         let session = model.sessions.first { $0.id == sessionID }
         threadTitle = isAgent ? project.name : session?.displayTitle(in: project) ?? ""
         renderAgent()
@@ -472,8 +454,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func renderAgent() {
-        pickers.set(model: model.shortAgentName(for: model.modelSelection), mode: model.runtimeMode)
-        pickers.model.isEnabled = true
         composer.placeholderText = "Message"
     }
 
@@ -727,7 +707,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func configure(_ cell: UITableViewCell, with item: ThreadItem) {
-        (cell as? TimelineCell)?.apply(chatStyle)
         switch item {
         case .header(let title):
             (cell as? HeaderCell)?.configure(title)

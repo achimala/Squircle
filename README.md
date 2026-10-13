@@ -7,6 +7,11 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-13: one look everywhere, version 0.3.0 (41).** Conversations read
+like plain chat in the app and the overlay alike: status lines are plain text,
+your messages keep glass bubbles, and model and approvals sit in a ⋯ menu. See
+[one look](docs/t3-native-migration.md#2026-10-13-one-look-everywhere-030-41).
+
 **2026-10-13: agent simulators, version 0.3.0 (40).** A simulator shows only
 while an agent uses it: agents run `squircle sim start`, Squircle records the
 simulator, and the phone shows it as a draggable PiP over the app's
