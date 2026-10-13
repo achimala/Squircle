@@ -882,6 +882,40 @@ quick fade (`flashFade`, response 0.32), and the flight is softer (response
 Abroad build: job `51d4cf24-e7c0-4894-b03b-1de349076c5b` (overlay key
 `7063e331…`, main at `dab5a20`); not yet on the phone.
 
+**Handle path, top fade, springier capture (user, 2026-10-14):** the top
+blur popped in after the panel settled; the capture was too linear and slow at
+the end with too strong a flash; resizing taller still jittered; to and from
+full screen popped; pulling down squashed the panel thin.
+
+- The system scroll-edge blur can't draw inside the morph's blurred,
+  stretched layers, so it appeared only at rest. The overlay now always uses
+  the conversation's own fade under its top controls, there from the first
+  frame.
+- The handle moves the panel's top edge along one path. Docked, the
+  conversation is laid out once (a little taller than the tallest docked
+  panel) and pinned to the glass's bottom, which reveals it: nothing re-lays
+  out per frame, and the handle and the top controls ride the visible edge
+  (`setVisibleTop`). Above the tallest docked panel the glass widens toward
+  full screen and a picture of the docked panel cross-blurs into the
+  full-screen layout, following the finger both ways. Below `minimumHeight`
+  the panel morphs toward the bubble (stretch and cross blur, as the spring
+  does). Release carries on with the finger's speed (full screen, docked at
+  that height, back, or into the bubble). The pan's recognition slop is
+  subtracted so the edge doesn't skip at touch-down. When the height changes,
+  a conversation scrolled to its end stays at its end.
+- The picture is a snapshot of the glass as drawn on screen: inside the glass,
+  gray labels and fills are vibrant, and a picture of the content alone
+  (`snapshotView`, `drawHierarchy`, `render(in:)`) lost the build cards and
+  the field's placeholder.
+- Capture: flash 0.4 opacity fading on its own (response 0.2); flight
+  response 0.5, damping 0.72, landing in about 0.4 s with a small overshoot.
+
+Verified from real-touch recordings (throwaway XCUITest; 30 fps, frame by
+frame): taller with no jitter, docked → full and full → docked continuous, a
+pull-down cancelled back to docked and one completed into the bubble, opening
+with the fade present throughout, the capture flight. Letters Abroad build
+recorded below once made.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
