@@ -134,21 +134,9 @@ final class MessageCell: TimelineCell {
     private var trailing: NSLayoutConstraint!
     private var minimumLeading: NSLayoutConstraint!
     private var top: NSLayoutConstraint!
-    /// Transcript style: a hairline above each of your messages, which open a turn.
-    private let rule = UIView()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        rule.backgroundColor = .separator
-        rule.isHidden = true
-        rule.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(rule)
-        NSLayoutConstraint.activate([
-            rule.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            rule.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale),
-            rule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            rule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
-        ])
         text.isEditable = false
         text.isScrollEnabled = false
         text.backgroundColor = .clear
@@ -171,20 +159,10 @@ final class MessageCell: TimelineCell {
         ])
     }
 
-    override func styleChanged() {
-        switch chatStyle {
-        case .standard, .transcript: break
-        case .messages: ChatStyle.flatten(bubble, fill: Theme.userBubble, radius: 19)
-        case .sheet: ChatStyle.flatten(bubble, fill: .tertiarySystemFill, radius: 17)
-        }
-    }
-
     func configure(_ message: ChatMessage, style: Style, rendered: NSAttributedString, expanded: Bool) {
-        let transcript = chatStyle == .transcript
-        let user = style == .user && !transcript
-        rule.isHidden = !(transcript && style == .user)
+        let user = style == .user
         text.attributedText = rendered
-        text.textContainerInset = user ? UIEdgeInsets(top: chatStyle == .sheet ? 7 : 10, left: 0, bottom: chatStyle == .sheet ? 7 : 10, right: 0) : .zero
+        text.textContainerInset = user ? UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0) : .zero
         let folded = (style == .thought || style == .note) && !expanded
         text.textContainer.maximumNumberOfLines = folded ? (style == .thought ? 2 : 4) : 0
         text.textContainer.lineBreakMode = folded ? .byTruncatingTail : .byWordWrapping
@@ -194,7 +172,7 @@ final class MessageCell: TimelineCell {
         leading.isActive = !user
         minimumLeading.isActive = user
         trailing.constant = user ? -35 : -20
-        top.constant = transcript && style == .user ? 22 : user || style == .update ? (chatStyle == .sheet ? 10 : 14) : style == .answer ? 10 : 6
+        top.constant = user || style == .update ? 14 : style == .answer ? 10 : 6
         accessibilityIdentifier = "thread.message.\(message.role)"
     }
 }
@@ -585,7 +563,7 @@ final class ChangesCell: TimelineCell {
     }
 
     override func styleChanged() {
-        guard chatStyle.isLight else { return }
+        guard chatStyle == .light else { return }
         ChatStyle.flatten(glass, fill: nil, radius: 0)
         // A plain line, aligned with the text.
         if let row = glass.contentView.subviews.first {
@@ -662,12 +640,9 @@ final class BuildCell: TimelineCell {
     }
 
     override func styleChanged() {
-        switch chatStyle {
-        case .standard: break
-        case .messages, .sheet: ChatStyle.flatten(glass, fill: .tertiarySystemFill, radius: 18)
-        case .transcript: ChatStyle.flatten(glass, fill: nil, radius: 0)
-        }
-        if chatStyle.isLight, var config = install.configuration {
+        guard chatStyle == .light else { return }
+        ChatStyle.flatten(glass, fill: .tertiarySystemFill, radius: 18)
+        if var config = install.configuration {
             // A plain tinted button: the only control in the row.
             config.background = .clear()
             config.background.backgroundColor = Theme.accent
@@ -739,7 +714,7 @@ final class SummaryCell: TimelineCell {
     }
 
     override func styleChanged() {
-        guard chatStyle.isLight else { return }
+        guard chatStyle == .light else { return }
         // A quiet line of text instead of a glass pill.
         ChatStyle.flatten(glass, fill: nil, radius: 0)
         NSLayoutConstraint.deactivate(glass.constraints.filter { $0.firstAttribute == .height })
@@ -798,8 +773,8 @@ final class SummaryCell: TimelineCell {
     }
 
     func configure(_ summary: TurnSummary) {
-        icon.image = UIImage(systemName: chatStyle.isLight ? "checkmark" : "checkmark.circle.fill")
-        icon.tintColor = chatStyle.isLight ? .tertiaryLabel : Theme.accent
+        icon.image = UIImage(systemName: chatStyle == .light ? "checkmark" : "checkmark.circle.fill")
+        icon.tintColor = chatStyle == .light ? .tertiaryLabel : Theme.accent
         titleLabel.text = summary.title
         detailLabel.text = summary.detail
         chevron.transform = summary.expanded ? CGAffineTransform(rotationAngle: .pi) : .identity
@@ -843,7 +818,7 @@ final class LiveCell: TimelineCell {
     required init?(coder: NSCoder) { fatalError() }
 
     override func styleChanged() {
-        guard chatStyle.isLight else { return }
+        guard chatStyle == .light else { return }
         // The same line without its glass.
         let plain = LiveCapsule(glass: false)
         plain.isUserInteractionEnabled = false
