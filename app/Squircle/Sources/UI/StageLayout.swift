@@ -78,8 +78,11 @@ struct StageLayout: Equatable {
     /// Conversation-first: the device docks in the top corner, opposite the
     /// back button. There is no title bar.
     var chatDivider: CGFloat { safe.top + 4 + Self.dockHeight + 6 }
+    /// Out of its dock the device stays below the row of floating buttons
+    /// (back, and the agent's Threads and Builds), so it never covers them.
+    var undockedTop: CGFloat { safe.top + 4 + 44 + 8 }
     /// Device and conversation share the screen.
-    var splitDivider: CGFloat { safe.top + 8 + splitPhoneHeight + 24 }
+    var splitDivider: CGFloat { undockedTop + splitPhoneHeight + 24 }
 
     /// Divider position for a continuous detent: 0 chat, 1 split, 2 device.
     /// `limit` is the lowest the divider may sit (just above the composer).
@@ -101,7 +104,7 @@ struct StageLayout: Equatable {
     func threadPose(divider y: CGFloat) -> PhonePose {
         let raw = ((y - chatDivider) / 150).clamped()
         let t = raw * raw * (3 - 2 * raw)
-        let top = CGFloat.lerp(safe.top + 4, safe.top + 8, t)
+        let top = CGFloat.lerp(safe.top + 4, undockedTop, t)
         let gap = CGFloat.lerp(6, 24, t)
         let region = max(40, y - gap - top)
         let height = min(region, (size.width - 40) / PhonePose.aspect)

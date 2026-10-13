@@ -26,6 +26,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     var onBuilds: (() -> Void)?
     private let threads = Theme.glassButton(symbol: "list.bullet", identifier: "agent.threads", accessibilityLabel: "Threads")
     private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "agent.builds", accessibilityLabel: "Builds")
+    /// The floating buttons at the top left, in reading order.
+    private var topControls: [UIView] { isAgent ? [back, threads, builds] : [back] }
     /// The model follows one conversation at a time; a thread opened over
     /// this one takes it and gives it back when it closes.
     private var isActive: Bool { model.selectedSessionID == sessionID }
@@ -316,7 +318,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
             bottom.edge = .bottom
             composer.addInteraction(bottom)
         }
-        view.accessibilityElements = [back, deviceTouch, home, simulator, divider, draftScroll, table, request, notice, jump, pickers.model, pickers.approvals, composer]
+        view.accessibilityElements = topControls + [deviceTouch, home, simulator, divider, draftScroll, table, request, notice, jump, pickers.model, pickers.approvals, composer]
 
         detent.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.84)
         detent.onChange = { [weak self] _ in self?.layoutStage() }
@@ -521,7 +523,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         composer.send.isEnabled = !sending
         draftScroll.isHidden = showsConversation
         table.isHidden = !showsConversation
-        view.accessibilityElements = [back, deviceTouch, home, simulator, divider,
+        view.accessibilityElements = topControls + [deviceTouch, home, simulator, divider,
                                       showsConversation ? table : draftScroll, request, notice, jump, pickers.model, pickers.approvals, composer]
         simulator.isEnabled = sessionID != nil
         let session = model.sessions.first { $0.id == sessionID }

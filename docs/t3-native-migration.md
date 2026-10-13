@@ -958,3 +958,10 @@ gone. Beside back sit two glass buttons: Threads opens a full-height sheet
 listing the app's other threads (title, status, model, age) with a New Thread
 button; picking one closes the sheet and pushes the thread over the agent.
 Builds opens the builds sheet.
+Verified in the simulator: docked, the three buttons sit clear of the PiP;
+the sheet lists threads with status, opens a thread over the agent, and New
+Thread opens an empty draft; Builds opens. Two fixes from looking: out of its
+dock the device covered Threads and Builds (and full size overlapped back), so
+the undocked device now starts below the button row (`undockedTop`); and the
+explicit VoiceOver order omitted both buttons. `SQUIRCLE_STRESS=1` 30 s:
+`settled=1 violations=0`.
