@@ -1339,3 +1339,5 @@ Checked in the simulator on the Squircle agent thread and a worker thread over
 it: before, "before", "after" and "drag" showed as words; after, the composites,
 screenshots and the clip show in place, the clip plays, and both tap through to
 full screen. Images you send were unaffected (none in that thread).
+Squircle build `713e2489-65e3-44f6-b026-bf992445fa0c` (0.3.0 42, main at
+`d0c8ba1`); not yet on the phone.
