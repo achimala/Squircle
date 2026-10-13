@@ -370,7 +370,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard isViewLoaded, view.bounds.width > 0 else { return }
         let width = view.bounds.width, height = view.bounds.height
         clip.frame = view.bounds
+        // Taller or shorter (the overlay's handle), the newest message stays
+        // where it was: the conversation grows and shrinks at its top.
+        let previous = table.bounds.height
         table.frame = view.bounds
+        if previous > 0, abs(previous - height) > 0.5, !table.isTracking {
+            table.contentOffset.y = max(-table.contentInset.top, table.contentOffset.y - (height - previous))
+        }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         fade.frame = clip.bounds

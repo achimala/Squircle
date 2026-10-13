@@ -152,6 +152,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The flying picture, in a shadow that lifts it off the screen it shows.
     private var flyer: (lift: UIView, picture: UIImageView)?
     private let flash = UIView()
+    private let flashFade = SpringDriver()
     private let shutter = UIImpactFeedbackGenerator(style: .rigid)
     private var movePan: UIPanGestureRecognizer!
     private var backPan: UIPanGestureRecognizer!
@@ -209,7 +210,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         flash.backgroundColor = .white
         flash.alpha = 0
         flash.isUserInteractionEnabled = false
-        flight.parameters = SpringDriver.Parameters(response: 0.35, damping: 0.86)
+        // Soft and unhurried (about 0.65 s), so it reads as the picture
+        // going into the field; the flash is its own quick fade.
+        flight.parameters = SpringDriver.Parameters(response: 0.78, damping: 0.92)
+        flashFade.parameters = SpringDriver.Parameters(response: 0.32, damping: 1)
+        flashFade.onChange = { [weak self] value in self?.flash.alpha = 0.85 * value.clamped() }
+        flashFade.onRest = { [weak self] _ in self?.flash.removeFromSuperview() }
         flight.onChange = { [weak self] _ in self?.applyFlight() }
         flight.onRest = { [weak self] _ in self?.landed() }
         handlePan = UIPanGestureRecognizer(target: self, action: #selector(handleDragged(_:)))
@@ -569,6 +575,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         route.open = true
         makeKey()
         sync()
+        flashFade.set(1)
+        flashFade.animate(to: 0)
         flight.set(0)
         flight.animate(to: 1)
     }
@@ -596,8 +604,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // Lifted as it leaves the screen, settled as it lands.
         lift.layer.shadowOpacity = Float(0.28 * min((t / 0.15).clamped(), ((1 - t) / 0.3).clamped()))
         lift.alpha = route.open ? 1 : (1 - t).clamped()
-        // A shutter: white at once, gone in the first third of the flight.
-        flash.alpha = 0.85 * (1 - t / 0.35).clamped()
         view.bringSubviewToFront(lift)
         view.bringSubviewToFront(flash)
         // In its slot and all but still: the thumbnail takes over now,
@@ -611,7 +617,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private func landed() {
         flyer?.lift.removeFromSuperview()
         flyer = nil
-        flash.removeFromSuperview()
         agent?.controller.holdAttachment(nil)
         thread?.controller.holdAttachment(nil)
     }
@@ -801,12 +806,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             frame.hold(resizedFrame(top: dragStart.minY + dy))
         case .ended, .cancelled, .failed:
             let vy = gesture.velocity(in: view).y
-            let docked = dockedFrame
-            let top = frame.value.minY + vy * 0.15
+            let current = frame.value, docked = dockedFrame
+            let top = current.minY + vy * 0.15
             frame.release()
             if top < safeBounds.minY + 20 {
                 route.full = true
-            } else if docked.maxY - top < Self.minimumHeight {
+            } else if current.maxY - top < Self.minimumHeight {
                 // Folds back into the bubble: content stretches from here.
                 liveResize = false
                 route.full = false
@@ -820,6 +825,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                 // Docked under the bubble, the panel's top is the bubble's.
                 if !lower { anchor = (anchor?.right ?? true, docked.maxY - height + bubbleSize.height / 2) }
             }
+            // The text reflows live only while its width holds; a new width
+            // (docked ↔ full) cross-blurs with the glass instead.
+            liveResize = abs(targetFrame.width - current.width) < 0.5
             setNeedsUpdateOfSupportedInterfaceOrientations()
             retarget(velocity: CGPoint(x: 0, y: vy), sizeVelocity: CGSize(width: 0, height: -vy))
         default: break
@@ -829,16 +837,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Where the docked panel's bottom and sides are, at its current height.
     private var dockedFrame: CGRect { miniFrame }
 
-    /// A panel whose top is at `top`: below the docked panel's top it is the
-    /// docked panel, shorter; above it, it widens toward the full screen.
+    /// The panel as the finger holds it: only its top edge moves. Its sides
+    /// and bottom stay where the drag began, so the field holds still and no
+    /// line re-wraps; letting go decides any change of width.
     private func resizedFrame(top: CGFloat) -> CGRect {
-        let docked = dockedFrame, full = view.bounds
-        let top = top.clamped(full.minY, docked.maxY - bubbleSize.height)
-        guard top < docked.minY else { return CGRect(x: docked.minX, y: top, width: docked.width, height: docked.maxY - top) }
-        let t = 1 - top / max(1, docked.minY)
-        let minX = CGFloat.lerp(docked.minX, full.minX, t), maxX = CGFloat.lerp(docked.maxX, full.maxX, t)
-        let maxY = CGFloat.lerp(docked.maxY, full.maxY, t)
-        return CGRect(x: minX, y: top, width: maxX - minX, height: maxY - top)
+        let start = dragStart
+        let top = top.clamped(min(start.minY, safeBounds.minY), start.maxY - bubbleSize.height)
+        return CGRect(x: start.minX, y: top, width: start.width, height: start.maxY - top)
     }
 
     /// The glass and everything in it follow the finger; on release they

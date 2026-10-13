@@ -865,6 +865,21 @@ thumbnail with its remove button replaces the flying picture about 0.3 s after
 the flash. Letters Abroad build: job `d69cbc9f-16b7-49c2-8777-e777af1ea6a6`
 (overlay key `a67d4ccb…`, main at `c1da0e8`); not yet on the phone.
 
+**Smoother handle, slower capture (user, 2026-10-13):** "a little jumpy
+while resizing and the snapshot animation is way too fast". From a 30 fps
+recording of a slow real drag: above the docked top the panel used to widen
+toward full screen and its bottom slid toward the screen's, so the field moved
+and every line re-wrapped each frame, and the conversation was pinned to the
+panel's top. Now only the top edge follows the finger; the sides and bottom
+stay where the drag began. The conversation keeps its newest message where it
+was as its height changes (`ThreadViewController` moves the offset by the
+change), so history appears and disappears at the top. A release that changes
+the width (to full screen, or full to docked) cross-blurs with the glass
+instead of re-wrapping live. Re-measured: while dragging, rows above the field
+hold still (at most 2 pt, no re-wrap). The capture's flash now has its own
+quick fade (`flashFade`, response 0.32), and the flight is softer (response
+0.78, damping 0.92): about 0.7 s from flash to landing at real speed.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
