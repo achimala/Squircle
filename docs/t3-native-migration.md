@@ -968,7 +968,8 @@ otherwise no simulator UI, and the transcript showing where a simulator was
 used, live while in use and the recording afterwards.
 
 **Measured (simulator only, iOS 27.0 on the Mac, optimized DEBUG build, live
-H.264 stream of Cards-Verify, 9 runs of each detent move):** main-thread work
+H.264 stream of Cards-Verify, two runs of eight dragless detent moves, four
+of them tap-driven):** main-thread work
 per divider frame mean 0.6–1.2 ms, worst 6.9 ms (`layoutStage`; `applyScene`
 ≤0.65 ms and runs twice per frame because the table's inset change re-enters
 layout); SceneKit encode ≤0.65 ms. Dropped frames were rare (0–5 per 1.4 s
