@@ -85,6 +85,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var rendered: [String: (source: String, text: NSAttributedString)] = [:]
     private var expanded = Set<String>()
     private var pinToBottom = true
+    /// The debug overlay's even inset and the safe area its glass will have
+    /// at rest (the glass stretches, so UIKit's own would change every frame).
+    private var overlayLayout: (inset: CGFloat, safe: UIEdgeInsets)?
+    private var edgeConstraints: [NSLayoutConstraint] = []
+    private var safeArea: UIEdgeInsets { overlayLayout?.safe ?? view.safeAreaInsets }
 
     init(model: SquircleModel, project: AppProject, sessionID: String?, agent: Bool = false) {
         self.isAgent = agent
@@ -107,6 +112,44 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         loadViewIfNeeded()
         back.configuration?.image = UIImage(systemName: symbol)
         back.accessibilityLabel = label
+    }
+
+    /// Lays the controls out at one inset from every edge of `safe`, for
+    /// the debug overlay's glass.
+    func setOverlayLayout(inset: CGFloat, safe: UIEdgeInsets) {
+        loadViewIfNeeded()
+        guard overlayLayout?.inset != inset || overlayLayout?.safe != safe else { return }
+        overlayLayout = (inset, safe)
+        view.keyboardLayoutGuide.usesBottomSafeArea = false
+        NSLayoutConstraint.deactivate(edgeConstraints)
+        let rest = composer.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        rest.priority = .defaultLow
+        edgeConstraints = [
+            composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+            composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
+            composer.bottomAnchor.constraint(lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor, constant: -inset),
+            composer.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -inset - safe.bottom),
+            rest,
+            pickers.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+            pickers.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
+            request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+            request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset)
+        ]
+        NSLayoutConstraint.activate(edgeConstraints)
+        view.setNeedsLayout()
+    }
+
+    /// The system's scroll edge blur can't draw inside a blurred or pictured
+    /// layer, so the debug overlay hides it while the glass morphs; the
+    /// conversation fades out under the top controls instead.
+    func setEdgeEffectsHidden(_ hidden: Bool) {
+        loadViewIfNeeded()
+        guard #available(iOS 26.0, *) else { return }
+        clip.layer.mask = hidden ? fade : nil
+        table.topEdgeEffect.isHidden = hidden
+        table.bottomEdgeEffect.isHidden = hidden
+        table.setNeedsLayout()
+        table.layoutIfNeeded()
     }
 
     // MARK: View
@@ -141,11 +184,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         dataSource.defaultRowAnimation = .fade
         table.accessibilityIdentifier = "thread.messages"
         // iOS 26 blurs the top scroll edge itself; earlier systems fade it.
-        if #unavailable(iOS 26.0) {
-            fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
-            fade.startPoint = CGPoint(x: 0.5, y: 0)
-            clip.layer.mask = fade
-        }
+        fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
+        fade.startPoint = CGPoint(x: 0.5, y: 0)
+        if #unavailable(iOS 26.0) { clip.layer.mask = fade }
         clip.addSubview(table)
         draftScroll.backgroundColor = .clear
         draftScroll.keyboardDismissMode = .interactive
@@ -211,18 +252,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             setJumpShown(false)
         }, for: .touchUpInside)
         [request, notice, pickers, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
-        NSLayoutConstraint.activate([
+        edgeConstraints = [
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
-            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             pickers.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14),
             pickers.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+            request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12)
+        ]
+        NSLayoutConstraint.activate(edgeConstraints + [
+            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
             pickers.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
             notice.bottomAnchor.constraint(equalTo: pickers.topAnchor, constant: -8),
-            request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8),
             requestStack.topAnchor.constraint(equalTo: request.contentView.topAnchor, constant: 14),
             requestStack.bottomAnchor.constraint(equalTo: request.contentView.bottomAnchor, constant: -12),
@@ -264,10 +307,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        let safe = view.safeAreaInsets
-        back.frame = CGRect(x: 16, y: safe.top + 4, width: 44, height: 44)
-        threads.frame = CGRect(x: 70, y: safe.top + 4, width: 44, height: 44)
-        builds.frame = CGRect(x: 124, y: safe.top + 4, width: 44, height: 44)
+        let x = overlayLayout?.inset ?? 16, y = safeArea.top + (overlayLayout?.inset ?? 4)
+        back.frame = CGRect(x: x, y: y, width: 44, height: 44)
+        threads.frame = CGRect(x: x + 54, y: y, width: 44, height: 44)
+        builds.frame = CGRect(x: x + 108, y: y, width: 44, height: 44)
         layoutConversation()
     }
 
@@ -280,11 +323,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         fade.frame = clip.bounds
-        fade.endPoint = CGPoint(x: 0.5, y: min(1, (view.safeAreaInsets.top + 20) / max(1, height)))
+        let faded = overlayLayout == nil ? safeArea.top + 20 : back.frame.maxY
+        fade.endPoint = CGPoint(x: 0.5, y: min(1, faded / max(1, height)))
         CATransaction.commit()
         let floor = request.isHidden ? (notice.isHidden ? pickers.frame.minY : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
-        let insets = UIEdgeInsets(top: view.safeAreaInsets.top + 54, left: 0, bottom: height - floor + 10, right: 0)
+        let insets = UIEdgeInsets(top: back.frame.maxY + 6, left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
