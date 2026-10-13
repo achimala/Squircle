@@ -778,7 +778,7 @@ the overlay's own controller had not changed since build 26. Now:
   larger than where the glass is headed (an overshoot shows paper, not a
   relayout). Removed: the separate content layer, stretch and Gaussian blur,
   and the `UIView.animate` resize, drag and keyboard animations.
-- Opening first captures the host app into the message field (`hostWillBeCovered()`, `HostCapture`).
+- Opening first captures the host app into the message field (`hostWillBeCovered()`, `HostCapture`). *Superseded 2026-10-13: only a long press captures; see "Capture on long press" below.*
 - DEBUG: `SQUIRCLE_OVERLAY_OPEN=mini|full`, `SQUIRCLE_OVERLAY_CYCLE=1`
   (with `SQUIRCLE_SLOW`) under `SQUIRCLE_OVERLAY_DEMO`.
 
@@ -842,6 +842,27 @@ while the finger held mid-drag. Not checked: the ⋯ menu's items, a pushed
 thread's back + ⋯. Letters Abroad build with this overlay: job
 `5384b535-7a74-4387-8627-05f99a0d1e60` (overlay key `285a1fff…`, main at
 `280b6a8`); not yet on the phone.
+
+**Capture on long press (user request, 2026-10-13).** Tapping the bubble
+opens the overlay without capturing. Long-pressing it (0.35 s; the tap waits
+only for the finger to lift) captures the app beneath with a rigid haptic: the
+screen flashes white, and the full-screen picture, lifted by a shadow and
+rounding its corners, shrinks into its thumbnail slot in the message field
+while the panel opens around it. One `SpringDriver` (response 0.35, damping
+0.86) runs the flight from 0 to 1. Every frame the picture interpolates from
+the screen to wherever the slot is now, so it follows the slot as the panel
+stretches open; it flies into the bubble instead if the panel closes
+mid-flight. The flash fades in the first third. The thumbnail stays hidden
+(`Composer.held`) until the picture lands, then replaces it. The
+tray now redraws a picture replaced under the same ID, so a second capture
+shows. Fixed in the open morph: the bubble's line had a clear background, and
+the blur turned it into a gray block while the panel opened; it now gets paper
+while blurred. DEBUG: `SQUIRCLE_OVERLAY_OPEN=capture`. Verified in the
+simulator (iPhone 17 Pro, iOS 27.0) at 20× slow (frame by frame) and in a
+real-speed Squircle recording driven by a throwaway XCUITest: a tap opened
+with an empty field, and a long press flashed and landed the capture. The
+thumbnail with its remove button replaces the flying picture about 0.3 s after
+the flash.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
@@ -1083,7 +1104,7 @@ overlay pre-attaches a screenshot of the app that is easy to delete.
   the model shows them; sending takes them and returns them if T3 refuses.
   Images resize to a 2000 px long side, JPEG. Sent images show under your
   bubble, right-aligned, and open full screen on tap.
-- **Overlay.** Opening the bubble draws the scene's windows below the overlay
+- **Overlay.** Long-pressing the bubble (since 2026-10-13; a tap no longer captures) draws the scene's windows below the overlay
   (`drawHierarchy`, overlay window excluded) and attaches the picture under a
   fixed ID, so reopening replaces it instead of piling up (`Overlay/HostCapture.swift`).
 - **New app agent with images:** the Mac creates the agent with no message and

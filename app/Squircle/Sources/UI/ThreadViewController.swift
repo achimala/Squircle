@@ -164,6 +164,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.layoutIfNeeded()
     }
 
+    /// The debug overlay's capture is flying into the field: keep its
+    /// thumbnail hidden until it lands (nil: show it).
+    func holdAttachment(_ id: String?) {
+        loadViewIfNeeded()
+        composer.held = id.map { [$0] } ?? []
+    }
+
+    /// Where an attachment's thumbnail is now (or will appear) in `view`.
+    func attachmentFrame(_ id: String, in view: UIView) -> CGRect {
+        composer.thumbnailFrame(id, in: view)
+    }
+
     // MARK: Light style
 
     private func setUpLightChrome() {

@@ -144,6 +144,15 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private var finished: (text: String, until: Date)?
     private var bubblePan: UIPanGestureRecognizer!
     private var bubbleTap: UITapGestureRecognizer!
+    private var bubblePress: UILongPressGestureRecognizer!
+    /// A long press captures the app: the screen flashes, and its picture
+    /// shrinks from full screen into its slot in the message field as the
+    /// panel opens. `flight` runs 0 (full screen) → 1 (in the slot).
+    private let flight = SpringDriver()
+    /// The flying picture, in a shadow that lifts it off the screen it shows.
+    private var flyer: (lift: UIView, picture: UIImageView)?
+    private let flash = UIView()
+    private let shutter = UIImpactFeedbackGenerator(style: .rigid)
     private var movePan: UIPanGestureRecognizer!
     private var backPan: UIPanGestureRecognizer!
 
@@ -189,10 +198,20 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubblePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
         movePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
         backPan = UIPanGestureRecognizer(target: self, action: #selector(backDragged(_:)))
-        for gesture in [bubbleTap, bubblePan, movePan, backPan] as [UIGestureRecognizer] {
+        bubblePress = UILongPressGestureRecognizer(target: self, action: #selector(bubblePressed(_:)))
+        bubblePress.minimumPressDuration = 0.35
+        // A tap waits only for the finger to lift before the press fails.
+        bubbleTap.require(toFail: bubblePress)
+        for gesture in [bubbleTap, bubblePress, bubblePan, movePan, backPan] as [UIGestureRecognizer] {
             gesture.delegate = self
             glass.addGestureRecognizer(gesture)
         }
+        flash.backgroundColor = .white
+        flash.alpha = 0
+        flash.isUserInteractionEnabled = false
+        flight.parameters = SpringDriver.Parameters(response: 0.35, damping: 0.86)
+        flight.onChange = { [weak self] _ in self?.applyFlight() }
+        flight.onRest = { [weak self] _ in self?.landed() }
         handlePan = UIPanGestureRecognizer(target: self, action: #selector(handleDragged(_:)))
         handlePan.delegate = self
         handle.addGestureRecognizer(handlePan)
@@ -416,6 +435,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let paper = Theme.paper.withAlphaComponent(.lerp(0.93, 1, fullness))
         page.backgroundColor = paper
         outgoing?.view.backgroundColor = paper
+        // The bubble's line is on clear glass; blurred, it needs paper too.
+        bubbleStage.backgroundColor = bubbleStage.layer.filters == nil ? .clear : paper
         body.bringSubviewToFront(handle)
         handle.accessibilityValue = route.full ? "Full screen" : "Small"
 
@@ -516,19 +537,83 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private func open() {
         guard !route.open, project != nil else { return }
         Theme.openHaptic()
-        hostWillBeCovered()
         makeKey()
         route.open = true
         sync()
     }
 
-    /// The panel starts to cover the host app: its screen goes into the
-    /// message field as an attachment first.
-    private func hostWillBeCovered() {
-        #if DEBUG
-        if ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_NO_CAPTURE"] == "1" { return }
-        #endif
-        if let window = view.window { HostCapture.attach(below: window, to: model) }
+    /// Captures the app under the overlay and opens with it in the field:
+    /// a flash, then the picture flies from full screen into its slot.
+    private func captureAndOpen() {
+        guard !route.open, project != nil, let window = view.window,
+              let image = HostCapture.image(below: window),
+              let attachment = ImageAttachment(image, id: HostCapture.attachmentID) else { return open() }
+        shutter.impactOccurred(intensity: 1)
+        flyer?.lift.removeFromSuperview()
+        let lift = UIView(), picture = UIImageView(image: image)
+        lift.isUserInteractionEnabled = false
+        lift.layer.shadowColor = UIColor.black.cgColor
+        lift.layer.shadowOffset = CGSize(width: 0, height: 6)
+        lift.layer.shadowRadius = 18
+        picture.contentMode = .scaleAspectFill
+        picture.clipsToBounds = true
+        picture.layer.cornerCurve = .continuous
+        picture.layer.borderColor = UIColor.separator.cgColor
+        lift.addSubview(picture)
+        view.addSubview(lift)
+        flash.frame = view.bounds
+        view.addSubview(flash)
+        flyer = (lift, picture)
+        activeController?.holdAttachment(HostCapture.attachmentID)
+        model.attach(attachment)
+        route.open = true
+        makeKey()
+        sync()
+        flight.set(0)
+        flight.animate(to: 1)
+    }
+
+    /// The conversation on top: the field the capture lands in.
+    private var activeController: ThreadViewController? {
+        route.thread != nil && route.thread == threadKey ? thread?.controller ?? agent?.controller : agent?.controller
+    }
+
+    /// Every frame of the flight, toward wherever the slot is now (the
+    /// panel is opening around it); into the bubble if the panel closed.
+    private func applyFlight() {
+        guard let (lift, picture) = flyer else { return }
+        let t = flight.value
+        let target = route.open ? activeController?.attachmentFrame(HostCapture.attachmentID, in: view) ?? bubbleFrame : frame.value
+        let start = view.bounds
+        lift.frame = CGRect(x: .lerp(start.minX, target.minX, t), y: .lerp(start.minY, target.minY, t),
+                            width: .lerp(start.width, target.width, t), height: .lerp(start.height, target.height, t))
+        picture.frame = lift.bounds
+        // Full screen it hides under the display's own corners.
+        let radius = CGFloat.lerp(44, 12, t.clamped())
+        picture.layer.cornerRadius = radius
+        picture.layer.borderWidth = 1
+        lift.layer.shadowPath = UIBezierPath(roundedRect: lift.bounds, cornerRadius: radius).cgPath
+        // Lifted as it leaves the screen, settled as it lands.
+        lift.layer.shadowOpacity = Float(0.28 * min((t / 0.15).clamped(), ((1 - t) / 0.3).clamped()))
+        lift.alpha = route.open ? 1 : (1 - t).clamped()
+        // A shutter: white at once, gone in the first third of the flight.
+        flash.alpha = 0.85 * (1 - t / 0.35).clamped()
+        view.bringSubviewToFront(lift)
+        view.bringSubviewToFront(flash)
+        // In its slot and all but still: the thumbnail takes over now,
+        // not when the spring's last tremor dies.
+        if route.open, abs(1 - t) < 0.01, abs(flight.velocity) < 0.3 {
+            flight.stop()
+            landed()
+        }
+    }
+
+    private func landed() {
+        flyer?.lift.removeFromSuperview()
+        flyer = nil
+        flash.removeFromSuperview()
+        agent?.controller.holdAttachment(nil)
+        thread?.controller.holdAttachment(nil)
     }
 
     private func close() {
@@ -668,7 +753,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     // MARK: Gestures
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        if gesture === bubbleTap || gesture === bubblePan { return !route.open }
+        if gesture === bubbleTap || gesture === bubblePan || gesture === bubblePress { return !route.open }
         // Where the finger went down, not where it is once the pan is
         // recognized: a quick drag has already left the strip by then.
         var point = gesture.location(in: body)
@@ -695,6 +780,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { false }
 
     @objc private func openTapped() { open() }
+
+    @objc private func bubblePressed(_ gesture: UILongPressGestureRecognizer) {
+        if gesture.state == .began { captureAndOpen() }
+    }
 
     @objc private func handleTapped() { toggleFull() }
 
@@ -822,8 +911,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     #if DEBUG
     /// Verification only, in Squircle Debug with `SQUIRCLE_OVERLAY_DEMO`:
-    /// `SQUIRCLE_OVERLAY_OPEN=mini|full` opens the overlay after 4 s;
-    /// `SQUIRCLE_OVERLAY_NO_CAPTURE=1` skips attaching the host's screen;
+    /// `SQUIRCLE_OVERLAY_OPEN=mini|full|capture` opens the overlay after 4 s
+    /// (`capture`: as a long press does);
     /// `SQUIRCLE_OVERLAY_CYCLE=1` loops bubble → mini → full → thread → back
     /// → mini → bubble for recordings (`SQUIRCLE_SLOW` slows the springs).
     private func startVerificationHooks() {
@@ -832,6 +921,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         if let mode = environment["SQUIRCLE_OVERLAY_OPEN"] {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(4))
+                if mode == "capture" { self?.captureAndOpen(); return }
                 self?.open()
                 if mode == "full" { self?.toggleFull() }
             }

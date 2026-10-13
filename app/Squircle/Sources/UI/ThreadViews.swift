@@ -191,18 +191,22 @@ final class Composer: UIView, UITextViewDelegate {
 
     /// Shows the pictures waiting to be sent, each with its own remove button.
     func show(_ attachments: [ImageAttachment]) {
-        let ids = attachments.map(\.id)
+        // A picture replaced under the same ID (a new capture) shows anew.
+        let ids = attachments.map { "\($0.id)#\(ObjectIdentifier($0.thumbnail).hashValue)" }
         guard ids != shown else { return }
         let added = Set(ids).subtracting(shown)
         shown = ids
         thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for attachment in attachments {
+        for (attachment, key) in zip(attachments, ids) {
             let thumb = AttachmentThumb(attachment) { [weak self] id in
                 Theme.selectionHaptic()
                 self?.onRemoveAttachment?(id)
             }
             thumbs.addArrangedSubview(thumb)
-            if added.contains(attachment.id), window != nil, !Motion.reduced {
+            if held.contains(attachment.id) {
+                // Something is flying into this slot; it shows when it lands.
+                thumb.alpha = 0
+            } else if added.contains(key), window != nil, !Motion.reduced {
                 thumb.alpha = 0
                 thumb.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
                 UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.75, initialSpringVelocity: 0,
@@ -211,6 +215,22 @@ final class Composer: UIView, UITextViewDelegate {
         }
         trayHeight.constant = attachments.isEmpty ? 0 : 84
         onChange?()
+    }
+
+    /// Pictures whose thumbnails stay hidden: a capture is flying into them.
+    var held = Set<String>() {
+        didSet {
+            for case let thumb as AttachmentThumb in thumbs.arrangedSubviews { thumb.alpha = held.contains(thumb.id) ? 0 : 1 }
+        }
+    }
+
+    /// Where a picture's thumbnail is, or where the next one will appear.
+    func thumbnailFrame(_ id: String, in view: UIView) -> CGRect {
+        layoutIfNeeded()
+        if let thumb = thumbs.arrangedSubviews.first(where: { ($0 as? AttachmentThumb)?.id == id }) {
+            return thumb.convert(thumb.bounds, to: view)
+        }
+        return convert(CGRect(x: 10, y: -72, width: 48, height: 72), to: view)
     }
 
     /// Where the first line of typed text begins, in `view`'s coordinates.
@@ -247,7 +267,10 @@ final class Composer: UIView, UITextViewDelegate {
 /// A picture in the message field, with a button that takes it out.
 @MainActor
 final class AttachmentThumb: UIView {
+    let id: String
+
     init(_ attachment: ImageAttachment, remove: @escaping (String) -> Void) {
+        id = attachment.id
         super.init(frame: .zero)
         let image = UIImageView(image: attachment.thumbnail)
         image.contentMode = .scaleAspectFill
