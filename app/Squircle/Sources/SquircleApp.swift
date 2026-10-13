@@ -50,4 +50,6 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         Task { await model.refresh() }
     }
     func sceneWillResignActive(_ scene: UIScene) { model.stopMetadataUpdates() }
+    func sceneDidEnterBackground(_ scene: UIScene) { model.enteredBackground() }
+    func sceneWillEnterForeground(_ scene: UIScene) { model.enteringForeground() }
 }

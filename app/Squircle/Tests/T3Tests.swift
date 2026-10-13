@@ -97,6 +97,31 @@ final class T3Tests: XCTestCase {
         state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":39,"thread":["messages":[]]]]))
         XCTAssertEqual(state.messages.count,2)
     }
+    /// After a reconnect T3 resends a snapshot and may replay events the
+    /// thread already has; neither may lose or duplicate the transcript.
+    func testResubscribeAfterReconnectKeepsTranscript() {
+        func message(_ id: String, _ text: String, _ seq: Int) -> JSONValue {
+            .from(["kind":"event","event":["sequence":seq,"type":"thread.message-sent","payload":["messageId":id,"role":"assistant","text":text,"streaming":false,"createdAt":"2026-10-14T10:00:0\(seq % 10).000Z"]]])
+        }
+        var state = T3ThreadState()
+        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":10,"thread":["id":"t","messages":[],"activities":[]]]]))
+        state.consume(message("a", "First", 11))
+        // Resubscribed with nothing new: same sequence, same transcript.
+        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":11,"thread":["id":"t","messages":[
+            ["id":"a","role":"assistant","text":"First","createdAt":"2026-10-14T10:00:01.000Z"]],"activities":[]]]]))
+        XCTAssertEqual(state.messages.map(\.content), ["First"])
+        // A message sent while the socket was down arrives in the snapshot;
+        // replayed events it already includes change nothing.
+        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":12,"thread":["id":"t","messages":[
+            ["id":"a","role":"assistant","text":"First","createdAt":"2026-10-14T10:00:01.000Z"],
+            ["id":"b","role":"assistant","text":"Second","createdAt":"2026-10-14T10:00:02.000Z"]],"activities":[]]]]))
+        state.consume(message("a", "First", 11)); state.consume(message("b", "Second", 12))
+        state.consume(message("c", "Third", 13))
+        XCTAssertEqual(state.messages.map(\.content), ["First", "Second", "Third"])
+        // A late snapshot from the old socket never rolls the thread back.
+        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":11,"thread":["id":"t","messages":[],"activities":[]]]]))
+        XCTAssertEqual(state.messages.count, 3)
+    }
     func testConfigurationRejectsCredentialOriginTricks() throws {
         let valid: [String:Any] = ["t3_url":"https://mac.example","t3_token":"token","squircle_url":"https://mac.example:8443","squircle_token":"build","diagnostic_token":"diagnostic"]
         XCTAssertNoThrow(try JSONDecoder().decode(AppConfiguration.self,from:JSONSerialization.data(withJSONObject:valid)))

@@ -31,6 +31,14 @@ final class OverlayHost {
         observers.append(center.addObserver(forName: UIScene.willDeactivateNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { OverlayHost.shared.model?.stopMetadataUpdates() }
         })
+        // The host app's lifecycle is the overlay's: hold T3's socket in the
+        // background, reconnect on return.
+        observers.append(center.addObserver(forName: UIScene.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { OverlayHost.shared.model?.enteredBackground() }
+        })
+        observers.append(center.addObserver(forName: UIScene.willEnterForegroundNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { OverlayHost.shared.model?.enteringForeground() }
+        })
         activate(nil)
     }
 

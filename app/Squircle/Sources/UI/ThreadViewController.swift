@@ -450,7 +450,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         shownAttachments = attached
         renderSend()
         renderRequest()
-        let error = model.error ?? (model.connected ? nil : "Reconnecting…")
+        // A brief reconnect is silent; the model reports one that keeps failing.
+        let error = model.error
         if notice.text != error || notice.isHidden != (error == nil) {
             notice.text = error
             notice.isHidden = error == nil

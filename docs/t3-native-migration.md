@@ -1341,3 +1341,32 @@ screenshots and the clip show in place, the clip plays, and both tap through to
 full screen. Images you send were unaffected (none in that thread).
 Squircle build `713e2489-65e3-44f6-b026-bf992445fa0c` (0.3.0 42, main at
 `d0c8ba1`); not yet on the phone.
+
+## 2026-10-14 surviving background and network changes
+
+User: "Frequently get t3 connection errors on background and foreground the
+app." What was wrong: iOS suspends the app a few seconds after it leaves the
+screen, which kills T3's socket without telling it. On return Squircle still
+thought it was connected, so the first requests failed and showed "Couldn't
+reach T3", the thread showed "Reconnecting…", and the reconnect waited a
+second before its first try. The heartbeat only wrote pings and never noticed
+a silent (half-open) socket, e.g. after a Wi-Fi/cellular handover. The
+injected overlay had the same model and the same faults.
+
+Now (`SquircleModel` connection section, `T3Gateway`): Squircle holds a
+background task, so the socket survives the ~30 s iOS allows; when that runs
+out it closes the socket cleanly. On return it reconnects at once (or, if the
+socket is still up, checks it answers a ping within 4 s). One connector
+retries immediately, then 0.5 s doubling to 15 s; a network change
+(`NWPathMonitor`) retries now or re-checks the socket. A socket with no frame
+for 40 s (T3 answers every Ping) is dropped. Requests made mid-reconnect wait
+for the new socket instead of failing. Reconnecting resubscribes the shell,
+devices and the open thread; the transcript stays on screen and T3's snapshot
+brings it up to date. Nothing is shown unless T3 stays unreachable for 8 s.
+
+Verified in the simulator (DEBUG `SQUIRCLE_DROP_T3_EVERY=10` fails the socket
+every 10 s): four 4 s app switches kept the same socket; a 75 s background
+closed it at the ~30 s limit and reconnected on return; forced drops
+reconnected in ~0.2 s, with the thread's transcript and live simulator PiPs
+intact and no notice. Not tested: toggling the simulator's network (needs root
+on the Mac) and a T3 that stays down. Not yet on the phone.
