@@ -1294,5 +1294,7 @@ flag (`ChatStyle` and `PickerBar` are gone):
 
 Checked in the simulator (iPhone 17 Pro, iOS 27.0): the Squircle agent, a
 thread over it, and the overlay docked (unchanged from the overlay's design A);
-`SQUIRCLE_STRESS=1` for 30 s ended with `violations=0`. Not yet on the phone.
+`SQUIRCLE_STRESS=1` for 30 s ended with `violations=0`. Squircle build
+`a7292357-04cf-4aa5-8a8f-d192f615a730` (0.3.0 41, main at `8174ff2`); not yet on
+the phone.
 
