@@ -60,6 +60,7 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         SquircleBuildID: $(SQUIRCLE_BUILD_ID)
         NSLocalNetworkUsageDescription: Connect to your Mac for agent conversations and app builds.
+        NSCameraUsageDescription: Take a photo to send to the coding agent.
   # Debug overlay the Squircle CLI injects into apps it signs for your phone.
   # It reuses the app's own sources; it is never linked by any app project.
   SquircleOverlay:

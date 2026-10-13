@@ -965,3 +965,34 @@ dock the device covered Threads and Builds (and full size overlapped back), so
 the undocked device now starts below the button row (`undockedTop`); and the
 explicit VoiceOver order omitted both buttons. `SQUIRCLE_STRESS=1` 30 s:
 `settled=1 violations=0`.
+
+## 2026-10-13 image attachments
+
+User request: image uploads in Squircle generally, and opening the in-app
+overlay pre-attaches a screenshot of the app that is easy to delete.
+
+- **T3's own mechanism.** `thread.turn.start` takes
+  `message.attachments: [{type:"image", name, mimeType, sizeBytes, dataUrl}]`
+  (T3 0.0.45 limits: 10 MiB per image, 80 MiB per message). T3 writes each to
+  `~/.t3/userdata/attachments/<thread>-<uuid>.jpg` and gives the provider its
+  path. Sent images come back as `{type:"image", id, …}` on the message and are
+  fetched through `assets.createUrl` (`resource: {_tag:"attachment", attachmentId}`),
+  a short-lived signed URL. No separate upload server. T3's alternative
+  `attachments.createUploadUrl` two-step upload is not used.
+- **Composer.** A `+` menu (Photo Library; Camera where the app declares camera
+  use) adds images as thumbnails above the text, each with a remove button.
+  Pending images live on `SquircleModel.attachments`, so any composer bound to
+  the model shows them; sending takes them and returns them if T3 refuses.
+  Images resize to a 2000 px long side, JPEG. Sent images show under your
+  bubble, right-aligned, and open full screen on tap.
+- **Overlay.** Opening the bubble draws the scene's windows below the overlay
+  (`drawHierarchy`, overlay window excluded) and attaches the picture under a
+  fixed ID, so reopening replaces it instead of piling up (`Overlay/HostCapture.swift`).
+- **New app agent with images:** the Mac creates the agent with no message and
+  the phone sends the first message itself, so the images go through T3.
+- Verified 2026-10-13 in the simulator (iOS 27.0, T3 0.0.45) on the Squircle
+  Probe agent: two photos attached, one removed, sent with text; T3 stored a
+  53 KB JPEG and the agent answered with the image's text; after a relaunch
+  the image reloaded from T3. Overlay demo (`SQUIRCLE_OVERLAY_DEMO`) attached the
+  app beneath on open, in both the list and a thread; remove worked. Not yet
+  on the phone.
