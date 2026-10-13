@@ -862,7 +862,8 @@ simulator (iPhone 17 Pro, iOS 27.0) at 20× slow (frame by frame) and in a
 real-speed Squircle recording driven by a throwaway XCUITest: a tap opened
 with an empty field, and a long press flashed and landed the capture. The
 thumbnail with its remove button replaces the flying picture about 0.3 s after
-the flash.
+the flash. Letters Abroad build: job `d69cbc9f-16b7-49c2-8777-e777af1ea6a6`
+(overlay key `a67d4ccb…`, main at `c1da0e8`); not yet on the phone.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
