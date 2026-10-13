@@ -10,6 +10,7 @@
 		01C183AE5505BED2A14E3B72 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF796323376B17E9A5610B5 /* Markdown.swift */; };
 		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
 		12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
+		137F5D691337ACCA68558014 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
 		2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */ = {isa = PBXBuildFile; fileRef = 27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */; };
 		22CAD50EF60BBEF3BB22B919 /* StageLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5F85DA67966D2090740EE5 /* StageLayout.swift */; };
 		261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */; };
@@ -64,6 +65,7 @@
 		C5F5AE1D757E9658332F4638 /* SpringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51AB12A9050AE317BDBA9C84 /* SpringTests.swift */; };
 		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
 		CB3B7947C642FB450BF2C93F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
+		D3823161D75D25966F363568 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
 		DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
@@ -114,6 +116,7 @@
 		C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Gateway.swift; sourceTree = "<group>"; };
 		CA04F2B838066131F83E73E4 /* ThreadCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadCells.swift; sourceTree = "<group>"; };
 		CC31297102176DC07450ECF1 /* SquircleOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleOverlay.swift; sourceTree = "<group>"; };
+		D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildDetailViewController.swift; sourceTree = "<group>"; };
 		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotBinding.swift; sourceTree = "<group>"; };
 		DB495D800CF688C469BFF725 /* AppProjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProjectTests.swift; sourceTree = "<group>"; };
@@ -167,6 +170,7 @@
 			isa = PBXGroup;
 			children = (
 				FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */,
+				D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */,
 				8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */,
 				1AE56C52866D21AD27A18697 /* DeviceStage.swift */,
 				5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */,
@@ -378,6 +382,7 @@
 				45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */,
 				12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */,
 				69A1E4E034A3A9C310663B31 /* AppProject.swift in Sources */,
+				137F5D691337ACCA68558014 /* BuildDetailViewController.swift in Sources */,
 				6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */,
 				B33D4A9C782619416B5ABFD7 /* ClientModels.swift in Sources */,
 				C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */,
@@ -425,6 +430,7 @@
 				DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */,
 				28208C4B33CBBF06CF5B9360 /* AppImportViewController.swift in Sources */,
 				B5A57409F7C6F7D79CF583B7 /* AppProject.swift in Sources */,
+				D3823161D75D25966F363568 /* BuildDetailViewController.swift in Sources */,
 				DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */,
 				8ECBFCDE794CEEE7DA10B1CB /* ClientModels.swift in Sources */,
 				B9EF10730486FE81421DC60F /* DeviceStage.swift in Sources */,

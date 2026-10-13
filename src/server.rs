@@ -281,16 +281,31 @@ async fn status(
 ) -> ApiResult<Json<Value>> {
     auth(&state, &headers, false)?;
     let recovered = state.recovery_jobs.lock().unwrap().get(&id).cloned();
-    let store = state.store.lock().unwrap();
-    let job = match recovered {
-        Some(job) => job,
-        None => store.load_job(&id).map_err(ApiError::missing)?,
+    let (job, launches, log) = {
+        let store = state.store.lock().unwrap();
+        let job = match recovered {
+            Some(job) => job,
+            None => store.load_job(&id).map_err(ApiError::missing)?,
+        };
+        let launches = store
+            .diagnostics(&id, 0, 1, Some(DiagnosticKind::Launch))
+            .map_err(ApiError::internal)?;
+        (job, launches, store.job_dir(&id).ok().map(|dir| dir.join("build.log")))
     };
-    let launches = store
-        .diagnostics(&id, 0, 1, Some(DiagnosticKind::Launch))
-        .map_err(ApiError::internal)?;
+    let failure = match (&job.state, log) {
+        (BuildState::Failed | BuildState::Interrupted, Some(log)) => {
+            let text = tokio::fs::read(&log).await.unwrap_or_default();
+            let root = job.request.as_ref().and_then(|r| r.project.parent()).map(|p| p.to_string_lossy().into_owned());
+            let mut failure = crate::buildlog::failure(&String::from_utf8_lossy(&text), root.as_deref());
+            failure.message = job.error.as_deref().map(|error| {
+                error.rsplit_once("; see /").map_or(error, |(message, _)| message).to_string()
+            });
+            Some(failure)
+        }
+        _ => None,
+    };
     Ok(Json(success(
-        json!({"job":job,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty())}),
+        json!({"job":job,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty()),"failure":failure}),
     )))
 }
 async fn start(
@@ -1353,7 +1368,7 @@ async fn build_log(
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Json(success(
-                json!({"text":"","next_offset":0,"has_more":false}),
+                json!({"text":"","next_offset":0,"has_more":false,"size":0}),
             )));
         }
         Err(e) => return Err(ApiError::internal(e)),
@@ -1369,7 +1384,7 @@ async fn build_log(
     let count = file.read(&mut bytes).await.map_err(ApiError::internal)?;
     bytes.truncate(count);
     Ok(Json(success(
-        json!({"text":String::from_utf8_lossy(&bytes),"next_offset":page.offset+count as u64,"has_more":(page.offset+count as u64)<size}),
+        json!({"text":String::from_utf8_lossy(&bytes),"next_offset":page.offset+count as u64,"has_more":(page.offset+count as u64)<size,"size":size}),
     )))
 }
 

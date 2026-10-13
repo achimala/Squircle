@@ -712,6 +712,12 @@ final class SquircleModel {
         return true
     }
     func cancelUpdate() { updatingTo = nil }
+    func buildDetail(id: String) async throws -> (AppBuild, BuildFailure?) {
+        guard let client else { throw ClientError.configuration }; return try await client.build(id: id)
+    }
+    func buildLog(id: String, offset: Int, limit: Int) async throws -> BuildLogPage {
+        guard let client else { throw ClientError.configuration }; return try await client.buildLog(id: id, offset: offset, limit: limit)
+    }
     func browseMacProjects(path: String? = nil) async throws -> MacProjectDirectory {
         guard let client else { throw ClientError.configuration }; return try await client.browseMacProjects(path:path)
     }
