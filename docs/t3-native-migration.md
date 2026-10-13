@@ -878,7 +878,9 @@ the width (to full screen, or full to docked) cross-blurs with the glass
 instead of re-wrapping live. Re-measured: while dragging, rows above the field
 hold still (at most 2 pt, no re-wrap). The capture's flash now has its own
 quick fade (`flashFade`, response 0.32), and the flight is softer (response
-0.78, damping 0.92): about 0.7 s from flash to landing at real speed.
+0.78, damping 0.92): about 0.7 s from flash to landing at real speed. Letters
+Abroad build: job `51d4cf24-e7c0-4894-b03b-1de349076c5b` (overlay key
+`7063e331…`, main at `dab5a20`); not yet on the phone.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
