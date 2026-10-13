@@ -913,8 +913,9 @@ full screen popped; pulling down squashed the panel thin.
 Verified from real-touch recordings (throwaway XCUITest; 30 fps, frame by
 frame): taller with no jitter, docked → full and full → docked continuous, a
 pull-down cancelled back to docked and one completed into the bubble, opening
-with the fade present throughout, the capture flight. Letters Abroad build
-recorded below once made.
+with the fade present throughout, the capture flight. Letters Abroad build:
+job `9c690d0f-f240-4376-a154-d163edad6d97` (overlay key `5f304350…`, main at
+`713918a`); not yet on the phone.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
