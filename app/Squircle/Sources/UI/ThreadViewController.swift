@@ -20,10 +20,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     var currentSessionID: String? { sessionID }
     /// The app's agent: one conversation per app that runs its threads.
     let isAgent: Bool
-    /// The agent's corner menu and its update lines open the app's other threads (nil: a new one).
+    /// The agent's update lines open the app's other threads (nil: a new one).
     var onOpenThread: ((String?) -> Void)?
+    var onThreads: (() -> Void)?
     var onBuilds: (() -> Void)?
     private let threads = Theme.glassButton(symbol: "list.bullet", identifier: "agent.threads", accessibilityLabel: "Threads")
+    private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "agent.builds", accessibilityLabel: "Builds")
     /// The model follows one conversation at a time; a thread opened over
     /// this one takes it and gives it back when it closes.
     private var isActive: Bool { model.selectedSessionID == sessionID }
@@ -228,9 +230,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         [deviceTouch, back, simulatorStatus, divider, home, simulator].forEach(view.addSubview)
         if isAgent {
             back.accessibilityLabel = "Apps"
-            threads.showsMenuAsPrimaryAction = true
-            threads.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.threadsMenu() ?? []) }])
-            view.addSubview(threads)
+            threads.addAction(UIAction { [weak self] _ in self?.onThreads?() }, for: .touchUpInside)
+            builds.addAction(UIAction { [weak self] _ in self?.onBuilds?() }, for: .touchUpInside)
+            [threads, builds].forEach(view.addSubview)
         }
 
         grabber.backgroundColor = .tertiaryLabel
@@ -363,6 +365,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let safe = view.safeAreaInsets
         back.frame = CGRect(x: 16, y: safe.top + 4, width: 44, height: 44)
         threads.frame = CGRect(x: 70, y: safe.top + 4, width: 44, height: 44)
+        builds.frame = CGRect(x: 124, y: safe.top + 4, width: 44, height: 44)
         layoutStage()
     }
 
@@ -427,6 +430,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
         let alpha = ((progress - 0.55) / 0.45).clamped()
         back.alpha = alpha
         threads.alpha = alpha
+        builds.alpha = alpha
         pickers.alpha = alpha
         jump.alpha = jumpShown ? alpha : 0
     }
@@ -486,21 +490,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate, UIGestu
     }
 
     // MARK: Content
-
-    /// The app's other threads, newest first, and what else lives beside the agent.
-    private func threadsMenu() -> [UIMenuElement] {
-        let actions = model.sessions(for: project).map { session in
-            UIAction(title: session.displayTitle(in: project),
-                     subtitle: session.phase == .needsYou ? "Needs you" : session.phase == .working ? "Working" : nil,
-                     image: UIImage(systemName: session.phase == .needsYou ? "exclamationmark.bubble" : session.phase == .working ? "ellipsis.bubble" : "bubble")) { [weak self] _ in
-                self?.onOpenThread?(session.id)
-            }
-        }
-        return [UIMenu(options: .displayInline, children: [
-            UIAction(title: "New Thread", image: UIImage(systemName: "square.and.pencil")) { [weak self] _ in self?.onOpenThread?(nil) },
-            UIAction(title: "Builds", image: UIImage(systemName: "shippingbox")) { [weak self] _ in self?.onBuilds?() }
-        ]), UIMenu(options: .displayInline, children: actions)]
-    }
 
     /// A thread opened over this one closed: take the model back.
     func reactivate() {

@@ -25,7 +25,7 @@ enum Route: Equatable {
 /// those devices that scroll natively. Opening an app pushes in the
 /// conversation with its agent while the others fall back and the same
 /// device travels into it. The app's other threads open from the agent's
-/// corner menu or its update lines, pushing in over it the same way.
+/// Threads page or its update lines, pushing in over it the same way.
 ///
 /// Navigation is a route plus two springs (`appSpring` grid→agent, `spring`
 /// agent→thread). Each spring's target is a function of the route and of what
@@ -500,6 +500,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project),
                                               stage: stage, agent: true)
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
+        controller.onThreads = { [weak self] in self?.presentThreads() }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         host(controller, in: agentHost)
         controller.onBack = { [weak self] in self?.closeApp() }
@@ -768,6 +769,21 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             sheet.detents = [.medium(), .large()]
             sheet.prefersGrabberVisible = true
             sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+        }
+        present(controller, animated: true)
+    }
+
+    private func presentThreads() {
+        guard let project = selectedProject, presentedViewController == nil, route == .app(project.id) else { return }
+        Theme.selectionHaptic()
+        let controller = ThreadsViewController(model: model, project: project)
+        controller.onOpen = { [weak self, weak controller] id in
+            controller?.dismiss(animated: true) { self?.openThread(id) }
+        }
+        controller.modalPresentationStyle = .pageSheet
+        if let sheet = controller.sheetPresentationController {
+            sheet.detents = [.large()]
+            sheet.prefersGrabberVisible = true
         }
         present(controller, animated: true)
     }

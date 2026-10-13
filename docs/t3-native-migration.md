@@ -944,10 +944,17 @@ the fix (message bounced back into the field) and passing after it, first and
 follow-up messages, through the phone's own send path (`SQUIRCLE_SEND`).
 (2) No list between Home and the agent: route `app` is the agent's
 conversation (back returns to Home); `thread` pushes another thread over it,
-from the agent's corner menu (threads, New Thread, Builds) or by tapping a
+from the agent's corner menu (threads, New Thread, Builds; replaced in 39) or by tapping a
 worker update line. The model follows one conversation at a time, so the
 covered agent ignores model changes and reselects its thread when the one
 over it closes. The app page (`AppPage`) and its geometry are gone. Verified:
 slow-motion frames of Home → agent (one push) and agent → thread → back;
 returning restores the agent's own conversation; `SQUIRCLE_STRESS=1` 40 s:
 `settled=1 violations=0`.
+
+**Build 39 (user: "builds be one button and threads another that goes to a
+proper view, not shove them all in a menu").** The agent's corner menu is
+gone. Beside back sit two glass buttons: Threads opens a full-height sheet
+listing the app's other threads (title, status, model, age) with a New Thread
+button; picking one closes the sheet and pushes the thread over the agent.
+Builds opens the builds sheet.
