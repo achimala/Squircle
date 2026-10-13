@@ -24,7 +24,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private let threads = Theme.glassButton(symbol: "list.bullet", identifier: "agent.threads", accessibilityLabel: "Threads")
     private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "agent.builds", accessibilityLabel: "Builds")
     /// The floating buttons at the top left, in reading order.
-    private var topControls: [UIView] { isAgent ? [back, threads, builds] : [back] }
+    private var topControls: [UIView] {
+        switch chatStyle {
+        case .standard: return isAgent ? [back, threads, builds] : [back]
+        case .light: return isAgent ? [more] : [back, more]
+        }
+    }
+    /// How the conversation draws itself; set before it loads.
+    var chatStyle = ChatStyle.standard
+    /// The overlay's full-screen toggle, offered in the light style's menu.
+    var onToggleFull: (() -> Void)?
+    var isFull: (() -> Bool)?
+    /// Light style: one menu for Threads, Builds, full screen, model and approvals.
+    private let more = Theme.glassButton(symbol: "ellipsis", identifier: "agent.more", accessibilityLabel: "More")
     /// The model follows one conversation at a time; a thread opened over
     /// this one takes it and gives it back when it closes.
     private var isActive: Bool { model.selectedSessionID == sessionID }
@@ -152,6 +164,45 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.layoutIfNeeded()
     }
 
+    // MARK: Light style
+
+    private func setUpLightChrome() {
+        sticky.apply(chatStyle)
+        composer.apply(chatStyle)
+        // Model and approvals move into the menu.
+        pickers.model.isHidden = true
+        pickers.approvals.isHidden = true
+        [back, threads, builds].forEach { $0.isHidden = !topControls.contains($0) }
+        more.showsMenuAsPrimaryAction = true
+        more.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.lightMenu() ?? []) }])
+        view.addSubview(more)
+        if #available(iOS 26.0, *) {
+            let top = UIScrollEdgeElementContainerInteraction()
+            top.scrollView = table
+            top.edge = .top
+            more.addInteraction(top)
+        }
+    }
+
+    /// Everything the standard style puts in buttons, in one menu.
+    private func lightMenu() -> [UIMenuElement] {
+        var items: [UIMenuElement] = []
+        if isAgent {
+            items.append(UIAction(title: "Threads", image: UIImage(systemName: "list.bullet")) { [weak self] _ in self?.onThreads?() })
+            items.append(UIAction(title: "Builds", image: UIImage(systemName: "shippingbox")) { [weak self] _ in self?.onBuilds?() })
+        }
+        if let onToggleFull {
+            let full = isFull?() ?? false
+            items.append(UIAction(title: full ? "Make Small" : "Full Screen",
+                                  image: UIImage(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")) { _ in onToggleFull() })
+        }
+        items.append(UIMenu(options: .displayInline, children: [
+            UIMenu(title: "Model", subtitle: model.shortAgentName(for: model.modelSelection), image: UIImage(systemName: "cpu"), children: modelMenu()),
+            UIMenu(title: "Approvals", subtitle: model.runtimeMode.title, image: UIImage(systemName: model.runtimeMode.symbol), children: approvalMenu())
+        ]))
+        return items
+    }
+
     // MARK: View
 
     override func viewDidLoad() {
@@ -223,6 +274,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             builds.addAction(UIAction { [weak self] _ in self?.onBuilds?() }, for: .touchUpInside)
             [threads, builds].forEach(view.addSubview)
         }
+        if chatStyle == .light { setUpLightChrome() }
 
         requestDetail.lineBreakMode = .byTruncatingTail
         requestButtons.spacing = 8
@@ -311,6 +363,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         back.frame = CGRect(x: x, y: y, width: 44, height: 44)
         threads.frame = CGRect(x: x + 54, y: y, width: 44, height: 44)
         builds.frame = CGRect(x: x + 108, y: y, width: 44, height: 44)
+        more.frame = CGRect(x: view.bounds.width - x - 44, y: y, width: 44, height: 44)
         layoutConversation()
     }
 
@@ -326,7 +379,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let faded = overlayLayout == nil ? safeArea.top + 20 : back.frame.maxY
         fade.endPoint = CGPoint(x: 0.5, y: min(1, faded / max(1, height)))
         CATransaction.commit()
-        let floor = request.isHidden ? (notice.isHidden ? pickers.frame.minY : notice.frame.minY) : request.frame.minY
+        // Light style: the pickers' row holds only the floating jump button.
+        let pickersTop = chatStyle == .light ? composer.frame.minY : pickers.frame.minY
+        let floor = request.isHidden ? (notice.isHidden ? pickersTop : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
         let insets = UIEdgeInsets(top: back.frame.maxY + 6, left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
@@ -342,6 +397,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let alpha = ((progress - 0.55) / 0.45).clamped()
         back.alpha = alpha
         threads.alpha = alpha
+        more.alpha = alpha
         builds.alpha = alpha
         pickers.alpha = alpha
         jump.alpha = jumpShown ? alpha : 0
@@ -437,7 +493,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let symbol = stop ? "stop.fill" : "arrow.up"
         if composer.send.accessibilityValue != symbol {
             composer.send.accessibilityValue = symbol
-            composer.send.configuration?.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .bold))
+            composer.send.configuration?.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: composer.sendSymbolSize, weight: .bold))
             composer.send.accessibilityLabel = stop ? "Stop agent" : "Send message"
         }
     }
@@ -659,6 +715,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func configure(_ cell: UITableViewCell, with item: ThreadItem) {
+        (cell as? TimelineCell)?.apply(chatStyle)
         switch item {
         case .header(let title):
             (cell as? HeaderCell)?.configure(title)

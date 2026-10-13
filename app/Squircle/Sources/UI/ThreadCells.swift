@@ -85,6 +85,15 @@ class TimelineCell: UITableViewCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Set once, before the first `configure`; glass can't come back.
+    private(set) var chatStyle = ChatStyle.standard
+    func apply(_ style: ChatStyle) {
+        guard style != chatStyle else { return }
+        chatStyle = style
+        styleChanged()
+    }
+    func styleChanged() {}
+
     /// Pressed feedback for tappable rows.
     func setPressed(_ pressed: Bool) {
         UIView.animate(withDuration: pressed ? 0.08 : 0.3, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
@@ -553,6 +562,18 @@ final class ChangesCell: TimelineCell {
         accessibilityIdentifier = "thread.changes"
     }
 
+    override func styleChanged() {
+        guard chatStyle == .light else { return }
+        ChatStyle.flatten(glass, fill: nil, radius: 0)
+        // A plain line, aligned with the text.
+        if let row = glass.contentView.subviews.first {
+            NSLayoutConstraint.deactivate(glass.contentView.constraints.filter { $0.firstItem === row && $0.firstAttribute == .leading })
+            row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6).isActive = true
+        }
+        label.font = Theme.font(.footnote, 13, .medium)
+        label.textColor = .secondaryLabel
+    }
+
     func configure(_ changes: TurnChanges) {
         label.text = "\(changes.files.count) file\(changes.files.count == 1 ? "" : "s")"
         let text = NSMutableAttributedString(string: "+\(changes.additions)", attributes: [.foregroundColor: Theme.success])
@@ -618,6 +639,20 @@ final class BuildCell: TimelineCell {
         accessibilityIdentifier = "thread.build"
     }
 
+    override func styleChanged() {
+        guard chatStyle == .light else { return }
+        ChatStyle.flatten(glass, fill: .tertiarySystemFill, radius: 18)
+        if var config = install.configuration {
+            // A plain tinted button: the only control in the row.
+            config.background = .clear()
+            config.background.backgroundColor = Theme.accent
+            config.cornerStyle = .capsule
+            config.baseForegroundColor = .white
+            config.image = nil
+            install.configuration = config
+        }
+    }
+
     func configure(_ build: AppBuild, installing: Bool) {
         self.build = build
         titleLabel.text = build.version.isEmpty ? build.title : build.title + " " + build.version
@@ -678,6 +713,27 @@ final class SummaryCell: TimelineCell {
         accessibilityIdentifier = "thread.summary"
     }
 
+    override func styleChanged() {
+        guard chatStyle == .light else { return }
+        // A quiet line of text instead of a glass pill.
+        ChatStyle.flatten(glass, fill: nil, radius: 0)
+        NSLayoutConstraint.deactivate(glass.constraints.filter { $0.firstAttribute == .height })
+        if let row = glass.contentView.subviews.first {
+            NSLayoutConstraint.deactivate(glass.contentView.constraints.filter { $0.firstItem === row })
+            NSLayoutConstraint.activate([
+                row.topAnchor.constraint(equalTo: glass.contentView.topAnchor, constant: 2),
+                row.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -2),
+                row.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
+                row.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -6)
+            ])
+        }
+        titleLabel.font = Theme.font(.footnote, 13, .medium)
+        titleLabel.textColor = .secondaryLabel
+        detailLabel.font = Theme.font(.footnote, 13)
+        detailLabel.textColor = .tertiaryLabel
+        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+    }
+
     /// A soft pulse: light blooms around the pill and fades as it settles.
     func celebrate() {
         guard !Motion.reduced else { return }
@@ -717,8 +773,8 @@ final class SummaryCell: TimelineCell {
     }
 
     func configure(_ summary: TurnSummary) {
-        icon.image = UIImage(systemName: "checkmark.circle.fill")
-        icon.tintColor = Theme.accent
+        icon.image = UIImage(systemName: chatStyle == .light ? "checkmark" : "checkmark.circle.fill")
+        icon.tintColor = chatStyle == .light ? .tertiaryLabel : Theme.accent
         titleLabel.text = summary.title
         detailLabel.text = summary.detail
         chevron.transform = summary.expanded ? CGAffineTransform(rotationAngle: .pi) : .identity
@@ -740,7 +796,7 @@ final class LayoutView: UIView {
 /// the finished task slides up out of the capsule and the next slides in
 /// from below, clipped by the capsule's shape.
 final class LiveCell: TimelineCell {
-    private let capsule = LiveCapsule()
+    private var capsule = LiveCapsule()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -760,6 +816,24 @@ final class LiveCell: TimelineCell {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    override func styleChanged() {
+        guard chatStyle == .light else { return }
+        // The same line without its glass.
+        let plain = LiveCapsule(glass: false)
+        plain.isUserInteractionEnabled = false
+        plain.translatesAutoresizingMaskIntoConstraints = false
+        capsule.removeFromSuperview()
+        contentView.addSubview(plain)
+        NSLayoutConstraint.activate([
+            plain.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            plain.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+            plain.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
+            plain.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
+            plain.heightAnchor.constraint(equalToConstant: 34)
+        ])
+        capsule = plain
+    }
 
     func configure(_ status: LiveStatus) {
         capsule.configure(headline: status.headline, started: status.started)

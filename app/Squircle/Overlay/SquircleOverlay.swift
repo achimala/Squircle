@@ -113,8 +113,16 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// glass and blurring out while the content at the new size blurs in.
     private var outgoing: (view: UIView, size: CGSize)?
     private var edgeEffectsHidden = false
-    private let resizeButton = Theme.glassButton(symbol: "arrow.up.left.and.arrow.down.right",
-                                                 identifier: "overlay.resize", accessibilityLabel: "Full screen")
+    /// The panel's grab handle: drag it to resize the panel, up to full
+    /// screen or down into the bubble.
+    private let handle = UIView()
+    private var handlePan: UIPanGestureRecognizer!
+    /// The docked panel's height, once the handle has set it.
+    private var miniHeight: CGFloat?
+    /// The handle is moving the panel: its content is laid out at the
+    /// glass's own size every frame (text reflows, nothing stretches) until
+    /// the spring rests.
+    private var liveResize = false
 
     private typealias Mounted = (controller: ThreadViewController, host: UIView)
     /// Mounted once the app is known and kept, so opening shows it at once.
@@ -164,10 +172,18 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubbleStage.isUserInteractionEnabled = false
         bubbleStage.addSubview(bubble)
         glass.contentView.addSubview(bubbleStage)
-        body.addSubview(resizeButton)
+        let pill = UIView()
+        pill.backgroundColor = .tertiaryLabel
+        pill.layer.cornerRadius = 2.5
+        pill.isUserInteractionEnabled = false
+        handle.addSubview(pill)
+        handle.isAccessibilityElement = true
+        handle.accessibilityTraits = .adjustable
+        handle.accessibilityLabel = "Resize"
+        handle.accessibilityIdentifier = "overlay.handle"
+        body.addSubview(handle)
         page.addSubview(body)
         glass.contentView.addSubview(page)
-        resizeButton.addAction(UIAction { [weak self] _ in self?.toggleFull() }, for: .touchUpInside)
 
         bubbleTap = UITapGestureRecognizer(target: self, action: #selector(openTapped))
         bubblePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
@@ -177,6 +193,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             gesture.delegate = self
             glass.addGestureRecognizer(gesture)
         }
+        handlePan = UIPanGestureRecognizer(target: self, action: #selector(handleDragged(_:)))
+        handlePan.delegate = self
+        handle.addGestureRecognizer(handlePan)
+        handle.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTapped)))
 
         frame.onChange = { [weak self] in self?.applyScene() }
         frame.onRest = { [weak self] in self?.rested() }
@@ -280,7 +300,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// and rises above the keyboard.
     private var miniFrame: CGRect {
         let safe = safeBounds, bubble = bubbleFrame
-        let size = CGSize(width: min(safe.width, 390), height: min(safe.height * 0.66, 600))
+        let height = (miniHeight ?? min(safe.height * 0.66, 600)).clamped(Self.minimumHeight, safe.height)
+        let size = CGSize(width: min(safe.width, 390), height: height)
         var y = lower ? bubble.maxY - size.height : bubble.minY
         y = y.clamped(safe.minY, max(safe.minY, min(safe.maxY, keyboardTop - 8) - size.height))
         return CGRect(x: bubble.midX > view.bounds.midX ? safe.maxX - size.width : safe.minX, y: y,
@@ -289,22 +310,33 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private var targetFrame: CGRect { !route.open ? bubbleFrame : route.full ? view.bounds : miniFrame }
 
+    /// Shorter than this, a released handle closes the panel.
+    private static let minimumHeight: CGFloat = 180
+
     /// Sends the glass toward wherever the route and anchor now put it.
-    private func retarget(velocity: CGPoint? = nil) {
+    private func retarget(velocity: CGPoint? = nil, sizeVelocity: CGSize = .zero) {
         guard view.bounds.width > 0 else { return }
-        if route.open || panelSize == .zero { layOutPanel(at: route.open && route.full ? view.bounds.size : miniFrame.size) }
+        if !liveResize, route.open || panelSize == .zero { layOutPanel(at: route.open && route.full ? view.bounds.size : miniFrame.size) }
         guard !frame.isHeld else { return }
         let target = targetFrame
-        if frame.target != target || velocity != nil { frame.animate(to: target, velocity: velocity) }
+        if frame.target != target || velocity != nil { frame.animate(to: target, velocity: velocity, sizeVelocity: sizeVelocity) }
+    }
+
+    /// The part of the screen's safe-area insets a panel at `rect` covers.
+    private func safeArea(in rect: CGRect) -> UIEdgeInsets {
+        let bounds = view.bounds, safe = view.safeAreaInsets
+        return UIEdgeInsets(top: max(0, bounds.minY + safe.top - rect.minY), left: max(0, bounds.minX + safe.left - rect.minX),
+                            bottom: max(0, rect.maxY - (bounds.maxY - safe.bottom)), right: max(0, rect.maxX - (bounds.maxX - safe.right)))
     }
 
     /// Lays the panel's content out at a new resting size. If it shows, a
-    /// picture of how it was blurs out as the glass stretches.
-    private func layOutPanel(at size: CGSize) {
+    /// picture of how it was blurs out as the glass stretches. `live`: the
+    /// glass's current frame while the handle moves it, laid out directly.
+    private func layOutPanel(at size: CGSize, live: CGRect? = nil) {
         guard size != panelSize, size.width > 0 else { return }
         outgoing?.view.removeFromSuperview()
         outgoing = nil
-        let showing = panelSize != .zero && page.alpha > 0.02 && !page.isHidden && view.window != nil
+        let showing = live == nil && panelSize != .zero && page.alpha > 0.02 && !page.isHidden && view.window != nil
         if showing { setEdgeEffectsHidden(true) }
         if showing, let picture = body.snapshotView(afterScreenUpdates: true) {
             let stage = UIView()
@@ -320,8 +352,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         page.transform = .identity
         page.bounds = CGRect(origin: .zero, size: size)
         body.frame = page.bounds
-        let safe = size == view.bounds.size ? view.safeAreaInsets : .zero
-        resizeButton.frame = CGRect(x: size.width - Self.inset - 44, y: safe.top + Self.inset, width: 44, height: 44)
+        let safe = live.map(safeArea(in:)) ?? (size == view.bounds.size ? view.safeAreaInsets : .zero)
+        // At the top centre, level with the ⋯ button; the strip it grabs runs
+        // from the panel's edge to below the buttons.
+        handle.frame = CGRect(x: size.width / 2 - 60, y: safe.top, width: 120, height: Self.inset + 44)
+        handle.subviews.first?.frame = CGRect(x: 42, y: 7, width: 36, height: 5)
         for mounted in [agent, thread].compactMap({ $0 }) {
             mounted.controller.setOverlayLayout(inset: Self.inset, safe: safe)
             place(mounted, offset: 0)
@@ -352,6 +387,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let opened = Self.progress(rect.size, from: bubbleSize, to: panelSize).clamped()
         let fullness = ((rect.height - miniFrame.height) / max(1, bounds.height - miniFrame.height)).clamped()
         glass.frame = rect
+        if liveResize, route.open { layOutPanel(at: rect.size, live: rect) }
         let radius = min(rect.height / 2, rect.width / 2, .lerp(Self.panelRadius, 0, fullness))
         Theme.setGlassCorner(glass, radius: radius)
         glass.contentView.layer.cornerRadius = radius
@@ -377,12 +413,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         page.isHidden = page.alpha == 0 && !route.open
         // Paper under the conversation, so it reads over any app. It is the
         // blurred layer's own background: the blur renders clear areas black.
-        let paper = Theme.paper.withAlphaComponent(.lerp(0.74, 1, fullness))
+        let paper = Theme.paper.withAlphaComponent(.lerp(0.93, 1, fullness))
         page.backgroundColor = paper
         outgoing?.view.backgroundColor = paper
-        let full = route.full
-        resizeButton.configuration?.image = UIImage(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-        resizeButton.accessibilityLabel = full ? "Make small" : "Full screen"
+        body.bringSubviewToFront(handle)
+        handle.accessibilityValue = route.full ? "Full screen" : "Small"
 
         // Flat push: a thread slides in on its own paper over the agent, which
         // drifts a third as far left and fades out first, so text never sits
@@ -462,6 +497,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     }
 
     private func rested() {
+        if !frame.isAnimating, !frame.isHeld { liveResize = false }
         if !frame.isAnimating, let stage = outgoing?.view {
             outgoing = nil
             stage.removeFromSuperview()
@@ -489,6 +525,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The panel starts to cover the host app: its screen goes into the
     /// message field as an attachment first.
     private func hostWillBeCovered() {
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_NO_CAPTURE"] == "1" { return }
+        #endif
         if let window = view.window { HostCapture.attach(below: window, to: model) }
     }
 
@@ -537,6 +576,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private func mountAgent(_ project: AppProject) {
         let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
+        controller.chatStyle = .light
         controller.setBackButton(symbol: "chevron.down", label: "Minimize")
         controller.onBack = { [weak self] in self?.close() }
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
@@ -549,6 +589,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         guard let project else { return }
         agent?.controller.deactivate()
         let controller = ThreadViewController(model: model, project: project, sessionID: key.hasPrefix("draft:") ? nil : key)
+        controller.chatStyle = .light
         controller.onBack = { [weak self] in self?.closeThread() }
         thread = host(controller)
         threadKey = key
@@ -569,11 +610,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// already in the app, so no picture-in-picture).
     private func host(_ controller: ThreadViewController) -> Mounted {
         controller.feeds = feeds
+        controller.onToggleFull = { [weak self] in self?.toggleFull() }
+        controller.isFull = { [weak self] in self?.route.full ?? false }
         let host = UIView()
         host.clipsToBounds = true
         addChild(controller)
         host.addSubview(controller.view)
-        body.insertSubview(host, belowSubview: resizeButton)
+        body.insertSubview(host, belowSubview: handle)
         controller.didMove(toParent: self)
         let mounted = (controller, host)
         controller.setOverlayLayout(inset: Self.inset, safe: panelSize == view.bounds.size ? view.safeAreaInsets : .zero)
@@ -638,10 +681,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             return route.open && thread != nil && point.x < 28 && velocity.x > abs(velocity.y)
         }
         if gesture === movePan {
-            // Move the mini panel by its top, between its buttons.
+            // Move the mini panel by its top, beside the handle and clear of
+            // the buttons.
             let inset = Self.inset
-            return route.open && !route.full && point.y < inset + 48 && point.x > inset + 156 && point.x < body.bounds.width - inset - 48
+            return route.open && !route.full && point.y < inset + 48 && point.x > inset + 48 && point.x < body.bounds.width - inset - 48
+                && !handle.frame.contains(point)
         }
+        if gesture === handlePan { return route.open }
         return true
     }
 
@@ -649,6 +695,63 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { false }
 
     @objc private func openTapped() { open() }
+
+    @objc private func handleTapped() { toggleFull() }
+
+    /// The panel's top edge follows the finger, its content laid out at
+    /// every size. Above the docked panel it grows toward full screen. Let
+    /// go, it springs on with the finger's speed: to full screen near the
+    /// top, into the bubble when short, else docked at that height.
+    @objc private func handleDragged(_ gesture: UIPanGestureRecognizer) {
+        let dy = gesture.translation(in: view).y
+        switch gesture.state {
+        case .began:
+            dragStart = frame.value
+            liveResize = true
+            frame.hold(dragStart)
+        case .changed:
+            frame.hold(resizedFrame(top: dragStart.minY + dy))
+        case .ended, .cancelled, .failed:
+            let vy = gesture.velocity(in: view).y
+            let docked = dockedFrame
+            let top = frame.value.minY + vy * 0.15
+            frame.release()
+            if top < safeBounds.minY + 20 {
+                route.full = true
+            } else if docked.maxY - top < Self.minimumHeight {
+                // Folds back into the bubble: content stretches from here.
+                liveResize = false
+                route.full = false
+                close()
+                frame.animate(to: targetFrame, velocity: CGPoint(x: 0, y: vy), sizeVelocity: CGSize(width: 0, height: -vy))
+                return
+            } else {
+                route.full = false
+                let height = docked.maxY - max(top, safeBounds.minY)
+                miniHeight = height
+                // Docked under the bubble, the panel's top is the bubble's.
+                if !lower { anchor = (anchor?.right ?? true, docked.maxY - height + bubbleSize.height / 2) }
+            }
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+            retarget(velocity: CGPoint(x: 0, y: vy), sizeVelocity: CGSize(width: 0, height: -vy))
+        default: break
+        }
+    }
+
+    /// Where the docked panel's bottom and sides are, at its current height.
+    private var dockedFrame: CGRect { miniFrame }
+
+    /// A panel whose top is at `top`: below the docked panel's top it is the
+    /// docked panel, shorter; above it, it widens toward the full screen.
+    private func resizedFrame(top: CGFloat) -> CGRect {
+        let docked = dockedFrame, full = view.bounds
+        let top = top.clamped(full.minY, docked.maxY - bubbleSize.height)
+        guard top < docked.minY else { return CGRect(x: docked.minX, y: top, width: docked.width, height: docked.maxY - top) }
+        let t = 1 - top / max(1, docked.minY)
+        let minX = CGFloat.lerp(docked.minX, full.minX, t), maxX = CGFloat.lerp(docked.maxX, full.maxX, t)
+        let maxY = CGFloat.lerp(docked.maxY, full.maxY, t)
+        return CGRect(x: minX, y: top, width: maxX - minX, height: maxY - top)
+    }
 
     /// The glass and everything in it follow the finger; on release they
     /// spring to the nearer side with the finger's speed.
@@ -720,6 +823,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     #if DEBUG
     /// Verification only, in Squircle Debug with `SQUIRCLE_OVERLAY_DEMO`:
     /// `SQUIRCLE_OVERLAY_OPEN=mini|full` opens the overlay after 4 s;
+    /// `SQUIRCLE_OVERLAY_NO_CAPTURE=1` skips attaching the host's screen;
     /// `SQUIRCLE_OVERLAY_CYCLE=1` loops bubble → mini → full → thread → back
     /// → mini → bubble for recordings (`SQUIRCLE_SLOW` slows the springs).
     private func startVerificationHooks() {
@@ -794,9 +898,9 @@ final class FrameSpring {
 
     /// Retargets from the presented frame, keeping its momentum unless a
     /// finger's velocity is given.
-    func animate(to rect: CGRect, velocity v: CGPoint? = nil) {
+    func animate(to rect: CGRect, velocity v: CGPoint? = nil, sizeVelocity: CGSize = .zero) {
         target = rect
-        if let v { velocity = [v.x, v.y, 0, 0] }
+        if let v { velocity = [v.x, v.y, sizeVelocity.width, sizeVelocity.height] }
         if Motion.reduced {
             set(rect)
             onRest?()

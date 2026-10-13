@@ -222,3 +222,21 @@ extension ChatSession {
         return title.hasPrefix(prefix) ? String(title.dropFirst(prefix.count)) : title
     }
 }
+
+/// How a conversation draws itself. The app keeps glass pills and cards;
+/// the debug overlay is lighter, closer to plain chat (user, 2026-10-13).
+enum ChatStyle {
+    case standard
+    /// Status lines as plain text, no glass on cards, one ⋯ menu for the
+    /// controls. Your messages keep their glass bubbles.
+    case light
+
+    /// A solid fill in place of glass, rounded like the glass was.
+    static func flatten(_ view: UIVisualEffectView, fill: UIColor?, radius: CGFloat) {
+        view.effect = nil
+        view.backgroundColor = fill
+        view.layer.cornerRadius = radius
+        view.layer.cornerCurve = .continuous
+        view.clipsToBounds = true
+    }
+}

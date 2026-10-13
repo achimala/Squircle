@@ -817,6 +817,30 @@ code only changed coordinate space). Letters Abroad build with this overlay:
 job `760e6572-a8b8-43ce-9899-3fcd25eb81e9` (overlay key `b82197f2…`, built from
 main at `efa4bf6`); not yet on the phone.
 
+**Lighter overlay, design A (user choice, 2026-10-13):** "generally heavy
+feeling … huge glass blobs … all the extra buttons too especially in the little
+docked one". Of three DEBUG alternatives the user picked A (Messages-like),
+with changes. The overlay's conversations use `ChatStyle.light` (the app keeps
+`standard`): "Worked for…", the changes pill and the live step are plain gray
+text lines instead of glass; build cards are a plain fill with a solid Install
+button; your messages keep their glass bubbles. Threads, Builds, full screen,
+model and approvals are one ⋯ menu at the top right (the resize button and the
+pickers' row are gone, so no empty band above the field). The field's + and
+send are 30 pt, each centred on the one-line field 9 pt from its edge. A grab
+handle at the top centre resizes the panel: its top edge follows the finger
+and the conversation is laid out at the glass's own size every frame (text
+reflows, nothing stretches) until the spring rests; above the docked panel it
+widens toward full screen. Released within 20 pt of the top it goes full
+screen, shorter than 180 pt it folds into the bubble (with the morph's
+stretch), else it docks at that height, with the finger's speed (`FrameSpring`
+now takes a size velocity). Tapping the handle toggles full screen. Measured in
+the simulator (iPhone 17 Pro, iOS 27.0): the docked panel's content sits 12 pt
+from all four of its edges, and the panel 12 pt from the screen's sides.
+Handle drags (taller, full screen, back to docked, collapse to bubble) were
+driven by a throwaway XCUITest and checked in screenshots, including frames
+while the finger held mid-drag. Not checked: the ⋯ menu's items, a pushed
+thread's back + ⋯.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was

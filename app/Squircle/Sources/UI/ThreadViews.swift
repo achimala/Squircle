@@ -70,7 +70,7 @@ final class Composer: UIView, UITextViewDelegate {
             attach.menu = attachMenu
             attach.showsMenuAsPrimaryAction = true
             attach.isHidden = attachMenu == nil
-            inputLeading.constant = attachMenu == nil ? 6 : 44
+            inputLeading.constant = attachMenu == nil ? buttonEdges[0].constant : buttonEdges[0].constant + buttonSizes[0].constant + 2
         }
     }
     var onRemoveAttachment: ((String) -> Void)?
@@ -81,6 +81,10 @@ final class Composer: UIView, UITextViewDelegate {
     private var shown: [String] = []
     private var trayHeight: NSLayoutConstraint!
     private var inputLeading: NSLayoutConstraint!
+    private var buttonSizes: [NSLayoutConstraint] = []
+    private var buttonEdges: [NSLayoutConstraint] = []
+    /// The send arrow's point size.
+    private(set) var sendSymbolSize: CGFloat = 15
     var placeholderText: String {
         get { placeholder.text ?? "" }
         set { if placeholder.text != newValue { placeholder.text = newValue } }
@@ -126,7 +130,13 @@ final class Composer: UIView, UITextViewDelegate {
         height = input.heightAnchor.constraint(equalToConstant: 48)
         trayHeight = tray.heightAnchor.constraint(equalToConstant: 0)
         inputLeading = input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6)
-        NSLayoutConstraint.activate([
+        buttonSizes = [attach.widthAnchor.constraint(equalToConstant: 36), attach.heightAnchor.constraint(equalToConstant: 36),
+                       send.widthAnchor.constraint(equalToConstant: 36), send.heightAnchor.constraint(equalToConstant: 36)]
+        buttonEdges = [attach.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
+                       attach.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
+                       send.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -6),
+                       send.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6)]
+        NSLayoutConstraint.activate(buttonSizes + buttonEdges + [
             group.topAnchor.constraint(equalTo: topAnchor), group.bottomAnchor.constraint(equalTo: bottomAnchor),
             group.leadingAnchor.constraint(equalTo: leadingAnchor), group.trailingAnchor.constraint(equalTo: trailingAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -143,22 +153,41 @@ final class Composer: UIView, UITextViewDelegate {
             input.topAnchor.constraint(equalTo: tray.bottomAnchor),
             input.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
             inputLeading,
-            attach.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: 6),
-            attach.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
-            attach.widthAnchor.constraint(equalToConstant: 36), attach.heightAnchor.constraint(equalToConstant: 36),
             input.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -4),
             height,
             placeholder.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 17),
             placeholder.topAnchor.constraint(equalTo: input.topAnchor, constant: 12),
             placeholder.trailingAnchor.constraint(lessThanOrEqualTo: send.leadingAnchor, constant: -4),
-            send.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor, constant: -6),
-            send.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor, constant: -6),
-            send.widthAnchor.constraint(equalToConstant: 36), send.heightAnchor.constraint(equalToConstant: 36)
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The overlay's lighter field: its buttons lose their own glass.
+    func apply(_ style: ChatStyle) {
+        guard style == .light else { return }
+        var plus = UIButton.Configuration.plain()
+        plus.image = attach.configuration?.image
+        plus.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)
+        plus.baseForegroundColor = .secondaryLabel
+        plus.contentInsets = .zero
+        attach.configuration = plus
+        var arrow = UIButton.Configuration.filled()
+        arrow.image = send.configuration?.image
+        arrow.cornerStyle = .capsule
+        arrow.baseBackgroundColor = Theme.accent
+        arrow.baseForegroundColor = .white
+        arrow.contentInsets = .zero
+        send.configuration = arrow
+        // Smaller buttons, each centred on a one-line field and as far from
+        // its edge as from the field's top and bottom.
+        let side: CGFloat = 30, edge = (48 - side) / 2
+        for constraint in buttonSizes { constraint.constant = side }
+        for constraint in buttonEdges { constraint.constant = constraint.constant < 0 ? -edge : edge }
+        inputLeading.constant = attachMenu == nil ? edge : edge + side - 4
+        sendSymbolSize = 13
+    }
 
     /// Shows the pictures waiting to be sent, each with its own remove button.
     func show(_ attachments: [ImageAttachment]) {
