@@ -2090,7 +2090,9 @@ fn task_signals(state: &AppState, task: &tasks::Task) -> (String, Option<tasks::
 fn task_view(state: &AppState, task: &tasks::Task) -> Value {
     let threads: Vec<Value> = task.threads.iter().map(|id| {
         let row = state.agents.as_ref().and_then(|a| a.thread_row(id));
-        json!({"id": id, "title": row.as_ref().and_then(|r| r["title"].as_str()),
+        let title = row.as_ref().and_then(|r| r["title"].as_str()).map(str::to_string)
+            .or_else(|| state.agents.as_ref().and_then(|a| a.worker_title(id)));
+        json!({"id": id, "title": title,
                "state": row.as_ref().map_or("missing", crate::agents::worker_state)})
     }).collect();
     let store = state.store.lock().unwrap();
