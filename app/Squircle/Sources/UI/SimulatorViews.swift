@@ -739,6 +739,8 @@ final class SimulatorCell: TimelineCell {
     }
     private let frameView = UIView()
     private let playerLayer = AVPlayerLayer()
+    /// The recording's last screen, until (or instead of) the movie.
+    private let posterView = UIImageView()
     private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
     private var playing: URL?
@@ -755,6 +757,8 @@ final class SimulatorCell: TimelineCell {
         frameView.isUserInteractionEnabled = false
         playerLayer.videoGravity = .resizeAspect
         frameView.layer.addSublayer(playerLayer)
+        posterView.contentMode = .scaleAspectFit
+        frameView.addSubview(posterView)
         frameView.addSubview(screen)
         dot.backgroundColor = .systemRed
         dot.layer.cornerRadius = 4
@@ -774,7 +778,7 @@ final class SimulatorCell: TimelineCell {
 
     /// `tappable` false: a preview only, not a button (a host that can't
     /// bring a live simulator large).
-    func configure(_ use: SimulatorUse, feeds: SimulatorFeeds?, video: URL?, tappable: Bool) {
+    func configure(_ use: SimulatorUse, feeds: SimulatorFeeds?, video: URL?, poster: UIImage? = nil, tappable: Bool) {
         self.use = use
         if self.feeds !== feeds { self.feeds?.attach(screen, to: nil) }
         self.feeds = feeds
@@ -796,6 +800,8 @@ final class SimulatorCell: TimelineCell {
             playing = video
             if window != nil, showing { queue.play() }
         }
+        posterView.image = poster
+        posterView.isHidden = use.live || player != nil
         setNeedsLayout()
     }
 
@@ -824,6 +830,7 @@ final class SimulatorCell: TimelineCell {
         button.frame = CGRect(x: 20, y: 6, width: width, height: height)
         frameView.frame = button.bounds
         screen.frame = frameView.bounds
+        posterView.frame = frameView.bounds
         dot.frame = CGRect(x: 12, y: 12, width: 8, height: 8)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         playerLayer.frame = frameView.bounds

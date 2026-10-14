@@ -1,7 +1,7 @@
 //! Recordings and images an agent publishes into a T3 thread, so the phone
 //! can show them inline. Files live under `<data>/threads/<thread>/media/`.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
@@ -186,6 +186,15 @@ pub fn list_in(dir: &Path) -> Result<Vec<Media>> {
         .collect();
     items.sort_by(|a, b| a.created_at.total_cmp(&b.created_at));
     Ok(items)
+}
+
+/// A recording's poster: a small JPEG of the simulator's screen, taken when
+/// Squircle stopped recording it, so the phone shows a turn's recording
+/// without downloading the movie (a long session is well over 100 MB).
+pub fn poster(media: &Media) -> Result<PathBuf> {
+    let poster = media.file.with_extension("poster.jpg");
+    ensure!(poster.metadata().is_ok_and(|m| m.is_file() && m.len() > 0), "This recording has no poster");
+    Ok(poster)
 }
 
 pub fn get(root: &Path, thread: &str, id: &str) -> Result<Media> {

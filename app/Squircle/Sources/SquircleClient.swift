@@ -267,6 +267,14 @@ final class SquircleClient {
         return data
     }
 
+    /// A simulator recording's poster (a small JPEG), when Squircle took one.
+    func mediaPoster(threadID: String, id: String) async throws -> Data {
+        let request = try request(["v1", "t3", "threads", threadID, "media", id, "poster"])
+        let (data, response) = try await session.data(for: request)
+        try validate(response, service: "Squircle")
+        return data
+    }
+
     func fetchBuildPreview(id: String) async throws -> Data {
         try await fetchPNG(["v1", "builds", id, "preview"])
     }

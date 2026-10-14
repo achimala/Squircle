@@ -423,7 +423,7 @@ final class SquircleModel {
         do {
             // With a shell already held, T3 sends only what changed since
             // (or a fresh snapshot when it can't).
-            var shellRequest: [String: Any] = [:]
+            var shellRequest: [String: Any] = ["requestCompletionMarker": true]
             if let sequence = shell["snapshotSequence"].int { shellRequest["afterSequence"] = sequence }
             try await gateway.subscribe("orchestration.subscribeShell", .from(shellRequest), receive: { [weak self] in self?.consumeShell($0, batched: true) },
                                         ended: { [weak self] in self?.connectionSubscriptionEnded("shell", $0) })
@@ -513,6 +513,10 @@ final class SquircleModel {
             for await path in NWPathMonitor() {
                 guard let self else { return }
                 defer { previous = path }
+                metered = path.isExpensive || path.isConstrained
+                #if DEBUG
+                if ProcessInfo.processInfo.environment["SQUIRCLE_METERED"] == "1" { metered = true }
+                #endif
                 guard let before = previous, path.status == .satisfied, !suspended else { continue }
                 if connected {
                     if before.status != .satisfied || before.availableInterfaces.map(\.name) != path.availableInterfaces.map(\.name) {
@@ -546,7 +550,11 @@ final class SquircleModel {
     private func consumeShell(_ item: JSONValue, batched: Bool = false) {
         liveShell = true
         if item["kind"].string == "snapshot" { shell = item["snapshot"]; ConnectionTrace.mark("shell.snapshot") }
-        else if item["kind"].string == "synchronized" { ConnectionTrace.mark("shell.synchronized"); return }
+        else if item["kind"].string == "synchronized" {
+            // Up to date with T3, whether or not anything changed.
+            if ConnectionTrace.enabled, !tracedHome, !projects.isEmpty { tracedHome = true; ConnectionTrace.mark("home.live", "synchronized") }
+            return
+        }
         else {
             // Replayed and live events overlap; each applies once, and the
             // shell remembers how far it got for the next resume.
@@ -1128,6 +1136,30 @@ final class SquircleModel {
     }
     /// A recording's file on the phone, downloading it once; its first frame
     /// becomes the gallery picture.
+    /// Cellular, a personal hotspot or Low Data Mode.
+    private var metered = false
+    /// A turn's recording plays inline once downloaded; on a metered network
+    /// only a small one downloads by itself, a large one shows its poster
+    /// until tapped (a long session is well over 100 MB).
+    func autoLoadsRecording(_ id: String) -> Bool {
+        guard metered else { return true }
+        let bytes = media.first { $0["id"].string == id }?["bytes"].double ?? .infinity
+        return bytes <= 15_000_000
+    }
+    /// The poster Squircle took when it stopped recording, if any.
+    func recordingPoster(_ id: String) async -> Data? {
+        let key = "poster:" + id
+        if let data = StepImages.data(for: key, index: 0) { return data }
+        guard !posterless.contains(id), let client, let thread = selectedSessionID else { return nil }
+        do {
+            let data = try await client.mediaPoster(threadID: thread, id: id)
+            StepImages.set(data, for: key, index: 0)
+            return data
+        } catch ClientError.http(_, 404) { posterless.insert(id); return nil }
+        catch { return nil }
+    }
+    /// Recordings made before Squircle took posters.
+    private var posterless = Set<String>()
     func loadVideo(_ stepID: String) async -> URL? {
         if let url = StepVideos.url(for: stepID) { return url }
         if stepID.hasPrefix("file:") {
@@ -1170,8 +1202,13 @@ final class SquircleModel {
         if stepID.hasPrefix("media:") {
             let message = messages.first { $0.id == stepID }
             var data: Data?
-            if message?.videoID != nil, let url = await loadVideo(stepID) {
+            let id = String(stepID.dropFirst("media:".count))
+            if message?.videoID != nil, let poster = await recordingPoster(id) {
+                data = poster
+            } else if message?.videoID != nil, autoLoadsRecording(id), let url = await loadVideo(stepID) {
                 data = await Self.poster(of: url)
+            } else if message?.videoID != nil {
+                data = nil
             } else if let client, let thread = selectedSessionID {
                 data = try? await client.mediaFile(threadID: thread, id: String(stepID.dropFirst("media:".count)))
             }
