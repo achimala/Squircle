@@ -1312,6 +1312,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             }
         }
         if let slow = environment["SQUIRCLE_SLOW"].flatMap(Double.init) { SpringDriver.debugSlowMotion = slow }
+        if environment["SQUIRCLE_JELLY_STRESS"] == "1" {
+            let seconds = environment["SQUIRCLE_JELLY_STRESS_SECONDS"].flatMap(Double.init) ?? 40
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                await self?.stressJelly(seconds: seconds)
+            }
+        }
         if let mode = environment["SQUIRCLE_OVERLAY_OPEN"] {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(4))
@@ -1344,8 +1351,115 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             }
         }
     }
+
+    /// `SQUIRCLE_JELLY_STRESS=1` (`SQUIRCLE_JELLY_STRESS_SECONDS`, default
+    /// 40): flings, drags, pokes, backgrounds, status changes, open/close,
+    /// Reduce Motion and dropped frames at random 30–500 ms intervals, every
+    /// few actions letting it settle. Every frame it audits the jelly
+    /// (`GlassJelly.debugViolation`); each settle must end asleep at rest,
+    /// on its anchor, showing that pose. Logs `JELLY STRESS end … violations=`.
+    private func stressJelly(seconds: Double) async {
+        let audit = JellyAudit()
+        let auditing = Task { [weak self] in
+            while audit.running {
+                await DisplayFrame.next()
+                if let problem = self?.glass.debugViolation() {
+                    if audit.violations[problem] == nil, let self { NSLog("JELLY STRESS violation: %@ — %@", problem, self.glass.debugState) }
+                    audit.violations[problem, default: 0] += 1
+                }
+            }
+        }
+        func pause(_ range: ClosedRange<Double> = 0.03...0.5) async { try? await Task.sleep(for: .seconds(.random(in: range))) }
+        var actions = 0, settles = 0, unsettled: [String] = []
+        func settle(_ label: String) async {
+            settles += 1
+            let start = CACurrentMediaTime()
+            while CACurrentMediaTime() - start < 6 {
+                if glass.debugSettled { return }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            unsettled.append(label)
+            NSLog("JELLY STRESS did not settle: %@ — %@", label, glass.debugState)
+        }
+        let statuses: [(String?, LiveCapsule.Tone)] = [
+            (nil, .idle), ("Reading GlassJelly.swift", .working), ("Building Letters Abroad for the simulator", .working),
+            ("Needs you · Letters Abroad", .needsYou), ("Done · Letters Abroad", .done), ("Worker · fix", .idle)
+        ]
+        let deadline = CACurrentMediaTime() + seconds
+        while CACurrentMediaTime() < deadline {
+            actions += 1
+            let safe = safeBounds
+            switch Int.random(in: 0..<10) {
+            case 0, 1:
+                // Fling: to either side at any height, with a finger's speed.
+                anchor = (Bool.random(), .random(in: safe.minY...safe.maxY))
+                retarget(velocity: CGPoint(x: .random(in: -4000...4000), y: .random(in: -4000...4000)))
+            case 2:
+                // Drag: the frame held and jerked about, then thrown.
+                let start = frame.value
+                var offset = CGPoint.zero
+                for _ in 0..<Int.random(in: 3...30) {
+                    offset.x += .random(in: -60...60)
+                    offset.y += .random(in: -60...60)
+                    frame.hold(start.offsetBy(dx: offset.x, dy: offset.y))
+                    await DisplayFrame.next()
+                }
+                anchor = (Bool.random(), .random(in: safe.minY...safe.maxY))
+                frame.release()
+                retarget(velocity: CGPoint(x: .random(in: -3000...3000), y: .random(in: -3000...3000)))
+            case 3:
+                glass.debugBackground(true)
+                await pause(0.05...0.8)
+                glass.debugBackground(false)
+            case 4:
+                let status = statuses.randomElement()!
+                demoStatus = (status.0, status.1)
+                render()
+            case 5:
+                [{ $0.open() }, { $0.close() }, { $0.toggleFull() }].randomElement()!(self)
+            case 6:
+                Motion.debugReduced = !(Motion.debugReduced ?? false)
+                NotificationCenter.default.post(name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
+            case 7:
+                glass.debugPoke(true)
+                await pause()
+                glass.debugPoke(false)
+            case 8:
+                glass.debugDropRate = [0, 0, 0.2, 0.6].randomElement()!
+            default:
+                glass.look(at: CGPoint(x: .random(in: -200...200), y: .random(in: -400...400)))
+            }
+            if actions % 9 == 0 {
+                await settle("after action \(actions), open=\(route.open) reduced=\(Motion.reduced) drop=\(glass.debugDropRate)")
+            } else {
+                await pause()
+            }
+        }
+        // Last: settle with motion on and off, every frame presented.
+        glass.debugDropRate = 0
+        for reduced in [false, true, false] {
+            Motion.debugReduced = reduced
+            NotificationCenter.default.post(name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
+            await settle("final reduced=\(reduced)")
+        }
+        Motion.debugReduced = nil
+        audit.running = false
+        await auditing.value
+        let detail = audit.violations.map { "\($0.key) ×\($0.value)" }.sorted().joined(separator: ", ")
+        NSLog("JELLY STRESS end actions=%d settles=%d unsettled=%d violations=%d %@", actions, settles, unsettled.count,
+              audit.violations.values.reduce(0, +), detail)
+    }
     #endif
 }
+
+#if DEBUG
+/// What the jelly stress saw, frame by frame.
+@MainActor
+private final class JellyAudit {
+    var running = true
+    var violations: [String: Int] = [:]
+}
+#endif
 
 /// The overlay shows the agent's simulator live in its turn as a preview
 /// only: you are already in the app, so there is no picture-in-picture or

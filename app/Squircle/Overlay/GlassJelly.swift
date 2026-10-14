@@ -124,11 +124,16 @@ final class GlassJelly: UIView {
     /// blink, glance or hop.
     private var sleptAt: CFTimeInterval?
     private var alarm: Task<Void, Never>?
-    private var motionSetting: Task<Void, Never>?
-    private var drawn: JellyUniforms?
-    private var drawnCanvas = CGRect.zero
-    /// The owner's layout drew since the last tick: the tick needn't.
+    private var observers: [Task<Void, Never>] = []
+    /// What is on screen: set only once a frame was actually presented (a
+    /// frame that found no drawable, or came in the background, isn't), so
+    /// it may only sleep showing the pose it rests in.
+    private var presented: (uniforms: JellyUniforms, canvas: CGRect)?
+    /// The owner's layout drew this frame: the tick draws next frame instead
+    /// (one draw a frame), and doesn't sleep until that frame is shown.
     private var drewInLayout = false
+    /// The app is in the background: no GPU work, nothing presented.
+    private var inBackground = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -153,15 +158,26 @@ final class GlassJelly: UIView {
         addSubview(content)
         // Light or dark: its colours change, so it draws again.
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.wake() }
-        // Reduce Motion turned off brings the breath back.
-        motionSetting = Task { [weak self] in
-            for await _ in NotificationCenter.default.notifications(named: UIAccessibility.reduceMotionStatusDidChangeNotification) {
-                self?.wake()
+        // Reduce Motion changing, and the app leaving or returning, wake it;
+        // back in front it draws its pose again whatever it last showed.
+        let center = NotificationCenter.default
+        let events: [(Notification.Name, @MainActor (GlassJelly) -> Void)] = [
+            (UIAccessibility.reduceMotionStatusDidChangeNotification, { $0.wake() }),
+            (UIApplication.didEnterBackgroundNotification, { $0.background(true) }),
+            (UIApplication.willEnterForegroundNotification, { $0.background(false) }),
+            (UIApplication.didBecomeActiveNotification, { $0.background(false) })
+        ]
+        observers = events.map { name, action in
+            Task { [weak self] in
+                for await _ in center.notifications(named: name) {
+                    guard let self else { return }
+                    action(self)
+                }
             }
         }
     }
 
-    deinit { alarm?.cancel(); motionSetting?.cancel() }
+    deinit { alarm?.cancel(); observers.forEach { $0.cancel() } }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
@@ -217,6 +233,9 @@ final class GlassJelly: UIView {
         alarm = nil
         sleptAt = nil
         cadence = .moving
+        presented = nil
+        drewInLayout = false
+        pressed = false
         guard window != nil else { return }
         metal.contentsScale = min(2, window?.screen.scale ?? 2)
         let proxy = DisplayLinkProxy { [weak self] link in self?.tick(link) }
@@ -231,8 +250,25 @@ final class GlassJelly: UIView {
     func layoutChanged() {
         guard window != nil else { return }
         wake()
-        draw()
-        drewInLayout = true
+        if draw() { drewInLayout = true }
+    }
+
+    /// The app left or came back. Away, it draws nothing (no GPU work in the
+    /// background) and lets go of a held press; back, whatever it showed
+    /// before is stale, so it draws its pose again, without replaying the
+    /// time away as motion.
+    private func background(_ away: Bool) {
+        guard away != inBackground else { return }
+        inBackground = away
+        presented = nil
+        if away {
+            pressed = false
+        } else {
+            last = nil
+            lastPosition = nil
+            lastSize = nil
+        }
+        wake()
     }
 
     /// Something may move: full rate from the next frame. Time it spent
@@ -292,14 +328,18 @@ final class GlassJelly: UIView {
         }
         time += dt - min(dt, 0.1)
         toneTime += dt - min(dt, 0.1)
+        if !isValid { settleAtRest() }
+        // The owner's layout drew this frame already; what the springs
+        // moved since shows next frame (`showsCurrentPose` keeps it awake).
         if drewInLayout { drewInLayout = false } else { draw() }
         setCadence(nextCadence, link: link)
     }
 
-    /// Full rate while anything moves; otherwise slow for the breath alone,
-    /// or paused until the next thing timed to happen.
+    /// Full rate while anything moves or the screen doesn't yet show where
+    /// it rests; otherwise slow for the breath alone, or paused until the
+    /// next thing timed to happen.
     private var nextCadence: Cadence {
-        guard isAtRest else { return .moving }
+        guard isAtRest, showsCurrentPose else { return .moving }
         if !Motion.reduced, opened < 0.999 { return .breathing }
         var due: [CGFloat] = [gazeHold, squintUntil]
         if let finger { due.append(finger.at + 1.6) }
@@ -311,15 +351,119 @@ final class GlassJelly: UIView {
         return .still(after: due.filter { $0 > time }.min().map { $0 - time })
     }
 
-    /// Every spring settled on its target, no blink, touch or glide under way.
+    /// The whole body at rest: every spring of the blob, the creature, its
+    /// face and the bridge settled on its target, the frame not moving, the
+    /// cube back on its anchor, no blink, touch or glide under way.
     private var isAtRest: Bool {
-        guard !pressed, !gliding, blinkStart < 0, abs(cubeScale - 1) < 0.001 || !bridgeConnected,
+        guard !pressed, !gliding, blinkStart < 0, abs(cubeScale - 1) < 0.001,
               hypot(velocity.x, velocity.y) < 0.5, hypot(sizeVelocity.width, sizeVelocity.height) < 0.5,
               hypot(accel.x, accel.y) < 1, hypot(sizeAccel.width, sizeAccel.height) < 1 else { return false }
         let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
         let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, tint.r, tint.g, tint.b, tint.a]
         return modes.allSatisfy { $0.isAtRest } && wobbles.allSatisfy { $0.isAtRest }
     }
+
+    /// The screen shows the pose it has now (in the foreground, a frame with
+    /// these values was presented).
+    private var showsCurrentPose: Bool {
+        if inBackground { return true }
+        guard let now = uniforms() else { return true }
+        guard let presented else { return false }
+        return presented.canvas == now.canvas && presented.uniforms.isClose(to: now.uniforms)
+    }
+
+    /// Every value finite (a NaN anywhere would never settle and draw nothing).
+    private var isValid: Bool {
+        let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, tint.r, tint.g, tint.b, tint.a]
+        let values = modes.flatMap { [$0.value, $0.velocity] } + wobbles.flatMap { [$0.value, $0.velocity] }
+            + [velocity.x, velocity.y, sizeVelocity.width, sizeVelocity.height, accel.x, accel.y,
+               sizeAccel.width, sizeAccel.height, creatureWorld.x, creatureWorld.y, waist, catenary, cubeScale, time, toneTime]
+        return values.allSatisfy(\.isFinite)
+    }
+
+    /// Back to the rest pose on its anchor (after an invalid state).
+    private func settleAtRest() {
+        (squash, shear, lagX, lagY, offsetX, offsetY) = (Mode(), Mode(), Mode(), Mode(), Mode(), Mode())
+        (creatureSquash, hop, stubRoot, stubCube) = (Mode(), Mode(), Mode(), Mode())
+        func rest(_ wobble: inout Wobble) {
+            if !wobble.target.isFinite { wobble.target = 0 }
+            (wobble.value, wobble.velocity) = (wobble.target, 0)
+        }
+        rest(&yaw); rest(&pitch); rest(&roll); rest(&gazeX); rest(&gazeY)
+        rest(&happy); rest(&squint); rest(&worry)
+        rest(&tint.r); rest(&tint.g); rest(&tint.b); rest(&tint.a)
+        (velocity, sizeVelocity, accel, sizeAccel) = (.zero, .zero, .zero, .zero)
+        (lastPosition, lastSize, gliding) = (nil, nil, false)
+        (bridgeConnected, waist, catenary, cubeScale) = (true, Self.restWaist, 10, 1)
+        if !time.isFinite || !toneTime.isFinite { (time, toneTime, gazeHold, nextBlink, nextHop, squintUntil) = (0, 0, 0, 2.5, 1.5, 0) }
+        creatureWorld = anchorWorld
+    }
+
+    #if DEBUG
+    // MARK: Stress (`SQUIRCLE_JELLY_STRESS`)
+
+    /// The chance a frame finds no drawable.
+    var debugDropRate = 0.0
+    private var debugNoDrawable = 0
+
+    func debugBackground(_ away: Bool) { background(away) }
+    func debugPoke(_ down: Bool) {
+        if down { touchesBegan([], with: nil) } else { touchesEnded([], with: nil) }
+    }
+
+    /// Asleep (paused or breathing), resting on its anchor and showing the
+    /// pose it rests in.
+    var debugSettled: Bool {
+        cadence != .moving && isAtRest && showsCurrentPose && hypot(offsetX.value, offsetY.value) < 0.5
+            && (bridgeConnected || stubRoot.value + stubCube.value < 0.5)
+    }
+
+    /// Which part of it isn't settled.
+    var debugState: String {
+        let names = ["squash", "shear", "lagX", "lagY", "offsetX", "offsetY", "creatureSquash", "hop", "stubRoot", "stubCube"]
+        let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
+        let wobbleNames = ["yaw", "pitch", "roll", "gazeX", "gazeY", "happy", "squint", "worry", "r", "g", "b", "a"]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, tint.r, tint.g, tint.b, tint.a]
+        var moving = zip(names, modes).filter { !$0.1.isAtRest }.map { "\($0.0)=\($0.1.value)/\($0.1.velocity)" }
+        moving += zip(wobbleNames, wobbles).filter { !$0.1.isAtRest }.map { "\($0.0)=\($0.1.value)→\($0.1.target) v\($0.1.velocity)" }
+        return "cadence=\(cadence) paused=\(link?.isPaused ?? true) rest=\(isAtRest) shows=\(showsCurrentPose) pressed=\(pressed) "
+            + "gliding=\(gliding) blink=\(blinkStart) scale=\(cubeScale) connected=\(bridgeConnected) v=\(velocity) sv=\(sizeVelocity) "
+            + "a=\(accel) sa=\(sizeAccel) bg=\(inBackground) presented=\(presented != nil) noDrawable=\(debugNoDrawable) "
+            + "window=\(window != nil) hidden=\(isHidden) alpha=\(alpha) metal=\(metal.bounds.size) drawable=\(metal.drawableSize) moving=[\(moving.joined(separator: ", "))]"
+    }
+
+    /// What is wrong with it, if anything, held for at least three audited
+    /// frames (a change whose wake is a notification away is not frozen):
+    /// any value not finite; asleep in the foreground while not at rest or
+    /// not showing its pose (a frozen mid-motion frame); awake but its pose
+    /// not on screen for a second; or no display link on screen.
+    func debugViolation() -> String? {
+        let problem = debugProblem()
+        debugStreak = problem == nil ? 0 : debugStreak + 1
+        return debugStreak >= 3 ? problem : nil
+    }
+
+    private var debugStreak = 0
+    private var debugStaleSince: CFTimeInterval?
+
+    private func debugProblem() -> String? {
+        let now = CACurrentMediaTime()
+        guard isValid else { return "invalid state" }
+        guard window != nil, !inBackground else { debugStaleSince = nil; return nil }
+        guard let link else { return "no display link on screen" }
+        let shows = showsCurrentPose
+        if shows { debugStaleSince = nil } else if debugStaleSince == nil { debugStaleSince = now }
+        if cadence != .moving || link.isPaused {
+            if !isAtRest { return "asleep while moving" }
+            if !shows { return "asleep showing a stale pose" }
+        } else if let since = debugStaleSince, now - since > 1 {
+            return "awake but its pose not presented for a second"
+        }
+        if !gliding, hypot(offsetX.value, offsetY.value) > 46.5 { return "cube beyond its reach" }
+        return nil
+    }
+    #endif
 
     // MARK: Blob
 
@@ -340,6 +484,14 @@ final class GlassJelly: UIView {
             offsetX.value -= position.x - lastPosition.x
             offsetY.value -= position.y - lastPosition.y
             gliding = true
+            // A jump (or a fast frame stopping dead) carries no motion: the
+            // frame's motion starts again from rest. Kept, the old velocity
+            // made every following still frame read as a jump again, so the
+            // body held that phantom pull forever, frozen mid-stretch.
+            velocity = .zero
+            sizeVelocity = .zero
+            accel = .zero
+            sizeAccel = .zero
             return
         }
         let v = CGPoint(x: (position.x - lastPosition.x) / dt, y: (position.y - lastPosition.y) / dt)
@@ -386,9 +538,11 @@ final class GlassJelly: UIView {
         // the anchor's acceleration moves (the same springy lag as a body on
         // a short neck), so it glides with the pill and never fights it.
         if !placedCreature || Motion.reduced {
+            // On its anchor, still: nothing left to glide back from.
             placedCreature = true
             offsetX = Mode()
             offsetY = Mode()
+            gliding = false
         } else {
             let steps = 4, h = dt / CGFloat(steps)
             for _ in 0..<steps {
@@ -501,12 +655,14 @@ final class GlassJelly: UIView {
                 stubRoot.step(dt / 4, frequency: 3.2, damping: 0.35, force: 0)
                 stubCube.step(dt / 4, frequency: 3.4, damping: 0.35, force: 0)
             }
-            stubRoot.value = max(0, stubRoot.value)
-            stubCube.value = max(0, stubCube.value)
+            // Drawn back in, a stub is gone: no motion left in it.
+            if stubRoot.value <= 0 { stubRoot = Mode() }
+            if stubCube.value <= 0 { stubCube = Mode() }
             cubeScale += (1 - cubeScale) * min(1, dt * 6)
             // Close enough again: they touch and merge.
             if L < restLength * 1.12 {
                 bridgeConnected = true
+                (stubRoot, stubCube) = (Mode(), Mode())
                 creatureSquash.velocity += 0.8
             }
         }
@@ -629,18 +785,17 @@ final class GlassJelly: UIView {
 
     // MARK: Drawing
 
-    private func draw() {
-        guard bounds.width > 1, bounds.height > 1, bodyRect.width > 1 else { return }
+    /// The pose as the shader draws it, and the canvas it draws on (nil
+    /// while there is nothing to draw).
+    private func uniforms() -> (uniforms: JellyUniforms, canvas: CGRect)? {
+        guard bounds.width > 1, bounds.height > 1, bodyRect.width > 1, bodyRect.height > 1 else { return nil }
         let s = Self.creatureSize
         let half = CGSize(width: bodyRect.width / 2, height: bodyRect.height / 2)
         let radius = min(cornerRadius, half.width, half.height)
-        let pillow = self.pillow
-        let m = deformation
-        let center = CGPoint(x: bodyRect.midX + lagX.value, y: bodyRect.midY + lagY.value)
-        let creature = cubeNow
+        let inverse = deformation.inverted()
+        let center = bodyCenter, creature = cubeNow
         let canvas = bounds.insetBy(dx: -Self.margin, dy: -Self.margin)
-        let inverse = m.inverted()
-        var u = JellyUniforms(
+        let u = JellyUniforms(
             tint: SIMD4(Float(tint.r.value), Float(tint.g.value), Float(tint.b.value), Float(tint.a.value)),
             fill: fillVector,
             face: SIMD4(Float(lid), Float(happy.value), Float(squint.value), Float(worry.value)),
@@ -656,10 +811,28 @@ final class GlassJelly: UIView {
             scale: Float(metal.contentsScale), radius: Float(radius), pillow: Float(pillow),
             time: 0, churn: 0, opened: Float(opened),
             dark: traitCollection.userInterfaceStyle == .dark ? 1 : 0, mode: 0)
+        return u.isFinite && canvas.width.isFinite && canvas.height.isFinite ? (u, canvas) : nil
+    }
+
+    private var bodyCenter: CGPoint { CGPoint(x: bodyRect.midX + lagX.value, y: bodyRect.midY + lagY.value) }
+
+    /// Draws the pose unless the screen already shows it. False when a frame
+    /// was due but not presented (the background, no drawable): the tick
+    /// tries again and it doesn't sleep meanwhile.
+    @discardableResult
+    private func draw() -> Bool {
+        guard let (uniforms, canvas) = uniforms() else { return true }
         // Settled and unchanged (no blink, glance or move): nothing to draw.
-        if let drawn, drawnCanvas == canvas, drawn.isClose(to: u) { return }
-        drawn = u
-        drawnCanvas = canvas
+        if let presented, presented.canvas == canvas, presented.uniforms.isClose(to: uniforms) { return true }
+        guard !inBackground else { return false }
+        var u = uniforms
+        let s = Self.creatureSize
+        let half = CGSize(width: bodyRect.width / 2, height: bodyRect.height / 2)
+        let radius = min(cornerRadius, half.width, half.height)
+        let pillow = self.pillow
+        let m = deformation
+        let center = bodyCenter
+        let creature = cubeNow
 
         let rest = restPath(half: half, radius: radius, pillow: pillow)
         var toBounds = m.concatenating(CGAffineTransform(translationX: center.x, y: center.y))
@@ -709,8 +882,10 @@ final class GlassJelly: UIView {
             metal.bounds = CGRect(origin: .zero, size: size)
             metal.drawableSize = CGSize(width: size.width * metal.contentsScale, height: size.height * metal.contentsScale)
         }
-        render(&u, into: metal)
+        let shown = render(&u, into: metal)
         CATransaction.commit()
+        presented = shown ? (uniforms, canvas) : nil
+        return shown
     }
 
     private var fillVector: SIMD4<Float> {
@@ -719,15 +894,25 @@ final class GlassJelly: UIView {
         return SIMD4(Float(r), Float(g), Float(b), Float(fillAmount * a))
     }
 
-    private func render(_ u: inout JellyUniforms, into target: CAMetalLayer) {
-        guard let pipeline = JellyRenderer.pipeline, let queue = JellyRenderer.queue,
-              let drawable = target.nextDrawable(), let commands = queue.makeCommandBuffer() else { return }
+    private func render(_ u: inout JellyUniforms, into target: CAMetalLayer) -> Bool {
+        #if DEBUG
+        // Stress: a frame now and then finds no drawable.
+        if Double.random(in: 0..<1) < debugDropRate { return false }
+        #endif
+        guard let pipeline = JellyRenderer.pipeline, let queue = JellyRenderer.queue else { return false }
+        guard let drawable = target.nextDrawable() else {
+            #if DEBUG
+            debugNoDrawable += 1
+            #endif
+            return false
+        }
+        guard let commands = queue.makeCommandBuffer() else { return false }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = drawable.texture
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return false }
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentBytes(&u, length: MemoryLayout<JellyUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -740,6 +925,7 @@ final class GlassJelly: UIView {
         commands.commit()
         commands.waitUntilScheduled()
         drawable.present()
+        return true
     }
 }
 
@@ -834,6 +1020,11 @@ struct JellyUniforms {
     var dark: Float
     /// 0: the jelly; 2: its coverage only (the blur's mask).
     var mode: Float
+
+    var isFinite: Bool {
+        [tint, fill, face, inverse, creature, pose, gaze, bridge, stubs].allSatisfy { v in (0..<4).allSatisfy { v[$0].isFinite } }
+            && [center, half, origin].allSatisfy { $0.x.isFinite && $0.y.isFinite } && pillow.isFinite && opened.isFinite
+    }
 
     /// For the blob layer: whether anything it draws has moved.
     func isClose(to o: JellyUniforms) -> Bool {
