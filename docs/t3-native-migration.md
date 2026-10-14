@@ -1657,3 +1657,26 @@ menu (deferred through a running turn); its first reply was three short
 sentences naming the open item. Not yet checked on the physical phone.
 
 Squircle build `e76693ea-4f76-47c2-a735-b327e0ff49c5` (0.3.0 46, main at `adec020`) succeeded; not yet installed on the phone.
+
+## 2026-10-14 simulator deck
+
+User, after trying several simulators on the phone: "we need to stack em
+somehow and let them fan out when tapped … it's so in the way". With two or
+more, `SimulatorDock` now shows one deck in the corner, 80 pt wide (was 96, or
+78 each when 3+ sat in a column): the most recently started simulator on top,
+up to two more peeking below it, darker, and a count badge. Tapping the deck
+fans the pictures out from the corner into a row with each thread's name
+beneath (a `fan` spring, interruptible like the others); tapping one brings it
+large as before, and shrinking it returns it to the deck. A tap or drag outside
+the row gathers it. One simulator stays a single small picture. Pictures that
+can't be seen (behind the deck's top, or docked in the conversation) detach
+from their feed and keep their last frame; a feed whose screens are all gone
+stops streaming, so hidden simulators don't decode.
+
+**Verified (simulator, iOS 27.0, Debug, four live sessions: this worker's, two
+scratch worker threads' and another worker's):** deck with badge "4"; the
+DEBUG `SQUIRCLE_SIM_FAN=1` sequence (same paths as taps) fanned the row,
+expanded the second picture, shrank it into the deck, fanned and gathered;
+screenshots at ~2.5 per second showed each step moving continuously, no
+jumps. Not verified: real finger taps (T3's agent-device daemon was not
+running), the phone.
