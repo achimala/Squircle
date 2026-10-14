@@ -58,7 +58,8 @@ struct ActionLine: Equatable {
     }
     let id: String
     let kind: Kind
-    var thread: String?
+    /// The worker it is about, when its own command or Squircle's news names it.
+    var thread: WorkerID?
     /// The worker's title as the agent or Squircle named it.
     var title: String?
     var running = false
@@ -68,8 +69,11 @@ struct ActionLine: Equatable {
     var state: WorkerState?
 
     var text: String? {
-        if case .action(let action) = kind, [.send, .answer].contains(action.kind) { return action.text }
-        return nil
+        guard case .action(let action) = kind else { return nil }
+        switch action.kind {
+        case .send, .answer: return action.text
+        default: return nil
+        }
     }
 }
 
@@ -126,7 +130,8 @@ enum ThreadItem: Equatable {
 
     /// The conversation's rows. Views re-render on every model change (any
     /// thread's), so the last few results are kept and reused while their
-    /// inputs are unchanged.
+    /// inputs are unchanged; otherwise only turns whose own content changed
+    /// are built again (streaming touches just the last one).
     static func items(messages: [ChatMessage], running: Bool, expanded: Set<String> = [], builds: [AppBuild] = [],
                       changes: [TurnChanges] = [], simulators: [SimulatorUse] = []) -> [ThreadItem] {
         let inputs = TimelineInputs(messages: messages, running: running, expanded: expanded, builds: builds,
@@ -147,6 +152,23 @@ enum ThreadItem: Equatable {
     }
     private static let recent = Mutex<[(inputs: TimelineInputs, items: [ThreadItem])]>([])
 
+    /// Everything one turn's own rows depend on.
+    private struct TurnInputs: Equatable {
+        let user: ChatMessage?, rest: [ChatMessage], live: Bool, expanded: Bool, simulators: [SimulatorUse]
+    }
+    /// One turn's rows up to its answer, plus what the rest of the
+    /// conversation's state is matched against.
+    private struct TurnRows {
+        let body: [ThreadItem]
+        let turnIDs: Set<String>
+        let answerID: String?
+        /// Build IDs the turn's messages name, in order.
+        let buildIDs: [String]
+        let live: LiveStatus?
+    }
+    /// Built turns by turn ID, reused while their inputs are equal.
+    private static let turnCache = Mutex<[String: (inputs: TurnInputs, rows: TurnRows)]>([:])
+
     private static func build(_ inputs: TimelineInputs) -> [ThreadItem] {
         let (messages, running, expanded, builds, changes, simulators) =
             (inputs.messages, inputs.running, inputs.expanded, inputs.builds, inputs.changes, inputs.simulators)
@@ -164,64 +186,81 @@ enum ThreadItem: Equatable {
             let index = starts.lastIndex { $0 <= use.started } ?? 0
             used[index, default: []].append(use)
         }
+        let known = Dictionary(builds.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
         var items: [ThreadItem] = []
         for (index, turn) in turns.enumerated() {
-            let live = running && index == turns.count - 1
             let id = turn.user?.id ?? "start"
-            // What you attached sits above your words, as in Messages.
-            if let user = turn.user, !user.attachments.isEmpty || user.captures.contains(where: \.isVideo) {
-                let images = user.attachments.enumerated().map {
-                    Shot(step: user.id, index: $0.offset, title: "Your image", attachment: $0.element)
-                }
-                let clips = user.captures.filter(\.isVideo).map {
-                    Shot(step: "file:" + $0.path, index: 0, title: "Your recording", video: true, path: $0.path)
-                }
-                items.append(.gallery(id: "gallery:sent:" + user.id, shots: images + clips))
-            }
-            if let user = turn.user, !user.news.isEmpty {
-                items += user.news.enumerated().map { index, news in
-                    .action(ActionLine(id: "\(user.id)#\(index)", kind: .news(news.state), thread: news.id, title: news.title))
-                }
-            } else if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                items.append(user.isUpdate ? .update(user) : user.agent != nil ? .agentMessage(user) : .user(user))
-            }
-            // A performance capture is for the agent; you see that it went.
-            for (index, capture) in (turn.user?.captures ?? []).enumerated() where !capture.isVideo {
-                var line = ChatMessage(id: "capture:\(id)#\(index)", role: "user", content: capture.label)
-                line.symbol = "waveform.path.ecg"
-                items.append(.update(line))
-            }
-            let rest = turn.rest.filter { $0.role == "tool" || !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            // The answer is the last thing the agent wrote, once nothing follows it.
-            var answer: ChatMessage?
-            if let last = rest.lastIndex(where: { $0.role == "assistant" }),
-               !live || !rest[(last + 1)...].contains(where: { $0.role != "assistant" }) {
-                answer = rest[last]
-            }
-            let work = rest.filter { $0.id != answer?.id }
-            let steps = work.filter { $0.role == "tool" }
-            if live {
-                items += liveRows(turn: id, work: work, expanded: expanded.contains(id))
-            } else if !steps.isEmpty {
-                let open = expanded.contains(id)
-                items.append(.summary(summary(turn: id, user: turn.user, work: work, answer: answer, expanded: open)))
-                // Squircle actions stay in view when the work folds.
-                items += open ? allRows(work) : gallery("gallery:" + id, work) + steps.flatMap(actionRows)
-            }
-            items += (used[index] ?? []).map { .simulator($0) }
-            if let answer { items += withMedia(answer, ThreadItem.answer) }
-            if !live {
-                let turnIDs = Set(([turn.user] + rest).compactMap { $0?.turnID })
-                if let change = changes.last(where: { turnIDs.contains($0.turnID) || ($0.assistantMessageID != nil && $0.assistantMessageID == answer?.id) }) {
-                    items.append(.changes(change, turn: id))
+            let key = TurnInputs(user: turn.user, rest: turn.rest, live: running && index == turns.count - 1,
+                                 expanded: expanded.contains(id), simulators: used[index] ?? [])
+            let rows: TurnRows
+            if let hit = turnCache.withLock({ $0[id] }), hit.inputs == key { rows = hit.rows }
+            else {
+                rows = turnRows(id: id, key)
+                turnCache.withLock { cache in
+                    if cache.count > 4000 { cache.removeAll() }
+                    cache[id] = (key, rows)
                 }
             }
-            items += mentionedBuilds(in: rest, builds: builds).map { .build($0, turn: id) }
-            if live {
-                items.append(.live(LiveStatus(headline: headline(work: work, answer: answer), started: turn.user.flatMap { date($0.createdAt) })))
+            items += rows.body
+            if !key.live, let change = changes.last(where: { rows.turnIDs.contains($0.turnID) || ($0.assistantMessageID != nil && $0.assistantMessageID == rows.answerID) }) {
+                items.append(.changes(change, turn: id))
             }
+            var seen = Set<String>()
+            for buildID in rows.buildIDs where seen.insert(buildID).inserted {
+                if let build = known[buildID] { items.append(.build(build, turn: id)) }
+            }
+            if let live = rows.live { items.append(.live(live)) }
         }
         return items
+    }
+
+    private static func turnRows(id: String, _ turn: TurnInputs) -> TurnRows {
+        let live = turn.live
+        var items: [ThreadItem] = []
+        // What you attached sits above your words, as in Messages.
+        if let user = turn.user, !user.attachments.isEmpty || user.captures.contains(where: \.isVideo) {
+            let images = user.attachments.enumerated().map {
+                Shot(step: user.id, index: $0.offset, title: "Your image", attachment: $0.element)
+            }
+            let clips = user.captures.filter(\.isVideo).map {
+                Shot(step: "file:" + $0.path, index: 0, title: "Your recording", video: true, path: $0.path)
+            }
+            items.append(.gallery(id: "gallery:sent:" + user.id, shots: images + clips))
+        }
+        if let user = turn.user, !user.news.isEmpty {
+            items += user.news.enumerated().map { index, news in
+                .action(ActionLine(id: "\(user.id)#\(index)", kind: .news(news.state), thread: WorkerID(news.id), title: news.title))
+            }
+        } else if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            items.append(user.isUpdate ? .update(user) : user.agent != nil ? .agentMessage(user) : .user(user))
+        }
+        // A performance capture is for the agent; you see that it went.
+        for (index, capture) in (turn.user?.captures ?? []).enumerated() where !capture.isVideo {
+            var line = ChatMessage(id: "capture:\(id)#\(index)", role: "user", content: capture.label)
+            line.symbol = "waveform.path.ecg"
+            items.append(.update(line))
+        }
+        let rest = turn.rest.filter { $0.role == "tool" || !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        // The answer is the last thing the agent wrote, once nothing follows it.
+        var answer: ChatMessage?
+        if let last = rest.lastIndex(where: { $0.role == "assistant" }),
+           !live || !rest[(last + 1)...].contains(where: { $0.role != "assistant" }) {
+            answer = rest[last]
+        }
+        let work = rest.filter { $0.id != answer?.id }
+        let steps = work.filter { $0.role == "tool" }
+        if live {
+            items += liveRows(turn: id, work: work, expanded: turn.expanded)
+        } else if !steps.isEmpty {
+            items.append(.summary(summary(turn: id, user: turn.user, work: work, answer: answer, expanded: turn.expanded)))
+            // Squircle actions stay in view when the work folds.
+            items += turn.expanded ? allRows(work) : gallery("gallery:" + id, work) + steps.flatMap(actionRows)
+        }
+        items += turn.simulators.map { .simulator($0) }
+        if let answer { items += withMedia(answer, ThreadItem.answer) }
+        return TurnRows(body: items, turnIDs: Set(([turn.user] + rest).compactMap { $0?.turnID }), answerID: answer?.id,
+                        buildIDs: mentionedBuildIDs(in: rest),
+                        live: live ? LiveStatus(headline: headline(work: work, answer: answer), started: turn.user.flatMap { date($0.createdAt) }) : nil)
     }
 
     /// Latest note, the newest few steps after it, and every screenshot.
@@ -250,7 +289,7 @@ enum ThreadItem: Equatable {
     static func actionRows(_ step: ChatMessage) -> [ThreadItem] {
         guard let actions = step.step?.actions else { return [] }
         return actions.enumerated().filter { $0.element.visible }.map { index, action in
-            .action(ActionLine(id: "action:\(step.id)#\(index)", kind: .action(action), thread: action.thread, title: action.title,
+            .action(ActionLine(id: "action:\(step.id)#\(index)", kind: .action(action), thread: action.worker, title: action.title,
                                running: step.isStreaming, failed: step.failed))
         }
     }
@@ -318,20 +357,16 @@ enum ThreadItem: Equatable {
         return shots.isEmpty ? [] : [.gallery(id: id, shots: shots)]
     }
 
-    /// Builds of any app whose job IDs appear in what the agent ran or wrote this turn,
-    /// in the order first mentioned.
-    static func mentionedBuilds(in messages: [ChatMessage], builds: [AppBuild]) -> [AppBuild] {
-        guard !builds.isEmpty else { return [] }
-        let known = Dictionary(builds.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
-        var seen = Set<String>(), found: [AppBuild] = []
+    /// IDs (possibly of builds) the agent ran or wrote this turn, in the
+    /// order first mentioned; matched against the builds when shown.
+    private static func mentionedBuildIDs(in messages: [ChatMessage]) -> [String] {
+        var seen = Set<String>(), found: [String] = []
         func scan(_ text: String) {
-            for id in uuids(in: text) {
-                if let build = known[id], seen.insert(id).inserted { found.append(build) }
-            }
+            for id in uuids(in: text) where seen.insert(id).inserted { found.append(id) }
         }
         for message in messages {
             scan(message.content); scan(message.detail)
-            message.step?.actions.compactMap(\.build).forEach(scan)
+            message.step?.actions.compactMap(\.build?.raw).forEach(scan)
         }
         return found
     }

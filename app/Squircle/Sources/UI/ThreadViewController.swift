@@ -757,14 +757,17 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let sessions = Dictionary(model.sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         return items.compactMap { item in
             guard case .action(var line) = item else { return item }
-            // A spawn's output is often cut short before it names the thread.
-            if line.thread == nil, case .action(let action) = line.kind, action.kind == .spawn {
-                line.thread = workers.first { action.branch != nil && $0.value.branch == action.branch }?.key
+            // A spawn whose reply was cut short or shared with other commands
+            // is found by its own branch or title, never by another's ID.
+            if line.thread == nil, case .action(let action) = line.kind, action.isSpawn {
+                let id = workers.first { action.branch != nil && $0.value.branch == action.branch }?.key
                     ?? workers.first { action.title != nil && $0.value.title == action.title }?.key
                     ?? sessions.values.first { action.title != nil && $0.title == action.title }?.id
+                line.thread = WorkerID(id)
             }
-            guard let id = line.thread else {
-                if case .action(let action) = line.kind, action.unconfirmed { return nil }
+            guard let id = line.thread?.raw else {
+                // Only a worker Squircle knows of shows a filtered spawn happened.
+                if case .action(let action) = line.kind, action.isSpawn, action.outcome == .unattributed { return nil }
                 line.name = line.title
                 return .action(line)
             }
@@ -1232,7 +1235,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .agentMessage(let message): toggle(message.id)
         case .action(let line):
             // T3 no longer lists an archived worker's thread.
-            if line.text?.isEmpty == false { toggle(line.id) } else if let id = line.thread, line.state != .archived { onOpenThread?(id) }
+            if line.text?.isEmpty == false { toggle(line.id) } else if let id = line.thread?.raw, line.state != .archived { onOpenThread?(id) }
         default: break
         }
     }

@@ -1,31 +1,69 @@
 import Foundation
 
+/// A worker thread an action names. Only a thread argument or a spawn's own
+/// reply makes one, so no other ID in a command's output can pass for it.
+struct WorkerID: Hashable {
+    let raw: String
+    init?(_ text: String?) {
+        guard let text, let id = SquircleAction.uuid(text) else { return nil }
+        raw = id
+    }
+}
+
+/// A build an action started, from that command's own reply.
+struct BuildID: Hashable {
+    let raw: String
+    init?(_ text: String?) {
+        guard let text, let id = SquircleAction.uuid(text) else { return nil }
+        raw = id
+    }
+}
+
 /// A Squircle command an agent ran (`squircle thread spawn …`, `build start`,
 /// `sim start`, …), read from its Bash command line and output. One Bash call
-/// can run several.
+/// can run several; each takes its target and outcome only from output that
+/// is provably its own.
 struct SquircleAction: Equatable {
-    enum Kind: String {
-        case spawn, send, read, answer, archive, cleanup, status
-        case buildStart, buildStatus, simStart, simStop, simOther
+    enum Kind: Equatable {
+        /// The new worker, once its reply names it.
+        case spawn(WorkerID?)
+        case send(WorkerID?), read(WorkerID?), answer(WorkerID?), archive(WorkerID?)
+        /// The build it started, once its reply names it.
+        case buildStart(BuildID?)
+        case cleanup, status, buildStatus, simStart, simStop, simOther
         case restart, fresh, agentOther, perf, media, help, other
     }
+    /// What Squircle's reply says happened.
+    enum Outcome: Equatable {
+        /// No output yet.
+        case pending
+        case succeeded
+        /// Squircle refused it (its output is an error), so nothing happened.
+        case refused
+        /// Output there is, but not provably this command's: filtered by
+        /// `| grep`, or several commands' replies that can't be told apart.
+        case unattributed
+    }
     var kind: Kind
-    /// The thread it acts on (a worker), when known.
-    var thread: String?
     /// A worker's title, from `spawn --title`.
     var title: String?
     var branch: String?
     /// The prompt or message sent.
     var text: String?
-    /// The build it started.
-    var build: String?
     /// What it built, from `--scheme` or the project's name.
     var app: String?
-    /// Squircle refused it (its output is an error), so nothing happened.
-    var refused = false
-    /// Its output was filtered away, so only a worker Squircle knows of
-    /// shows it happened.
-    var unconfirmed = false
+    var outcome = Outcome.pending
+
+    var refused: Bool { outcome == .refused }
+    /// The worker it acts on, when known.
+    var worker: WorkerID? {
+        switch kind {
+        case .spawn(let id), .send(let id), .read(let id), .answer(let id), .archive(let id): id
+        default: nil
+        }
+    }
+    var build: BuildID? { if case .buildStart(let id) = kind { id } else { nil } }
+    var isSpawn: Bool { if case .spawn = kind { true } else { false } }
 
     /// Actions that change something show as their own line; lookups fold
     /// into the turn's work like any step.
@@ -94,14 +132,33 @@ struct SquircleAction: Equatable {
 
     // MARK: Parsing
 
-    /// Every Squircle command in `command`, with IDs `result` names.
+    /// Every Squircle command in `command`. `result` is the whole call's
+    /// output: a lone command owns all of it; several share it only when it
+    /// splits into exactly one Squircle reply each, in order. Otherwise
+    /// their targets and outcomes stay unknown rather than borrowed.
     static func parse(command: String, result: String? = nil) -> [SquircleAction] {
+        let invocations = invocations(command)
+        guard !invocations.isEmpty else { return [] }
+        let outputs: [Output?]
+        if result == nil {
+            outputs = invocations.map { _ in nil }
+        } else if invocations.count == 1 {
+            outputs = [Output(result ?? "")]
+        } else if let replies = Output.replies(result ?? ""), replies.count == invocations.count {
+            outputs = replies.map(Output.init)
+        } else {
+            outputs = invocations.map { _ in Output.unattributed }
+        }
+        return zip(invocations, outputs).compactMap { action($0, output: $1) }
+    }
+
+    /// The words after the CLI's name, for each Squircle command in `command`.
+    private static func invocations(_ command: String) -> [[String]] {
         guard command.contains("squircle") else { return [] }
-        let commands = Shell.commands(command)
         var functions = Set<String>(), variables = Set<String>()
         var defining: String?
-        var actions: [SquircleAction] = []
-        for words in commands {
+        var found: [[String]] = []
+        for words in Shell.commands(command) {
             // `S() { …/squircle … "$@"; }` and `S="…/squircle …"` name the CLI.
             if words.count == 2, words[1] == "()" { defining = words[0]; continue }
             if let name = defining {
@@ -120,14 +177,9 @@ struct SquircleAction: Equatable {
             let start = index
             guard start < words.count, isBinary(words[start]) || functions.contains(words[start])
                     || variables.contains(where: { words[start] == "$" + $0 || words[start] == "${\($0)}" }) else { continue }
-            if var action = action(Array(words[(start + 1)...]), result: result) {
-                let output = Output(result)
-                action.refused = output.isError
-                action.unconfirmed = action.kind == .spawn && output.isOther
-                actions.append(action)
-            }
+            if isAction(Array(words[(start + 1)...])) { found.append(Array(words[(start + 1)...])) }
         }
-        return actions
+        return found
     }
 
     private static func isBinary(_ word: String) -> Bool {
@@ -141,66 +193,92 @@ struct SquircleAction: Equatable {
         "--file", "--caption", "--build", "--summary", "--message", "--handoff", "--kind", "--name", "--team", "--bundle-id"
     ]
 
-    private static func action(_ words: [String], result: String?) -> SquircleAction? {
+    private struct Words {
         var positional: [String] = [], options: [String: String] = [:], help = false
-        var index = 0
-        while index < words.count {
-            let word = words[index]
-            if word == "--help" || word == "-h" || word == "help" { help = true }
-            if word.hasPrefix("--"), let eq = word.firstIndex(of: "=") {
-                options[String(word[..<eq])] = String(word[word.index(after: eq)...])
-            } else if word.hasPrefix("--") {
-                if valued.contains(word), index + 1 < words.count { options[word] = words[index + 1]; index += 1 }
-                else { options[word] = "" }
-            } else {
-                positional.append(word)
+        init(_ words: [String]) {
+            var index = 0
+            while index < words.count {
+                let word = words[index]
+                if word == "--help" || word == "-h" || word == "help" { help = true }
+                if word.hasPrefix("--"), let eq = word.firstIndex(of: "=") {
+                    options[String(word[..<eq])] = String(word[word.index(after: eq)...])
+                } else if word.hasPrefix("--") {
+                    if valued.contains(word), index + 1 < words.count { options[word] = words[index + 1]; index += 1 }
+                    else { options[word] = "" }
+                } else {
+                    positional.append(word)
+                }
+                index += 1
             }
-            index += 1
         }
-        if help { return SquircleAction(kind: .help) }
+    }
+
+    /// Bare options (`squircle --version`) are no action.
+    private static func isAction(_ words: [String]) -> Bool {
+        let parsed = Words(words)
+        return parsed.help || !parsed.positional.isEmpty
+    }
+
+    private static func action(_ words: [String], output: Output?) -> SquircleAction? {
+        let parsed = Words(words)
+        let positional = parsed.positional, options = parsed.options
+        if parsed.help { return SquircleAction(kind: .help) }
         let group = positional.first ?? "", sub = positional.count > 1 ? positional[1] : ""
         let args = Array(positional.dropFirst(2))
-        let target = args.first.flatMap(uuid)
+        let target = WorkerID(args.first)
+        var action: SquircleAction
         switch (group, sub) {
         case ("thread", "spawn"):
-            let output = Output(result)
-            return SquircleAction(kind: .spawn, thread: output.string("id") ?? output.string("thread_id"),
-                                  title: options["--title"], branch: options["--branch"], text: options["--prompt"])
-        case ("thread", "send"): return SquircleAction(kind: .send, thread: target, text: args.dropFirst().first)
-        case ("thread", "answer"): return SquircleAction(kind: .answer, thread: target, text: args.dropFirst().first)
-        case ("thread", "read"): return SquircleAction(kind: .read, thread: target)
-        case ("thread", "archive"): return SquircleAction(kind: .archive, thread: target)
-        case ("thread", "cleanup"): return options["--dry-run"] != nil ? SquircleAction(kind: .status) : SquircleAction(kind: .cleanup)
-        case ("thread", _): return SquircleAction(kind: .status)
+            action = SquircleAction(kind: .spawn(WorkerID(output?.string("id") ?? output?.string("thread_id"))),
+                                    title: options["--title"], branch: options["--branch"], text: options["--prompt"])
+        case ("thread", "send"): action = SquircleAction(kind: .send(target), text: args.dropFirst().first)
+        case ("thread", "answer"): action = SquircleAction(kind: .answer(target), text: args.dropFirst().first)
+        case ("thread", "read"): action = SquircleAction(kind: .read(target))
+        case ("thread", "archive"): action = SquircleAction(kind: .archive(target))
+        case ("thread", "cleanup"): action = SquircleAction(kind: options["--dry-run"] != nil ? .status : .cleanup)
+        case ("thread", _): action = SquircleAction(kind: .status)
         case ("build", "start"):
             let project = options["--project"].map { (($0 as NSString).lastPathComponent as NSString).deletingPathExtension }
-            let output = Output(result)
-            return SquircleAction(kind: .buildStart, build: output.string("id") ?? output.string("build_id") ?? output.firstUUID,
-                                  app: options["--scheme"] ?? project)
-        case ("build", _): return SquircleAction(kind: .buildStatus)
-        case ("sim", "start"): return SquircleAction(kind: .simStart)
-        case ("sim", "stop"): return SquircleAction(kind: .simStop)
-        case ("sim", _): return SquircleAction(kind: .simOther)
-        case ("agent", "restart"): return SquircleAction(kind: .restart)
-        case ("agent", "fresh"): return SquircleAction(kind: .fresh)
-        case ("agent", _): return SquircleAction(kind: .agentOther)
-        case ("perf", _): return SquircleAction(kind: .perf)
-        case ("media", _): return SquircleAction(kind: .media)
-        default: return group.isEmpty ? nil : SquircleAction(kind: .other)
+            action = SquircleAction(kind: .buildStart(BuildID(output?.string("id") ?? output?.string("build_id") ?? output?.onlyUUID)),
+                                    app: options["--scheme"] ?? project)
+        case ("build", _): action = SquircleAction(kind: .buildStatus)
+        case ("sim", "start"): action = SquircleAction(kind: .simStart)
+        case ("sim", "stop"): action = SquircleAction(kind: .simStop)
+        case ("sim", _): action = SquircleAction(kind: .simOther)
+        case ("agent", "restart"): action = SquircleAction(kind: .restart)
+        case ("agent", "fresh"): action = SquircleAction(kind: .fresh)
+        case ("agent", _): action = SquircleAction(kind: .agentOther)
+        case ("perf", _): action = SquircleAction(kind: .perf)
+        case ("media", _): action = SquircleAction(kind: .media)
+        default: action = SquircleAction(kind: .other)
         }
+        action.outcome = output?.outcome ?? .pending
+        return action
     }
 
     static func uuid(_ text: String) -> String? {
         UUID(uuidString: text) != nil ? text.lowercased() : nil
     }
 
-    /// A command's output: Squircle's JSON envelope, often cut short by `| head`.
+    /// One command's output: Squircle's JSON envelope, often cut short by
+    /// `| head`, or whatever a filter left of it.
     fileprivate struct Output {
         let text: String
-        init(_ text: String?) { self.text = text ?? "" }
+        /// Output that can't be tied to one command.
+        var attributable = true
+        init(_ text: String) { self.text = text }
+        static let unattributed: Output = { var output = Output(""); output.attributable = false; return output }()
+
+        var outcome: Outcome {
+            guard attributable else { return .unattributed }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isError { return .refused }
+            if trimmed.hasPrefix("{") || onlyUUID != nil { return .succeeded }
+            return trimmed.isEmpty ? .succeeded : .unattributed
+        }
         /// `"key": "value"` anywhere in the text, whole or truncated.
         func string(_ key: String) -> String? {
-            guard let range = text.range(of: #""\#(key)"\s*:\s*"([^"]*)""#, options: .regularExpression) else { return nil }
+            guard attributable, let range = text.range(of: #""\#(key)"\s*:\s*"([^"]*)""#, options: .regularExpression) else { return nil }
             let match = text[range]
             guard let open = match.dropLast().lastIndex(of: "\"") else { return nil }
             return String(match[match.index(after: open)..<match.index(before: match.endIndex)])
@@ -209,14 +287,38 @@ struct SquircleAction: Equatable {
         var isError: Bool {
             text.range(of: #"^\s*\{\s*"error"\s*:\s*\{"#, options: .regularExpression) != nil
         }
-        /// Output, but not Squircle's reply (`| grep` filtered it away).
-        var isOther: Bool {
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return !trimmed.isEmpty && !trimmed.hasPrefix("{") && firstUUID == nil
+        /// The one UUID the output names (`| jq -r .data.id`); none when it
+        /// names several, which could be anything's.
+        var onlyUUID: String? {
+            guard attributable else { return nil }
+            let ids = Set(ThreadItem.uuids(in: text))
+            return ids.count == 1 ? ids.first : nil
         }
-        var firstUUID: String? {
-            text.range(of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#, options: .regularExpression)
-                .map { text[$0].lowercased() }
+
+        /// Several commands' output as one Squircle JSON reply each, in
+        /// order; the last may be cut short. Nil when anything else is in
+        /// it that could carry an ID, so replies can't be paired by position.
+        static func replies(_ text: String) -> [String]? {
+            let chars = Array(text)
+            var replies: [String] = [], outside = ""
+            var i = 0
+            while i < chars.count {
+                guard chars[i] == "{" else { outside.append(chars[i]); i += 1; continue }
+                let start = i
+                var depth = 0, inString = false, escaped = false
+                while i < chars.count {
+                    let c = chars[i]
+                    i += 1
+                    if inString {
+                        if escaped { escaped = false } else if c == "\\" { escaped = true } else if c == "\"" { inString = false }
+                    } else if c == "\"" { inString = true }
+                    else if c == "{" { depth += 1 }
+                    else if c == "}" { depth -= 1; if depth == 0 { break } }
+                }
+                replies.append(String(chars[start..<i]))
+            }
+            guard ThreadItem.uuids(in: outside).isEmpty else { return nil }
+            return replies
         }
     }
 }

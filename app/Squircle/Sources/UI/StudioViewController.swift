@@ -8,9 +8,8 @@ enum Route: Equatable {
     case grid
     /// The app's agent: the conversation an app opens to.
     case app(String)
-    /// Another of the app's threads, over its agent. A T3 thread ID, or
-    /// `draft:<uuid>` for a new conversation.
-    case thread(app: String, thread: String)
+    /// Another of the app's threads, over its agent.
+    case thread(app: String, ThreadDestination)
 
     var app: String? {
         switch self {
@@ -18,7 +17,28 @@ enum Route: Equatable {
         case .app(let id), .thread(let id, _): id
         }
     }
-    var thread: String? { if case .thread(_, let thread) = self { thread } else { nil } }
+    var thread: ThreadDestination? { if case .thread(_, let thread) = self { thread } else { nil } }
+}
+
+/// A conversation over the app's agent: one of its T3 threads, or a new
+/// conversation T3 hasn't been told about yet (each its own).
+enum ThreadDestination: Hashable {
+    case existing(String)
+    case draft(UUID)
+
+    var threadID: String? { if case .existing(let id) = self { id } else { nil } }
+}
+
+/// What a notification asked to open, until it is on screen.
+private enum PendingOpen {
+    /// The Mac's catalog is being asked for the app or build it names.
+    case lookingUp(PushTarget)
+    /// The catalog couldn't be read; it is tried again as apps arrive.
+    case waiting(PushTarget)
+
+    var target: PushTarget {
+        switch self { case .lookingUp(let target), .waiting(let target): target }
+    }
 }
 
 /// The root: every app's real device. Home is a grid of still portraits of
@@ -68,12 +88,19 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     // MARK: Navigation state
 
     private var route = Route.grid
+    /// A conversation in place, with what it was mounted for: the two are
+    /// set and cleared together.
+    private struct Mounted<Key: Equatable> {
+        let key: Key
+        let controller: ThreadViewController
+    }
     /// The app whose agent (and device) is mounted. Changes only at `appSpring` 0.
-    private(set) var selectedID: String?
-    private(set) var agent: ThreadViewController?
-    /// The mounted conversation and its route key. Changes only at `spring` 0.
-    private(set) var thread: ThreadViewController?
-    private var threadKey: String?
+    private var mountedApp: Mounted<String>?
+    /// The conversation over the agent. Changes only at `spring` 0.
+    private var mountedThread: Mounted<ThreadDestination>?
+    private var selectedID: String? { mountedApp?.key }
+    private var agent: ThreadViewController? { mountedApp?.controller }
+    private var thread: ThreadViewController? { mountedThread?.controller }
     /// A finger on the back edge owns one spring; targets wait for release.
     private var dragging: SpringDriver?
     private var dragStart: CGFloat = 0
@@ -81,8 +108,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private var syncing = false
     /// The conversation on screen changed (nil: none), for notifications.
     var onViewing: ((String?) -> Void)?
-    /// A notification tapped before the apps arrived from the Mac.
-    private var pendingTarget: PushTarget?
+    /// A notification tapped before what it names arrived from the Mac.
+    private var pendingOpen: PendingOpen?
 
     init(model: SquircleModel) {
         self.model = model
@@ -102,7 +129,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         view.addSubview(dock)
         dock.onOpenThread = { [weak self] id in
             guard let self else { return }
-            if id == agent?.currentSessionID { closeThread() } else if route.thread != id { openThread(id) }
+            if id == agent?.currentSessionID { closeThread() } else if route.thread?.threadID != id { openThread(id) }
         }
 
         grid.alwaysBounceVertical = true
@@ -308,7 +335,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         try? await Task.sleep(for: .seconds(2.5))
         let settled = !appSpring.isAnimating && !spring.isAnimating
             && appSpring.value == appTarget && spring.value == threadTarget
-            && selectedID == (route.app ?? selectedID) && threadKey == route.thread
+            && selectedID == (route.app ?? selectedID) && mountedThread?.key == route.thread
         NSLog("STRESS end route=%@ settled=%d a=%.3f t=%.3f violations=%d", "\(route)", settled,
               appSpring.value, spring.value, auditViolations)
     }
@@ -420,7 +447,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         if laidOut != nil { layoutGrid() }
         sync()
         schedulePortraits()
-        if let pendingTarget, !projects.isEmpty { open(pendingTarget) }
+        if case .waiting(let target) = pendingOpen, let resolved = resolve(target) { show(target, resolved) }
     }
 
     /// The simulators the open app's agents are using, over its conversations.
@@ -477,7 +504,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// what is mounted. Anything else first goes back to zero, off screen.
     private var appTarget: CGFloat { route.app != nil && route.app == selectedID ? 1 : 0 }
     private var threadTarget: CGFloat {
-        appTarget == 1 && route.thread != nil && route.thread == threadKey && thread != nil ? 1 : 0
+        appTarget == 1 && route.thread != nil && route.thread == mountedThread?.key ? 1 : 0
     }
 
     func openApp(_ id: String) {
@@ -498,7 +525,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     func openThread(_ sessionID: String?) {
         guard presentedViewController == nil, let app = selectedID, route.app == app else { return }
         Theme.openHaptic()
-        route = .thread(app: app, thread: sessionID ?? "draft:" + UUID().uuidString)
+        route = .thread(app: app, sessionID.map(ThreadDestination.existing) ?? .draft(UUID()))
         sync()
     }
 
@@ -510,40 +537,71 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     /// A tapped notification or Live Activity: its app, then its thread or
-    /// build. Whatever was presented gives way.
+    /// build. Whatever was presented gives way. A target the apps and
+    /// builds on hand don't explain waits while the Mac is asked again, and
+    /// is dropped only once the Mac's answer doesn't have it either.
     func open(_ target: PushTarget) {
-        let id = target.project.flatMap { p in projects.contains { $0.id == p } ? p : nil }
-            ?? target.bundle.flatMap { b in projects.first { $0.bundleID == b }?.id }
-        guard let id, let project = projects.first(where: { $0.id == id }) else {
-            pendingTarget = projects.isEmpty ? target : nil
-            return
+        if let resolved = resolve(target) { show(target, resolved); return }
+        pendingOpen = .lookingUp(target)
+        Task { [weak self] in
+            guard let self else { return }
+            let failure = await model.refreshMetadata(fresh: true)
+            guard case .lookingUp(let current)? = pendingOpen, current == target else { return }
+            if let resolved = resolve(target) { show(target, resolved) }
+            else if failure == nil, model.connected, !projects.isEmpty { pendingOpen = nil; showMissing(target) }
+            else { pendingOpen = .waiting(target) }
         }
-        pendingTarget = nil
+    }
+
+    /// The app a target names, and its build when it names one, from what
+    /// the phone has now; nil until both are known.
+    private func resolve(_ target: PushTarget) -> (project: AppProject, build: AppBuild?)? {
+        var build: AppBuild?
+        if let id = target.build {
+            guard let found = model.builds.first(where: { $0.id.lowercased() == id.lowercased() }) else { return nil }
+            build = found
+        }
+        let named: AppProject? = switch target.appRef {
+        case .project(let id)?: projects.first { $0.id == id }
+        case .bundle(let id)?: projects.first { $0.bundleID == id }
+        case .catalog(let id)?: projects.first { $0.metadataID == id }
+        case nil: nil
+        }
+        // A failed build names only itself: its request says whose it is.
+        let owner = named ?? build.flatMap { build in
+            projects.first { $0.buildRequest != nil && $0.buildRequest?.key == build.request?.key }
+                ?? build.bundleID.flatMap { bundle in projects.first { $0.bundleID == bundle } }
+        }
+        guard let owner else { return nil }
+        return (owner, build)
+    }
+
+    private func show(_ target: PushTarget, _ resolved: (project: AppProject, build: AppBuild?)) {
+        pendingOpen = nil
         if presentedViewController != nil { dismiss(animated: false) }
         view.endEditing(true)
-        if let thread = target.thread, thread != model.agentThreadID(for: project) {
-            route = .thread(app: id, thread: thread)
+        let id = resolved.project.id
+        if let thread = target.thread, thread != model.agentThreadID(for: resolved.project) {
+            route = .thread(app: id, .existing(thread))
         } else {
             route = .app(id)
         }
         sync()
-        guard let buildID = target.build else { return }
-        Task { [weak self] in
-            // Builds may still be on their way from the Mac.
-            for _ in 0..<20 {
-                guard let self else { return }
-                if let build = model.builds.first(where: { $0.id == buildID }) {
-                    guard presentedViewController == nil else { return }
-                    let navigation = UINavigationController(rootViewController: BuildDetailViewController(model: model, build: build))
-                    navigation.modalPresentationStyle = .pageSheet
-                    navigation.sheetPresentationController?.detents = [.large()]
-                    navigation.sheetPresentationController?.prefersGrabberVisible = true
-                    present(navigation, animated: true)
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(250))
-            }
-        }
+        guard let build = resolved.build else { return }
+        let navigation = UINavigationController(rootViewController: BuildDetailViewController(model: model, build: build))
+        navigation.modalPresentationStyle = .pageSheet
+        navigation.sheetPresentationController?.detents = [.large()]
+        navigation.sheetPresentationController?.prefersGrabberVisible = true
+        present(navigation, animated: true)
+    }
+
+    /// The Mac answered and doesn't have what the notification named.
+    private func showMissing(_ target: PushTarget) {
+        guard presentedViewController == nil else { return }
+        let alert = UIAlertController(title: target.build != nil ? "Build not found" : "App not found",
+                                      message: "It’s no longer on your Mac.", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 
     /// Makes what is mounted and where the springs head agree with the route.
@@ -558,7 +616,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             onViewing?(route == .grid ? nil : route.thread != nil ? thread?.currentSessionID : agent?.currentSessionID)
         }
         // The thread level only exists inside its app; it leaves first.
-        if spring.value <= 0.001, threadKey != nil, route.thread != threadKey || route.app != selectedID {
+        if spring.value <= 0.001, let mounted = mountedThread, route.thread != mounted.key || route.app != selectedID {
             unmountThread()
         }
         if appSpring.value <= 0.001, let app = route.app, app != selectedID {
@@ -566,7 +624,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             unmountAgent()
             mountApp(app)
         }
-        if spring.value <= 0.001, thread == nil, let key = route.thread, route.app == selectedID {
+        if spring.value <= 0.001, mountedThread == nil, let key = route.thread, route.app == selectedID {
             mountThread(key)
         }
         for (driver, target) in [(appSpring, appTarget), (spring, threadTarget)] where driver !== dragging {
@@ -589,7 +647,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private func mountApp(_ id: String) {
         guard let project = projects.first(where: { $0.id == id }) else { return }
-        selectedID = id
         model.selectProject(project)
         let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
@@ -597,13 +654,13 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         host(controller, in: agentHost)
         controller.onBack = { [weak self] in self?.closeApp() }
-        agent = controller
+        mountedApp = Mounted(key: id, controller: controller)
     }
 
     private func unmountAgent() {
-        guard let controller = agent else { return }
-        agent = nil
-        dismount(controller)
+        guard let mounted = mountedApp else { return }
+        mountedApp = nil
+        dismount(mounted.controller)
     }
 
     /// Adds a conversation as an opaque page that covers what is beneath it
@@ -632,21 +689,19 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         controller.removeFromParent()
     }
 
-    private func mountThread(_ key: String) {
+    private func mountThread(_ key: ThreadDestination) {
         guard let project = selectedProject else { return }
         agent?.deactivate()
-        let controller = ThreadViewController(model: model, project: project, sessionID: key.hasPrefix("draft:") ? nil : key)
+        let controller = ThreadViewController(model: model, project: project, sessionID: key.threadID)
         controller.onBack = { [weak self] in self?.closeThread() }
         host(controller, in: threadHost)
-        thread = controller
-        threadKey = key
+        mountedThread = Mounted(key: key, controller: controller)
     }
 
     private func unmountThread() {
-        guard let controller = thread else { return }
-        thread = nil
-        threadKey = nil
-        dismount(controller)
+        guard let mounted = mountedThread else { return }
+        mountedThread = nil
+        dismount(mounted.controller)
         agent?.reactivate()
     }
 

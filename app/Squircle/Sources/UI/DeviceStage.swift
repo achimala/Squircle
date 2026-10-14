@@ -18,16 +18,7 @@ struct PhonePose: Equatable {
     var pitch: CGFloat = 0
     var roll: CGFloat = 0
     var shadow: CGFloat = 1
-    var visible = true
     var opacity: CGFloat = 1
-
-    static func interpolate(_ a: PhonePose, _ b: PhonePose, _ t: CGFloat) -> PhonePose {
-        PhonePose(center: CGPoint(x: .lerp(a.center.x, b.center.x, t), y: .lerp(a.center.y, b.center.y, t)),
-                  height: .lerp(a.height, b.height, t), depth: .lerp(a.depth, b.depth, t),
-                  yaw: .lerp(a.yaw, b.yaw, t), pitch: .lerp(a.pitch, b.pitch, t), roll: .lerp(a.roll, b.roll, t),
-                  shadow: .lerp(a.shadow, b.shadow, t), visible: a.visible || b.visible,
-                  opacity: .lerp(a.opacity, b.opacity, t))
-    }
 
     /// Device outline aspect (width / height) of the modeled hardware.
     static let aspect: CGFloat = 3.55 / 7.42
