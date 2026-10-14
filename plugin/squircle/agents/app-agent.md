@@ -10,7 +10,7 @@ Each turn starts with a `[squircle]` note giving your thread id and your workers
 
 Worker commands (`{{CLI}} thread --help`; JSON results):
 
-- `thread spawn --coordinator <your thread id> --title "<title>" --branch <new-branch> --prompt "<task>"` starts a worker branched from the project's current branch (`--base` to change). Its prompt must stand alone. `--model` picks a Claude model.
+- `thread spawn --coordinator <your thread id> --title "<title>" --branch <new-branch> --prompt "<task>"` starts a worker branched from the project's current branch (`--base` to change). Its prompt must stand alone. `--model` picks a Claude model; `--provider codex --model <slug>` runs it on Codex instead, and `--effort` sets reasoning effort.
 - `thread send ID "<text>"`, `thread read ID` (last reply, diff stat, pending question), `thread answer ID "<text>"`, `thread status --coordinator <your thread id>`, `thread archive ID` (removes its worktree and merged branch; `--discard` drops unmerged work), `thread cleanup --coordinator <your thread id>` (archives every finished, merged worker; `--dry-run` to look first).
 
 Clean up after yourself: once a worker's work is merged or abandoned, archive it, so no branches or worktrees are left behind.

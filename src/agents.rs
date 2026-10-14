@@ -73,6 +73,38 @@ pub struct Registry {
 }
 
 /// What a worker is doing, from T3's shell row.
+/// A worker's T3 model selection, checked against the providers T3 reports
+/// ready. Claude by default, on the app agent's model; another provider
+/// defaults to its own default model. Squircle's own instance carries the
+/// app-agent plugin, so it is not offered to workers.
+fn worker_selection(config: &Value, provider: Option<&str>, model: Option<&str>, effort: Option<&str>, agent_model: Option<&str>) -> Result<Value> {
+    let ready: Vec<&Value> = config["providers"].as_array().into_iter().flatten()
+        .filter(|p| p["status"] == "ready" && p["enabled"] != false && p["instanceId"] != INSTANCE)
+        .collect();
+    let names = |items: Vec<&str>| items.join(", ");
+    let instance = provider.unwrap_or("claudeAgent");
+    let provider = ready.iter().find(|p| p["instanceId"] == instance).with_context(|| format!(
+        "T3 has no ready provider \"{instance}\". Ready: {}", names(ready.iter().filter_map(|p| p["instanceId"].as_str()).collect())))?;
+    let models: Vec<&Value> = provider["models"].as_array().into_iter().flatten().collect();
+    let model = model.map(str::to_string).or_else(|| match instance {
+        "claudeAgent" => Some(agent_model.unwrap_or(DEFAULT_MODEL).to_string()),
+        _ => models.iter().find(|m| m["isDefault"] == true).or(models.first()).and_then(|m| m["slug"].as_str()).map(str::to_string),
+    }).with_context(|| format!("T3 lists no models for \"{instance}\""))?;
+    let entry = models.iter().find(|m| m["slug"] == model.as_str()).with_context(|| format!(
+        "\"{instance}\" has no model \"{model}\". Models: {}", names(models.iter().filter_map(|m| m["slug"].as_str()).collect())))?;
+    let mut selection = json!({"instanceId": instance, "model": model});
+    if let Some(effort) = effort {
+        // Claude calls it "effort", Codex "reasoningEffort".
+        let option = entry["capabilities"]["optionDescriptors"].as_array().into_iter().flatten()
+            .find(|o| o["type"] == "select" && matches!(o["id"].as_str(), Some("effort" | "reasoningEffort")))
+            .with_context(|| format!("{model} has no reasoning effort setting"))?;
+        let levels: Vec<&str> = option["options"].as_array().into_iter().flatten().filter_map(|o| o["id"].as_str()).collect();
+        ensure!(levels.contains(&effort), "{model} has no effort \"{effort}\". Levels: {}", names(levels));
+        selection["options"] = json!([{"id": option["id"], "value": effort}]);
+    }
+    Ok(selection)
+}
+
 pub fn worker_state(thread: &Value) -> &'static str {
     if thread["hasPendingApprovals"] == true || thread["hasPendingUserInput"] == true {
         "needs-you"
@@ -706,7 +738,9 @@ impl Agents {
             }).collect()
     }
 
-    pub async fn spawn(&self, coordinator: &str, title: &str, branch: &str, base: Option<&str>, prompt: &str, model: Option<&str>) -> Result<Value> {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn(&self, coordinator: &str, title: &str, branch: &str, base: Option<&str>, prompt: &str,
+                       provider: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Result<Value> {
         let client = self.ready().await?;
         let agent = self.agent_for_thread(coordinator)
             .with_context(|| format!("{coordinator} is not an app agent's thread"))?;
@@ -714,10 +748,10 @@ impl Agents {
         ensure!(!branch.is_empty() && !branch.contains(char::is_whitespace) && !branch.contains(".."), "Invalid branch name");
         let project = self.shell.lock().unwrap().projects.get(&agent.project_id).cloned().context("The app's T3 project is gone")?;
         let coordinator_thread = self.thread(coordinator).context("The app agent's thread is gone")?;
-        let model = model.map(str::to_string)
-            .or_else(|| coordinator_thread["modelSelection"]["model"].as_str().map(str::to_string))
-            .unwrap_or_else(|| DEFAULT_MODEL.into());
-        let selection = json!({"instanceId": "claudeAgent", "model": model});
+        let config = client.call("server.getConfig", json!({})).await?;
+        let selection = worker_selection(&config, provider, model, effort,
+                                         coordinator_thread["modelSelection"]["model"].as_str())?;
+        let (instance, model) = (selection["instanceId"].clone(), selection["model"].clone());
         let checkout = PathBuf::from(project["workspaceRoot"].as_str().context("The project has no folder")?);
         let current = git(&checkout, &["symbolic-ref", "--short", "HEAD"]).await.unwrap_or_else(|_| "HEAD".into());
         let base = base.unwrap_or(&current);
@@ -751,7 +785,7 @@ impl Agents {
             });
             self.save(&registry)?;
         }
-        Ok(json!({"id": id, "title": title, "branch": branch, "base": base, "model": model,
+        Ok(json!({"id": id, "title": title, "branch": branch, "base": base, "provider": instance, "model": model, "effort": effort,
                   "next": "The worker is running. End your turn; a [worker update] arrives when it finishes."}))
     }
 
