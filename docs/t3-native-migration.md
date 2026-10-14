@@ -1785,3 +1785,41 @@ expanded the second picture, shrank it into the deck, fanned and gathered;
 screenshots at ~2.5 per second showed each step moving continuously, no
 jumps. Not verified: real finger taps (T3's agent-device daemon was not
 running), the phone.
+
+## 2026-10-14 Squircle actions in the conversation (0.3.0 52)
+
+User: what the agent does through Squircle (starting workers, messages
+between threads, builds, simulators) showed only sometimes; messages agents
+send each other looked like the user's own.
+
+- **Why steps went missing:** T3 0.0.45 sends a client only a thread's newest
+  500 activities (`THREAD_DETAIL_ACTIVITY_LIMIT`), and in an app agent's
+  thread about a third of those are `context-window.updated`, so whole turns
+  lost all their steps. The service's step details
+  (`/v1/t3/threads/ID/steps`) now also carry each tool call's start time,
+  turn, finished/failed and, for Squircle commands, their output; the app
+  rebuilds every tool call T3 no longer sends. They also list every worker
+  Squircle started (archived too) for names.
+- **Lines:** the app reads Squircle commands from the Bash command line
+  (quotes, heredocs, `S()` wrappers and `$S` variables; `SquircleAction`)
+  and their output. Started worker (its live state: working, done, needs
+  you, error), Sent to / Answered (tap for the whole message), Read, Archived,
+  Cleaned up, Started build (with its build card), Started/Stopped simulator,
+  Restarted, Started fresh, and Squircle's wake-ups as one "From <worker>"
+  line per worker each stay in view when the turn folds. Lookups (status,
+  help, build status) and commands Squircle refused fold with the other steps.
+  Tapping a worker's line opens its thread (not once it is archived).
+- **Who wrote a message:** the service marks what it sends for an agent with
+  a context record: `squircle-task` (a worker's prompt), `squircle-agent-message`
+  (`thread send`), both with `payload.from` the sending agent's thread, next to
+  the existing `squircle-worker-update` and `squircle-handoff`. Only unmarked
+  user messages get the user's bubble. A worker's task shows at the top as
+  "Task from <agent>" over a thin rule, Markdown, without the instructions
+  Squircle appends (cut at the `---` line starting "You are a worker for this
+  app's agent", which also identifies tasks sent before the marks); messages
+  read "From <agent>". Messages sent before the marks still look like yours.
+
+Verified in the simulator against the coordinator thread with a scratch copy
+of the service: turns that showed nothing now show their steps and lines, and
+a worker's thread opens with its task. Not yet on the phone; the service must
+be restarted for the step history and the marks.

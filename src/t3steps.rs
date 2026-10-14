@@ -89,6 +89,8 @@ fn trim_input(input: &Value) -> Value {
             out.insert(
                 key.clone(),
                 match value {
+                    // A command carries the whole message a worker was sent.
+                    Value::String(text) if key == "command" => cap(text, 20_000),
                     Value::String(text) => cap(text, 2_000),
                     other => other.clone(),
                 },
@@ -145,6 +147,10 @@ fn describe(tool: &str, input: &Value) -> Option<String> {
 
 /// One entry per tool call that has an input or returned images, keyed by
 /// T3's `toolCallId`. `since` (an ISO timestamp) limits to newer activity.
+/// Each also says when it started, its turn and whether it finished or
+/// failed: T3 sends a client only a thread's newest 500 activities, so the
+/// app rebuilds older steps from these. A Squircle command keeps its output,
+/// which names the worker or build it made.
 pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
     if !valid(thread, &[]) {
         bail!("invalid thread id");
@@ -157,7 +163,10 @@ pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
                 json_extract(payload_json,'$.data.input') as input,
                 (select count(*) from json_each({CONTENT})
                    where {IS_IMAGE}) as images,
-                created_at
+                created_at, turn_id, kind, tone,
+                json_extract(payload_json,'$.status') as status,
+                case when instr(json_extract(payload_json,'$.data.input.command'),'squircle') > 0
+                     then substr(json_extract(payload_json,'$.data.result.content'),1,4000) end as result
          from projection_thread_activities
          where thread_id='{thread}' and kind in ('tool.started','tool.updated','tool.completed') {since}
            and (json_extract(payload_json,'$.data.input') is not null or images > 0)
@@ -188,7 +197,19 @@ pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
             entry.insert("images".into(), json!(images));
         }
         if let Some(at) = row["created_at"].as_str() {
+            entry.entry("started_at").or_insert_with(|| json!(at));
             entry.insert("updated_at".into(), json!(at));
+        }
+        if let Some(turn) = row["turn_id"].as_str() {
+            entry.insert("turn_id".into(), json!(turn));
+        }
+        let kind = row["kind"].as_str().unwrap_or_default();
+        if kind == "tool.completed" || row["status"] == "completed" || row["status"] == "failed" {
+            let failed = row["tone"] == "error" || row["status"] == "failed";
+            entry.insert("finished".into(), json!(if failed { "failed" } else { "completed" }));
+        }
+        if let Some(result) = row["result"].as_str().filter(|r| !r.is_empty()) {
+            entry.insert("result".into(), json!(result));
         }
     }
     let list: Vec<Value> = order

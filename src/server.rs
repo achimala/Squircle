@@ -812,9 +812,12 @@ async fn t3_steps(
     Query(query): Query<StepsQuery>,
 ) -> ApiResult<Json<Value>> {
     auth(&state, &headers, false)?;
-    let steps = crate::t3steps::steps(&thread, query.since.as_deref())
+    let mut steps = crate::t3steps::steps(&thread, query.since.as_deref())
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?;
+    if let Ok(agents) = agents(&state) {
+        steps["workers"] = json!(agents.all_workers());
+    }
     Ok(Json(success(steps)))
 }
 
@@ -1943,7 +1946,7 @@ async fn message_worker(
     if text.trim().is_empty() {
         return Err(ApiError::bad("Message text is empty"));
     }
-    agents(&state)?.send(&id, &text).await.map_err(agent_error)?;
+    agents(&state)?.message(&id, &text).await.map_err(agent_error)?;
     Ok(Json(success(json!({"sent": id}))))
 }
 

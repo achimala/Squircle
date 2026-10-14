@@ -73,7 +73,14 @@ pub struct Registry {
     pub workers: BTreeMap<String, Worker>,
 }
 
-/// What a worker is doing, from T3's shell row.
+/// Marks a message Squircle sends for an agent (`squircle-task`: a worker's
+/// prompt; `squircle-agent-message`: `thread send`), with the agent's thread.
+/// The app shows only unmarked user messages as the user's own.
+fn agent_message(kind: &str, from: Option<&str>) -> Value {
+    json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Agent message",
+           "kind": kind, "payload": {"from": from}})
+}
+
 /// A worker's T3 model selection, checked against the providers T3 reports
 /// ready. Claude by default, on the app agent's model; another provider
 /// defaults to its own default model. Squircle's own instance carries the
@@ -128,6 +135,7 @@ impl crate::push::Threads for Agents {
     }
 }
 
+/// What a worker is doing, from T3's shell row.
 pub fn worker_state(thread: &Value) -> &'static str {
     if thread["hasPendingApprovals"] == true || thread["hasPendingUserInput"] == true {
         "needs-you"
@@ -826,6 +834,17 @@ impl Agents {
             }).collect()
     }
 
+    /// Every worker Squircle started, archived ones too, so a conversation
+    /// can name the workers its agent talked to.
+    pub fn all_workers(&self) -> Vec<Value> {
+        let registry = self.registry.lock().unwrap();
+        let shell = self.shell.lock().unwrap();
+        registry.workers.iter().map(|(id, w)| {
+            let state = if w.archived { "archived" } else { shell.threads.get(id).map_or("missing", worker_state) };
+            json!({"id": id, "title": w.title, "branch": w.branch, "state": state})
+        }).collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn(&self, coordinator: &str, title: &str, branch: &str, base: Option<&str>, prompt: &str,
                        provider: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Result<Value> {
@@ -856,7 +875,8 @@ impl Agents {
         let now = crate::t3::iso_now();
         client.dispatch(json!({
             "type": "thread.turn.start", "threadId": id,
-            "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": []},
+            "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": [],
+                        "context": {"version": 1, "records": [agent_message("squircle-task", Some(coordinator))]}},
             "modelSelection": selection, "runtimeMode": "full-access", "interactionMode": "default",
             "bootstrap": {
                 "createThread": {"projectId": agent.project_id, "title": title, "modelSelection": selection,
@@ -889,11 +909,26 @@ impl Agents {
     }
 
     pub async fn send(&self, thread_id: &str, text: &str) -> Result<()> {
+        self.send_with(thread_id, text, None).await
+    }
+
+    /// `squircle thread send`: a message from an agent, marked as one so the
+    /// app never shows it as something the user typed.
+    pub async fn message(&self, thread_id: &str, text: &str) -> Result<()> {
+        let from = self.registry.lock().unwrap().workers.get(thread_id).map(|w| w.coordinator.clone());
+        self.send_with(thread_id, text, Some(agent_message("squircle-agent-message", from.as_deref()))).await
+    }
+
+    async fn send_with(&self, thread_id: &str, text: &str, record: Option<Value>) -> Result<()> {
         let client = self.ready().await?;
         let thread = self.wait_thread(thread_id).await?;
+        let mut message = json!({"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": []});
+        if let Some(record) = record {
+            message["context"] = json!({"version": 1, "records": [record]});
+        }
         client.dispatch(json!({
             "type": "thread.turn.start", "threadId": thread_id,
-            "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": []},
+            "message": message,
             "runtimeMode": thread["runtimeMode"].as_str().unwrap_or("full-access"),
             "interactionMode": thread["interactionMode"].as_str().unwrap_or("default"),
         })).await?;

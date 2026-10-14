@@ -45,8 +45,42 @@ struct ChatMessage: Identifiable, Equatable {
     var isUpdate = false
     /// The worker threads an update is about.
     var threadIDs: [String] = []
+    /// What each worker in an update did.
+    var news: [WorkerNews] = []
+    /// Set when an agent, not the person, wrote this user message: a
+    /// worker's task or a `squircle thread send`.
+    var agent: AgentAuthor?
     /// T3's IDs for the images sent with a message of yours.
     var attachments: [String] = []
+}
+
+/// A worker's state as Squircle reports it.
+enum WorkerState: String, Equatable {
+    case working, done, needsYou = "needs-you", error, archived
+    var word: String {
+        switch self {
+        case .working: return "working"
+        case .done: return "done"
+        case .needsYou: return "needs you"
+        case .error: return "error"
+        case .archived: return "archived"
+        }
+    }
+}
+
+/// One worker in Squircle's wake-up message to an app agent.
+struct WorkerNews: Equatable {
+    let id: String
+    let title: String
+    let state: WorkerState
+}
+
+/// A user message Squircle sent for an agent, marked by the service.
+struct AgentAuthor: Equatable {
+    enum Kind: Equatable { case task, message }
+    let kind: Kind
+    /// The agent's thread.
+    let from: String?
 }
 
 /// A screen or performance recording a message links to.

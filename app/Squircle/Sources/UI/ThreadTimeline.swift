@@ -46,6 +46,32 @@ struct LiveStatus: Equatable {
     let started: Date?
 }
 
+/// A Squircle action or a worker's news, on a line of its own that stays
+/// out of the turn's fold. The conversation fills in the worker's name and
+/// live state.
+struct ActionLine: Equatable {
+    enum Kind: Equatable {
+        case action(SquircleAction)
+        /// A worker finished, stopped or needs you.
+        case news(WorkerState)
+    }
+    let id: String
+    let kind: Kind
+    var thread: String?
+    /// The worker's title as the agent or Squircle named it.
+    var title: String?
+    var running = false
+    var failed = false
+    /// Resolved by the conversation.
+    var name: String?
+    var state: WorkerState?
+
+    var text: String? {
+        if case .action(let action) = kind, [.send, .answer].contains(action.kind) { return action.text }
+        return nil
+    }
+}
+
 /// One row of a conversation. A turn is your message, the agent's work and
 /// its answer. Work in progress shows its latest note and newest steps; a
 /// finished turn folds its work into a summary line, keeping screenshots.
@@ -55,6 +81,9 @@ enum ThreadItem: Equatable {
     case user(ChatMessage)
     /// Squircle telling an app agent that workers finished: a quiet line.
     case update(ChatMessage)
+    /// What an agent sent this thread: a worker's task or a message.
+    case agentMessage(ChatMessage)
+    case action(ActionLine)
     case answer(ChatMessage)
     case note(ChatMessage)
     case thought(ChatMessage)
@@ -76,7 +105,8 @@ enum ThreadItem: Equatable {
     var id: String {
         switch self {
         case .header: return "header"
-        case .user(let message), .update(let message), .answer(let message): return message.id
+        case .user(let message), .update(let message), .answer(let message), .agentMessage(let message): return message.id
+        case .action(let line): return line.id
         case .note(let message): return "note:" + message.id
         case .thought(let message): return message.id
         case .step(let message, _, _): return message.id
@@ -113,8 +143,12 @@ enum ThreadItem: Equatable {
         for (index, turn) in turns.enumerated() {
             let live = running && index == turns.count - 1
             let id = turn.user?.id ?? "start"
-            if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                items.append(user.isUpdate ? .update(user) : .user(user))
+            if let user = turn.user, !user.news.isEmpty {
+                items += user.news.enumerated().map { index, news in
+                    .action(ActionLine(id: "\(user.id)#\(index)", kind: .news(news.state), thread: news.id, title: news.title))
+                }
+            } else if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                items.append(user.isUpdate ? .update(user) : user.agent != nil ? .agentMessage(user) : .user(user))
             }
             if let user = turn.user, !user.attachments.isEmpty || user.captures.contains(where: \.isVideo) {
                 let images = user.attachments.enumerated().map {
@@ -145,7 +179,8 @@ enum ThreadItem: Equatable {
             } else if !steps.isEmpty {
                 let open = expanded.contains(id)
                 items.append(.summary(summary(turn: id, user: turn.user, work: work, answer: answer, expanded: open)))
-                items += open ? allRows(work) : gallery("gallery:" + id, work)
+                // Squircle actions stay in view when the work folds.
+                items += open ? allRows(work) : gallery("gallery:" + id, work) + steps.flatMap(actionRows)
             }
             items += (used[index] ?? []).map { .simulator($0) }
             if let answer { items += withMedia(answer, ThreadItem.answer) }
@@ -172,7 +207,8 @@ enum ThreadItem: Equatable {
         if let last = work.last, last.role == "tool", last.isStreaming { work.removeLast() }
         let noteIndex = work.lastIndex { $0.role == "assistant" }
         let afterNote = work.indices.filter { $0 > (noteIndex ?? -1) && work[$0].role == "tool" }
-        let shown = Set(afterNote.suffix(liveWindow))
+        // Squircle actions always show, wherever they fall.
+        let shown = Set(afterNote.suffix(liveWindow)).union(work.indices.filter { !actionRows(work[$0]).isEmpty })
         let folded = work.indices.filter { work[$0].role == "tool" && !shown.contains($0) }.count
         var rows: [ThreadItem] = folded > 0 ? [.earlier(turn: turn, count: folded)] : []
         rows += gallery("gallery:earlier:" + turn, work.indices.filter { work[$0].role == "tool" && !shown.contains($0) }.map { work[$0] })
@@ -182,6 +218,15 @@ enum ThreadItem: Equatable {
             if message.role == "tool", shown.contains(index) { visible.append(message) }
         }
         return rows + stepRows(visible)
+    }
+
+    /// A step's Squircle actions that change something, one line each.
+    static func actionRows(_ step: ChatMessage) -> [ThreadItem] {
+        guard let actions = step.step?.actions else { return [] }
+        return actions.enumerated().filter { $0.element.visible }.map { index, action in
+            .action(ActionLine(id: "action:\(step.id)#\(index)", kind: .action(action), thread: action.thread, title: action.title,
+                               running: step.isStreaming, failed: step.failed))
+        }
     }
 
     private static func allRows(_ work: [ChatMessage]) -> [ThreadItem] {
@@ -222,10 +267,21 @@ enum ThreadItem: Equatable {
     /// A run of steps shares one rail; screenshots sit beneath their step.
     private static func stepRows(_ run: [ChatMessage]) -> [ThreadItem] {
         var rows: [ThreadItem] = []
-        for (index, step) in run.enumerated() {
-            rows.append(.step(step, first: index == 0, last: index == run.count - 1))
-            rows += gallery("gallery:" + step.id, [step])
+        var rail: [ChatMessage] = []
+        func flush() {
+            for (index, step) in rail.enumerated() {
+                rows.append(.step(step, first: index == 0, last: index == rail.count - 1))
+                rows += gallery("gallery:" + step.id, [step])
+            }
+            rail = []
         }
+        for step in run {
+            let actions = actionRows(step)
+            if actions.isEmpty { rail.append(step); continue }
+            flush()
+            rows += actions
+        }
+        flush()
         return rows
     }
 
@@ -243,7 +299,7 @@ enum ThreadItem: Equatable {
         let known = Dictionary(builds.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
         var seen = Set<String>(), found: [AppBuild] = []
         for message in messages {
-            let text = message.content + "\n" + message.detail
+            let text = message.content + "\n" + message.detail + "\n" + (message.step?.actions.compactMap(\.build).joined(separator: " ") ?? "")
             var range = text.startIndex..<text.endIndex
             while let match = text.range(of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
                                           options: .regularExpression, range: range) {

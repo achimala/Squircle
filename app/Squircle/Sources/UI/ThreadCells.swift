@@ -117,9 +117,11 @@ final class HeaderCell: TimelineCell {
 /// Text a person or the agent wrote. Yours sits in a bubble at the trailing
 /// edge; the answer fills the column; notes and thoughts are quieter.
 final class MessageCell: TimelineCell {
-    enum Style { case user, answer, note, thought, update }
+    enum Style { case user, answer, note, thought, update, action, agent }
     /// Your words sit in lightly tinted glass.
     let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
+    /// What an agent sent hangs off a thin rule, like a quotation.
+    private let rule = UIView()
     let text = UITextView()
     private var leading: NSLayoutConstraint!
     private var trailing: NSLayoutConstraint!
@@ -134,7 +136,9 @@ final class MessageCell: TimelineCell {
         text.textContainer.lineFragmentPadding = 0
         text.adjustsFontForContentSizeCategory = true
         text.linkTextAttributes = [.foregroundColor: Theme.accent]
-        [bubble, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
+        rule.backgroundColor = Theme.accent.withAlphaComponent(0.45)
+        rule.layer.cornerRadius = 1
+        [bubble, rule, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         leading = text.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20)
         trailing = text.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
         minimumLeading = text.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 76)
@@ -146,7 +150,11 @@ final class MessageCell: TimelineCell {
             bubble.topAnchor.constraint(equalTo: text.topAnchor),
             bubble.bottomAnchor.constraint(equalTo: text.bottomAnchor),
             bubble.leadingAnchor.constraint(equalTo: text.leadingAnchor, constant: -15),
-            bubble.trailingAnchor.constraint(equalTo: text.trailingAnchor, constant: 15)
+            bubble.trailingAnchor.constraint(equalTo: text.trailingAnchor, constant: 15),
+            rule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+            rule.widthAnchor.constraint(equalToConstant: 2),
+            rule.topAnchor.constraint(equalTo: text.topAnchor, constant: 2),
+            rule.bottomAnchor.constraint(equalTo: text.bottomAnchor, constant: -2)
         ])
     }
 
@@ -154,17 +162,19 @@ final class MessageCell: TimelineCell {
         let user = style == .user
         text.attributedText = rendered
         text.textContainerInset = user ? UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0) : .zero
-        // Reasoning reads in full; long notes fold until tapped.
-        let folded = style == .note && !expanded
-        text.textContainer.maximumNumberOfLines = folded ? 4 : 0
+        // Reasoning reads in full; long notes and agents' messages fold until tapped.
+        let folded = [.note, .action, .agent].contains(style) && !expanded
+        text.textContainer.maximumNumberOfLines = folded ? [.action: 2, .agent: 9][style] ?? 4 : 0
         text.textContainer.lineBreakMode = folded ? .byTruncatingTail : .byWordWrapping
         // Selecting text matters for answers; quieter rows are tapped to unfold.
         text.isUserInteractionEnabled = style == .answer || style == .user
         bubble.isHidden = !user
+        rule.isHidden = style != .agent
         leading.isActive = !user
+        leading.constant = style == .agent ? 34 : 20
         minimumLeading.isActive = user
         trailing.constant = user ? -35 : -20
-        top.constant = user || style == .update ? 14 : style == .answer ? 10 : 6
+        top.constant = user || style == .update || style == .agent ? 14 : style == .answer ? 10 : 6
         accessibilityIdentifier = "thread.message.\(message.role)"
     }
 }

@@ -4,7 +4,7 @@ import Foundation
 /// tool input T3 already records (a command's own description, an edit's old
 /// and new text, a screenshot's pixels), never from guesses about its output.
 struct AgentStep: Equatable {
-    enum Kind: String { case command, read, edit, search, web, agent, device, plan, other }
+    enum Kind: String { case command, read, edit, search, web, agent, device, plan, squircle, other }
     var kind: Kind
     var title: String
     var symbol: String
@@ -15,10 +15,12 @@ struct AgentStep: Equatable {
     var diff: StepDiff?
     /// Tool calls that are pure bookkeeping for the agent.
     var hidden = false
+    /// Squircle commands the step ran.
+    var actions: [SquircleAction] = []
 
     /// How much a description says: a written sentence beats a raw command,
     /// and an edit with its text beats one without.
-    var richness: Int { (literal ? 0 : 1) + (diff != nil ? 2 : 0) + (title.count > 8 ? 1 : 0) }
+    var richness: Int { (literal ? 0 : 1) + (diff != nil ? 2 : 0) + (title.count > 8 ? 1 : 0) + (actions.isEmpty ? 0 : 4) }
 
     /// Identity-free description for one activity payload.
     static func describe(_ activity: JSONValue) -> AgentStep {
@@ -39,6 +41,11 @@ struct AgentStep: Equatable {
         switch name {
         case "Bash", "BashOutput":
             let command = args["command"].string ?? data["command"].string ?? ""
+            let actions = SquircleAction.parse(command: command, result: data["squircleResult"].string)
+            if let first = actions.first(where: \.visible) ?? actions.first {
+                return AgentStep(kind: .squircle, title: first.sentence(worker: nil) + (first.refused ? " · refused" : ""),
+                                 symbol: first.symbol, actions: actions)
+            }
             if let description = args["description"].string, !description.isEmpty {
                 return AgentStep(kind: .command, title: sentence(description), symbol: "terminal")
             }
