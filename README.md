@@ -171,6 +171,7 @@ See the evidence page for the scope of rendered transition checks.
 | What owns each part? | [Architecture](docs/architecture.md) |
 | How do agents build and deliver apps? | [CLI design](docs/cli.md) |
 | How does cellular installation work? | [Remote iOS workflow](docs/remote-ios.md) |
+| How could the phone record a performance trace for the agent? (proposal) | [Performance capture](docs/perf-capture.md) |
 | What was verified before the T3 replacement? | [Historical validation](docs/validation.md) |
 
 Start with [AGENTS.md](AGENTS.md). Historical Hermes validation describes earlier
