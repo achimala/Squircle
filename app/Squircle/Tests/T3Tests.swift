@@ -75,6 +75,22 @@ final class T3Tests: XCTestCase {
             XCTAssertThrowsError(try framer.consume(header) { _,_ in XCTFail("Invalid envelope delivered") })
         }
     }
+    /// A 50 fps feed delivered in bunches (a relayed link) plays evenly,
+    /// never backwards, and no further behind arrival than the cap.
+    func testPacerSpreadsBunchedArrivalsEvenly() {
+        var pacer = SimulatorPacer()
+        var arrivals = (0..<200).map { Double($0) * 0.02 }
+        for i in stride(from: 40, to: 200, by: 25) { for j in i..<(i + 6) { arrivals[j] = arrivals[i + 5] } } // 100 ms stalls
+        let times = arrivals.map { pacer.time(arrival: $0, earliest: $0 + 0.002) }
+        let gaps = zip(times.dropFirst(), times).map { $0 - $1 }
+        XCTAssert(gaps.allSatisfy { $0 > 0 })
+        XCTAssert(zip(times, arrivals).allSatisfy { $0 - $1 <= SimulatorPacer.maximumLead + 0.001 })
+        // Unpaced, each stall shows as a 120 ms hold then five pictures at
+        // once. After the first, the delay covers them.
+        XCTAssertLessThan(gaps.dropFirst(70).max()!, 0.04)
+        XCTAssertGreaterThan(gaps.dropFirst(20).min()!, 0.008)
+    }
+
     func testLetterboxAndRotationMapping() {
         let bounds = CGRect(x:0,y:0,width:400,height:300), size = CGSize(width:200,height:400)
         XCTAssertNil(SimulatorSurface.point(CGPoint(x:10,y:150),bounds:bounds,size:size,orientation:"portrait"))

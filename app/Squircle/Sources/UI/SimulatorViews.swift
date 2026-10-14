@@ -17,12 +17,13 @@ struct SimulatorUse: Equatable {
 }
 
 /// Draws decoded simulator pictures flat, through the system's video layer:
-/// no 3D scene, no per-frame drawing of our own.
+/// no 3D scene, no per-frame drawing of our own. Its renderer runs on the
+/// host clock; a `SimulatorOutput` feeds it pictures with their times.
 @MainActor
 final class SimulatorScreen: UIView {
     override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
     private var display: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
-    private var format: CMVideoFormatDescription?
+    var renderer: AVSampleBufferVideoRenderer { display.sampleBufferRenderer }
     /// Pixel size of the latest picture; zero before the first.
     private(set) var pictureSize: CGSize = .zero
     fileprivate(set) var target: SimulatorTarget?
@@ -34,6 +35,13 @@ final class SimulatorScreen: UIView {
         backgroundColor = UIColor(white: 0.06, alpha: 1)
         isUserInteractionEnabled = false
         accessibilityIgnoresInvertColors = true
+        var timebase: CMTimebase?
+        CMTimebaseCreateWithSourceClock(allocator: nil, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &timebase)
+        if let timebase {
+            CMTimebaseSetTime(timebase, time: CMClockGetTime(CMClockGetHostTimeClock()))
+            CMTimebaseSetRate(timebase, rate: 1)
+            display.controlTimebase = timebase
+        }
     }
 
     @available(*, unavailable)
@@ -42,27 +50,22 @@ final class SimulatorScreen: UIView {
     /// Height over width of what is shown, or a phone's when nothing has arrived.
     var aspect: CGFloat { pictureSize.width > 0 ? pictureSize.height / pictureSize.width : 2.17 }
 
-    func show(_ buffer: CVPixelBuffer) {
-        if format == nil || !CMVideoFormatDescriptionMatchesImageBuffer(format!, imageBuffer: buffer) {
-            var next: CMVideoFormatDescription?
-            CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: buffer, formatDescriptionOut: &next)
-            format = next
+    #if DEBUG
+    private var showings = 0
+    #endif
+
+    /// The size of the picture now shown.
+    func showing(_ buffer: CVPixelBuffer) {
+        #if DEBUG
+        showings += 1
+        if showings % 240 == 0 {
+            let renderer = renderer
+            Task {
+                guard let metrics = await renderer.videoPerformanceMetrics else { return }
+                print("Simulator screen: \(metrics.totalNumberOfFrames) frames, \(metrics.numberOfDroppedFrames) dropped, \(metrics.numberOfCorruptedFrames) corrupted")
+            }
         }
-        guard let format else { return }
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
-                                        decodeTimeStamp: .invalid)
-        var sample: CMSampleBuffer?
-        CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: buffer, formatDescription: format,
-                                                 sampleTiming: &timing, sampleBufferOut: &sample)
-        guard let sample else { return }
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true), CFArrayGetCount(attachments) > 0 {
-            let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-        let renderer = display.sampleBufferRenderer
-        if renderer.status == .failed { renderer.flush() }
-        renderer.enqueue(sample)
+        #endif
         let size = CGSize(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer))
         if size != pictureSize {
             pictureSize = size
@@ -80,8 +83,11 @@ final class SimulatorFeeds {
     private struct Weak { weak var screen: SimulatorScreen? }
     private final class Feed {
         let stream: T3DeviceStream
+        var output: SimulatorOutput { stream.output }
         var screens: [Weak] = []
         var last: CVPixelBuffer?
+        /// Stops the stream once nothing has shown it for a moment.
+        var linger: Task<Void, Never>?
         var orientation = "portrait"
         var lastInput: CGPoint?
         init(stream: T3DeviceStream) { self.stream = stream }
@@ -111,7 +117,7 @@ final class SimulatorFeeds {
         closed = true
         observers.forEach { $0.cancel() }
         observers = []
-        for feed in feeds.values { feed.stream.stop() }
+        for feed in feeds.values { feed.linger?.cancel(); feed.stream.stop() }
         feeds = [:]
     }
 
@@ -124,19 +130,31 @@ final class SimulatorFeeds {
     func attach(_ screen: SimulatorScreen, to target: SimulatorTarget?) {
         guard screen.target != target else { return }
         if let old = screen.target, let feed = feeds[old] {
+            feed.output.remove(screen.renderer)
             feed.screens.removeAll { $0.screen == nil || $0.screen === screen }
             release(old)
         }
         screen.target = target
         guard !closed, let target, let feed = feeds[target] ?? makeFeed(target) else { return }
+        feed.linger?.cancel()
+        feed.linger = nil
         feed.screens.append(Weak(screen: screen))
-        if let last = feed.last { screen.show(last) }
+        feed.output.add(screen.renderer, showing: feed.last)
+        if let last = feed.last { screen.showing(last) }
     }
 
+    /// A stream nobody shows stops after a moment, not at once: a picture
+    /// moving between the PiP and its turn, or a reused cell, would otherwise
+    /// reconnect from scratch (seconds on a cellular link).
     private func release(_ target: SimulatorTarget) {
         guard let feed = feeds[target] else { return }
         feed.screens.removeAll { $0.screen == nil }
-        if feed.screens.isEmpty {
+        guard feed.screens.isEmpty, feed.linger == nil else { return }
+        feed.linger = Task { [weak self, weak feed] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, let self, let feed, feeds[target] === feed else { return }
+            feed.screens.removeAll { $0.screen == nil }
+            guard feed.screens.isEmpty else { feed.linger = nil; return }
             feed.stream.stop()
             feeds[target] = nil
         }
@@ -144,12 +162,13 @@ final class SimulatorFeeds {
 
     private func makeFeed(_ target: SimulatorTarget) -> Feed? {
         guard let http = model.gateway?.http else { return nil }
-        let feed = Feed(stream: T3DeviceStream(http: http, base: model.devices["hubBasePath"].string ?? "/api/device-hub", target: target))
+        let feed = Feed(stream: T3DeviceStream(http: http, base: model.devices["hubBasePath"].string ?? "/api/device-hub",
+                                               target: target, output: SimulatorOutput()))
         feed.stream.onFrame = { [weak self, weak feed, weak stream = feed.stream] buffer in
             // A feed nobody owns any more must not keep its stream running.
             guard let feed else { stream?.stop(); return }
             feed.last = buffer
-            for weak in feed.screens { weak.screen?.show(buffer) }
+            for weak in feed.screens { weak.screen?.showing(buffer) }
             if feed.screens.contains(where: { $0.screen == nil }) { self?.release(target) }
         }
         feed.stream.onScreen = { [weak feed] in feed?.orientation = $0["orientation"].string ?? "portrait" }

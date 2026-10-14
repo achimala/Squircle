@@ -70,7 +70,9 @@ writes go through the `DiskCache` actor; `close()` tears the model down. See
 `T3Gateway` implements Effect RPC; `T3ThreadState` reduces snapshots/events.
 `T3DeviceStream` owns one native H.264 connection and an input socket as a pair.
 Video starts before the input handshake; only interactive state enables touch.
-Decode is serial/off the UI thread with one newest frame waiting. A stopped stream
+Decode, pacing and presentation are serial and off the main actor: each picture
+goes straight to the visible screens' video renderers at a paced host time
+(`SimulatorPacer`); the main actor only gets the newest for sizing. A stopped stream
 cannot retain a live channel, and a channel owns its gesture queue. A stream runs
 only while a live cell or PiP shows it; background and navigation release it.
 Simulators appear only while an agent's session uses one; the service, not the

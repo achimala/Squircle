@@ -7,10 +7,12 @@ extension JSONValue {
               let json = try? JSONDecoder().decode(Self.self, from: data) else { return .null }
         return json
     }
-    var date: Date {
-        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return string.flatMap { f.date(from: $0) } ?? .distantPast
-    }
+    /// One formatter: making one per read was most of the main actor's time
+    /// while agents stream. ISO8601DateFormatter is thread-safe.
+    nonisolated(unsafe) private static let dates: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
+    }()
+    var date: Date { string.flatMap { Self.dates.date(from: $0) } ?? .distantPast }
 }
 
 /// Refuses every redirect. A session's delegate is this, not the session's

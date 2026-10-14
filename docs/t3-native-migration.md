@@ -1925,3 +1925,39 @@ through env prefixes, full paths, wrappers (`nohup`, `timeout`, `xargs`, …),
 `sh -c`, `eval`, command substitution and `npx`, and the Agent/Task and
 Workflow tools, pointing to the exact `thread spawn` command. Workers run on
 other T3 instances without the plugin and are unaffected.
+
+## 2026-10-15 smooth simulator playback
+
+User, often on cellular through a Tailscale relay: "Sim streaming too
+choppy". Measured on the Mac (raw hub feed, scrolling Settings): T3's iOS
+feed is fixed at the hub's defaults, 6 Mbit/s, 60 fps, full resolution
+(1206×2622 here), about 48 fps and 4.8 Mbit/s while scrolling, keyframes
+about 6 s apart plus a 300 KB JPEG seed per connection. It already arrives
+unevenly at the source (gaps p50 18, p90 35, p99 50 ms; the Mac was at load
+14 with the hub capturing six booted simulators at ~570% CPU). T3's proxy
+forwards `stream-settings` only for Android emulators, so fps, bitrate and
+size can't be lowered for cellular. Two of the four live simulators got only
+the JPEG seed and never any H.264 from the hub: a black picture no client can
+fix.
+
+Ours: pictures were shown "display immediately" when the main actor got to
+them, so all of that jitter, plus the main actor's own stalls (87% busy in a
+sample while six agents streamed, much of it making a new ISO-8601 formatter
+for every date read), reached the screen. A picture handed between the PiP
+and its turn block, or a reused cell, stopped the stream and reconnected
+from scratch.
+
+Now `SimulatorPacer` schedules each picture on a steady clock (the previous
+one's time plus the recent frame interval, pulled toward a delay covering
+the measured jitter and recent stalls, 33–150 ms), the decoding queue enqueues it
+straight into each visible screen's renderer on a host-clock timebase, an
+unused stream lingers 3 s before stopping, and dates share one formatter.
+
+Results. Simulator app watching a simulator while it scrolls, 25 s, screen
+recording sampled at 60 Hz: pictures shown 704 → 1030, holds of 3+ frames
+20.4% → 7.6%, cadence variation halved; the renderer reports 9 of 1130
+frames dropped. On recorded traces through an order-preserving proxy with
+8 Mbit/s, 40±20 ms delay and a 250 ms stall every 3 s, holds fell from 37–49%
+to 1–9% of frames, the delay rising to its 150 ms cap under those stalls
+(local feed: 20% → 1% at 44 ms). Not yet measured on the phone.
+

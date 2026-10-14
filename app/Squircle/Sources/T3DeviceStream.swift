@@ -1,5 +1,6 @@
+import AVFoundation
+import Synchronization
 import UIKit
-import CoreMedia
 import VideoToolbox
 
 struct SimulatorTarget: Hashable {
@@ -28,6 +29,119 @@ struct AVCCFramer {
             offset += length + 4
         }
         if offset > 0 { pending = pending.subdata(in:offset..<pending.count) }
+    }
+}
+
+/// The video renderers showing one simulator. Pictures go to them straight
+/// from the decoding queue, each at its scheduled host time on the
+/// renderer's own clock, so a busy main actor never delays or bunches them.
+/// The main actor only adds and removes renderers.
+final class SimulatorOutput: @unchecked Sendable {
+    /// Weak: a screen that went away without detaching leaves nothing behind.
+    private struct Target { weak var renderer: AVSampleBufferVideoRenderer?; var last: CFTimeInterval }
+    private struct State { var targets: [ObjectIdentifier: Target] = [:]; var format: CMVideoFormatDescription? }
+    private let state = Mutex(State())
+
+    /// Starts showing on `renderer`, with `picture` now if there is one.
+    func add(_ renderer: AVSampleBufferVideoRenderer, showing picture: CVPixelBuffer?) {
+        state.withLock { state in
+            var target = Target(renderer: renderer, last: 0)
+            if let picture { Self.enqueue(picture, at: CACurrentMediaTime(), on: &target, format: &state.format) }
+            state.targets[ObjectIdentifier(renderer)] = target
+        }
+    }
+
+    /// Stops showing on `renderer`; it keeps its current picture.
+    func remove(_ renderer: AVSampleBufferVideoRenderer) {
+        state.withLock { state in
+            if state.targets.removeValue(forKey: ObjectIdentifier(renderer)) != nil { renderer.flush() }
+        }
+    }
+
+    func show(_ picture: CVPixelBuffer, at time: CFTimeInterval) {
+        state.withLock { state in
+            state.targets = state.targets.filter { $0.value.renderer != nil }
+            for key in Array(state.targets.keys) { Self.enqueue(picture, at: time, on: &state.targets[key]!, format: &state.format) }
+        }
+    }
+
+    private static func enqueue(_ picture: CVPixelBuffer, at time: CFTimeInterval, on target: inout Target, format: inout CMVideoFormatDescription?) {
+        if format == nil || !CMVideoFormatDescriptionMatchesImageBuffer(format!, imageBuffer: picture) {
+            CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: picture, formatDescriptionOut: &format)
+        }
+        guard let format, let renderer = target.renderer else { return }
+        // Times only move forward on a renderer; a late picture shows at once.
+        let shown = max(time, target.last + 0.000_1)
+        target.last = shown
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMTime(seconds: shown, preferredTimescale: 1_000_000_000),
+                                        decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: picture, formatDescription: format,
+                                                 sampleTiming: &timing, sampleBufferOut: &sample)
+        guard let sample else { return }
+        if renderer.status == .failed { renderer.flush() }
+        renderer.enqueue(sample)
+    }
+}
+
+/// Schedules pictures on a steady clock. T3's AVCC feed carries no
+/// timestamps and arrives unevenly (the Mac's capture alone varies 9–50 ms
+/// between frames, a relayed cellular link much more), so each picture is
+/// given a time a little after it arrives: the previous one's plus the
+/// recent frame interval, pulled gently toward a delay that covers the
+/// measured jitter and recent stalls (a long gap followed by a burst),
+/// which it forgets over a few seconds. A pause starts a new run on the same
+/// clock; only a long one (a still screen) rebuilds the delay at once.
+struct SimulatorPacer {
+    static let minimumDelay: CFTimeInterval = 0.033
+    static let maximumDelay: CFTimeInterval = 0.150
+    /// Never more than this behind arrival; beyond it, catch up at once.
+    static let maximumLead: CFTimeInterval = 0.300
+    /// Arrivals further apart than this are a new run, not a slow frame.
+    static let pause: CFTimeInterval = 0.100
+    /// T3's feed is at most 60 fps.
+    static let shortestInterval: CFTimeInterval = 1.0 / 60
+    private var arrivals: [CFTimeInterval] = []
+    private var last: CFTimeInterval?
+    private var interval = shortestInterval
+    private var lastGap: CFTimeInterval = 0
+    private var jitter: CFTimeInterval = 0.011
+    private var stall: (held: CFTimeInterval, at: CFTimeInterval) = (0, 0)
+
+    func delay(at now: CFTimeInterval) -> CFTimeInterval {
+        let stalled = stall.held * exp(-(now - stall.at) / 3)
+        return min(Self.maximumDelay, max(Self.minimumDelay, 3 * jitter, stalled + 0.010))
+    }
+
+    /// The time to show a picture that arrived at `arrival`, no earlier than
+    /// `earliest` (when it can first reach the screen). Never decreases.
+    mutating func time(arrival: CFTimeInterval, earliest: CFTimeInterval) -> CFTimeInterval {
+        if let previous = arrivals.last {
+            let gap = arrival - previous
+            // A burst right after a long gap: those pictures were held back.
+            if gap < interval / 2, lastGap > interval * 1.5 {
+                let held = lastGap - interval
+                if held > stall.held * exp(-(arrival - stall.at) / 3) { stall = (held, arrival) }
+            }
+            lastGap = gap
+            if gap > Self.pause { arrivals = [] }
+        }
+        arrivals.append(arrival)
+        if arrivals.count > 17 { arrivals.removeFirst(arrivals.count - 17) }
+        let delay = delay(at: arrival)
+        var time = arrival + delay
+        if let last, arrivals.count < 8 {
+            time = max(last + interval, arrival + (lastGap > 0.3 ? delay : 0))
+        } else if let last {
+            interval = max(Self.shortestInterval, (arrivals[arrivals.count - 1] - arrivals[0]) / Double(arrivals.count - 1))
+            jitter += (abs(arrivals[arrivals.count - 1] - arrivals[arrivals.count - 2] - interval) - jitter) / 16
+            let ideal = last + interval
+            time = ideal + (arrival + delay - ideal) * 0.1
+        }
+        if time - arrival > Self.maximumLead { time = arrival + delay }
+        time = max(time, earliest, (last ?? -.infinity) + 0.001)
+        last = time
+        return time
     }
 }
 
@@ -89,9 +203,6 @@ private final class SimulatorH264Decoder {
     private enum Phase { case waiting, awaitingKeyframe(Configuration), decoding(Configuration) }
     private var phase: Phase = .waiting
     private var sequence: Int64 = 0
-    #if DEBUG
-    private var decoded = 0, totalMilliseconds = 0.0, maximumMilliseconds = 0.0
-    #endif
     func consume(tag:UInt8,payload:Data) throws -> CVPixelBuffer? {
         if tag == 1 { phase = .awaitingKeyframe(try Configuration(avcC:payload)); return nil }
         guard tag == 2 || tag == 3 else { return nil } // Ignore the host's one-off JPEG seed; never play JPEG.
@@ -115,33 +226,33 @@ private final class SimulatorH264Decoder {
             sampleCount:1,sampleTimingEntryCount:1,sampleTimingArray:&timing,sampleSizeEntryCount:1,sampleSizeArray:&size,sampleBufferOut:&sample)
         guard ready == noErr, let sample else { throw ClientError.response("Simulator H.264 sample") }
         var output: CVPixelBuffer?, outputStatus: OSStatus = noErr
-        #if DEBUG
-        let started = CACurrentMediaTime()
-        #endif
         // Both flags clear guarantees the callback completes before this returns.
         // No temporal reordering or asynchronous decoder queue can accumulate.
         let status = VTDecompressionSessionDecodeFrame(config.session,sampleBuffer:sample,flags:[],infoFlagsOut:nil) {
             status, _, image, _, _ in outputStatus = status; output = image
         }
         guard status == noErr, outputStatus == noErr else { throw ClientError.response("Simulator H.264 decode: \(status)/\(outputStatus)") }
-        #if DEBUG
-        let elapsed = (CACurrentMediaTime() - started) * 1000
-        decoded += 1; totalMilliseconds += elapsed; maximumMilliseconds = max(maximumMilliseconds,elapsed)
-        if decoded % 60 == 0 { print("Simulator H.264: \(decoded) decoded, mean \(totalMilliseconds / Double(decoded)) ms, max \(maximumMilliseconds) ms, one decode in flight") }
-        #endif
         return output
     }
 }
 
-/// One authenticated H.264 request and one newest decoded picture. No codec
-/// fallback or priming stream. URLSession delegates and decoding share a serial queue.
+/// One authenticated H.264 request. Decoded pictures go to `output` at their
+/// paced times and, newest only, to `frames`. No codec fallback or priming
+/// stream. URLSession delegates, decoding, pacing and presentation share a
+/// serial queue, off the main actor.
 private final class SimulatorVideo: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     let frames: AsyncThrowingStream<CVPixelBuffer, Error>
     private let continuation: AsyncThrowingStream<CVPixelBuffer, Error>.Continuation
+    private let output: SimulatorOutput
     private var session: URLSession!
     private var framer = AVCCFramer()
     private var decoder = SimulatorH264Decoder()
-    init(request: URLRequest) {
+    private var pacer = SimulatorPacer()
+    #if DEBUG
+    private var stats = SimulatorPacingStats()
+    #endif
+    init(request: URLRequest, output: SimulatorOutput) {
+        self.output = output
         (frames, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy:.bufferingNewest(1))
         super.init()
         let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1; queue.qualityOfService = .userInteractive
@@ -171,13 +282,38 @@ private final class SimulatorVideo: NSObject, URLSessionDataDelegate, @unchecked
         close(error ?? ClientError.connection("Simulator video"))
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        let arrival = CACurrentMediaTime()
         do {
             try framer.consume(data) { tag, payload in
-                if let frame = try decoder.consume(tag:tag,payload:payload) { continuation.yield(frame) }
+                guard let buffer = try decoder.consume(tag:tag,payload:payload) else { return }
+                let decoded = CACurrentMediaTime()
+                let time = pacer.time(arrival:arrival,earliest:decoded + 0.002)
+                #if DEBUG
+                stats.add(arrival:arrival,decoded:decoded,time:time,delay:pacer.delay(at:arrival))
+                #endif
+                output.show(buffer,at:time)
+                continuation.yield(buffer)
             }
         } catch { close(error) }
     }
 }
+
+#if DEBUG
+/// Every 120 pictures: arrival rate and gaps, decode time, and how far ahead
+/// of arrival pictures are scheduled (the jitter buffer's added delay).
+private struct SimulatorPacingStats {
+    private var arrivals: [CFTimeInterval] = [], decodes: [CFTimeInterval] = [], leads: [CFTimeInterval] = []
+    private var delay: CFTimeInterval = 0
+    mutating func add(arrival: CFTimeInterval, decoded: CFTimeInterval, time: CFTimeInterval, delay: CFTimeInterval) {
+        arrivals.append(arrival); decodes.append(decoded - arrival); leads.append(time - arrival); self.delay = delay
+        guard arrivals.count == 121 else { return }
+        func ms(_ values: [CFTimeInterval], _ q: Double) -> Int { Int(values.sorted()[min(values.count - 1, Int(Double(values.count) * q))] * 1000) }
+        let gaps = zip(arrivals.dropFirst(), arrivals).map { $0 - $1 }
+        print("Simulator pacing: \(Int(120 / (arrivals[120] - arrivals[0]))) fps, gap p50 \(ms(gaps, 0.5)) p90 \(ms(gaps, 0.9)) max \(ms(gaps, 1)) ms, decode p90 \(ms(decodes, 0.9)) ms, scheduled +\(ms(leads, 0.5))/+\(ms(leads, 0.95)) ms (p50/p95), target \(Int(delay * 1000)) ms")
+        arrivals = [arrivals[120]]; decodes = []; leads = []
+    }
+}
+#endif
 
 /// Owns partial startup so cancellation releases resources before a channel exists.
 @MainActor
@@ -233,14 +369,16 @@ final class T3DeviceStream {
     private let http: T3HTTP
     private let base: String
     let target: SimulatorTarget
+    /// The newest picture, on the main actor (it is already on screen).
     var onFrame: ((CVPixelBuffer) -> Void)?
     var onScreen: ((JSONValue) -> Void)?
     var onStatus: ((String?) -> Void)?
     var onInteractive: ((Bool) -> Void)?
     var isInteractive: Bool { if case .running(_,_,.interactive) = lifetime { return true }; return false }
     let codec = "h264"
-    init(http:T3HTTP,base:String,target:SimulatorTarget) {
-        self.http = http; self.base = base + "/vendor/serve-sim"; self.target = target
+    let output: SimulatorOutput
+    init(http:T3HTTP,base:String,target:SimulatorTarget,output:SimulatorOutput) {
+        self.http = http; self.base = base + "/vendor/serve-sim"; self.target = target; self.output = output
     }
     func start() {
         guard case .stopped = lifetime else { return }
@@ -287,7 +425,7 @@ final class T3DeviceStream {
     }
     private func connect(_ id:UUID) async throws {
         let video = SimulatorVideo(request:try http.request(base + "/helper/\(target.deviceID)/stream.avcc",
-            query:[URLQueryItem(name:"hostId",value:target.hostID)]))
+            query:[URLQueryItem(name:"hostId",value:target.hostID)]),output:output)
         // A failed input handshake also releases video. A startup timeout cancels
         // the actual resources, so no orphan receive task can hold a retry open.
         let attempt = SimulatorAttempt(video:video); set(.connecting(attempt),id:id)
@@ -307,7 +445,7 @@ final class T3DeviceStream {
         let channel = SimulatorChannel(socket:ws,video:video)
         try await channel.send(tag:0x0d,payload:.from(["enabled":false]))
         // The helper's config confirms that HID is ready; a cached picture alone
-        // never enables input. Video continues buffering just its newest frame.
+        // never enables input. Video keeps playing meanwhile.
         while true {
             if let screen = try await screenMessage(ws) {
                 guard owns(id), !Task.isCancelled else { throw CancellationError() }

@@ -178,8 +178,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Verification only (never in Release). Holds real states still for a
     /// screen capture: `SQUIRCLE_GRID` (grid scroll in points), `SQUIRCLE_APP`
     /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it)
-    /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` brings
-    /// the first simulator large; `SQUIRCLE_BUILDS=1` shows the app's builds and
+    /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` (or a simulator's name) brings
+    /// the first (or that) simulator large; `SQUIRCLE_BUILDS=1` shows the app's builds and
     /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads` opens Tasks on either tab. `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
@@ -225,11 +225,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 Task { [weak self] in try? await Task.sleep(for: .seconds(5)); self?.closeThread() }
             }
         }
-        if environment["SQUIRCLE_SIM_EXPAND"] == "1" {
+        if let wanted = environment["SQUIRCLE_SIM_EXPAND"] {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(9))
-                guard let self, let first = dock.uses.first else { return }
-                dock.expand(first.id)
+                guard let self, let use = dock.uses.first(where: { wanted == "1" || $0.deviceName == wanted }) else { return }
+                dock.expand(use.id)
             }
         }
         if environment["SQUIRCLE_STRESS"] == "1" {
