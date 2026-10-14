@@ -133,8 +133,24 @@ final class DeviceStage: UIView {
         SCNTransaction.commit()
         let pixels = CGSize(width: size.width * scale, height: size.height * scale)
         let image = portraitRenderer.snapshot(atTime: 0, with: pixels, antialiasingMode: .multisampling4X)
-        guard let cgImage = image.cgImage else { return nil }
+        guard let cgImage = image.cgImage, Self.cornerIsClear(cgImage) else { return nil }
         return UIImage(cgImage: cgImage, scale: scale, orientation: .up)
+    }
+
+    /// A portrait's corner is empty backdrop. A render the GPU rejected
+    /// (in the background, say) comes back opaque black there instead.
+    private static func cornerIsClear(_ image: CGImage) -> Bool {
+        var pixel: [UInt8] = [255, 255, 255, 255]
+        let drawn = pixel.withUnsafeMutableBytes { bytes -> Bool in
+            guard let context = CGContext(data: bytes.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.clear(CGRect(x: 0, y: 0, width: 1, height: 1))
+            // The image's top-left pixel onto the context's only one.
+            context.draw(image, in: CGRect(x: 0, y: 1 - image.height, width: image.width, height: image.height))
+            return true
+        }
+        return drawn && pixel[3] < 8
     }
 
     /// Positions a device for a pose in a view of `size`. The device is turned
