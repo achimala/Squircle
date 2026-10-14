@@ -1032,6 +1032,15 @@ under the cube, so the cube reads as the head of one piece of jelly. The blur
 is masked to the jelly's exact coverage (the same shader, drawn at 1×), and
 nothing redraws while nothing moves. Clips: `jelly4-*.mp4`. Not on the phone.
 
+Fifth round (user: "why is the liquid bridge stuff gone now"): the detached
+cube is back on v4's single body. Docked, the cube sits beside the pill with a
+gap; open, it rises above the panel's top edge as a head. Between them is an
+explicit liquid neck (a capsule from the pill's end or the panel's top to the
+cube, blended into both): finger-thick at rest, thinner as the cube trails a
+drag or fling, pinched apart past twice its length. Still one material in one
+pass, blur only under the jelly, no redraw when idle. Clips: `jelly5-*.mp4`.
+Not on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was

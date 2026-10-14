@@ -41,6 +41,9 @@ final class GlassJelly: UIView {
     var cornerRadius: CGFloat = 18
     /// Where the creature belongs, in bounds coordinates (its centre).
     var creatureAnchor = CGPoint(x: 22, y: 22)
+    /// Where the neck leaves the body (bounds coordinates), and its rest length.
+    var neckRoot = CGPoint(x: 22, y: 22)
+    var neckLength: CGFloat = 30
     /// +1 when the creature sits to the right of the blob, -1 to the left.
     var creatureSide: CGFloat = 1
     static let creatureSize: CGFloat = 34
@@ -407,9 +410,10 @@ final class GlassJelly: UIView {
             fill: fillVector,
             face: SIMD4(Float(lid), Float(happy.value), Float(squint.value), Float(worry.value)),
             inverse: SIMD4(Float(inverse.a), Float(inverse.b), Float(inverse.c), Float(inverse.d)),
-            creature: SIMD4(Float(creature.x), Float(creature.y), Float(s), 12),
+            creature: SIMD4(Float(creature.x), Float(creature.y), Float(s), Float(neckLength)),
             pose: SIMD4(Float(yaw.value), Float(pitch.value), Float(roll.value), Float(creatureSquash.value)),
-            gaze: SIMD4(Float(gazeX.value), Float(gazeY.value), 0, 0),
+            gaze: SIMD4(Float(gazeX.value), Float(gazeY.value),
+                        Float(neckRoot.x + center.x - bodyRect.midX), Float(neckRoot.y + center.y - bodyRect.midY)),
             center: SIMD2(Float(center.x), Float(center.y)),
             half: SIMD2(Float(half.width), Float(half.height)),
             origin: SIMD2(Float(canvas.minX), Float(canvas.minY)),
@@ -645,8 +649,28 @@ enum JellyRenderer {
         return min(a, b) - h * h * k * 0.25;
     }
 
+    static float segment(float2 p, float2 a, float2 b) {
+        float2 pa = p - a, ba = b - a;
+        float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+        return length(pa - ba * h);
+    }
+
+    // The liquid neck from the body (gaze.zw) to the cube: as thick as a
+    // finger at rest, thinner as it stretches, gone past twice its length.
+    static float neck(float2 p, constant Uniforms& u) {
+        float2 a = u.gaze.zw, b = u.creature.xy;
+        float len = length(b - a), rest = max(1.0, u.creature.w);
+        float r = 5.5 * clamp((rest * 2.0 - len) / rest, 0.0, 1.0);
+        if (r < 0.3) return 1e4;
+        return segment(p, a, b) - r;
+    }
+
+    static float union3(float db, float2 p, constant Uniforms& u) {
+        return smin(smin(db, neck(p, u), 9.0), foot(p, u), 7.0);
+    }
+
     static float field(float2 p, constant Uniforms& u) {
-        return smin(blob(rest(p, u), u), foot(p, u), u.creature.w);
+        return union3(blob(rest(p, u), u), p, u);
     }
 
     static float height(float2 p, float bevel, constant Uniforms& u) {
@@ -654,11 +678,6 @@ enum JellyRenderer {
         return sqrt(1.0 - (1.0 - t) * (1.0 - t));
     }
 
-    static float segment(float2 p, float2 a, float2 b) {
-        float2 pa = p - a, ba = b - a;
-        float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-        return length(pa - ba * h);
-    }
 
     // Two eyes at `c` in a face plane (points). Returns coverage in .a, ink in .rgb.
     static float4 eyes(float2 q, float px, float3 tint, constant Uniforms& u) {
@@ -779,7 +798,7 @@ enum JellyRenderer {
         float px = 1.0 / u.scale;
         float2 q = rest(p, u);
         float db = blob(q, u);
-        float d = smin(db, foot(p, u), u.creature.w);
+        float d = union3(db, p, u);
         float cover = clamp(0.5 - d / px, 0.0, 1.0);
         Cube c = { float4(0.0), 0.0 };
         bool near = length(p - u.creature.xy) < u.creature.z * 1.05;

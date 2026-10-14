@@ -118,9 +118,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Concentric with the 44-point controls at `inset`.
     private static let panelRadius: CGFloat = 22 + inset
     /// The creature's place at the end of the status pill.
-    private static let creatureCell: CGFloat = 44
+    private static let creatureCell: CGFloat = 54
     /// Room above the panel for the creature's head.
-    private static let headRoom: CGFloat = 34
+    private static let headRoom: CGFloat = 40
     /// The creature's head, open: drag it like the handle, tap it for full screen.
     private let headHandle = UIView()
     private var headPan: UIPanGestureRecognizer!
@@ -408,7 +408,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     /// Full screen, below the status bar's room for the creature's head.
     private var fullFrame: CGRect {
-        let top = view.safeAreaInsets.top + 26
+        let top = view.safeAreaInsets.top + 32
         return CGRect(x: 0, y: top, width: view.bounds.width, height: view.bounds.height - top)
     }
 
@@ -528,15 +528,21 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // Closed: the creature at the pill's end on the bubble's side, the
         // pill beside it (tucked under it when there is nothing to say).
         // Open: the creature rises above the panel's top edge as a head.
-        let creatureClosed = CGPoint(x: right ? w - cell / 2 : cell / 2, y: lower ? h - 22 : 22)
+        let creatureClosed = CGPoint(x: right ? w - 22 : 22, y: lower ? h - 22 : 22)
         let pill = hasLine
-            // Its end runs under the cube, so they read as one piece of jelly.
-            ? CGRect(x: right ? 0 : cell - 12, y: (lower ? h - 44 : 0) + 4, width: max(1, w - cell + 12), height: 36)
+            // A gap before the cube, bridged by the jelly's neck.
+            ? CGRect(x: right ? 0 : cell, y: (lower ? h - 44 : 0) + 3, width: max(1, w - cell), height: 38)
             : CGRect(x: creatureClosed.x - 12, y: creatureClosed.y - 12, width: 24, height: 24)
         let eased = opened * opened * (3 - 2 * opened)
-        let creatureOpen = CGPoint(x: w / 2, y: -21)
+        let creatureOpen = CGPoint(x: w / 2, y: -27)
         glass.creatureAnchor = CGPoint(x: .lerp(creatureClosed.x, creatureOpen.x, eased), y: .lerp(creatureClosed.y, creatureOpen.y, eased))
         glass.creatureSide = right ? 1 : -1
+        // The neck leaves the pill's end, or the panel's top edge.
+        let rootClosed = hasLine ? CGPoint(x: right ? pill.maxX - 14 : pill.minX + 14, y: pill.midY)
+            : CGPoint(x: creatureClosed.x, y: creatureClosed.y)
+        let root = CGPoint(x: .lerp(rootClosed.x, w / 2, eased), y: .lerp(rootClosed.y, 12, eased))
+        glass.neckRoot = root
+        glass.neckLength = max(1, hypot(glass.creatureAnchor.x - root.x, glass.creatureAnchor.y - root.y))
         glass.bodyRect = CGRect(x: .lerp(pill.minX, 0, opened), y: .lerp(pill.minY, 0, opened),
                                 width: .lerp(pill.width, w, opened), height: .lerp(pill.height, h, opened))
         glass.cornerRadius = .lerp(hasLine ? 16 : 10, .lerp(Self.panelRadius, 40, fullness), opened)
