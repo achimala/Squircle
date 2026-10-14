@@ -48,17 +48,22 @@ final class SquircleModel {
         return stream
     }
     private func changed() { for observer in observers.values { observer.yield() } }
-    /// Calls `action` once a burst of changes has been quiet for `delay`, for
-    /// as long as `owner` lives. Cancel the task to stop sooner.
+    /// Calls `action` `delay` after a change, once for all the changes in
+    /// between, for as long as `owner` lives. Cancel the task to stop sooner.
+    /// (Not a debounce: changes that never pause, such as a view whose own
+    /// render touches the model, must not hold every update back forever.)
     func observe<Owner: AnyObject>(by owner: Owner, after delay: Duration,
                                    _ action: @escaping @MainActor (Owner) -> Void) -> Task<Void, Never> {
         Task { [weak owner, updates = self.updates] in
             var pending: Task<Void, Never>?
+            var waiting = false
             for await _ in updates {
                 guard owner != nil else { break }
-                pending?.cancel()
+                guard !waiting else { continue }
+                waiting = true
                 pending = Task { [weak owner] in
                     try? await Task.sleep(for: delay)
+                    waiting = false
                     guard !Task.isCancelled, let owner else { return }
                     action(owner)
                 }
