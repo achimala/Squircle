@@ -7,7 +7,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, Request, State,
         rejection::{JsonRejection, QueryRejection},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -208,6 +208,54 @@ async fn envelope_errors(response: Response) -> Response {
     ApiError::rejection(status, text).into_response()
 }
 
+/// GET replies in JSON carry an ETag: a poll that already holds that exact
+/// body gets an empty 304, and a client that accepts gzip gets the body
+/// compressed. The phone polls several of these every few seconds, often
+/// over cellular (the build list alone is over 100 KB of JSON).
+async fn compact_json(request: Request, next: Next) -> Response {
+    let get = request.method() == Method::GET;
+    let known = request.headers().get(header::IF_NONE_MATCH).cloned();
+    let gzip = request
+        .headers()
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|e| e.split(';').next().is_some_and(|e| e.trim() == "gzip")));
+    let response = next.run(request).await;
+    let json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if !get || response.status() != StatusCode::OK || !json || response.headers().contains_key(header::CONTENT_ENCODING) {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 << 20).await else {
+        return ApiError::rejection(StatusCode::INTERNAL_SERVER_ERROR, "Reply too large".into()).into_response();
+    };
+    let digest = Sha256::digest(&bytes);
+    let tag: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
+    let etag = HeaderValue::from_str(&format!("\"{tag}\"")).expect("hex ETag");
+    parts.headers.insert(header::ETAG, etag.clone());
+    parts.headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    if known.as_ref().is_some_and(|k| k.as_bytes().split(|&c| c == b',').any(|t| t.trim_ascii() == etag.as_bytes())) {
+        parts.status = StatusCode::NOT_MODIFIED;
+        parts.headers.remove(header::CONTENT_TYPE);
+        parts.headers.remove(header::CONTENT_LENGTH);
+        return Response::from_parts(parts, Body::empty());
+    }
+    if gzip && bytes.len() >= 1024 {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::with_capacity(bytes.len() / 4), flate2::Compression::fast());
+        if encoder.write_all(&bytes).is_ok() && let Ok(compressed) = encoder.finish() {
+            parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return Response::from_parts(parts, Body::from(compressed));
+        }
+    }
+    Response::from_parts(parts, Body::from(bytes))
+}
+
 pub fn router(state: AppState) -> Router {
     // Everything here requires the control token, checked before extraction.
     let control = Router::new()
@@ -256,6 +304,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/import", post(import))
         .route("/v1/captures", post(upload_capture))
         .route("/v1/install-links/{token}", get(link_status))
+        .route_layer(middleware::from_fn(compact_json))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_control));
     let diagnostics = Router::new()
         .route("/v1/diagnostics", post(ingest))
@@ -1651,6 +1700,38 @@ async fn build_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn polled_json_revalidates_and_compresses() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route("/big", get(|| async { Json(json!({"rows": vec!["build"; 2000]})) }))
+            .route_layer(middleware::from_fn(compact_json));
+        let call = |headers: &[(header::HeaderName, &str)]| {
+            let mut request = axum::http::Request::get("/big");
+            for (name, value) in headers { request = request.header(name, *value); }
+            app.clone().oneshot(request.body(Body::empty()).unwrap())
+        };
+        let plain = call(&[]).await.unwrap();
+        assert_eq!(plain.status(), StatusCode::OK);
+        assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
+        let etag = plain.headers()[header::ETAG].to_str().unwrap().to_string();
+        let body = axum::body::to_bytes(plain.into_body(), usize::MAX).await.unwrap();
+
+        let same = call(&[(header::IF_NONE_MATCH, &etag)]).await.unwrap();
+        assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
+        assert!(axum::body::to_bytes(same.into_body(), usize::MAX).await.unwrap().is_empty());
+        let stale = call(&[(header::IF_NONE_MATCH, "\"other\"")]).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::OK);
+
+        let zipped = call(&[(header::ACCEPT_ENCODING, "br, gzip;q=0.9")]).await.unwrap();
+        assert_eq!(zipped.headers()[header::CONTENT_ENCODING], "gzip");
+        let bytes = axum::body::to_bytes(zipped.into_body(), usize::MAX).await.unwrap();
+        assert!(bytes.len() < body.len() / 10);
+        let mut unzipped = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut unzipped).unwrap();
+        assert_eq!(unzipped, body);
+    }
 
     #[tokio::test]
     async fn non_repository_source_has_no_invented_provenance() {
