@@ -1,8 +1,50 @@
-# Performance capture from the phone (proposal, 2026-10-14)
+# Performance capture from the phone
 
-**Status: proposal, not built.** The user asked for a way to start and stop a
+**Status 2026-10-14: built (overlay), verified in the simulator; not yet tried
+on the phone or over cellular.** The user asked for a way to start and stop a
 performance trace inside an app, on the phone, often on cellular, and hand it
-to the agent. Only the feasibility checks below were run.
+to the agent; then (approving the build) for screenshots and screen recordings
+in the same place.
+
+## As built
+
+- The message field's + menu in the overlay: Photo Library, Camera, then App
+  Screenshot, Record Screen, Record Performance. Long-pressing the bubble
+  still takes a screenshot.
+- Recording docks the overlay into the bubble in a recording state
+  (`CaptureSession.Recording`, rendered by `LiveCapsule` tone `.recording`:
+  crimson tint, pulsing dot, "Recording screen/performance", elapsed time).
+  The app stays usable; tapping the bubble stops; 60 s limit stops it too.
+  The panel opens with the recording flying into the field (a screen
+  recording from the screen, a performance one from the bubble).
+- Screen recording (`ScreenRecorder`): the app's own windows below the overlay
+  drawn with `drawHierarchy` 30 fps (15 if drawing costs over 12 ms), finger
+  dots, H.264 1.8 Mbit/s, long side 1280 px: no overlay, no system prompt.
+  Video/Metal layers may show stale or blank. Simulator check: 11 s → 435 KB,
+  588×1280, overlay absent.
+- Performance (`PerfRecorder`, `MainThreadSampler`): display-link frame times
+  (hitch = frame more than 1.5 periods apart), main-thread stack every ~1 ms
+  (suspend, `thread_get_state`, frame-pointer walk bounded to the main
+  thread's stack, resume; nothing allocates or locks while suspended),
+  CPU/memory/thermal every 250 ms, touches, screen name at each hitch,
+  `OSLogStore` lines, loaded images with UUIDs; `dladdr` names on the phone.
+- Upload: `POST /v1/captures?kind=video|performance` (control token, 300 MB
+  route limit) into `<data>/captures/`, started as soon as the recording is
+  attached. The message gets a "Recorded in the app:" block of links (hidden
+  in the transcript): the video plays in your message's gallery; a
+  performance recording shows as one line ("Performance recording · 0:08 · 11
+  hitches"); the link tells the agent to run `squircle perf show PATH`.
+- `squircle perf show PATH|ID [--dsym]` (text; `--json` structured), `perf
+  list`. App frames: a given dSYM, a Squircle build's dSYMs by UUID,
+  Spotlight, or the binary on this Mac (simulator). System frames: Xcode's
+  device symbols for the phone's OS build, the file on this Mac, or the
+  phone's `dladdr` guess (marked approx), demangled.
+- Simulator check (Squircle Debug, `SQUIRCLE_OVERLAY_DEMO` + `SQUIRCLE_JANK=1`,
+  250 ms main-thread busy loop every 1.5 s): 8 s capture, every hitch's
+  stack named `StudioScene.deliberateJank() SquircleApp.swift:62`; the
+  Squircle Probe agent received the capture and ran `perf show` on it.
+
+## Original proposal
 
 ## Recommendation
 
