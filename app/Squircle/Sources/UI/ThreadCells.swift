@@ -981,17 +981,6 @@ final class LiveCell: TimelineCell {
     }
 }
 
-#if DEBUG
-/// Prototype: something alive in place of the capsule's mark.
-@MainActor
-protocol CapsuleCharacter: AnyObject {
-    var side: CGFloat { get }
-    func set(tone: LiveCapsule.Tone)
-    /// The task text just changed (the old line rises out).
-    func lineChanged()
-}
-#endif
-
 /// The live capsule: the app's mark turning while the agent works, the task
 /// in shimmering text that slides vertically as tasks change, and the time
 /// since the turn began. Sized by its owner; it has no surface of its own
@@ -1050,34 +1039,31 @@ final class LiveCapsule: UIView {
 
     private func style(_ label: ShimmerLabel) {
         label.font = font
-        label.textColor = .secondaryLabel
+        label.textColor = textColor
         label.numberOfLines = 1
         label.isShimmering = tone == .working
         track.addSubview(label)
     }
 
-    #if DEBUG
-    /// Prototype: a living character in place of the mark (see
-    /// `BubbleCharacter`).
-    var character: (UIView & CapsuleCharacter)? {
+    /// Space for something drawn in place of the mark (the overlay's
+    /// jelly draws eyes there), or 0 for none; nil shows the turning mark.
+    var markSlot: CGFloat? {
         didSet {
-            oldValue?.removeFromSuperview()
-            if let character {
-                addSubview(character)
-                character.set(tone: tone)
-            }
-            mark.isHidden = character != nil
+            mark.isHidden = markSlot != nil
             setNeedsLayout()
         }
     }
-    private var markSide: CGFloat { character?.side ?? 14 }
+    /// Whether "needs you" colours the text (off where the surface shows the tone).
+    var tintsText = true
+    var textColor = UIColor.secondaryLabel { didSet { line.textColor = textColor } }
+    /// Called as a new line rises in.
+    var onLineChange: (() -> Void)?
+    private var markSide: CGFloat { markSlot ?? 14 }
     private func lead(_ height: CGFloat) -> CGFloat {
-        character != nil ? (height - markSide) / 2 : max(12, (height - markSide) / 2 + 1)
+        guard let markSlot else { return max(12, (height - markSide) / 2 + 1) }
+        return markSlot == 0 ? 7 : (height - markSlot) / 2 - 2
     }
-    #else
-    private var markSide: CGFloat { 14 }
-    private func lead(_ height: CGFloat) -> CGFloat { max(12, (height - markSide) / 2 + 1) }
-    #endif
+    private func trail(_ height: CGFloat) -> CGFloat { markSlot == nil ? lead(height) - 2 : 18 }
     private var inset: CGFloat { lead(bounds.height) }
 
     /// The width that shows the whole headline, within `limit`.
@@ -1085,7 +1071,7 @@ final class LiveCapsule: UIView {
         let lead = lead(height)
         guard let headline, !headline.isEmpty else { return height }
         let text = ceil((headline as NSString).size(withAttributes: [.font: font]).width)
-        let time = showsTime && started != nil ? 52 : lead - 2
+        let time = showsTime && started != nil ? 52 : trail(height)
         return min(limit, lead + markSide + 11 + text + time)
     }
 
@@ -1101,9 +1087,6 @@ final class LiveCapsule: UIView {
         edge.locations = [0, NSNumber(value: Double(max(0, width - 11) / width)), NSNumber(value: Double(max(0, width - 2) / width))]
         CATransaction.commit()
         mark.frame = CGRect(x: inset, y: (bounds.height - markSide) / 2, width: markSide, height: markSide)
-        #if DEBUG
-        character?.frame = mark.frame
-        #endif
         elapsed.sizeToFit()
         elapsed.isHidden = !showsTime || started == nil
         elapsed.center = CGPoint(x: bounds.width - inset - 3 - elapsed.bounds.width / 2, y: bounds.height / 2)
@@ -1114,7 +1097,7 @@ final class LiveCapsule: UIView {
     /// timer (or of where it would be at `widthLimit`).
     private func restingFrame(_ label: ShimmerLabel) -> CGRect {
         let x = mark.frame.maxX + 11
-        let end = elapsed.isHidden ? track.bounds.width - inset + 2 : elapsed.frame.minX - 8
+        let end = elapsed.isHidden ? track.bounds.width - trail(bounds.height) : elapsed.frame.minX - 8
         var room = end - x
         if let widthLimit { room = widthLimit - (track.bounds.width - room) }
         let text = ceil(((label.text ?? "") as NSString).size(withAttributes: [.font: font]).width) + 1
@@ -1138,11 +1121,8 @@ final class LiveCapsule: UIView {
             self.tone = tone
             mark.backgroundColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success : Theme.accent
             line.isShimmering = tone == .working
-            line.textColor = tone == .needsYou ? Theme.warning : .secondaryLabel
+            line.textColor = tone == .needsYou && tintsText ? Theme.warning : textColor
             animateMark()
-            #if DEBUG
-            character?.set(tone: tone)
-            #endif
         }
         if next == headline {
             cancelQueued()
@@ -1189,9 +1169,7 @@ final class LiveCapsule: UIView {
             setNeedsLayout()
             return
         }
-        #if DEBUG
-        character?.lineChanged()
-        #endif
+        onLineChange?()
         // The finished task rises out of the capsule and fades; the next
         // rises in from below.
         let old = line

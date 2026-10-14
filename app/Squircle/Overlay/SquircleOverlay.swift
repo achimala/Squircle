@@ -106,6 +106,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// so the spring never starts from a made-up frame.
     private let appear = SpringDriver()
     private var placed = false
+    /// The bubble: a frosted glass jelly with its own spring. It stays where
+    /// it rests (the anchor); the panel grows out of it like a speech bubble
+    /// and hangs beside it, `gap` away.
+    private let jelly = GlassJelly()
+    private let jellySpring = FrameSpring()
+    private static let jellySide: CGFloat = 44
+    private static let gap: CGFloat = 8
     /// 0 = the agent, 1 = a thread over it.
     private let push = SpringDriver()
     /// The one inset between the screen's safe area and the glass, and
@@ -186,19 +193,29 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
-        glass.accessibilityIdentifier = "overlay.bubble"
+        jelly.accessibilityIdentifier = "overlay.bubble"
         glass.contentView.clipsToBounds = true
         glass.contentView.layer.cornerCurve = .continuous
         view.addSubview(glass)
         bubble.isUserInteractionEnabled = false
         bubble.showsTime = false
         bubble.onHeadlineChange = { [weak self] in self?.retarget() }
+        bubble.onLineChange = { [weak self] in self?.jelly.gulp() }
+        bubble.markSlot = 0
+        bubble.tintsText = false
+        bubble.textColor = .label.withAlphaComponent(0.72)
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SQUIRCLE_JELLY_EYES"] == "1" {
+            jelly.eyes = true
+            bubble.markSlot = 22
+        }
+        #endif
         bubble.isAccessibilityElement = true
         bubble.accessibilityTraits = .button
         bubble.accessibilityLabel = "Squircle"
         bubbleStage.isUserInteractionEnabled = false
         bubbleStage.addSubview(bubble)
-        glass.contentView.addSubview(bubbleStage)
+        jelly.content.addSubview(bubbleStage)
         let pill = UIView()
         pill.backgroundColor = .tertiaryLabel
         pill.layer.cornerRadius = 2.5
@@ -211,6 +228,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         body.addSubview(handle)
         page.addSubview(body)
         glass.contentView.addSubview(page)
+        view.addSubview(jelly)
 
         bubbleTap = UITapGestureRecognizer(target: self, action: #selector(openTapped))
         bubblePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
@@ -220,7 +238,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubblePress.minimumPressDuration = 0.35
         // A tap waits only for the finger to lift before the press fails.
         bubbleTap.require(toFail: bubblePress)
-        for gesture in [bubbleTap, bubblePress, bubblePan, movePan, backPan] as [UIGestureRecognizer] {
+        for gesture in [bubbleTap, bubblePress, bubblePan] as [UIGestureRecognizer] {
+            gesture.delegate = self
+            jelly.addGestureRecognizer(gesture)
+        }
+        for gesture in [movePan, backPan] as [UIGestureRecognizer] {
             gesture.delegate = self
             glass.addGestureRecognizer(gesture)
         }
@@ -241,6 +263,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         handle.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTapped)))
 
         frame.onChange = { [weak self] in self?.applyScene() }
+        // No overshoot in size (it would pinch); the jelly's own squash and
+        // stretch, driven by this spring's speed, is the jiggle.
+        jellySpring.parameters = SpringDriver.Parameters(response: 0.4, damping: 0.86)
+        jellySpring.onChange = { [weak self] in self?.applyScene() }
         appear.parameters = SpringDriver.Parameters(response: 0.5, damping: 0.68)
         appear.onChange = { [weak self] _ in self?.applyScene() }
         frame.onRest = { [weak self] in self?.rested() }
@@ -266,6 +292,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         super.viewDidLayoutSubviews()
         guard view.bounds.width > 0, view.window != nil else { return }
         // Rotation or a first layout: rest exactly where the route says.
+        if !placed || (!jellySpring.isAnimating && !jellySpring.isHeld) { jellySpring.set(jellyTarget) }
         if !placed || (!frame.isAnimating && !frame.isHeld) { frame.set(targetFrame) } else { applyScene() }
         if !placed {
             placed = true
@@ -298,7 +325,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let now = Date.now
         for (id, name) in working where !active.contains(where: { $0.id == id }) {
             finished = ("Done · " + name, now.addingTimeInterval(6))
-            pulse()
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(6.1))
                 self?.render()
@@ -357,19 +383,43 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The bubble sits in the lower half: the panel grows up from it.
     private var lower: Bool { bubbleFrame.midY > view.bounds.midY }
 
-    /// The mini panel shares the bubble's side and its bottom (or top) edge,
-    /// and rises above the keyboard.
-    private var miniFrame: CGRect {
-        let safe = safeBounds, bubble = bubbleFrame
-        let height = (miniHeight ?? min(safe.height * 0.66, 600)).clamped(Self.minimumHeight, safe.height)
-        let size = CGSize(width: min(safe.width, 390), height: height)
-        var y = lower ? bubble.maxY - size.height : bubble.minY
-        y = y.clamped(safe.minY, max(safe.minY, min(safe.maxY, keyboardTop - 8) - size.height))
-        return CGRect(x: bubble.midX > view.bounds.midX ? safe.maxX - size.width : safe.minX, y: y,
-                      width: size.width, height: size.height)
+    /// The jelly when the panel is open: square, where the bubble rests,
+    /// above the keyboard while the docked panel is.
+    private var compactFrame: CGRect {
+        let safe = safeBounds, side = Self.jellySide
+        let right = anchor?.right ?? true
+        var y = ((anchor?.y ?? safe.maxY - 90) - side / 2).clamped(safe.minY, max(safe.minY, safe.maxY - side))
+        if route.open, !route.full { y = min(y, keyboardTop - 8 - side) }
+        return CGRect(x: right ? safe.maxX - side : safe.minX, y: y, width: side, height: side)
     }
 
-    private var targetFrame: CGRect { !route.open ? bubbleFrame : route.full ? view.bounds : miniFrame }
+    private var jellyTarget: CGRect { route.open ? compactFrame : bubbleFrame }
+
+    /// The docked panel hangs above the jelly (below it, if the jelly is
+    /// high), on its side.
+    private var miniFrame: CGRect {
+        let safe = safeBounds, jelly = compactFrame
+        let room = lower ? jelly.minY - Self.gap - safe.minY : min(safe.maxY, keyboardTop - 8) - jelly.maxY - Self.gap
+        let height = (miniHeight ?? min(safe.height * 0.66, 600)).clamped(min(Self.minimumHeight, room), max(1, room))
+        let width = min(safe.width, 390)
+        return CGRect(x: jelly.midX > view.bounds.midX ? safe.maxX - width : safe.minX,
+                      y: lower ? jelly.minY - Self.gap - height : jelly.maxY + Self.gap, width: width, height: height)
+    }
+
+    /// Full screen: the whole width, from the screen's edge to the jelly.
+    private var fullFrame: CGRect {
+        let bounds = view.bounds, jelly = compactFrame
+        return lower ? CGRect(x: 0, y: 0, width: bounds.width, height: jelly.minY - Self.gap)
+            : CGRect(x: 0, y: jelly.maxY + Self.gap, width: bounds.width, height: bounds.maxY - jelly.maxY - Self.gap)
+    }
+
+    /// The safe area a panel laid out at `size` gets: the screen's, where
+    /// the full-screen panel covers it.
+    private func panelSafeArea(_ size: CGSize) -> UIEdgeInsets { size == fullFrame.size ? safeArea(in: fullFrame) : .zero }
+
+    /// Closed, the (hidden) panel waits under the jelly, so it opens out of
+    /// all of it.
+    private var targetFrame: CGRect { !route.open ? bubbleFrame : route.full ? fullFrame : miniFrame }
 
     /// Shorter than this, a released handle closes the panel.
     private static let minimumHeight: CGFloat = 180
@@ -378,9 +428,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private func retarget(velocity: CGPoint? = nil, sizeVelocity: CGSize = .zero) {
         guard view.bounds.width > 0 else { return }
         // A finger on the handle sets the content up itself.
-        if clipLayout == nil, dragZone == nil, route.open || panelSize == .zero { layOutPanel(at: route.open && route.full ? view.bounds.size : miniFrame.size) }
+        if clipLayout == nil, dragZone == nil, route.open || panelSize == .zero { layOutPanel(at: route.open && route.full ? fullFrame.size : miniFrame.size) }
         // Before its first layout it has no place to move from.
-        guard !frame.isHeld, placed else { return }
+        guard placed else { return }
+        if !jellySpring.isHeld, jellySpring.target != jellyTarget { jellySpring.animate(to: jellyTarget) }
+        guard !frame.isHeld else { return }
         let target = targetFrame
         if frame.target != target || velocity != nil { frame.animate(to: target, velocity: velocity, sizeVelocity: sizeVelocity) }
     }
@@ -406,7 +458,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         page.transform = .identity
         page.bounds = CGRect(origin: .zero, size: size)
         body.frame = page.bounds
-        let safe = size == view.bounds.size ? view.safeAreaInsets : .zero
+        let safe = panelSafeArea(size)
         // At the top centre, level with the ⋯ button; the strip it grabs runs
         // from the panel's edge to below the buttons.
         handle.frame = CGRect(x: size.width / 2 - 60, y: safe.top, width: 120, height: Self.inset + 44)
@@ -460,27 +512,33 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // changes never reads as opening. 0…1 mini → full.
         let openHeight = min(panelSize.height, outgoing?.size.height ?? .greatestFiniteMagnitude)
         let opened = clipLayout != nil ? 1 : ((rect.height - bubbleSize.height) / max(1, openHeight - bubbleSize.height)).clamped()
-        let fullness = ((rect.height - miniFrame.height) / max(1, bounds.height - miniFrame.height)).clamped()
-        // Appearing, it grows in place from its own centre.
-        let appeared = appear.value
-        glass.transform = .identity
+        let fullness = ((rect.height - miniFrame.height) / max(1, fullFrame.height - miniFrame.height)).clamped()
+        // The panel grows out of the jelly: no glass while closed.
         glass.frame = rect
-        if appeared != 1 {
-            let scale = CGFloat.lerp(0.5, 1, appeared)
-            glass.transform = CGAffineTransform(scaleX: scale, y: scale)
-        }
-        glass.alpha = (appeared * 1.6).clamped()
-        let radius = min(rect.height / 2, rect.width / 2, .lerp(Self.panelRadius, 0, fullness))
+        glass.alpha = (opened * 4).clamped()
+        glass.isHidden = glass.alpha == 0 && !route.open
+        let radius = min(rect.height / 2, rect.width / 2, Self.panelRadius)
         Theme.setGlassCorner(glass, radius: radius)
         glass.contentView.layer.cornerRadius = radius
 
-        // Each content is stretched to the glass: the bubble's line from its
-        // own size (laid out at the glass's width while it is just a bubble),
-        // the conversation from where it rests.
-        let lineWidth = CGFloat.lerp(rect.width, bubbleSize.width, (opened * 10).clamped())
-        stretch(bubbleStage, from: CGSize(width: lineWidth, height: bubbleSize.height), into: local)
+        // The jelly, on its own spring; appearing, it grows in where it rests.
+        let blob = jellySpring.value
+        jelly.transform = .identity
+        jelly.frame = blob
+        let appeared = appear.value
+        if appeared != 1 {
+            let scale = CGFloat.lerp(0.4, 1, appeared)
+            jelly.transform = CGAffineTransform(scaleX: scale, y: scale)
+        }
+        jelly.alpha = (appeared * 1.6).clamped()
+        jelly.motion = jellySpring.centerVelocity
+        jelly.tone = bubble.tone
+        // Its line, at the jelly's own size; it leaves as the panel opens.
+        bubbleStage.frame = jelly.bounds
         if bubble.frame.size != bubbleStage.bounds.size { bubble.frame = bubbleStage.bounds }
-        crossBlur(bubbleStage, visibility: 1 - opened, sharpAt: 0.6)
+        bubbleStage.alpha = (1 - opened * 2.5).clamped()
+        let w = blob.width
+        jelly.eyeCenter = CGPoint(x: w <= 44.5 ? w / 2 : .lerp(w / 2, 20, ((w - 44) / 20).clamped()), y: blob.height / 2)
         if let clip = clipLayout {
             // Revealed from the bottom by the glass, at its laid-out size.
             page.transform = .identity
@@ -511,8 +569,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let paper = Theme.paper.withAlphaComponent(.lerp(0.93, 1, fullness))
         page.backgroundColor = paper
         outgoing?.view.backgroundColor = paper
-        // The bubble's line is on clear glass; blurred, it needs paper too.
-        bubbleStage.backgroundColor = bubbleStage.layer.filters == nil ? .clear : paper
         body.bringSubviewToFront(handle)
         handle.accessibilityValue = route.full ? "Full screen" : "Small"
 
@@ -544,7 +600,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The top `y` points of the panel's content are above the glass: the
     /// handle and the conversations' top controls ride the visible edge.
     private func revealTop(_ y: CGFloat) {
-        handle.frame.origin.y = y + (panelSize == view.bounds.size ? view.safeAreaInsets.top : 0)
+        handle.frame.origin.y = y + panelSafeArea(panelSize).top
         agent?.controller.setVisibleTop(y)
         thread?.controller.setVisibleTop(y)
     }
@@ -669,7 +725,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private func applyFlight() {
         guard let (lift, picture) = flyer else { return }
         let t = flight.value
-        let target = route.open ? activeController?.attachmentFrame(HostCapture.attachmentID, in: view) ?? bubbleFrame : frame.value
+        let target = route.open ? activeController?.attachmentFrame(HostCapture.attachmentID, in: view) ?? compactFrame : jellySpring.value
         let start = view.bounds
         lift.frame = CGRect(x: .lerp(start.minX, target.minX, t), y: .lerp(start.minY, target.minY, t),
                             width: .lerp(start.width, target.width, t), height: .lerp(start.height, target.height, t))
@@ -786,7 +842,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         body.insertSubview(host, belowSubview: handle)
         controller.didMove(toParent: self)
         let mounted = (controller, host)
-        controller.setOverlayLayout(inset: Self.inset, safe: panelSize == view.bounds.size ? view.safeAreaInsets : .zero)
+        controller.setOverlayLayout(inset: Self.inset, safe: panelSafeArea(panelSize))
         // The system's scroll-edge blur can't draw inside the blurred,
         // stretched layers of the morph, so it would pop in at rest; the
         // overlay always fades the conversation under its controls instead.
@@ -838,7 +894,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     // MARK: Gestures
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        if gesture === bubbleTap || gesture === bubblePan || gesture === bubblePress { return !route.open }
+        // Tapping the jelly opens and closes; it moves and captures only closed.
+        if gesture === bubbleTap { return true }
+        if gesture === bubblePan || gesture === bubblePress { return !route.open }
         // Where the finger went down, not where it is once the pan is
         // recognized: a quick drag has already left the strip by then.
         var point = gesture.location(in: body)
@@ -864,7 +922,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gesture: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { false }
 
-    @objc private func openTapped() { open() }
+    @objc private func openTapped() { route.open ? close() : open() }
 
     @objc private func bubblePressed(_ gesture: UILongPressGestureRecognizer) {
         if gesture.state == .began { captureAndOpen() }
@@ -897,7 +955,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             let top = dragStart.minY + dy + vy * 0.15
             let tall = tallestDocked
             frame.release()
-            if top < tall.minY - 0.4 * (tall.minY - view.bounds.minY) {
+            if top < tall.minY - 0.4 * (tall.minY - fullFrame.minY) {
                 enter(.full)
                 route.full = true
             } else if top > collapseTop + 0.4 * (Self.minimumHeight - bubbleSize.height) {
@@ -916,7 +974,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                 route.full = false
                 miniHeight = tall.maxY - top
                 // Docked under the bubble, the panel's top is the bubble's.
-                if !lower { anchor = (anchor?.right ?? true, top + bubbleSize.height / 2) }
+                if !lower { anchor = (anchor?.right ?? true, top - Self.gap - Self.jellySide / 2) }
             }
             // The spring takes over: content follows the route again.
             dragZone = nil
@@ -938,7 +996,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     /// Holds the glass where the finger's top edge puts it on the path.
     private func follow(top: CGFloat) {
-        let tall = tallestDocked, full = view.bounds
+        let tall = tallestDocked, full = fullFrame
         let zone: DragZone = top < tall.minY ? .full : top > collapseTop ? .collapse : .docked
         enter(zone)
         let rect: CGRect
@@ -949,7 +1007,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             rect = CGRect(x: tall.minX, y: top, width: tall.width, height: tall.maxY - top)
         case .collapse:
             let start = CGRect(x: tall.minX, y: collapseTop, width: tall.width, height: Self.minimumHeight)
-            rect = .lerp(start, bubbleFrame, ((top - collapseTop) / max(1, Self.minimumHeight - bubbleSize.height)).clamped())
+            rect = .lerp(start, compactFrame, ((top - collapseTop) / max(1, Self.minimumHeight - bubbleSize.height)).clamped())
         }
         frame.hold(rect)
     }
@@ -977,12 +1035,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                 keepPicture()
                 let picture = outgoing
                 outgoing = nil
-                layOutPanel(at: view.bounds.size, crossBlur: false)
+                layOutPanel(at: fullFrame.size, crossBlur: false)
                 outgoing = picture
-            } else if panelSize == view.bounds.size {
+            } else if panelSize == fullFrame.size {
                 layOutPanel(at: tall.size)
             } else {
-                layOutPanel(at: view.bounds.size)
+                layOutPanel(at: fullFrame.size)
             }
         case .collapse:
             // The shortest panel, which stretches into the bubble.
@@ -992,26 +1050,38 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         applyScene()
     }
 
-    /// The glass and everything in it follow the finger; on release they
-    /// spring to the nearer side with the finger's speed.
+    /// The jelly (closed) or the docked panel follows the finger; the jelly
+    /// trails the panel on its own, bouncier spring. On release they spring
+    /// to the nearer side with the finger's speed.
     @objc private func glassDragged(_ gesture: UIPanGestureRecognizer) {
         let t = gesture.translation(in: view)
+        let moving = route.open ? frame : jellySpring
         switch gesture.state {
         case .began:
-            dragStart = frame.value
-            frame.hold(dragStart)
+            dragStart = moving.value
+            moving.hold(dragStart)
         case .changed:
-            frame.hold(dragStart.offsetBy(dx: t.x, dy: t.y))
+            let rect = dragStart.offsetBy(dx: t.x, dy: t.y)
+            moving.hold(rect)
+            if route.open {
+                // The jelly hangs off the panel's corner.
+                let side = Self.jellySide, right = rect.midX > view.bounds.midX
+                let y = lower ? rect.maxY + Self.gap : rect.minY - Self.gap - side
+                jellySpring.animate(to: CGRect(x: right ? rect.maxX - side : rect.minX, y: y, width: side, height: side))
+            } else {
+                frame.set(compactFrame.offsetBy(dx: rect.midX - compactFrame.midX, dy: rect.midY - compactFrame.midY))
+            }
         case .ended, .cancelled, .failed:
             let v = gesture.velocity(in: view)
             // Where it would coast to decides the side and height it rests at.
             let rest = dragStart.offsetBy(dx: t.x + v.x * 0.12, dy: t.y + v.y * 0.12)
-            let bubbleHeight = bubbleSize.height
+            let half = Self.jellySide / 2
             let y = !route.open ? rest.midY
-                : rest.midY > view.bounds.midY ? rest.maxY - bubbleHeight / 2 : rest.minY + bubbleHeight / 2
+                : rest.midY > view.bounds.midY ? rest.maxY + Self.gap + half : rest.minY - Self.gap - half
             anchor = (rest.midX > view.bounds.midX, y)
-            frame.release()
-            retarget(velocity: v)
+            moving.release()
+            if !route.open { jellySpring.animate(to: jellyTarget, velocity: v) }
+            retarget(velocity: route.open ? v : nil)
         default: break
         }
     }
@@ -1033,17 +1103,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             sync()
         default: break
         }
-    }
-
-    /// A soft beat when a turn finishes.
-    private func pulse() {
-        guard !Motion.reduced, !route.open else { return }
-        let beat = CAKeyframeAnimation(keyPath: "transform.scale")
-        beat.values = [1, 1.08, 1]
-        beat.keyTimes = [0, 0.35, 1]
-        beat.duration = 0.6
-        beat.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        glass.layer.add(beat, forKey: "pulse")
     }
 
     private func keyboardMoved(_ note: Notification) {
@@ -1069,10 +1128,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
-        if let name = environment["SQUIRCLE_BUBBLE_CHARACTER"], let character = BubbleCharacter.make(name) {
-            bubble.character = character
-            retarget()
-        }
         // `SQUIRCLE_BUBBLE_DEMO=1`: the bubble loops through made-up statuses
         // (short, long, a rapid burst, needs you, done, idle) for recordings.
         if environment["SQUIRCLE_BUBBLE_DEMO"] == "1" {
@@ -1148,6 +1203,8 @@ final class FrameSpring {
     var onRest: (() -> Void)?
     var isAnimating: Bool { link != nil }
     private(set) var isHeld = false
+    /// Points per second of the frame's centre.
+    var centerVelocity: CGPoint { CGPoint(x: velocity[0] + velocity[2] / 2, y: velocity[1] + velocity[3] / 2) }
     private var link: CADisplayLink?
     private var lastTimestamp: CFTimeInterval?
 
