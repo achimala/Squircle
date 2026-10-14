@@ -423,6 +423,8 @@ final class SquircleModel {
         return sessions.filter { sessionProjects[$0.id] == project.id && (includingAgent || $0.id != agent) }
     }
     func agentThreadID(for project: AppProject) -> String? { agents[project.id] }
+    /// The Mac's Squircle service, for notification registration.
+    var service: SquircleClient? { client }
     /// Restarts the app's agent session, or replaces it with a new thread;
     /// the Mac does it once the agent's turn ends, and the agent view
     /// follows the new thread when the Mac reports it.

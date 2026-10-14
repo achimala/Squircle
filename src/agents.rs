@@ -106,6 +106,28 @@ fn worker_selection(config: &Value, provider: Option<&str>, model: Option<&str>,
     Ok(selection)
 }
 
+impl crate::push::Threads for Agents {
+    fn last_reply<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let client = self.client().await.ok()?;
+            let detail = self.thread_detail(&client, thread).await.ok()?;
+            detail["messages"].as_array()?.iter().rev().find(|m| m["role"] == "assistant")
+                .and_then(|m| m["text"].as_str()).map(str::to_string)
+        })
+    }
+    fn question<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let client = self.client().await.ok()?;
+            let detail = self.thread_detail(&client, thread).await.ok()?;
+            let (_, questions) = Self::pending_question(&detail)?;
+            questions.first()?["question"].as_str().map(str::to_string)
+        })
+    }
+    fn current_step<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
+        Box::pin(async move { crate::t3steps::current_step(thread).await.ok().flatten() })
+    }
+}
+
 pub fn worker_state(thread: &Value) -> &'static str {
     if thread["hasPendingApprovals"] == true || thread["hasPendingUserInput"] == true {
         "needs-you"
@@ -147,6 +169,7 @@ pub struct Agents {
     t3: RwLock<Option<Arc<T3>>>,
     status: Mutex<String>,
     flush_scheduled: Mutex<bool>,
+    push: std::sync::OnceLock<Arc<crate::push::Push>>,
     tasks: Arc<Tasks>,
 }
 
@@ -267,6 +290,7 @@ impl Agents {
             t3: RwLock::new(None),
             status: Mutex::new("Not connected to T3".into()),
             flush_scheduled: Mutex::new(false),
+            push: std::sync::OnceLock::new(),
             tasks,
         }))
     }
@@ -312,6 +336,7 @@ impl Agents {
                 item = shell.recv() => {
                     let Some(item) = item else { break };
                     self.consume_shell(&item);
+                    if let Some(push) = self.push.get() { push.apps_changed(self.app_views()); }
                     self.schedule_flush();
                     self.run_due_resets();
                 }
@@ -358,6 +383,27 @@ impl Agents {
 
     fn thread(&self, id: &str) -> Option<Value> {
         self.shell.lock().unwrap().threads.get(id).cloned()
+    }
+
+    /// Notifications and Live Activities follow the agents from here on.
+    pub fn attach_push(self: &Arc<Self>, push: Arc<crate::push::Push>) {
+        push.set_threads(self.clone());
+        let _ = self.push.set(push);
+    }
+
+    /// Each app's agent and live workers, for notifications.
+    fn app_views(&self) -> Vec<crate::push::AppView> {
+        let registry = self.registry.lock().unwrap();
+        let shell = self.shell.lock().unwrap();
+        registry.agents.values().map(|agent| crate::push::AppView {
+            project_id: agent.project_id.clone(),
+            app: shell.projects.get(&agent.project_id).and_then(|p| p["title"].as_str()).unwrap_or("App").to_string(),
+            agent: shell.threads.get(&agent.thread_id).map(|row| (agent.thread_id.clone(), row.clone())),
+            workers: registry.workers.iter()
+                .filter(|(_, w)| !w.archived && w.coordinator == agent.thread_id)
+                .filter_map(|(id, w)| Some((id.clone(), w.title.clone(), shell.threads.get(id)?.clone())))
+                .collect(),
+        }).collect()
     }
 
     /// A thread's row in T3's shell, if T3 has sent it.

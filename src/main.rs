@@ -138,6 +138,12 @@ enum Commands {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Notifications and the Live Activity on the phone, sent from this Mac to Apple with your own APNs key.
+    #[command(after_help = "Once: create an APNs auth key (Apple Developer > Keys > +, Apple Push Notifications service), then:\n  squircle push setup --key-file ~/Downloads/AuthKey_ABC123DEFG.p8 --key-id ABC123DEFG --team-id YOURTEAMID\nThe key is copied into the data directory (owner-only) and never printed. Open Squircle on the phone and allow notifications, then: squircle push test.\nThe phone is told when an app's agent replies or asks, a worker finishes, errors or needs input, and a device build succeeds or fails; nothing for the thread it is showing. Bursts arrive as one notification.")]
+    Push {
+        #[command(subcommand)]
+        command: PushCommand,
+    },
     /// The user's asks to an app's agent and where each stands; the phone shows them as Tasks.
     #[command(after_help = "One task per thing the user asked for, in their words. Status: queued, in_progress, needs_you, ready_to_try, done, dropped.\nLinked workers and builds move a task on by themselves (a worker working → in_progress, waiting on a question → needs_you, a linked build succeeding → ready_to_try); a status you set holds until one of them changes.\nDone and dropped tasks move to History after a day, untouched open ones after three days; any change brings one back.\n  squircle task add --thread YOUR_THREAD_ID --ask \"stack the sims and fan them out\"\n  squircle thread spawn ... --task TASK_ID      links the worker\n  squircle build start ... --task TASK_ID       links the build\n  squircle task update TASK_ID --status needs_you --note \"pick a layout\"\n  squircle task attach TASK_ID --file /abs/shot.png --caption \"New strip\"\n  squircle task list --thread YOUR_THREAD_ID")]
     Task {
@@ -258,6 +264,27 @@ enum ThreadCommand {
         #[arg(long, help = "Only report what would be removed")]
         dry_run: bool,
     },
+}
+#[derive(Subcommand)]
+enum PushCommand {
+    /// Store your APNs auth key (.p8). Works without the service running.
+    Setup {
+        #[arg(long, help = "The AuthKey_XXXXXXXXXX.p8 file downloaded from Apple")]
+        key_file: Option<PathBuf>,
+        #[arg(long, help = "The key's 10-character Key ID")]
+        key_id: Option<String>,
+        #[arg(long, help = "Your 10-character Apple Team ID")]
+        team_id: Option<String>,
+        #[arg(long, help = "Delete the stored key instead")]
+        remove: bool,
+    },
+    /// Send a test notification (and with --live-activity, start a test Live Activity) to registered phones.
+    Test {
+        #[arg(long)]
+        live_activity: bool,
+    },
+    /// Whether a key is set and which phones registered (no tokens shown).
+    Status,
 }
 #[derive(Subcommand)]
 enum TaskCommand {
@@ -694,7 +721,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -995,6 +1022,12 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 MediaCommand::List { thread } => success(json!({"media":squircle::media::list(&root, thread)?})),
             }
         }
+        Commands::Push { command } => match command {
+            PushCommand::Setup { key_file, key_id, team_id, remove } => success(squircle::push::setup(
+                &root(cli)?, key_file.as_deref(), key_id.as_deref(), team_id.as_deref(), *remove)?),
+            PushCommand::Test { live_activity } => post(cli, "/v1/push/test", json!({"live_activity": live_activity})).await?,
+            PushCommand::Status => get(cli, "/v1/push").await?,
+        },
         Commands::Sim { command } => match command {
             SimCommand::Start { thread, device } => post(cli, "/v1/sims", json!({"thread_id":thread_id(thread)?,"device":device})).await?,
             SimCommand::Stop { thread, id } => {
