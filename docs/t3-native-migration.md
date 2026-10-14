@@ -934,7 +934,9 @@ such as Needs you, show at once). Opening progress is by height only. The
 glass gets no frame until the first layout in a window, then grows in at its
 resting place (`appear`, scale 0.5 → 1 with a little overshoot, fading in).
 DEBUG: `SQUIRCLE_BUBBLE_DEMO=1` loops made-up statuses. Checked frame by
-frame in a real-speed simulator recording (iPhone 17 Pro, iOS 27.0).
+frame in a real-speed simulator recording (iPhone 17 Pro, iOS 27.0). Letters Abroad
+build: job `cb942484-6b95-4ebe-9061-26b5d25bad8d` (overlay key `6650da73…`,
+main at `b2e8e58`); not yet on the phone.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
