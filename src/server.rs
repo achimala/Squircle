@@ -2052,6 +2052,8 @@ struct SpawnWorker {
     provider: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    /// T3 runtime mode; None inherits the coordinator's.
+    runtime_mode: Option<String>,
     /// A task to link the worker to.
     task: Option<String>,
 }
@@ -2065,7 +2067,8 @@ async fn spawn_worker(
         tasks_of(&state)?.get(task).map_err(ApiError::missing)?;
     }
     let worker = agents(&state)?
-        .spawn(&r.coordinator, &r.title, &r.branch, r.base.as_deref(), &r.prompt, r.provider.as_deref(), r.model.as_deref(), r.effort.as_deref())
+        .spawn(&r.coordinator, &r.title, &r.branch, r.base.as_deref(), &r.prompt, r.provider.as_deref(), r.model.as_deref(), r.effort.as_deref(),
+               r.runtime_mode.as_deref())
         .await
         .map_err(agent_error)?;
     if let (Some(task), Some(id)) = (&r.task, worker["id"].as_str()) {

@@ -120,9 +120,6 @@ pub struct Registry {
 /// `full-access`; a fresh start keeps its predecessor's.
 const RUNTIME_MODES: [&str; 4] = ["approval-required", "auto-accept-edits", "auto", "full-access"];
 const AGENT_MODE: &str = "full-access";
-/// Workers run unattended in their own worktrees for an agent, not the user;
-/// an approval prompt would stall them until their agent noticed.
-const WORKER_MODE: &str = "full-access";
 
 fn runtime_mode(mode: Option<&str>) -> Result<String> {
     let mode = mode.unwrap_or(AGENT_MODE);
@@ -155,6 +152,40 @@ impl Peer for T3 {
 fn agent_message(kind: &str, from: Option<&str>) -> Value {
     json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Agent message",
            "kind": kind, "payload": {"from": from}})
+}
+
+/// A worker's runtime mode, and what T3 makes of it on the worker's provider
+/// (its driver): the mode asked for, else its coordinator's. Claude, Codex,
+/// Cursor and Grok each have an `auto` that runs unattended behind the
+/// provider's own checks; Antigravity's would ask before everything, so an
+/// inherited `auto` takes its auto-edit mode there. A worker that hits an
+/// approval prompt waits as needs-you for the user.
+fn worker_mode(driver: &str, coordinator: Option<&str>, requested: Option<&str>) -> Result<(String, &'static str)> {
+    let mode = match requested {
+        Some(mode) => runtime_mode(Some(mode))?,
+        None => match runtime_mode(coordinator).unwrap_or_else(|_| AGENT_MODE.into()).as_str() {
+            "auto" if driver == "antigravity" => "auto-accept-edits".into(),
+            mode => mode.into(),
+        },
+    };
+    let permissions = match (driver, mode.as_str()) {
+        ("claudeAgent", "approval-required") => "Claude Code default: asks before edits and commands",
+        ("claudeAgent", "auto-accept-edits") => "Claude Code acceptEdits: edits freely, asks before commands",
+        ("claudeAgent", "auto") => "Claude Code auto: runs unattended; its safety checks block risky actions",
+        ("codex", "approval-required") => "Codex read-only sandbox; asks before anything else",
+        ("codex", "auto-accept-edits") => "Codex workspace-write sandbox; asks before leaving it",
+        ("codex", "auto") => "Codex workspace-write sandbox; Codex's auto-reviewer decides on leaving it",
+        ("codex", _) => "Codex without a sandbox; never asks",
+        ("cursor", "auto") => "Cursor auto-review: runs unattended; its reviewer checks actions",
+        ("grok", "auto") => "Grok auto: runs unattended behind its own checks",
+        ("antigravity", "auto-accept-edits") => "Antigravity auto_edit: edits freely, asks before commands",
+        ("opencode", "full-access") => "OpenCode: allows everything",
+        ("opencode", _) => "OpenCode: asks before everything except reads",
+        (_, "full-access") => "No checks; never asks",
+        (_, "approval-required") => "Asks before edits and commands",
+        _ => "Asks before some actions",
+    };
+    Ok((mode, permissions))
 }
 
 /// A worker's T3 model selection, checked against the providers T3 reports
@@ -1229,7 +1260,7 @@ impl Agents {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn(&self, coordinator: &str, title: &str, branch: &str, base: Option<&str>, prompt: &str,
-                       provider: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Result<Value> {
+                       provider: Option<&str>, model: Option<&str>, effort: Option<&str>, runtime_mode: Option<&str>) -> Result<Value> {
         let client = self.ready().await?;
         let agent = self.agent_for_thread(coordinator)
             .with_context(|| format!("{coordinator} is not an app agent's thread"))?;
@@ -1241,6 +1272,9 @@ impl Agents {
         let selection = worker_selection(&config, provider, model, effort,
                                          coordinator_thread["modelSelection"]["model"].as_str())?;
         let (instance, model) = (selection["instanceId"].clone(), selection["model"].clone());
+        let driver = config["providers"].as_array().into_iter().flatten()
+            .find(|p| p["instanceId"] == instance).and_then(|p| p["driver"].as_str()).unwrap_or(instance.as_str().unwrap_or_default());
+        let (mode, permissions) = worker_mode(driver, coordinator_thread["runtimeMode"].as_str(), runtime_mode)?;
         let checkout = PathBuf::from(project["workspaceRoot"].as_str().context("The project has no folder")?);
         let current = git(&checkout, &["symbolic-ref", "--short", "HEAD"]).await.unwrap_or_else(|_| "HEAD".into());
         let base = base.unwrap_or(&current);
@@ -1259,10 +1293,10 @@ impl Agents {
             "type": "thread.turn.start", "threadId": id,
             "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": [],
                         "context": {"version": 1, "records": [agent_message("squircle-task", Some(coordinator))]}},
-            "modelSelection": selection, "runtimeMode": WORKER_MODE, "interactionMode": "default",
+            "modelSelection": selection, "runtimeMode": mode, "interactionMode": "default",
             "bootstrap": {
                 "createThread": {"projectId": agent.project_id, "title": title, "modelSelection": selection,
-                                 "runtimeMode": WORKER_MODE, "interactionMode": "default", "branch": null, "worktreePath": null, "createdAt": now},
+                                 "runtimeMode": mode, "interactionMode": "default", "branch": null, "worktreePath": null, "createdAt": now},
                 "prepareWorktree": {"projectCwd": project["workspaceRoot"], "baseBranch": base, "branch": branch},
                 "runSetupScript": true,
             },
@@ -1276,6 +1310,7 @@ impl Agents {
             self.save(&registry)?;
         }
         Ok(json!({"id": id, "title": title, "branch": branch, "base": base, "provider": instance, "model": model, "effort": effort,
+                  "runtime_mode": mode, "permissions": permissions,
                   "next": "The worker is running. End your turn; a [worker update] arrives when it finishes."}))
     }
 
@@ -1363,7 +1398,10 @@ impl Agents {
     pub async fn answer(&self, id: &str, text: &str) -> Result<()> {
         let client = self.ready().await?;
         let thread = self.thread_detail(&*client, id).await?;
-        let (request, questions) = Self::pending_question(&thread).context("That thread is not waiting on a question")?;
+        let (request, questions) = Self::pending_question(&thread).with_context(|| match pending_request(&thread) {
+            Some(_) => "That thread is waiting on an approval; the user approves or declines it on the phone",
+            None => "That thread is not waiting on a question",
+        })?;
         let answers: serde_json::Map<String, Value> = questions.iter()
             .filter_map(|q| q["id"].as_str().or(q["question"].as_str()).map(|k| (k.to_string(), json!(text)))).collect();
         client.dispatch(json!({"type": "thread.user-input.respond", "threadId": id, "requestId": request, "answers": answers})).await?;
@@ -1499,6 +1537,22 @@ mod tests {
             "latestTurn": turn.map(|t| json!({"turnId": t, "state": turn_state})),
             "session": {"status": session}, "hasPendingApprovals": false, "hasPendingUserInput": needs,
         })
+    }
+
+    #[test]
+    fn worker_mode_inherits_its_coordinators_unless_asked() {
+        let mode = |driver, coordinator, requested| worker_mode(driver, coordinator, requested).unwrap().0;
+        assert_eq!(mode("claudeAgent", Some("auto"), None), "auto");
+        assert_eq!(mode("codex", Some("auto"), None), "auto");
+        assert_eq!(mode("claudeAgent", Some("approval-required"), None), "approval-required");
+        assert_eq!(mode("antigravity", Some("auto"), None), "auto-accept-edits");
+        // Asked for explicitly, a mode is kept as is, even where it asks more.
+        assert_eq!(mode("antigravity", Some("auto"), Some("auto")), "auto");
+        assert_eq!(mode("claudeAgent", Some("auto"), Some("full-access")), "full-access");
+        // An agent thread without a known mode is one the service created.
+        assert_eq!(mode("claudeAgent", None, None), AGENT_MODE);
+        assert_eq!(mode("claudeAgent", Some("bogus"), None), AGENT_MODE);
+        assert!(worker_mode("claudeAgent", Some("auto"), Some("yolo")).is_err());
     }
 
     #[test]
