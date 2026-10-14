@@ -8,6 +8,7 @@
 
 use crate::agents::{Agents, worker_state};
 use crate::media::{self, SimulatorClip};
+use crate::t3::T3;
 use crate::store::{atomic_json, read_json};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -169,9 +170,9 @@ impl Sims {
         ensure!(media::valid_thread(thread) && uuid::Uuid::parse_str(thread).is_ok(), "Thread ID must be a T3 thread UUID");
         let client = self.agents.connection().await?;
         ensure!(self.agents.thread_row(thread).is_some(), "T3 has no thread {thread}");
-        let inventory = client.snapshot("subscribeDeviceState", json!({})).await?;
-        let simulators: Vec<&Value> = inventory["devices"].as_array().into_iter().flatten()
-            .filter(|d| d["platform"] == "ios" && d["physical"] != true && d["hostId"] == "local").collect();
+        let inventory = inventory(&client).await?;
+        let simulators = local_simulators(&inventory);
+        ensure!(!simulators.is_empty(), "{}", no_simulators(&inventory));
 
         let active: Vec<SimSession> = self.state.lock().unwrap().ledger.sessions.iter().filter(|s| s.active()).cloned().collect();
         let chosen = match device {
@@ -325,10 +326,11 @@ impl Sims {
     /// This Mac's iOS simulators, and which thread (if any) is using each.
     pub async fn devices(&self) -> Result<Value> {
         let client = self.agents.connection().await?;
-        let inventory = client.snapshot("subscribeDeviceState", json!({})).await?;
+        let inventory = inventory(&client).await?;
+        let simulators = local_simulators(&inventory);
+        ensure!(!simulators.is_empty(), "{}", no_simulators(&inventory));
         let active: Vec<SimSession> = self.state.lock().unwrap().ledger.sessions.iter().filter(|s| s.active()).cloned().collect();
-        let devices: Vec<Value> = inventory["devices"].as_array().into_iter().flatten()
-            .filter(|d| d["platform"] == "ios" && d["physical"] != true && d["hostId"] == "local")
+        let devices: Vec<Value> = simulators.into_iter()
             .map(|d| {
                 let session = active.iter().find(|s| Some(s.device_id.as_str()) == d["id"].as_str());
                 json!({"id": d["id"], "name": d["name"], "version": d["version"], "booted": d["booted"],
@@ -378,6 +380,30 @@ impl Sims {
         }
         due
     }
+}
+
+/// T3's device state after it re-lists every host. Its `subscribeDeviceState`
+/// snapshot is only a cache that starts empty when T3 starts and fills only
+/// when some client asks for a list, so read it through `device.list`.
+async fn inventory(client: &T3) -> Result<Value> {
+    client.call("device.list", json!({})).await.context("T3 could not list its simulators")
+}
+
+fn local_simulators(inventory: &Value) -> Vec<&Value> {
+    inventory["devices"].as_array().into_iter().flatten()
+        .filter(|d| d["platform"] == "ios" && d["physical"] != true && d["hostId"] == "local").collect()
+}
+
+/// Why T3 listed no simulators, from its own host status.
+fn no_simulators(inventory: &Value) -> String {
+    let status = inventory["hostStatus"].as_str().unwrap_or("unknown");
+    let detail = inventory["hostStatusDetail"].as_str()
+        .or_else(|| inventory["hostStatuses"]["local"]["detail"].as_str())
+        .map(|d| format!(": {d}")).unwrap_or_default();
+    if status == "disabled" {
+        return "T3 lists no simulators because its device support is off; turn it on in T3's Device panel".into();
+    }
+    format!("T3 lists no iOS simulators on this Mac (T3 device host {status}{detail}); check `xcrun simctl list devices` and T3's Device panel")
 }
 
 #[cfg(test)]
