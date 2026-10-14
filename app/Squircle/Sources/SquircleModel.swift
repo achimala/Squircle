@@ -2068,41 +2068,6 @@ final class SquircleModel {
             try await ensureOwnProject(record)
         } catch { self.error = error.localizedDescription }
     }
-    // MARK: Legacy controller API
-    // The chat controller's previous calls, until it addresses conversations
-    // itself (W7 deletes this block then).
-
-    enum LegacySendOutcome: Equatable {
-        case sent(threadID: String)
-        case failed(String)
-    }
-    private func appID(of thread: String) -> String { sessionProjects[thread] ?? selectedProjectID ?? "" }
-    func prepareSession(_ id: String) { show(.thread(id, appID: appID(of: id))) }
-    func selectSession(_ id: String) async { await open(.thread(id, appID: appID(of: id))) }
-    func beginDraft(agent: Bool = false) async { await open(.draft(UUID(), appID: selectedProjectID ?? "", agent: agent)) }
-    /// Sends from `threadID`, or the open draft when nil. Text the old
-    /// controller put back and sends again after a lost answer goes as the
-    /// same message.
-    func send(_ spoken: String, in project: AppProject, to threadID: String?, agent: Bool) async -> LegacySendOutcome {
-        let origin: ConversationID
-        if let threadID { origin = .thread(threadID, appID: project.id) }
-        else if let open, case .draft(_, _, let isAgent) = open, isAgent == agent { origin = open }
-        else { return .failed("This draft is no longer open.") }
-        let start: SendStart
-        if let pending = sends[origin], case .outcomeUnknown = pending.phase, pending.spoken == spoken { start = startRetry(origin) }
-        else { start = startSend(spoken, in: project, from: origin) }
-        guard case .started(_, let task) = start else {
-            if case .refused(let reason) = start { return .failed(reason) }
-            return .failed("Couldn’t send.")
-        }
-        let outcome = await task.value
-        // The old controller expects the model to follow a draft's new thread.
-        if open == origin, let next = successors[origin] { await open(next) }
-        switch outcome {
-        case .accepted(_, let conversation): return .sent(threadID: conversation.threadID ?? "")
-        case .rejected(_, let reason, _), .unknown(_, let reason, _): return .failed(reason)
-        }
-    }
 }
 
 /// Squircle's copies of Home and of threads on disk, read and written off
