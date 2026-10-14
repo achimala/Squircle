@@ -98,7 +98,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var pinToBottom = true
     /// The debug overlay's even inset and the safe area its glass will have
     /// at rest (the glass stretches, so UIKit's own would change every frame).
-    private var overlayLayout: (inset: CGFloat, safe: UIEdgeInsets)?
+    private var overlayLayout: (inset: CGFloat, safe: UIEdgeInsets, contentWidth: CGFloat?)?
+    /// The composer's distance from the bottom, which follows the safe area.
+    private var safeBottom: NSLayoutConstraint?
     private var edgeConstraints: [NSLayoutConstraint] = []
     private var safeArea: UIEdgeInsets { overlayLayout?.safe ?? view.safeAreaInsets }
 
@@ -126,26 +128,36 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     /// Lays the controls out at one inset from every edge of `safe`, for
-    /// the debug overlay's glass.
-    func setOverlayLayout(inset: CGFloat, safe: UIEdgeInsets) {
+    /// the debug overlay's glass. `contentWidth` keeps the conversation's
+    /// column that wide, centred, however wide the view: docked and full
+    /// screen then wrap every line alike, and the overlay can morph between
+    /// them laying this out every frame (with the safe area it covers so
+    /// far) without a line re-wrapping.
+    func setOverlayLayout(inset: CGFloat, safe: UIEdgeInsets, contentWidth: CGFloat? = nil) {
         loadViewIfNeeded()
-        guard overlayLayout?.inset != inset || overlayLayout?.safe != safe else { return }
-        overlayLayout = (inset, safe)
-        view.keyboardLayoutGuide.usesBottomSafeArea = false
-        NSLayoutConstraint.deactivate(edgeConstraints)
-        let rest = composer.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-        rest.priority = .defaultLow
-        edgeConstraints = [
-            composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
-            composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
-            composer.bottomAnchor.constraint(lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor, constant: -inset),
-            composer.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -inset - safe.bottom),
-            rest,
-            jump.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
-            request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
-            request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset)
-        ]
-        NSLayoutConstraint.activate(edgeConstraints)
+        guard overlayLayout?.inset != inset || overlayLayout?.safe != safe || overlayLayout?.contentWidth != contentWidth else { return }
+        let rebuild = overlayLayout?.inset != inset
+        overlayLayout = (inset, safe, contentWidth)
+        if rebuild {
+            view.keyboardLayoutGuide.usesBottomSafeArea = false
+            NSLayoutConstraint.deactivate(edgeConstraints)
+            let rest = composer.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            rest.priority = .defaultLow
+            let bottom = composer.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -inset - safe.bottom)
+            safeBottom = bottom
+            edgeConstraints = [
+                composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+                composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
+                composer.bottomAnchor.constraint(lessThanOrEqualTo: view.keyboardLayoutGuide.topAnchor, constant: -inset),
+                bottom,
+                rest,
+                jump.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
+                request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+                request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset)
+            ]
+            NSLayoutConstraint.activate(edgeConstraints)
+        }
+        safeBottom?.constant = -inset - safe.bottom
         view.setNeedsLayout()
     }
 
@@ -382,7 +394,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // height, so the offset is settled against the content's end.
         let previous = table.bounds.height
         let gap = table.contentSize.height + table.contentInset.bottom - (table.contentOffset.y + previous)
-        table.frame = view.bounds
+        let column = min(width, overlayLayout?.contentWidth ?? width)
+        table.frame = CGRect(x: ((width - column) / 2).rounded(), y: 0, width: column, height: height)
         if previous > 0, abs(previous - height) > 0.5, pinToBottom {
             scrollToBottom()
         } else if previous > 0, abs(previous - height) > 0.5, !table.isTracking {

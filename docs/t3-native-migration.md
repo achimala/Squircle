@@ -917,6 +917,20 @@ with the fade present throughout, the capture flight. Letters Abroad build:
 job `9c690d0f-f240-4376-a154-d163edad6d97` (overlay key `5f304350…`, main at
 `713918a`); not yet on the phone.
 
+**Docked ↔ full screen without cross blur (user, 2026-10-14):** "feels like
+the before and after states are ~ the same so why can't it transition
+smoothly?" The conversation's column now keeps the docked panel's width in full
+screen too (`setOverlayLayout(contentWidth:)`, the table centred), so both
+states wrap every line alike. Between them, whether the finger or the spring
+(handle tap, menu) moves the glass, the panel is laid out at the glass's frame
+every frame with the part of the screen's safe area that frame covers
+(`liveLayout`): the handle, ⋯, field and top fade slide to their full-screen
+places as the glass widens, with no picture and no blur. Per frame only
+constraint constants change. Cross blur remains for bubble ↔ panel and for the
+panel's shortest layout morphing into the bubble. Verified from real-touch
+recordings: drag up into full screen and back, handle tap to full and back,
+continuous with nothing re-wrapping and nothing changing at rest.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
