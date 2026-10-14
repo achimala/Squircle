@@ -185,6 +185,17 @@ final class T3HTTP {
               (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         return data
     }
+    /// A T3 file streamed to disk and moved to `destination`, with the
+    /// bearer, only on T3's origin. False if it couldn't be fetched.
+    func authorizedDownload(_ url: URL, to destination: URL) async -> Bool {
+        guard Self.sameOrigin(url, configuration.t3URL) else { return false }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        guard let (file, response) = try? await session.download(for: request) else { return false }
+        defer { try? FileManager.default.removeItem(at: file) }
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
+        return (try? MediaFileStore.move(file, to: destination)) != nil
+    }
 }
 
 /// Effect RPC JSON framing, pinned to the installed T3 0.0.45 contract.

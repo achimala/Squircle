@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// What one tool call did, said the way a person would say it. Built from the
@@ -224,28 +225,136 @@ struct BoundedCache<Key: Hashable, Value> {
     }
 }
 
-/// Downloaded recordings, kept as local files for AVFoundation. Files
-/// Squircle downloaded are deleted when they leave the cache; a file it was
-/// handed (your own recording) never is.
+/// Recordings and clips as files for AVFoundation: one cache on disk for
+/// every download (conversation recordings, clips agents link, task clips).
+/// Files are named by what they are, so a later launch finds them again;
+/// the cache is listed at launch and bounded by bytes and age. A file used
+/// in the last few minutes (a player may hold it) is never evicted. A file
+/// Squircle was handed (your own recording) is not the cache's.
 @MainActor
 enum StepVideos {
-    private struct File { let url: URL; let owned: Bool }
-    private static var files = BoundedCache<String, File>(budget: 24)
     /// Where downloads go; anything in it is Squircle's to delete.
     static let directory: URL = {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("squircle-videos", isDirectory: true)
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
+        let url = caches.appendingPathComponent("squircle-media", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
-    static func url(for id: String) -> URL? { files.value(for: id)?.url }
-    /// `url` is in `directory` when Squircle downloaded it.
-    static func set(_ url: URL, for id: String) {
-        let owned = url.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL
-        delete(files.set(File(url: url, owned: owned), for: id).filter { $0.url != url })
+    /// Files on hand, by name, with their size and last use.
+    private static var files: [String: MediaFileStore.Entry] = [:]
+    /// Your own recordings, by step ID; never deleted here.
+    private static var handed = BoundedCache<String, URL>(budget: 64)
+    /// Downloads under way, by step ID: everyone asking waits for the one.
+    private static var loads: [String: Task<URL?, Never>] = [:]
+    private static var listed: Task<Void, Never>?
+
+    static func url(for id: String) -> URL? {
+        if let url = handed.value(for: id) { return url }
+        let name = MediaFileStore.name(for: id)
+        guard files[name] != nil else { return nil }
+        files[name]?.used = .now
+        return directory.appendingPathComponent(name)
     }
-    static func removeAll() { delete(files.removeAll()) }
-    private static func delete(_ dropped: [File]) {
-        for file in dropped where file.owned { try? FileManager.default.removeItem(at: file.url) }
+    /// A file Squircle didn't download, such as your own recording.
+    static func set(_ url: URL, for id: String) { handed.set(url, for: id) }
+
+    /// The file for `id`, fetched once by `fetch` (which writes the
+    /// destination it's given and says whether it did), however many ask.
+    static func file(for id: String, fetch: @escaping (URL) async -> Bool) async -> URL? {
+        if let url = url(for: id) { return url }
+        if let load = loads[id] { return await load.value }
+        await list()
+        if let url = url(for: id) { return url }
+        let name = MediaFileStore.name(for: id), destination = directory.appendingPathComponent(name)
+        let load = Task<URL?, Never> {
+            guard await fetch(destination), let bytes = await MediaFileStore.size(of: destination) else { return nil }
+            files[name] = MediaFileStore.Entry(name: name, bytes: bytes, used: .now)
+            await evict()
+            return destination
+        }
+        loads[id] = load
+        let url = await load.value
+        loads[id] = nil
+        return url
+    }
+
+    /// Lists what earlier launches left, once, and trims it.
+    static func list() async {
+        if listed == nil {
+            listed = Task {
+                for entry in await MediaFileStore.scan(directory) where files[entry.name] == nil { files[entry.name] = entry }
+                await evict()
+            }
+        }
+        await listed?.value
+    }
+
+    private static func evict() async {
+        let doomed = MediaFileStore.evictions(Array(files.values), now: .now)
+        guard !doomed.isEmpty else { return }
+        for name in doomed { files[name] = nil }
+        await MediaFileStore.remove(doomed.map { directory.appendingPathComponent($0) })
+    }
+}
+
+/// The disk side of `StepVideos`, off the main actor.
+enum MediaFileStore {
+    struct Entry: Equatable {
+        let name: String
+        let bytes: Int
+        var used: Date
+    }
+    static let budget = 1 << 30
+    static let maxAge: TimeInterval = 14 * 86_400
+    /// A file used this recently may be playing: it stays.
+    static let inUse: TimeInterval = 15 * 60
+
+    /// A stable file name for a step ID, keeping a video's extension.
+    static func name(for id: String) -> String {
+        let digest = SHA256.hash(data: Data(id.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
+        let ext = (id as NSString).pathExtension.lowercased()
+        return digest + "." + (["mp4", "mov", "m4v"].contains(ext) ? ext : "mp4")
+    }
+
+    /// What to delete: anything unused for `maxAge`, then the least recently
+    /// used until the rest fit `budget`; never a file used within `inUse`.
+    static func evictions(_ entries: [Entry], now: Date, budget: Int = budget, maxAge: TimeInterval = maxAge,
+                          inUse: TimeInterval = inUse) -> [String] {
+        var doomed: [String] = []
+        var total = entries.reduce(0) { $0 + $1.bytes }
+        for entry in entries.sorted(by: { $0.used < $1.used }) {
+            let idle = now.timeIntervalSince(entry.used)
+            guard idle >= inUse else { continue }
+            guard idle >= maxAge || total > budget else { continue }
+            doomed.append(entry.name); total -= entry.bytes
+        }
+        return doomed
+    }
+
+    /// Replaces `destination` with `file` in one step.
+    static func move(_ file: URL, to destination: URL) throws {
+        let manager = FileManager.default
+        try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if manager.fileExists(atPath: destination.path) {
+            _ = try manager.replaceItemAt(destination, withItemAt: file)
+        } else {
+            try manager.moveItem(at: file, to: destination)
+        }
+    }
+    static func size(of url: URL) async -> Int? {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+    }
+    static func scan(_ directory: URL) async -> [Entry] {
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentAccessDateKey, .contentModificationDateKey]
+        let urls = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
+        return urls.compactMap { url in
+            guard let values = try? url.resourceValues(forKeys: Set(keys)), let bytes = values.fileSize else { return nil }
+            return Entry(name: url.lastPathComponent, bytes: bytes,
+                         used: values.contentAccessDate ?? values.contentModificationDate ?? .distantPast)
+        }
+    }
+    static func remove(_ urls: [URL]) async {
+        for url in urls { try? FileManager.default.removeItem(at: url) }
     }
 }
 
