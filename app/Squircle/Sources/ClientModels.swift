@@ -10,12 +10,58 @@ struct ChatSession: Identifiable, Equatable {
     let updatedAt: Date
     var phase = Phase.idle
     var modelSelection = JSONValue.null
+    /// T3's newest turn in this thread, as the shell last reported it.
+    var latestTurn: TurnObservation?
 
     init(id: String, title: String, preview: String = "", updatedAt: Date = .now,
-         phase: Phase = .idle, modelSelection: JSONValue = .null) {
+         phase: Phase = .idle, modelSelection: JSONValue = .null, latestTurn: TurnObservation? = nil) {
         self.id = id; self.title = title; self.preview = preview
         self.updatedAt = updatedAt; self.phase = phase; self.modelSelection = modelSelection
+        self.latestTurn = latestTurn
     }
+}
+
+/// A thread's newest turn as T3 observed it. A finished one is a
+/// `TurnCompletion`: whether work completed comes from here, never from a
+/// row that stopped showing as working.
+struct TurnObservation: Equatable {
+    enum State: Equatable {
+        case running, completed, interrupted, error
+        /// A state this build doesn't know; never read as finished.
+        case unknown(String)
+    }
+    let turnID: String
+    let state: State
+    let endedAt: Date?
+    init?(_ value: JSONValue) {
+        guard let turn = value["turnId"].string else { return nil }
+        turnID = turn
+        switch value["state"].string ?? "" {
+        case "running": state = .running
+        case "completed": state = .completed
+        case "interrupted": state = .interrupted
+        case "error": state = .error
+        case let other: state = .unknown(other)
+        }
+        endedAt = value["completedAt"].string.flatMap(ISODate.parse)
+    }
+    /// The turn's end, when it has ended.
+    var completion: TurnCompletion? {
+        switch state {
+        case .completed: TurnCompletion(turnID: turnID, endedAt: endedAt, outcome: .completed)
+        case .interrupted: TurnCompletion(turnID: turnID, endedAt: endedAt, outcome: .interrupted)
+        case .error: TurnCompletion(turnID: turnID, endedAt: endedAt, outcome: .failed)
+        case .running, .unknown: nil
+        }
+    }
+}
+
+/// A turn T3 reported finished: the event a "Done" notice is about.
+struct TurnCompletion: Equatable, Hashable {
+    enum Outcome: Hashable { case completed, interrupted, failed }
+    let turnID: String
+    let endedAt: Date?
+    let outcome: Outcome
 }
 
 struct ChatMessage: Identifiable, Equatable {
@@ -343,18 +389,26 @@ struct AppTask: Decodable, Equatable, Identifiable {
     let order: Double
     let updatedAt: Double
     let archivedAt: Double?
+    /// The service's revision of this task; an edit's receipt names the
+    /// revision that holds it. Nil from an older service.
+    let revision: UInt64?
     let threads: [Thread]
     let builds: [Build]
     let media: [Media]
 
     enum CodingKeys: String, CodingKey {
-        case id, ask, status, note, order, threads, builds, media
+        case id, ask, status, note, order, threads, builds, media, revision
         case updatedAt = "updated_at", archivedAt = "archived_at"
     }
 }
 
-/// An app's tasks: the active list and History.
+/// An app's tasks: the active list and History, newest first. The service
+/// sends History a page at a time; `historyNext` is where the next older
+/// page starts, nil once all of it is here.
 struct AppTasks: Decodable, Equatable {
     var tasks: [AppTask] = []
     var history: [AppTask] = []
+    var historyNext: String?
+    var hasMoreHistory: Bool { historyNext != nil }
+    enum CodingKeys: String, CodingKey { case tasks, history, historyNext = "history_next" }
 }
