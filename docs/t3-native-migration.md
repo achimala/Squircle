@@ -731,7 +731,10 @@ frame in the simulator; not yet on the phone. *Superseded 2026-10-14
 ([review fixes](#2026-10-14-code-review-fixes-030-56)): `downloaded_at` was
 set when the request arrived; it now means every byte was sent, and
 `download_started_at` marks the IPA being opened. The curtain waits for
-`downloaded_at`.*
+`downloaded_at` Fixed the same night: the first version recorded the
+finish in a trailing chunk Hyper never polls once Content-Length bytes are
+out, so no real download ever finished and the curtain never showed; it is
+now recorded when Hyper drops the fully sent body (tested over a socket).*
 
 **Correction, real glass morph (2026-10-07):** the previous build faked the
 morph: two glass views crossfaded (materialize/dematerialize in a container)
