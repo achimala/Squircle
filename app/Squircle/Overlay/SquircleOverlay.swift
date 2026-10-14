@@ -1158,6 +1158,19 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// → mini → bubble for recordings (`SQUIRCLE_SLOW` slows the springs).
     private var demoStatus: (headline: String?, tone: LiveCapsule.Tone)?
 
+    /// `SQUIRCLE_OVERLAY_OPEN=record-screen|record-performance`: records for
+    /// `SQUIRCLE_RECORD_SECONDS` (default 8), stops as a tap does, and with
+    /// `SQUIRCLE_OVERLAY_SEND` sends that message with the recording.
+    private func debugRecord(_ mode: String, environment: [String: String]) async {
+        startRecording(mode == "record-screen" ? .screen : .performance)
+        let seconds = environment["SQUIRCLE_RECORD_SECONDS"].flatMap(Double.init) ?? 8
+        try? await Task.sleep(for: .seconds(seconds))
+        stopRecording()
+        guard let text = environment["SQUIRCLE_OVERLAY_SEND"] else { return }
+        try? await Task.sleep(for: .seconds(4))
+        activeController?.debugSend(text)
+    }
+
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
         // `SQUIRCLE_BUBBLE_DEMO=1`: the bubble loops through made-up statuses
@@ -1191,15 +1204,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(4))
                 if mode == "capture" { self?.captureAndOpen(); return }
-                // `record-screen` / `record-performance`: records for
-                // `SQUIRCLE_RECORD_SECONDS` (default 8), then stops as a tap does.
-                if mode.hasPrefix("record-") {
-                    self?.startRecording(mode == "record-screen" ? .screen : .performance)
-                    let seconds = environment["SQUIRCLE_RECORD_SECONDS"].flatMap(Double.init) ?? 8
-                    try? await Task.sleep(for: .seconds(seconds))
-                    self?.stopRecording()
-                    return
-                }
+                if mode.hasPrefix("record-") { await self?.debugRecord(mode, environment: environment); return }
                 self?.open()
                 if mode == "full" { self?.toggleFull() }
             }
