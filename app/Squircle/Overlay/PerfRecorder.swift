@@ -10,14 +10,16 @@ import UIKit
 /// memory, thermal state, touches and the app's log. The Mac names the app's
 /// frames from the build's dSYM (`squircle perf`).
 @MainActor
-final class PerfRecorder {
+final class PerfRecorder: CaptureProducer {
     private let sampler: MainThreadSampler
     private var link: CADisplayLink?
     private let started = CACurrentMediaTime()
     private let startDate = Date()
-    private var frames: [Double] = []
+    private var frames: [FrameTiming] = []
     private var hitchScreens: [(Double, String)] = []
-    private var refresh: Double = 60
+    /// The app left the foreground or became inactive since the last frame:
+    /// the next frame's gap is no frame.
+    private var interrupted = false
     private let touches: TouchTracker
     private var events: [[String: Any]] = []
     private var observers: [NSObjectProtocol] = []
@@ -36,6 +38,8 @@ final class PerfRecorder {
         let center = NotificationCenter.default
         for (name, kind) in [(UIApplication.didEnterBackgroundNotification, "background"),
                              (UIApplication.willEnterForegroundNotification, "foreground"),
+                             (UIApplication.willResignActiveNotification, "inactive"),
+                             (UIApplication.didBecomeActiveNotification, "active"),
                              (UIApplication.didReceiveMemoryWarningNotification, "memory-warning")] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.event(kind) }
@@ -43,36 +47,53 @@ final class PerfRecorder {
         }
     }
 
-    var hitchCount: Int { Self.hitches(frames, refresh: refresh).count }
+    deinit {
+        // Never left running past its owner, finished or not.
+        sampler.abandon()
+        link?.invalidate()
+    }
 
     private func event(_ kind: String) {
         events.append(["t": CACurrentMediaTime() - started, "kind": kind])
+        if kind != "memory-warning" { interrupted = true }
     }
 
     private func tick(_ link: CADisplayLink) {
-        let now = link.timestamp - started
-        let interval = link.targetTimestamp - link.timestamp
-        if interval > 0 { refresh = (1 / interval).rounded() }
+        let frame = FrameTiming(time: link.timestamp - started, period: max(0.001, link.targetTimestamp - link.timestamp),
+                                resumed: interrupted || frames.isEmpty)
+        interrupted = false
         // A late frame: note what was on screen while it was late.
-        if let last = frames.last, now - last > 1.5 / refresh {
-            hitchScreens.append((last, overlay.flatMap(Self.screenName(below:)) ?? ""))
+        if let last = frames.last, let gap = FrameGap(from: last, to: frame), gap.late {
+            hitchScreens.append((last.time, overlay.flatMap(Self.screenName(below:)) ?? ""))
         }
-        frames.append(now)
+        frames.append(frame)
+    }
+
+    func cancel() {
+        stopProducing()
+        _ = sampler.stop()
+    }
+
+    private func stopProducing() {
+        link?.invalidate()
+        link = nil
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        _ = touches.detach()
     }
 
     /// Stops and writes the capture as JSON; returns its file, how long it
     /// ran and its frame times (for the thumbnail).
-    func finish() async -> (url: URL, duration: Double, frames: [Double], hitches: Int)? {
-        link?.invalidate()
-        link = nil
-        observers.forEach(NotificationCenter.default.removeObserver)
+    func finish() async -> CaptureOutput? {
+        let touchEvents = touches.events
+        stopProducing()
         let duration = CACurrentMediaTime() - started
         let raw = sampler.stop()
-        let touchEvents = touches.detach()
-        let frames = self.frames, refresh = self.refresh, screens = hitchScreens
-        let hitches = Self.hitches(frames, refresh: refresh).map { hitch -> [String: Any] in
+        let frames = self.frames, screens = hitchScreens
+        let gaps = FrameGap.all(frames)
+        let hitches = gaps.filter(\.late).map { hitch -> [String: Any] in
             let screen = screens.last { abs($0.0 - hitch.start) < 0.0005 }?.1 ?? ""
-            return ["start": hitch.start, "duration": hitch.duration, "screen": screen]
+            return ["start": hitch.start, "duration": hitch.overdue, "period": hitch.period, "screen": screen]
         }
         let info = Bundle.main.infoDictionary ?? [:]
         let device = UIDevice.current
@@ -91,9 +112,13 @@ final class PerfRecorder {
                        "simulator": ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil],
             "started_at": startDate.timeIntervalSince1970,
             "duration": duration,
-            "refresh_hz": refresh,
+            "refresh_hz": FrameGap.usualRate(frames),
             "sample_interval_ms": MainThreadSampler.interval * 1000,
-            "frames": frames.map { ($0 * 10_000).rounded() / 10_000 },
+            "frames": frames.map { ($0.time * 10_000).rounded() / 10_000 },
+            // Each frame's expected period, and the frames that follow a
+            // pause (the app inactive or away): their gap is no frame.
+            "periods": frames.map { ($0.period * 100_000).rounded() / 100_000 },
+            "resumed": frames.indices.filter { frames[$0].resumed },
             "hitches": hitches,
             "events": (events + touchEvents).sorted { ($0["t"] as? Double ?? 0) < ($1["t"] as? Double ?? 0) }
         ]
@@ -105,20 +130,8 @@ final class PerfRecorder {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("perf-\(UUID().uuidString).perf.json")
             guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
                   (try? data.write(to: url)) != nil else { return nil }
-            return (url, duration, frames, hitches.count)
+            return CaptureOutput.performance(url: url, duration: duration, gaps: gaps, hitches: hitches.count)
         }.value
-    }
-
-    /// Frames that arrived more than half a frame late: when the late frame
-    /// was due, and how long past due it came.
-    nonisolated static func hitches(_ frames: [Double], refresh: Double) -> [(start: Double, duration: Double)] {
-        let period = 1 / max(1, refresh)
-        var out: [(Double, Double)] = []
-        for i in frames.indices.dropFirst() {
-            let gap = frames[i] - frames[i - 1]
-            if gap > period * 1.5 { out.append((frames[i - 1], gap - period)) }
-        }
-        return out
     }
 
     /// The innermost view controller showing in the app's key window.
@@ -170,6 +183,45 @@ final class PerfRecorder {
                           "message": String(entry.composedMessage.prefix(500))])
         }
         return Array(lines.suffix(400))
+    }
+}
+
+/// One display-link frame: when it came and the period the display was
+/// running at, which is when the next one is due.
+struct FrameTiming: Equatable, Sendable {
+    let time: Double
+    let period: Double
+    /// The first frame, or the first after the app was inactive or away.
+    let resumed: Bool
+}
+
+/// The time between two frames, against the deadline the first one set.
+struct FrameGap: Equatable, Sendable {
+    let start: Double
+    let end: Double
+    let period: Double
+
+    /// Nil across a pause: that time is not a frame.
+    init?(from previous: FrameTiming, to next: FrameTiming) {
+        guard !next.resumed else { return nil }
+        (start, end, period) = (previous.time, next.time, previous.period)
+    }
+
+    var length: Double { end - start }
+    /// More than half a frame past due.
+    var late: Bool { length > period * 1.5 }
+    /// How long past due it came.
+    var overdue: Double { length - period }
+
+    static func all(_ frames: [FrameTiming]) -> [FrameGap] {
+        zip(frames, frames.dropFirst()).compactMap { FrameGap(from: $0, to: $1) }
+    }
+
+    /// The rate most frames ran at, for the summary.
+    static func usualRate(_ frames: [FrameTiming]) -> Double {
+        var counts: [Double: Int] = [:]
+        for frame in frames { counts[(1 / frame.period).rounded(), default: 0] += 1 }
+        return counts.max { $0.value < $1.value }?.key ?? 60
     }
 }
 
@@ -362,6 +414,9 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
         return 0
         #endif
     }
+
+    /// Asks it to stop without waiting (its owner is gone).
+    func abandon() { done.store(true, ordering: .relaxed) }
 
     /// Stops sampling and hands over what it recorded.
     func stop() -> MainThreadSamples {

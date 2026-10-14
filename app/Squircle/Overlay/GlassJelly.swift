@@ -32,6 +32,7 @@ final class GlassJelly: UIView {
             case .needsYou: hop.velocity -= 70
             case .working, .idle, .recording: break
             }
+            wake()
         }
     }
     /// The status line or the conversation: masked to the blob, carried by it.
@@ -52,7 +53,9 @@ final class GlassJelly: UIView {
     var fill = UIColor.white
     var fillAmount: CGFloat = 0
     /// The keyboard is up: it watches the field.
-    var typing = false
+    var typing = false {
+        didSet { if typing != oldValue { wake() } }
+    }
 
     /// The creature as drawn now, in the superview's coordinates.
     var creatureFrame: CGRect {
@@ -115,6 +118,13 @@ final class GlassJelly: UIView {
     private var nextHop: CGFloat = 1.5
     private var link: CADisplayLink?
     private var last: CFTimeInterval?
+    /// How often it needs a frame, decided after every tick from what moves.
+    private var cadence = Cadence.moving
+    /// When the link paused, and the task that resumes it for the next
+    /// blink, glance or hop.
+    private var sleptAt: CFTimeInterval?
+    private var alarm: Task<Void, Never>?
+    private var motionSetting: Task<Void, Never>?
     private var drawn: JellyUniforms?
     private var drawnCanvas = CGRect.zero
     /// The owner's layout drew since the last tick: the tick needn't.
@@ -141,7 +151,15 @@ final class GlassJelly: UIView {
         contentMask.fillColor = UIColor.black.cgColor
         content.layer.mask = contentMask
         addSubview(content)
+        // Reduce Motion turned off brings the breath back.
+        motionSetting = Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: UIAccessibility.reduceMotionStatusDidChangeNotification) {
+                self?.wake()
+            }
+        }
     }
+
+    deinit { alarm?.cancel(); motionSetting?.cancel() }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
@@ -149,17 +167,22 @@ final class GlassJelly: UIView {
     // MARK: Events
 
     /// A finished task: the creature gulps it down.
-    func gulp() { creatureSquash.velocity += 1.1 }
+    func gulp() {
+        creatureSquash.velocity += 1.1
+        wake()
+    }
 
     /// Somewhere a finger touched (bounds coordinates).
     func look(at point: CGPoint) {
         if let finger, time - finger.at < 0.4, hypot(point.x - finger.point.x, point.y - finger.point.y) < 30 { return }
         finger = (point, time)
         gazeHold = 0
+        wake()
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
+        wake()
         pressed = true
         squintUntil = time + 0.5
         if let touch = touches.first { look(at: touch.location(in: self)) }
@@ -178,29 +201,73 @@ final class GlassJelly: UIView {
         creatureSquash.velocity -= 1.2
     }
 
-    /// The creature is never still (it breathes, blinks and glances), so a
-    /// display link runs at the screen's full rate whenever it is on screen;
-    /// iOS stops it with the app in the background, and it ends with the window.
+    /// A display link runs while it is on screen, at the screen's full rate
+    /// while anything moves, slowly while it only breathes, and not at all
+    /// while it is still (Reduce Motion, or the open panel) until its next
+    /// blink or glance or something touches or moves it. iOS stops it with
+    /// the app in the background, and it ends with the window.
     override func didMoveToWindow() {
         super.didMoveToWindow()
         link?.invalidate()
         link = nil
         last = nil
+        alarm?.cancel()
+        alarm = nil
+        sleptAt = nil
+        cadence = .moving
         guard window != nil else { return }
         metal.contentsScale = min(2, window?.screen.scale ?? 2)
         let proxy = DisplayLinkProxy { [weak self] link in self?.tick(link) }
         let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        link.preferredFrameRateRange = Cadence.moving.rate ?? .default
         link.add(to: .main, forMode: .common)
         self.link = link
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        wake()
     }
 
     /// The owner moved or resized it: draw now, in the same transaction, so
     /// the jelly and its text never sit a frame apart.
     func layoutChanged() {
         guard window != nil else { return }
+        wake()
         draw()
         drewInLayout = true
+    }
+
+    /// Something may move: full rate from the next frame. Time it spent
+    /// paused passes at once (blinks and glances come due), without
+    /// stepping the springs, which were at rest.
+    private func wake() {
+        guard let link else { return }
+        if let sleptAt {
+            let gap = CGFloat(max(0, CACurrentMediaTime() - sleptAt))
+            time += gap
+            toneTime += gap
+            self.sleptAt = nil
+            last = nil
+        }
+        setCadence(.moving, link: link)
+    }
+
+    private func setCadence(_ next: Cadence, link: CADisplayLink) {
+        guard next != cadence || link.isPaused != next.paused else { return }
+        cadence = next
+        alarm?.cancel()
+        alarm = nil
+        if let rate = next.rate { link.preferredFrameRateRange = rate }
+        link.isPaused = next.paused
+        guard case .still(let after) = next else { return }
+        sleptAt = CACurrentMediaTime()
+        guard let after else { return }
+        alarm = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Double(after)))
+            guard !Task.isCancelled else { return }
+            self?.wake()
+        }
     }
 
     private func tick(_ link: CADisplayLink) {
@@ -229,6 +296,32 @@ final class GlassJelly: UIView {
         time += dt - min(dt, 0.1)
         toneTime += dt - min(dt, 0.1)
         if drewInLayout { drewInLayout = false } else { draw() }
+        setCadence(nextCadence, link: link)
+    }
+
+    /// Full rate while anything moves; otherwise slow for the breath alone,
+    /// or paused until the next thing timed to happen.
+    private var nextCadence: Cadence {
+        guard isAtRest else { return .moving }
+        if !Motion.reduced, opened < 0.999 { return .breathing }
+        var due: [CGFloat] = [gazeHold, squintUntil]
+        if let finger { due.append(finger.at + 1.6) }
+        if tone == .done { due.append(time - toneTime + 4) }
+        if !Motion.reduced {
+            due.append(nextBlink)
+            if tone == .needsYou { due.append(nextHop) }
+        }
+        return .still(after: due.filter { $0 > time }.min().map { $0 - time })
+    }
+
+    /// Every spring settled on its target, no blink, touch or glide under way.
+    private var isAtRest: Bool {
+        guard !pressed, !gliding, blinkStart < 0, abs(cubeScale - 1) < 0.001 || !bridgeConnected,
+              hypot(velocity.x, velocity.y) < 0.5, hypot(sizeVelocity.width, sizeVelocity.height) < 0.5,
+              hypot(accel.x, accel.y) < 1, hypot(sizeAccel.width, sizeAccel.height) < 1 else { return false }
+        let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, tint.r, tint.g, tint.b, tint.a]
+        return modes.allSatisfy { $0.isAtRest } && wobbles.allSatisfy { $0.isAtRest }
     }
 
     // MARK: Blob
@@ -449,6 +542,9 @@ final class GlassJelly: UIView {
             } else if typing, opened > 0.5 {
                 target = CGPoint(x: 0, y: 1.8)
                 hold = 0.6
+            } else if Motion.reduced {
+                // Still: it looks ahead, and only at what you do.
+                hold = 1
             } else if tone == .working, opened < 0.5 {
                 // Reading along the line, a word or two at a time.
                 readStep = (readStep + 1) % 4
@@ -467,7 +563,7 @@ final class GlassJelly: UIView {
         gazeX.step(dt); gazeY.step(dt)
 
         // Blinks: shut quickly, open a little slower, every few seconds.
-        if blinkStart < 0, time > nextBlink, happy.value < 0.3, squint.value < 0.3 {
+        if blinkStart < 0, !Motion.reduced, time > nextBlink, happy.value < 0.3, squint.value < 0.3 {
             blinkStart = time
         }
         if blinkStart >= 0 {
@@ -650,6 +746,25 @@ final class GlassJelly: UIView {
     }
 }
 
+/// How often the jelly draws.
+private enum Cadence: Equatable {
+    case moving
+    /// Only the breath moves: a fraction of a point a frame.
+    case breathing
+    /// Nothing moves; the link pauses, to resume after this long (nil: only
+    /// when something touches or moves it).
+    case still(after: CGFloat?)
+
+    var paused: Bool { if case .still = self { true } else { false } }
+    var rate: CAFrameRateRange? {
+        switch self {
+        case .moving: CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        case .breathing: CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+        case .still: nil
+        }
+    }
+}
+
 /// A damped oscillator driven by a force.
 private struct Mode {
     var value: CGFloat = 0
@@ -662,6 +777,8 @@ private struct Mode {
         velocity += a * dt
         value += velocity * dt
     }
+
+    var isAtRest: Bool { abs(value - target) < 0.01 && abs(velocity) < 0.05 }
 
     mutating func limit(_ reach: CGFloat) {
         if abs(value) > reach {
@@ -689,6 +806,8 @@ struct Wobble {
         target = value
         parameters = .init(response: response, damping: damping)
     }
+
+    var isAtRest: Bool { abs(value - target) < 0.0005 && abs(velocity) < 0.005 }
 
     mutating func step(_ dt: CGFloat) {
         (value, velocity) = SpringDriver.step(value: value, velocity: velocity, target: target, dt: dt, parameters: parameters)

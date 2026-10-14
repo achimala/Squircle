@@ -4,6 +4,32 @@ import UIKit
 /// One screen or performance recording at a time, started from the message
 /// field's + menu while the overlay docks out of the way. `recording` is the
 /// whole state the bubble renders.
+/// What a recorder hands over when it stops.
+enum CaptureOutput {
+    /// A video and, if it drew a frame, its first picture.
+    case screen(url: URL, duration: Double, poster: UIImage?)
+    case performance(url: URL, duration: Double, gaps: [FrameGap], hitches: Int)
+
+    var url: URL {
+        switch self {
+        case .screen(let url, _, _), .performance(let url, _, _, _): url
+        }
+    }
+}
+
+/// A running screen or performance recorder.
+@MainActor
+protocol CaptureProducer: AnyObject {
+    /// Stops recording, then finishes its file. Stopped on every path,
+    /// whatever it returns; nil when it has no file (it removes its own).
+    func finish() async -> CaptureOutput?
+    /// Stops at once and removes whatever it wrote.
+    func cancel()
+}
+
+/// One screen or performance recording at a time, started from the message
+/// field's + menu while the overlay docks out of the way. `recording` is the
+/// whole state the bubble renders.
 @MainActor
 final class CaptureSession {
     enum Kind: Equatable { case screen, performance }
@@ -11,52 +37,96 @@ final class CaptureSession {
         let kind: Kind
         let started: Date
     }
+    /// A recording owns its producer from start until it is finished or
+    /// cancelled; nothing else holds one.
+    private enum State {
+        case idle
+        case recording(Recording, CaptureProducer, timeout: Task<Void, Never>)
+        case stopping(Recording, CaptureProducer)
+    }
 
     static let limit: Duration = .seconds(60)
-    private(set) var recording: Recording?
-    private var screen: ScreenRecorder?
-    private var perf: PerfRecorder?
-    private var timeout: Task<Void, Never>?
-    /// Called when a recording reaches `limit` and stops itself.
+    private var state = State.idle
+    private let make: (Kind, UIWindow) -> CaptureProducer?
+    /// Called when a recording reaches `limit` and should stop.
     var onLimit: (() -> Void)?
 
-    func start(_ kind: Kind, below overlay: UIWindow) -> Bool {
-        guard recording == nil else { return false }
-        switch kind {
-        case .screen:
-            guard let recorder = ScreenRecorder(below: overlay) else { return false }
-            screen = recorder
-        case .performance:
-            perf = PerfRecorder(below: overlay)
+    init(make: @escaping (Kind, UIWindow) -> CaptureProducer? = CaptureSession.recorder) {
+        self.make = make
+    }
+
+    /// Recording or finishing: the bubble is its stop button until it is done.
+    var recording: Recording? {
+        switch state {
+        case .idle: nil
+        case .recording(let recording, _, _), .stopping(let recording, _): recording
         }
-        recording = Recording(kind: kind, started: .now)
-        timeout = Task { [weak self] in
+    }
+    var isStopping: Bool { if case .stopping = state { true } else { false } }
+
+    static func recorder(_ kind: Kind, below overlay: UIWindow) -> CaptureProducer? {
+        switch kind {
+        case .screen: ScreenRecorder(below: overlay)
+        case .performance: PerfRecorder(below: overlay)
+        }
+    }
+
+    func start(_ kind: Kind, below overlay: UIWindow) -> Bool {
+        guard case .idle = state, let producer = make(kind, overlay) else { return false }
+        let timeout = Task { [weak self] in
             try? await Task.sleep(for: Self.limit)
             guard !Task.isCancelled else { return }
             self?.onLimit?()
         }
+        state = .recording(Recording(kind: kind, started: .now), producer, timeout: timeout)
         return true
     }
 
-    /// Stops the recording; returns it ready for the message field.
+    /// Stops the recording; returns it ready for the message field, or nil
+    /// (nothing recorded, or cancelled meanwhile; its file is gone).
     /// `snapshot` is the app as it looks now: a screen recording's thumbnail.
     func stop(snapshot: UIImage?) async -> ImageAttachment? {
-        guard let recording else { return nil }
-        timeout?.cancel()
-        timeout = nil
-        defer { self.recording = nil; screen = nil; perf = nil }
-        switch recording.kind {
-        case .screen:
-            guard let recorder = self.screen, let poster = snapshot ?? recorder.poster, let done = await recorder.finish() else { return nil }
-            let label = Self.clock(done.duration)
-            return ImageAttachment(capture: .init(kind: .video, file: done.url, label: label),
-                                   thumbnail: Self.badge(poster, text: label, symbol: "play.fill"))
-        case .performance:
-            guard let perf, let done = await perf.finish() else { return nil }
-            let hitches = done.hitches == 1 ? "1 hitch" : "\(done.hitches) hitches"
-            return ImageAttachment(capture: .init(kind: .performance, file: done.url, label: Self.clock(done.duration) + " · " + hitches),
-                                   thumbnail: Self.chart(done.frames, duration: done.duration, hitches: hitches))
+        guard case .recording(let recording, let producer, let timeout) = state else { return nil }
+        timeout.cancel()
+        state = .stopping(recording, producer)
+        let output = await producer.finish()
+        // Cancelled while it finished: the owner has gone.
+        guard case .stopping(_, let current) = state, current === producer else {
+            output.map { try? FileManager.default.removeItem(at: $0.url) }
+            return nil
         }
+        state = .idle
+        switch output {
+        case nil:
+            return nil
+        case .screen(let url, let duration, let poster):
+            guard let poster = snapshot ?? poster else {
+                try? FileManager.default.removeItem(at: url)
+                return nil
+            }
+            let label = Self.clock(duration)
+            return ImageAttachment(capture: .init(kind: .video, file: url, label: label),
+                                   thumbnail: Self.badge(poster, text: label, symbol: "play.fill"))
+        case .performance(let url, let duration, let gaps, let hitches):
+            let count = hitches == 1 ? "1 hitch" : "\(hitches) hitches"
+            return ImageAttachment(capture: .init(kind: .performance, file: url, label: Self.clock(duration) + " · " + count),
+                                   thumbnail: Self.chart(gaps, duration: duration, hitches: count))
+        }
+    }
+
+    /// The overlay is going away: stops any recording at once and removes
+    /// its file. A stop in progress returns nil.
+    func cancel() {
+        switch state {
+        case .idle: return
+        case .recording(_, let producer, let timeout):
+            timeout.cancel()
+            producer.cancel()
+        case .stopping:
+            // Already stopped; `stop` removes the file when it finishes.
+            break
+        }
+        state = .idle
     }
 
     static func clock(_ seconds: Double) -> String {
@@ -84,25 +154,27 @@ final class CaptureSession {
         }
     }
 
-    /// Each frame's time as a bar, late frames in crimson, on paper.
-    private static func chart(_ frames: [Double], duration: Double, hitches: String) -> UIImage {
+    /// Each frame's time as a bar, late frames (as the recording counted
+    /// them) in crimson, on paper.
+    private static func chart(_ gaps: [FrameGap], duration: Double, hitches: String) -> UIImage {
         let size = CGSize(width: 220, height: 160)
         return UIGraphicsImageRenderer(size: size).image { context in
             Theme.paper.setFill()
             context.fill(CGRect(origin: .zero, size: size))
             let plot = CGRect(x: 10, y: 40, width: size.width - 20, height: size.height - 52)
-            let gaps = zip(frames.dropFirst(), frames).map { $0 - $1 }
-            let period = gaps.sorted().dropFirst(gaps.count / 2).first ?? 1.0 / 60
+            let periods = gaps.map(\.period).sorted()
+            let period = periods.dropFirst(periods.count / 2).first ?? 1.0 / 60
             let ceiling = max(period * 6, 0.1)
             let columns = Int(plot.width / 2)
-            var worst = [Double](repeating: 0, count: max(1, columns))
-            for (index, gap) in gaps.enumerated() {
-                let column = min(columns - 1, Int(frames[index + 1] / max(duration, 0.001) * Double(columns)))
-                if column >= 0 { worst[column] = max(worst[column], gap) }
+            var worst = [(gap: Double, late: Bool)](repeating: (0, false), count: max(1, columns))
+            for gap in gaps {
+                let column = min(columns - 1, Int(gap.end / max(duration, 0.001) * Double(columns)))
+                guard column >= 0 else { continue }
+                worst[column] = (max(worst[column].gap, gap.length), worst[column].late || gap.late)
             }
-            for (column, gap) in worst.enumerated() where gap > 0 {
+            for (column, (gap, late)) in worst.enumerated() where gap > 0 {
                 let height = max(1.5, plot.height * min(1, gap / ceiling))
-                (gap > period * 1.5 ? Theme.failure : UIColor.tertiaryLabel).setFill()
+                (late ? Theme.failure : UIColor.tertiaryLabel).setFill()
                 UIBezierPath(roundedRect: CGRect(x: plot.minX + CGFloat(column) * 2, y: plot.maxY - height, width: 1.5, height: height),
                              cornerRadius: 0.75).fill()
             }
