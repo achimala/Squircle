@@ -24,7 +24,6 @@ use std::{
 pub const ACTIVITY_TYPE: &str = "SquircleActivityAttributes";
 const SANDBOX: &str = "https://api.sandbox.push.apple.com";
 const PRODUCTION: &str = "https://api.push.apple.com";
-/// Events this close together arrive as one notification.
 const COALESCE: Duration = Duration::from_secs(3);
 /// A phone's report that it shows a thread counts for this long.
 const PRESENCE: Duration = Duration::from_secs(300);
@@ -173,7 +172,10 @@ pub enum Outcome {
     Sent,
     /// The token is no longer valid; forget it.
     Unregistered,
+    /// Apple won't take this message; trying it again won't help.
     Rejected(String),
+    /// Apple is busy or unreachable; the same message may go through later.
+    Retry(String),
 }
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -238,6 +240,8 @@ impl Transport for Apns {
             Ok(match (status, reason.as_str()) {
                 (200, _) => Outcome::Sent,
                 (410, _) | (400, "BadDeviceToken" | "DeviceTokenNotForTopic") => Outcome::Unregistered,
+                (429 | 500..=599, reason) | (403, reason @ "ExpiredProviderToken") =>
+                    Outcome::Retry(format!("HTTP {status} {reason}").trim().to_string()),
                 (_, reason) => Outcome::Rejected(format!("HTTP {status} {reason}").trim().to_string()),
             })
         })
@@ -255,6 +259,9 @@ pub struct Target {
     pub thread: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    /// The Mac catalog's app ID, for a build whose bundle isn't known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
     /// The built app's bundle ID, to find its app on the phone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
@@ -282,6 +289,7 @@ pub fn alert_payload(notes: &[&Note]) -> Value {
         project: first.target.project.clone(),
         thread: if same(|t| &t.thread) { first.target.thread.clone() } else { None },
         build: if same(|t| &t.build) { first.target.build.clone() } else { None },
+        app: first.target.app.clone(),
         bundle: first.target.bundle.clone(),
     };
     json!({
@@ -331,10 +339,66 @@ pub fn activity_payload(event: LiveEvent, state: &LiveState, app: &str, project:
 
 // MARK: Devices
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Activity {
     pub id: String,
     pub token: String,
+}
+
+/// Where one phone's Live Activity for one app stands, as far as APNs has
+/// accepted. Absent from the map: the phone has none we know of.
+#[derive(Clone, Debug)]
+enum Stage {
+    /// Nothing running; kept only while a failed start backs off.
+    Absent,
+    /// APNs accepted a push-to-start; the phone reports the new activity's token.
+    Starting { at: Instant },
+    /// A running activity. `acked` is the content APNs last accepted for it;
+    /// its token is kept until an End is accepted or Apple says it is gone.
+    Running { activity: Activity, acked: Option<(LiveState, Instant)> },
+}
+
+/// The send for a link: none, one in flight (by generation), or a failure
+/// waiting out its backoff.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Flight {
+    Idle,
+    Sending(u64),
+    Waiting { until: Instant, failures: u32 },
+}
+
+#[derive(Clone, Debug)]
+struct Link {
+    stage: Stage,
+    flight: Flight,
+}
+
+impl Link {
+    fn new(stage: Stage) -> Self {
+        Self { stage, flight: Flight::Idle }
+    }
+}
+
+/// devices.json keeps each running activity's ID and token, as before;
+/// everything else about a link lives only in memory.
+mod persisted_links {
+    use super::{Activity, Link, Stage};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(links: &BTreeMap<String, Link>, s: S) -> Result<S::Ok, S::Error> {
+        let running: BTreeMap<&String, &Activity> = links.iter().filter_map(|(project, link)| match &link.stage {
+            Stage::Running { activity, .. } => Some((project, activity)),
+            _ => None,
+        }).collect();
+        running.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Link>, D::Error> {
+        Ok(BTreeMap::<String, Activity>::deserialize(d)?.into_iter()
+            .map(|(project, activity)| (project, Link::new(Stage::Running { activity, acked: None })))
+            .collect())
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -348,30 +412,39 @@ pub struct Device {
     /// Starts a Live Activity by push.
     #[serde(default)]
     pub start_token: Option<String>,
-    /// Running Live Activities by T3 project ID.
-    #[serde(default)]
-    pub activities: BTreeMap<String, Activity>,
+    /// Live Activities by T3 project ID.
+    #[serde(default, rename = "activities", with = "persisted_links")]
+    links: BTreeMap<String, Link>,
     pub updated_at: u64,
 }
 
-/// What the phone shows right now; kept in memory only.
-#[derive(Clone, Default)]
+impl Device {
+    fn running(&self) -> usize {
+        self.links.values().filter(|l| matches!(l.stage, Stage::Running { .. })).count()
+    }
+}
+
+/// What a phone reported it shows. A report holds for `PRESENCE`, so a phone
+/// that died with Squircle open doesn't silence a thread forever.
+#[derive(Clone, Debug, PartialEq)]
+enum Shown {
+    Background,
+    Foreground { thread: Option<String> },
+}
+
 struct Presence {
-    foreground: bool,
-    thread: Option<String>,
-    at: Option<Instant>,
+    shown: Shown,
+    until: Instant,
 }
 
 impl Presence {
-    fn fresh(&self) -> bool {
-        self.at.is_some_and(|at| at.elapsed() < PRESENCE)
+    fn shown(&self) -> Shown {
+        if Instant::now() < self.until { self.shown.clone() } else { Shown::Background }
     }
-    fn viewing(&self, thread: &str) -> bool {
-        self.fresh() && self.foreground && self.thread.as_deref() == Some(thread)
-    }
-    fn foreground(&self) -> bool {
-        self.fresh() && self.foreground
-    }
+}
+
+fn shown(presence: &HashMap<String, Presence>, device: &str) -> Shown {
+    presence.get(device).map_or(Shown::Background, Presence::shown)
 }
 
 fn valid_token(token: &str) -> bool {
@@ -476,15 +549,76 @@ pub fn summary_line(text: &str) -> String {
     out
 }
 
-#[derive(Default)]
-struct Live {
-    sent: Option<(LiveState, Instant)>,
-    status: String,
-    status_at: Option<Instant>,
-    deferred: bool,
-    idle_since: Option<Instant>,
-    /// Push-to-start attempts per device, so a missed token doesn't start a second.
-    started: HashMap<String, Instant>,
+/// The agent turn whose current step the activity shows.
+#[derive(Clone, Debug, PartialEq)]
+struct StepKey {
+    thread: String,
+    turn: Option<String>,
+}
+
+/// The step text read from T3 for one turn. Replaced whole when the turn
+/// changes, so a lookup for an older turn finds nothing to write into.
+struct Step {
+    key: StepKey,
+    text: Option<String>,
+    checked: Option<Instant>,
+    looking: bool,
+}
+
+/// What an app's activity should be, from T3's latest shell.
+#[derive(Clone, Debug)]
+enum Want {
+    /// Work or a question: show this (the status before the step is applied).
+    Show(LiveState),
+    /// Just went idle; a pause between turns is not the end yet.
+    Pausing { since: Instant, last: LiveState },
+    /// Idle: running activities end with this.
+    Hide(LiveState),
+}
+
+struct AppLive {
+    name: String,
+    want: Want,
+    /// The working agent's turn, when its step is what the activity shows.
+    stepping: Option<StepKey>,
+    step: Option<Step>,
+}
+
+impl AppLive {
+    /// Shown content with the current step applied, when the step belongs
+    /// to the turn still running.
+    fn stepped(&self, state: &LiveState) -> LiveState {
+        let mut state = state.clone();
+        if let (Some(key), Some(step)) = (&self.stepping, &self.step)
+            && step.key == *key && let Some(text) = &step.text
+        {
+            state.status = text.clone();
+        }
+        state
+    }
+}
+
+/// An app's activity content and the turn to step, from T3's shell row.
+fn observe(app: &AppView) -> (LiveState, Option<StepKey>) {
+    let agent = app.agent.as_ref().map(|(_, row)| phase(row));
+    let workers: Vec<Phase> = app.workers.iter().map(|(_, _, row)| phase(row)).collect();
+    let busy = workers.iter().filter(|p| **p == Phase::Working).count();
+    let needs_you = agent == Some(Phase::NeedsYou) || workers.contains(&Phase::NeedsYou);
+    let working = agent == Some(Phase::Working) || busy > 0;
+    let status = if needs_you { "Needs you" } else if agent == Some(Phase::Working) { "Working" }
+        else if busy > 0 { "Waiting on workers" } else { "Done" };
+    let stepping = app.agent.as_ref().filter(|_| agent == Some(Phase::Working) && !needs_you).map(|(id, row)| StepKey {
+        thread: id.clone(), turn: row["latestTurn"]["turnId"].as_str().map(str::to_string),
+    });
+    (LiveState { status: status.into(), workers: busy, needs_you, working }, stepping)
+}
+
+/// What one send to one phone's activity carries.
+#[derive(Clone, Debug)]
+enum Message {
+    Start(LiveState),
+    Update(LiveState),
+    End(LiveState),
 }
 
 /// Lookups the hub needs from T3, provided by `Agents`.
@@ -494,39 +628,119 @@ pub trait Threads: Send + Sync {
     fn current_step<'a>(&'a self, thread: &'a str) -> BoxFuture<'a, Option<String>>;
 }
 
+/// How long things wait; shorter in tests.
+#[derive(Clone, Copy)]
+pub struct Timing {
+    /// Events this close together arrive as one notification.
+    pub coalesce: Duration,
+    /// The first retry after a transient failure; each further one waits 4×
+    /// longer, up to `RETRY_CAP`.
+    pub retry: Duration,
+    /// Idle this long before a running activity ends.
+    pub pause: Duration,
+    /// Minor updates (the step text) go out at most this often per activity.
+    pub throttle: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self { coalesce: COALESCE, retry: Duration::from_secs(2), pause: Duration::from_secs(20),
+               throttle: Duration::from_secs(10) }
+    }
+}
+
+/// A push-to-start without a token reported back is retried after this.
+const START_WAIT: Duration = Duration::from_secs(300);
+/// The step text is read again after this, while the agent works.
+const STEP_EVERY: Duration = Duration::from_secs(5);
+/// A step lookup that takes longer is abandoned.
+const STEP_DEADLINE: Duration = Duration::from_secs(5);
+/// The reconciler runs at least this often.
+const TICK: Duration = Duration::from_secs(8);
+const RETRY_CAP: Duration = Duration::from_secs(300);
+/// An alert that keeps failing transiently is dropped after this many tries.
+const ALERT_ATTEMPTS: u32 = 4;
+
+fn backoff(base: Duration, failures: u32) -> Duration {
+    base.saturating_mul(4u32.saturating_pow(failures.saturating_sub(1))).min(RETRY_CAP)
+}
+
+/// Whether a send's outcome is worth trying again later.
+fn transient(outcome: &Result<Outcome>) -> bool {
+    matches!(outcome, Err(_) | Ok(Outcome::Retry(_)))
+}
+
+fn describe(outcome: &Result<Outcome>) -> String {
+    match outcome {
+        Ok(Outcome::Sent) => "sent".into(),
+        Ok(Outcome::Unregistered) => "token no longer valid; forgotten".into(),
+        Ok(Outcome::Rejected(reason) | Outcome::Retry(reason)) => reason.clone(),
+        Err(error) => format!("{error:#}"),
+    }
+}
+
+#[derive(Default)]
+struct State {
+    devices: BTreeMap<String, Device>,
+    presence: HashMap<String, Presence>,
+    apps: BTreeMap<String, AppLive>,
+    generation: u64,
+}
+
+impl State {
+    /// A phone that could show this app's activity: one running or starting,
+    /// or a start token while Squircle isn't open on it.
+    fn has_recipient(&self, project: &str) -> bool {
+        self.devices.values().any(|d| match d.links.get(project).map(|l| &l.stage) {
+            Some(Stage::Running { .. } | Stage::Starting { .. }) => true,
+            _ => d.start_token.is_some() && shown(&self.presence, &d.id) == Shown::Background,
+        })
+    }
+}
+
+/// A send the reconciler decided on, with the generation its result must match.
+struct Outgoing {
+    device: String,
+    project: String,
+    generation: u64,
+    message: Message,
+    delivery: Delivery,
+}
+
 pub struct Push {
     root: PathBuf,
-    devices: Mutex<BTreeMap<String, Device>>,
-    presence: Mutex<HashMap<String, Presence>>,
+    state: Mutex<State>,
     /// The key file's modification time and the transport made from it.
     loaded: Mutex<Option<(SystemTime, Arc<dyn Transport>)>>,
     fixed: Option<Arc<dyn Transport>>,
     pending: Mutex<Vec<Note>>,
-    coalesce: Duration,
+    timing: Timing,
+    alerts_sent: std::sync::atomic::AtomicU64,
     seen: Mutex<Option<HashMap<String, (Option<String>, Phase)>>>,
-    apps: Mutex<Vec<AppView>>,
-    live: Mutex<HashMap<String, Live>>,
     threads: Mutex<Option<Arc<dyn Threads>>>,
+    /// Wakes the reconciler after a shell change, a phone report or a result.
+    wake: tokio::sync::Notify,
 }
 
 impl Push {
     pub fn open(root: &Path) -> Result<Arc<Self>> {
-        Self::build(root, None, COALESCE)
+        Self::build(root, None, Timing::default())
     }
 
-    /// With a given transport and burst window, for tests.
-    pub fn with_transport(root: &Path, transport: Arc<dyn Transport>, coalesce: Duration) -> Result<Arc<Self>> {
-        Self::build(root, Some(transport), coalesce)
+    /// With a given transport and timing, for tests.
+    pub fn with_transport(root: &Path, transport: Arc<dyn Transport>, timing: Timing) -> Result<Arc<Self>> {
+        Self::build(root, Some(transport), timing)
     }
 
-    fn build(root: &Path, fixed: Option<Arc<dyn Transport>>, coalesce: Duration) -> Result<Arc<Self>> {
+    fn build(root: &Path, fixed: Option<Arc<dyn Transport>>, timing: Timing) -> Result<Arc<Self>> {
         private_dir(&root.join("push"))?;
         let path = root.join("push").join("devices.json");
         let devices = if path.try_exists()? { read_json(&path)? } else { BTreeMap::new() };
         Ok(Arc::new(Self {
-            root: root.to_path_buf(), devices: Mutex::new(devices), presence: Mutex::default(),
-            loaded: Mutex::default(), fixed, pending: Mutex::default(), coalesce, seen: Mutex::default(),
-            apps: Mutex::default(), live: Mutex::default(), threads: Mutex::default(),
+            root: root.to_path_buf(), state: Mutex::new(State { devices, ..State::default() }),
+            loaded: Mutex::default(), fixed, pending: Mutex::default(), timing,
+            alerts_sent: Default::default(), seen: Mutex::default(), threads: Mutex::default(),
+            wake: tokio::sync::Notify::new(),
         }))
     }
 
@@ -570,14 +784,14 @@ impl Push {
         for token in [&r.token, &r.start_token].into_iter().flatten() {
             ensure!(valid_token(token), "a push token is hex");
         }
-        let mut devices = self.devices.lock().unwrap();
-        let device = devices.entry(r.device_id.clone()).or_insert_with(|| Device {
+        let mut state = self.state.lock().unwrap();
+        let device = state.devices.entry(r.device_id.clone()).or_insert_with(|| Device {
             id: r.device_id.clone(), token: None, environment: r.environment, bundle_id: r.bundle_id.clone(),
-            start_token: None, activities: BTreeMap::new(), updated_at: 0,
+            start_token: None, links: BTreeMap::new(), updated_at: 0,
         });
         if device.environment != r.environment || device.bundle_id != r.bundle_id {
             // A different build: its activities belong to the old one.
-            device.activities.clear();
+            device.links.clear();
             device.token = None;
             device.start_token = None;
         }
@@ -586,91 +800,76 @@ impl Push {
         if r.token.is_some() { device.token = r.token; }
         if r.start_token.is_some() { device.start_token = r.start_token; }
         device.updated_at = crate::model::now();
-        self.save(&devices);
+        self.save(&state.devices);
+        drop(state);
+        self.wake.notify_one();
         Ok(())
     }
 
     pub fn register_activity(&self, r: ActivityRegistration) -> Result<()> {
         ensure!(valid_id(&r.project_id) && valid_id(&r.activity_id), "invalid ID");
-        let mut devices = self.devices.lock().unwrap();
-        let device = devices.get_mut(&r.device_id).context("Register the device first")?;
+        let mut state = self.state.lock().unwrap();
+        let device = state.devices.get_mut(&r.device_id).context("Register the device first")?;
         match r.token {
             Some(token) => {
                 ensure!(valid_token(&token), "a push token is hex");
-                device.activities.insert(r.project_id.clone(), Activity { id: r.activity_id, token });
-                if let Some(live) = self.live.lock().unwrap().get_mut(&r.project_id) {
-                    live.started.remove(&r.device_id);
-                    // Send the current state to the new activity soon.
-                    live.sent = None;
+                // A new token supersedes whatever was in flight for the old one;
+                // the current content goes to it next. The phone repeats a known
+                // one each time Squircle opens, which changes nothing.
+                let activity = Activity { id: r.activity_id, token };
+                let known = device.links.get(&r.project_id)
+                    .is_some_and(|l| matches!(&l.stage, Stage::Running { activity: a, .. } if *a == activity));
+                if !known {
+                    device.links.insert(r.project_id, Link::new(Stage::Running { activity, acked: None }));
                 }
             }
             None => {
-                if device.activities.get(&r.project_id).is_some_and(|a| a.id == r.activity_id) {
-                    device.activities.remove(&r.project_id);
+                if device.links.get(&r.project_id)
+                    .is_some_and(|l| matches!(&l.stage, Stage::Running { activity, .. } if activity.id == r.activity_id))
+                {
+                    device.links.remove(&r.project_id);
                 }
             }
         }
-        self.save(&devices);
+        self.save(&state.devices);
+        drop(state);
+        self.wake.notify_one();
         Ok(())
     }
 
     pub fn report_presence(&self, r: PresenceReport) -> Result<()> {
         ensure!(valid_id(&r.device_id), "invalid device ID");
-        self.presence.lock().unwrap().insert(r.device_id, Presence { foreground: r.foreground, thread: r.thread_id, at: Some(Instant::now()) });
+        let shown = if r.foreground { Shown::Foreground { thread: r.thread_id } } else { Shown::Background };
+        self.state.lock().unwrap().presence.insert(r.device_id, Presence { shown, until: Instant::now() + PRESENCE });
+        self.wake.notify_one();
         Ok(())
     }
 
     pub fn status(&self) -> Value {
         let key = KeyConfig::load(&self.root).ok().flatten();
-        let devices = self.devices.lock().unwrap();
+        let state = self.state.lock().unwrap();
         json!({
             "configured": key.is_some() || self.fixed.is_some(),
             "key_id": key.as_ref().map(|k| k.key_id.clone()), "team_id": key.as_ref().map(|k| k.team_id.clone()),
             "transport": if self.fixed.is_some() { "test" } else { "apns" },
-            "devices": devices.values().map(|d| json!({
+            "devices": state.devices.values().map(|d| json!({
                 "id": d.id, "environment": d.environment, "bundle_id": d.bundle_id,
                 "notifications": d.token.is_some(), "live_activity_start": d.start_token.is_some(),
-                "live_activities": d.activities.len(), "updated_at": d.updated_at,
+                "live_activities": d.running(), "updated_at": d.updated_at,
             })).collect::<Vec<_>>(),
         })
     }
 
-    // MARK: Sending
+    // MARK: Notifications
 
-    /// Sends and forgets tokens Apple says are gone. Returns what happened per device.
-    async fn deliver(&self, deliveries: Vec<(String, Delivery)>) -> Vec<Value> {
-        let transport = match self.transport() {
-            Ok(Some(t)) => t,
-            Ok(None) => return vec![json!({"error": "No APNs key. Run: squircle push setup --key-file PATH --key-id ID --team-id ID"})],
-            Err(error) => return vec![json!({"error": format!("{error:#}")})],
-        };
-        let mut results = vec![];
-        for (device, delivery) in deliveries {
-            let outcome = transport.send(&delivery).await;
-            let result = match &outcome {
-                Ok(Outcome::Sent) => "sent".to_string(),
-                Ok(Outcome::Unregistered) => {
-                    self.forget(&device, &delivery.token);
-                    "token no longer valid; forgotten".into()
-                }
-                Ok(Outcome::Rejected(reason)) => reason.clone(),
-                Err(error) => format!("{error:#}"),
-            };
-            if !matches!(outcome, Ok(Outcome::Sent)) {
-                eprintln!("Push to device {device}: {result}");
-            }
-            results.push(json!({"device": device, "result": result}));
-        }
-        results
-    }
-
+    /// Forgets a token Apple says is gone, wherever this device used it.
     fn forget(&self, device: &str, token: &str) {
-        let mut devices = self.devices.lock().unwrap();
-        let Some(d) = devices.get_mut(device) else { return };
+        let mut state = self.state.lock().unwrap();
+        let Some(d) = state.devices.get_mut(device) else { return };
         if d.token.as_deref() == Some(token) { d.token = None; }
         if d.start_token.as_deref() == Some(token) { d.start_token = None; }
-        d.activities.retain(|_, a| a.token != token);
-        self.save(&devices);
+        d.links.retain(|_, l| !matches!(&l.stage, Stage::Running { activity, .. } if activity.token == token));
+        self.save(&state.devices);
     }
 
     /// Queues a notification; notes within the burst window go out together.
@@ -682,30 +881,58 @@ impl Push {
         }
         let this = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(this.coalesce).await;
-            this.flush().await;
+            tokio::time::sleep(this.timing.coalesce).await;
+            this.flush();
         });
     }
 
-    async fn flush(&self) {
+    /// Sends the batch; each alert retries transient failures on its own,
+    /// under one collapse ID so a retry of a delivered alert replaces it.
+    fn flush(self: &Arc<Self>) {
         let notes = std::mem::take(&mut *self.pending.lock().unwrap());
-        let deliveries = self.alerts(&notes);
-        if !deliveries.is_empty() {
-            self.deliver(deliveries).await;
+        for (device, mut delivery) in self.alerts(&notes) {
+            let n = self.alerts_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            delivery.collapse_id = Some(format!("squircle-{}-{n}", crate::model::now()));
+            let this = self.clone();
+            tokio::spawn(async move { this.send_alert(device, delivery).await });
+        }
+    }
+
+    async fn send_alert(&self, device: String, delivery: Delivery) {
+        for attempt in 1..=ALERT_ATTEMPTS {
+            let transport = match self.transport() {
+                Ok(Some(t)) => t,
+                Ok(None) => return,
+                Err(error) => { eprintln!("Push: {error:#}"); return }
+            };
+            let outcome = transport.send(&delivery).await;
+            if matches!(outcome, Ok(Outcome::Unregistered)) {
+                self.forget(&device, &delivery.token);
+            }
+            if !matches!(outcome, Ok(Outcome::Sent)) {
+                eprintln!("Push to device {device} (try {attempt}): {}", describe(&outcome));
+            }
+            if !transient(&outcome) {
+                return;
+            }
+            if attempt < ALERT_ATTEMPTS {
+                tokio::time::sleep(backoff(self.timing.retry, attempt)).await;
+            }
         }
     }
 
     /// One alert per device and app, leaving out what the phone is looking at.
     fn alerts(&self, notes: &[Note]) -> Vec<(String, Delivery)> {
-        let devices = self.devices.lock().unwrap();
-        let presence = self.presence.lock().unwrap();
+        let state = self.state.lock().unwrap();
         let mut out = vec![];
-        for device in devices.values() {
+        for device in state.devices.values() {
             let Some(token) = &device.token else { continue };
-            let here = presence.get(&device.id).cloned().unwrap_or_default();
+            let here = shown(&state.presence, &device.id);
             let mut by_app: BTreeMap<&str, Vec<&Note>> = BTreeMap::new();
             for note in notes {
-                if note.target.thread.as_deref().is_some_and(|t| here.viewing(t)) {
+                if let (Some(t), Shown::Foreground { thread: Some(viewed) }) = (&note.target.thread, &here)
+                    && t == viewed
+                {
                     continue;
                 }
                 by_app.entry(note.app.as_str()).or_default().push(note);
@@ -720,38 +947,56 @@ impl Push {
         out
     }
 
-    /// `squircle push test`: a notification, and optionally a Live Activity, now.
+    /// `squircle push test`: a notification, and optionally a Live Activity,
+    /// now, once each, reporting what Apple said.
     pub async fn test(&self, live: bool) -> Value {
         let note = Note { app: "Squircle".into(), line: "Notifications from your Mac work.".into(), target: Target::default() };
         let mut deliveries = self.alerts(&[note]);
         if live {
-            let state = LiveState { status: "Testing the Live Activity".into(), workers: 1, needs_you: false, working: true };
-            let devices = self.devices.lock().unwrap();
-            for device in devices.values() {
+            let content = LiveState { status: "Testing the Live Activity".into(), workers: 1, needs_you: false, working: true };
+            let state = self.state.lock().unwrap();
+            for device in state.devices.values() {
                 let Some(token) = &device.start_token else { continue };
                 deliveries.push((device.id.clone(), Delivery {
                     token: token.clone(), environment: device.environment, bundle_id: device.bundle_id.clone(),
                     push_type: PushType::LiveActivity, priority: 10, collapse_id: None,
-                    payload: activity_payload(LiveEvent::Start, &state, "Squircle", "test", crate::model::now()),
+                    payload: activity_payload(LiveEvent::Start, &content, "Squircle", "test", crate::model::now()),
                 }));
             }
         }
         if deliveries.is_empty() {
             return json!({"sent": [], "note": "No phone has registered yet. Open Squircle on the phone and allow notifications."});
         }
-        json!({"sent": self.deliver(deliveries).await})
+        let transport = match self.transport() {
+            Ok(Some(t)) => t,
+            Ok(None) => return json!({"sent": [{"error": "No APNs key. Run: squircle push setup --key-file PATH --key-id ID --team-id ID"}]}),
+            Err(error) => return json!({"sent": [{"error": format!("{error:#}")}]}),
+        };
+        let mut results = vec![];
+        for (device, delivery) in deliveries {
+            let outcome = transport.send(&delivery).await;
+            if matches!(outcome, Ok(Outcome::Unregistered)) {
+                self.forget(&device, &delivery.token);
+            }
+            results.push(json!({"device": device, "result": describe(&outcome)}));
+        }
+        json!({"sent": results})
     }
 
     // MARK: Builds
 
-    pub fn build_finished(self: &Arc<Self>, job: &crate::model::Job) {
+    /// A finished device build. `app` is its catalog app, when the caller
+    /// knows it, so even a failed build without output opens its app.
+    pub fn build_finished(self: &Arc<Self>, job: &crate::model::Job, app: Option<&crate::apps::AppRecord>) {
         use crate::model::{BuildMode, BuildState};
         let Some(request) = &job.request else { return };
         if request.mode != BuildMode::Archive {
             return; // Agents' simulator builds are their own business.
         }
         let output = job.output.as_ref();
-        let app = output.map(|o| o.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| request.scheme.clone());
+        let record = app;
+        let app = output.map(|o| o.title.clone()).filter(|t| !t.is_empty())
+            .or_else(|| record.map(|r| r.name.clone())).unwrap_or_else(|| request.scheme.clone());
         let line = match job.state {
             BuildState::Succeeded => match output {
                 Some(o) => format!("Build {} is ready to install", o.build_number),
@@ -763,14 +1008,18 @@ impl Push {
             }
             _ => return,
         };
-        let target = Target { build: Some(job.id.clone()), bundle: output.map(|o| o.bundle_id.clone()), ..Target::default() };
+        let target = Target {
+            app: record.map(|r| r.id.clone()), build: Some(job.id.clone()),
+            bundle: output.map(|o| o.bundle_id.clone()).or_else(|| record.and_then(|r| r.bundle_id.clone())),
+            ..Target::default()
+        };
         self.notify(Note { app, line, target });
     }
 
     // MARK: Agents
 
     /// Called with each change to T3's shell: notes for finished turns and
-    /// questions, and the Live Activity for each app.
+    /// questions, and what each app's Live Activity should show.
     pub fn apps_changed(self: &Arc<Self>, apps: Vec<AppView>) {
         let mut changes = vec![];
         {
@@ -790,7 +1039,7 @@ impl Push {
                 }
             }
         }
-        *self.apps.lock().unwrap() = apps;
+        self.observe(&apps);
         for (app, project, thread, worker, change) in changes {
             let this = self.clone();
             tokio::spawn(async move {
@@ -813,160 +1062,221 @@ impl Push {
                 this.notify(Note { app, line, target: Target { project: Some(project), thread: Some(thread), ..Target::default() } });
             });
         }
-        self.refresh_activities(false);
     }
 
-    /// Recomputes each app's Live Activity; `poll` also refreshes the agent's
-    /// current step (the service ticks this while anything works).
-    fn refresh_activities(self: &Arc<Self>, poll: bool) {
-        let apps: Vec<(String, String, Option<String>, LiveState)> = self.apps.lock().unwrap().iter().map(|app| {
-            let agent = app.agent.as_ref().map(|(_, row)| phase(row));
-            let workers: Vec<Phase> = app.workers.iter().map(|(_, _, row)| phase(row)).collect();
-            let busy = workers.iter().filter(|p| **p == Phase::Working).count();
-            let needs_you = agent == Some(Phase::NeedsYou) || workers.contains(&Phase::NeedsYou);
-            let working = agent == Some(Phase::Working) || busy > 0;
-            let fallback = if needs_you { "Needs you" } else if agent == Some(Phase::Working) { "Working" }
-                else if busy > 0 { "Waiting on workers" } else { "Done" };
-            let thread = app.agent.as_ref().filter(|_| agent == Some(Phase::Working)).map(|(id, _)| id.clone());
-            (app.project_id.clone(), app.app.clone(), thread,
-             LiveState { status: fallback.into(), workers: busy, needs_you, working })
-        }).collect();
-        for (project, app, thread, mut state) in apps {
-            let (cached, stale) = {
-                let mut live = self.live.lock().unwrap();
-                let entry = live.entry(project.clone()).or_default();
-                let stale = entry.status_at.is_none_or(|at| at.elapsed() > Duration::from_secs(5));
-                (entry.status.clone(), stale)
-            };
-            let stepping = state.working && !state.needs_you && thread.is_some();
-            if stepping && !cached.is_empty() {
-                state.status = cached;
-            }
-            self.update_activity(&project, &app, state.clone());
-            let Some(thread) = thread.filter(|_| stepping && (poll || stale)) else { continue };
-            let this = self.clone();
-            tokio::spawn(async move {
-                let threads = this.threads.lock().unwrap().clone();
-                let Some(step) = (match threads { Some(t) => t.current_step(&thread).await, None => None }) else { return };
-                {
-                    let mut live = this.live.lock().unwrap();
-                    let entry = live.entry(project.clone()).or_default();
-                    entry.status_at = Some(Instant::now());
-                    if entry.status == step { return }
-                    entry.status = step.clone();
-                }
-                this.update_activity(&project, &app, LiveState { status: step, ..state });
+    /// Moves each app's wanted activity to what the shell now says.
+    fn observe(&self, apps: &[AppView]) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap();
+        for app in apps {
+            let (observed, stepping) = observe(app);
+            let active = observed.working || observed.needs_you;
+            let entry = state.apps.entry(app.project_id.clone()).or_insert_with(|| AppLive {
+                name: app.app.clone(), want: Want::Hide(observed.clone()), stepping: None, step: None,
             });
+            entry.name = app.app.clone();
+            entry.want = match (&entry.want, active) {
+                (_, true) => Want::Show(observed),
+                (Want::Show(_), false) => Want::Pausing { since: now, last: observed },
+                (Want::Pausing { since, .. }, false) => Want::Pausing { since: *since, last: observed },
+                (Want::Hide(_), false) => Want::Hide(observed),
+            };
+            if entry.step.as_ref().map(|s| &s.key) != stepping.as_ref() {
+                entry.step = stepping.clone().map(|key| Step { key, text: None, checked: None, looking: false });
+            }
+            entry.stepping = stepping;
         }
+        drop(state);
+        self.wake.notify_one();
     }
 
-    /// Ticks the Live Activities' step while anything works.
+    /// Keeps every phone's activities in line with what each app wants, until
+    /// the service stops. Runs on each change and at least every `TICK`.
     pub async fn run(self: Arc<Self>) {
         loop {
-            tokio::time::sleep(Duration::from_secs(8)).await;
-            self.refresh_activities(true);
-        }
-    }
-
-    fn update_activity(self: &Arc<Self>, project: &str, app: &str, state: LiveState) {
-        let active = state.working || state.needs_you;
-        let event = {
-            let mut live = self.live.lock().unwrap();
-            let entry = live.entry(project.to_string()).or_default();
-            if !active {
-                let Some((sent, _)) = &entry.sent else { return };
-                if !sent.working && !sent.needs_you {
-                    return; // already ended
-                }
-                // A pause between turns is not the end: wait a little.
-                let since = *entry.idle_since.get_or_insert_with(Instant::now);
-                if since.elapsed() < Duration::from_secs(20) {
-                    if !entry.deferred {
-                        entry.deferred = true;
-                        let (this, project) = (self.clone(), project.to_string());
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(21)).await;
-                            this.live.lock().unwrap().entry(project).or_default().deferred = false;
-                            this.refresh_activities(false);
-                        });
-                    }
-                    return;
-                }
-                entry.sent = Some((state.clone(), Instant::now()));
-                entry.idle_since = None;
-                entry.started.clear();
-                LiveEvent::End
-            } else {
-                entry.idle_since = None;
-                let important = entry.sent.as_ref().is_none_or(|(s, _)| {
-                    s.working != state.working || s.needs_you != state.needs_you || s.workers != state.workers
-                });
-                match &entry.sent {
-                    Some((s, _)) if *s == state => return,
-                    Some((_, at)) if !important && at.elapsed() < Duration::from_secs(10) => {
-                        if !entry.deferred {
-                            entry.deferred = true;
-                            let this = self.clone();
-                            let wait = Duration::from_secs(10).saturating_sub(at.elapsed());
-                            let project = project.to_string();
-                            tokio::spawn(async move {
-                                tokio::time::sleep(wait).await;
-                                this.live.lock().unwrap().entry(project).or_default().deferred = false;
-                                this.refresh_activities(false);
-                            });
-                        }
-                        return;
-                    }
-                    _ => {}
-                }
-                entry.sent = Some((state.clone(), Instant::now()));
-                if important { LiveEvent::Start } else { LiveEvent::Update }
+            let next = self.reconcile();
+            let wait = next.map_or(TICK, |at| at.saturating_duration_since(Instant::now())).min(TICK);
+            tokio::select! {
+                _ = self.wake.notified() => {}
+                _ = tokio::time::sleep(wait) => {}
             }
-        };
-        let deliveries = self.activity_deliveries(project, app, &state, event);
-        if event == LiveEvent::End {
-            // An ended activity takes no more updates; the next work starts a new one.
-            let mut devices = self.devices.lock().unwrap();
-            for device in devices.values_mut() { device.activities.remove(project); }
-            self.save(&devices);
-        }
-        if !deliveries.is_empty() {
-            let this = self.clone();
-            tokio::spawn(async move { this.deliver(deliveries).await; });
         }
     }
 
-    /// Updates running activities; `Start` also starts one by push on phones
-    /// in the background that have none for this app.
-    fn activity_deliveries(&self, project: &str, app: &str, state: &LiveState, event: LiveEvent) -> Vec<(String, Delivery)> {
-        let now = crate::model::now();
-        let devices = self.devices.lock().unwrap();
-        let presence = self.presence.lock().unwrap();
-        let mut live = self.live.lock().unwrap();
-        let entry = live.entry(project.to_string()).or_default();
-        let mut out = vec![];
-        for device in devices.values() {
-            let (token, event, priority) = match (device.activities.get(project), event) {
-                (Some(activity), LiveEvent::Start) => (activity.token.clone(), LiveEvent::Update, 10),
-                (Some(activity), LiveEvent::Update) => (activity.token.clone(), LiveEvent::Update, 5),
-                (Some(activity), LiveEvent::End) => (activity.token.clone(), LiveEvent::End, 10),
-                (None, LiveEvent::Start) => {
-                    let Some(token) = &device.start_token else { continue };
-                    let here = presence.get(&device.id).cloned().unwrap_or_default();
-                    let recent = entry.started.get(&device.id).is_some_and(|at| at.elapsed() < Duration::from_secs(300));
-                    if here.foreground() || recent { continue }
-                    entry.started.insert(device.id.clone(), Instant::now());
-                    (token.clone(), LiveEvent::Start, 10)
+    /// One pass: decides the sends and step lookups due now, starts them, and
+    /// returns when the next pass is due.
+    fn reconcile(self: &Arc<Self>) -> Option<Instant> {
+        let transport = match self.transport() {
+            Ok(Some(t)) => t,
+            Ok(None) => return None, // nobody to tell: no sends, no lookups
+            Err(error) => { eprintln!("Push: {error:#}"); return None }
+        };
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        let mut due = |at: Instant| next = Some(next.map_or(at, |n: Instant| n.min(at)));
+        let mut sends = vec![];
+        let mut lookups = vec![];
+        let mut state = self.state.lock().unwrap();
+        // The step is read only while it can reach someone.
+        let recipients: Vec<String> = state.apps.keys().filter(|p| state.has_recipient(p)).cloned().collect();
+        let State { devices, presence, apps, generation } = &mut *state;
+        for app in apps.values_mut() {
+            if let Want::Pausing { since, last } = &app.want {
+                if now.duration_since(*since) >= self.timing.pause {
+                    app.want = Want::Hide(last.clone());
+                } else {
+                    due(*since + self.timing.pause);
                 }
-                (None, _) => continue,
-            };
-            out.push((device.id.clone(), Delivery {
-                token, environment: device.environment, bundle_id: device.bundle_id.clone(),
-                push_type: PushType::LiveActivity, priority, collapse_id: None,
-                payload: activity_payload(event, state, app, project, now),
-            }));
+            }
         }
-        out
+        for (project, app) in apps.iter_mut() {
+            for device in devices.values_mut() {
+                let here = shown(presence, &device.id);
+                let link = device.links.get(project).cloned();
+                if let Some(Link { flight, .. }) = &link {
+                    match flight {
+                        Flight::Sending(_) => continue,
+                        Flight::Waiting { until, .. } if *until > now => { due(*until); continue }
+                        _ => {}
+                    }
+                }
+                let stage = link.as_ref().map(|l| &l.stage);
+                let (message, token, priority) = match (&app.want, stage) {
+                    (Want::Pausing { .. }, _) => continue,
+                    (Want::Show(shown), Some(Stage::Running { activity, acked })) => {
+                        let content = app.stepped(shown);
+                        let important = acked.as_ref().is_none_or(|(s, _)| {
+                            s.working != content.working || s.needs_you != content.needs_you || s.workers != content.workers
+                        });
+                        match acked {
+                            Some((s, _)) if *s == content => continue,
+                            Some((_, at)) if !important && now.duration_since(*at) < self.timing.throttle => {
+                                due(*at + self.timing.throttle);
+                                continue;
+                            }
+                            _ => {}
+                        }
+                        (Message::Update(content), activity.token.clone(), if important { 10 } else { 5 })
+                    }
+                    (Want::Show(_), Some(Stage::Starting { at })) if now.duration_since(*at) < START_WAIT => continue,
+                    (Want::Show(shown), _) => {
+                        let Some(token) = &device.start_token else { continue };
+                        if here != Shown::Background { continue }
+                        (Message::Start(app.stepped(shown)), token.clone(), 10)
+                    }
+                    (Want::Hide(last), Some(Stage::Running { activity, .. })) => (Message::End(last.clone()), activity.token.clone(), 10),
+                    (Want::Hide(_), Some(Stage::Starting { .. } | Stage::Absent)) => {
+                        // Nothing to end; the phone reports a late start's token, which then ends.
+                        device.links.remove(project);
+                        continue;
+                    }
+                    (Want::Hide(_), None) => continue,
+                };
+                *generation += 1;
+                let (event, body) = match &message {
+                    Message::Start(s) => (LiveEvent::Start, s.clone()),
+                    Message::Update(s) => (LiveEvent::Update, s.clone()),
+                    Message::End(s) => (LiveEvent::End, s.clone()),
+                };
+                let failures = match link.as_ref().map(|l| l.flight) { Some(Flight::Waiting { failures, .. }) => failures, _ => 0 };
+                let entry = device.links.entry(project.clone()).or_insert_with(|| Link::new(Stage::Absent));
+                entry.flight = Flight::Sending(*generation);
+                sends.push((failures, Outgoing {
+                    device: device.id.clone(), project: project.clone(), generation: *generation, message,
+                    delivery: Delivery {
+                        token, environment: device.environment, bundle_id: device.bundle_id.clone(),
+                        push_type: PushType::LiveActivity, priority, collapse_id: None,
+                        payload: activity_payload(event, &body, &app.name, project, crate::model::now()),
+                    },
+                }));
+            }
+        }
+        // One lookup per turn at a time.
+        for (project, app) in apps.iter_mut() {
+            let (Want::Show(_), Some(step)) = (&app.want, app.step.as_mut()) else { continue };
+            if step.looking || !recipients.contains(project) { continue }
+            match step.checked {
+                Some(at) if now.duration_since(at) < STEP_EVERY => due(at + STEP_EVERY),
+                _ => {
+                    step.looking = true;
+                    lookups.push((project.clone(), step.key.clone()));
+                }
+            }
+        }
+        drop(state);
+        for (failures, send) in sends {
+            let (this, transport) = (self.clone(), transport.clone());
+            tokio::spawn(async move {
+                let outcome = transport.send(&send.delivery).await;
+                this.settle(send, failures, outcome);
+            });
+        }
+        for (project, key) in lookups {
+            let this = self.clone();
+            tokio::spawn(async move { this.look_up(project, key).await });
+        }
+        next
+    }
+
+    /// Applies a send's result, if the link still waits for that send.
+    fn settle(&self, send: Outgoing, failures: u32, outcome: Result<Outcome>) {
+        let now = Instant::now();
+        if !matches!(outcome, Ok(Outcome::Sent)) {
+            eprintln!("Live Activity push to device {} ({}): {}", send.device, send.project, describe(&outcome));
+        }
+        let mut state = self.state.lock().unwrap();
+        let Some(device) = state.devices.get_mut(&send.device) else { return };
+        let Some(link) = device.links.get_mut(&send.project) else { return };
+        if link.flight != Flight::Sending(send.generation) {
+            return; // superseded: a new activity token, or the link went away
+        }
+        link.flight = Flight::Idle;
+        let mut save = false;
+        match (&outcome, &send.message) {
+            (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::Start(_)) => link.stage = Stage::Starting { at: now },
+            (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::Update(content)) => {
+                // A rejected update is not retried: the next change sends anew.
+                if let Stage::Running { acked, .. } = &mut link.stage { *acked = Some((content.clone(), now)); }
+            }
+            (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::End(_)) => {
+                device.links.remove(&send.project);
+                save = true;
+            }
+            (Ok(Outcome::Unregistered), message) => {
+                device.links.remove(&send.project);
+                if matches!(message, Message::Start(_)) && device.start_token.as_deref() == Some(&send.delivery.token) {
+                    device.start_token = None;
+                }
+                save = true;
+            }
+            (Ok(Outcome::Retry(_)) | Err(_), _) => {
+                link.flight = Flight::Waiting { until: now + backoff(self.timing.retry, failures + 1), failures: failures + 1 };
+            }
+        }
+        if save {
+            self.save(&state.devices);
+        }
+        drop(state);
+        self.wake.notify_one();
+    }
+
+    /// Reads the agent's current step for one turn; the text is kept only if
+    /// that turn is still the one the activity shows.
+    async fn look_up(&self, project: String, key: StepKey) {
+        let threads = self.threads.lock().unwrap().clone();
+        let text = match threads {
+            Some(t) => tokio::time::timeout(STEP_DEADLINE, t.current_step(&key.thread)).await.ok().flatten(),
+            None => None,
+        };
+        let mut state = self.state.lock().unwrap();
+        let Some(step) = state.apps.get_mut(&project).and_then(|a| a.step.as_mut()).filter(|s| s.key == key) else { return };
+        step.looking = false;
+        step.checked = Some(Instant::now());
+        if text.is_some() {
+            step.text = text;
+        }
+        drop(state);
+        self.wake.notify_one();
     }
 }
 
@@ -1074,7 +1384,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = key();
         let public = Signer::new(&config).unwrap().public_key().to_vec();
-        let push = Push::with_transport(dir.path(), Arc::new(Apns::with_hosts(&config, &url, &url).unwrap()), Duration::from_millis(50)).unwrap();
+        let timing = Timing { coalesce: Duration::from_millis(50), ..Timing::default() };
+        let push = Push::with_transport(dir.path(), Arc::new(Apns::with_hosts(&config, &url, &url).unwrap()), timing).unwrap();
         push.register(Registration { device_id: "phone".into(), bundle_id: "ai.dreamslate.Squircle".into(),
             environment: Environment::Development, token: Some("ab".repeat(32)), start_token: None }).unwrap();
         push.register(Registration { device_id: "old".into(), bundle_id: "ai.dreamslate.Squircle".into(),
@@ -1102,5 +1413,130 @@ mod tests {
         let status = push.status();
         let old = status["devices"].as_array().unwrap().iter().find(|d| d["id"] == "old").unwrap();
         assert_eq!(old["notifications"], false, "a 410 forgets the token");
+    }
+
+    /// Answers each send of a kind from a script (then `Sent`), recording what went out.
+    #[derive(Default)]
+    struct Scripted {
+        answers: Mutex<Vec<(PushType, Outcome)>>,
+        sent: Mutex<Vec<Delivery>>,
+    }
+
+    impl Transport for Scripted {
+        fn send<'a>(&'a self, delivery: &'a Delivery) -> BoxFuture<'a, Result<Outcome>> {
+            self.sent.lock().unwrap().push(delivery.clone());
+            let mut answers = self.answers.lock().unwrap();
+            let next = answers.iter().position(|(kind, _)| *kind == delivery.push_type);
+            let outcome = next.map_or(Outcome::Sent, |i| answers.remove(i).1);
+            Box::pin(async move { Ok(outcome) })
+        }
+    }
+
+    fn fast() -> Timing {
+        Timing { coalesce: Duration::from_millis(10), retry: Duration::from_millis(30), pause: Duration::from_millis(40),
+                 throttle: Duration::from_millis(20) }
+    }
+
+    fn app(agent: Value) -> Vec<AppView> {
+        vec![AppView { project_id: "p".into(), app: "Notes".into(), agent: Some(("agent".into(), agent)), workers: vec![] }]
+    }
+
+    fn working(turn: &str) -> Value {
+        json!({"latestTurn": {"turnId": turn, "state": "running"}})
+    }
+
+    fn phone(push: &Push) {
+        push.register(Registration { device_id: "phone".into(), bundle_id: "ai.dreamslate.Squircle".into(),
+            environment: Environment::Development, token: Some("ab".repeat(32)), start_token: None }).unwrap();
+        push.register_activity(ActivityRegistration { device_id: "phone".into(), project_id: "p".into(),
+            activity_id: "a1".into(), token: Some("cd".repeat(32)) }).unwrap();
+    }
+
+    fn events(transport: &Scripted) -> Vec<String> {
+        transport.sent.lock().unwrap().iter().filter(|d| d.push_type == PushType::LiveActivity)
+            .map(|d| d.payload["aps"]["event"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn transient_failures_retry_and_an_end_keeps_its_token_until_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = Arc::new(Scripted::default());
+        let push = Push::with_transport(dir.path(), transport.clone(), fast()).unwrap();
+        tokio::spawn(push.clone().run());
+        phone(&push);
+
+        // An alert that APNs drops once arrives on the retry, under one collapse ID.
+        transport.answers.lock().unwrap().push((PushType::Alert, Outcome::Retry("HTTP 503".into())));
+        push.notify(Note { app: "Notes".into(), line: "Build failed".into(), target: Target::default() });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let alerts: Vec<Delivery> = transport.sent.lock().unwrap().iter().filter(|d| d.push_type == PushType::Alert).cloned().collect();
+        assert_eq!(alerts.len(), 2);
+        transport.sent.lock().unwrap().clear();
+        assert!(alerts[0].collapse_id.is_some() && alerts[0].collapse_id == alerts[1].collapse_id);
+
+        push.apps_changed(app(working("t1")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(events(&transport), ["update"]);
+
+        // Idle past the pause: the End fails once, and the token survives it.
+        transport.answers.lock().unwrap().push((PushType::LiveActivity, Outcome::Retry("HTTP 500".into())));
+        push.apps_changed(app(json!({"latestTurn": {"turnId": "t1", "state": "completed"}})));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(events(&transport), ["update", "end"]);
+        assert_eq!(push.status()["devices"][0]["live_activities"], 1, "token kept for the retry");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(events(&transport), ["update", "end", "end"]);
+        assert_eq!(push.status()["devices"][0]["live_activities"], 0, "forgotten once ended");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(events(&transport).len(), 3, "nothing more once acknowledged");
+    }
+
+    /// The first lookup waits to be released; later ones answer at once.
+    struct SlowSteps {
+        calls: Mutex<Vec<String>>,
+        release: tokio::sync::Notify,
+    }
+
+    impl Threads for SlowSteps {
+        fn last_reply<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> { Box::pin(async { None }) }
+        fn question<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> { Box::pin(async { None }) }
+        fn current_step<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> {
+            let first = { let mut calls = self.calls.lock().unwrap(); calls.push("step".into()); calls.len() == 1 };
+            Box::pin(async move {
+                if first {
+                    self.release.notified().await;
+                    Some("Old turn's step".into())
+                } else {
+                    Some("New turn's step".into())
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_late_step_from_an_older_turn_is_dropped_and_steps_need_a_recipient() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = Arc::new(Scripted::default());
+        let push = Push::with_transport(dir.path(), transport.clone(), fast()).unwrap();
+        let steps = Arc::new(SlowSteps { calls: Mutex::default(), release: tokio::sync::Notify::new() });
+        push.set_threads(steps.clone());
+        tokio::spawn(push.clone().run());
+
+        push.apps_changed(app(working("t1")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(steps.calls.lock().unwrap().is_empty(), "no phone, no lookup");
+
+        phone(&push);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(steps.calls.lock().unwrap().len(), 1);
+        push.apps_changed(app(working("t2")));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        steps.release.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let statuses: Vec<String> = transport.sent.lock().unwrap().iter()
+            .map(|d| d.payload["aps"]["content-state"]["status"].as_str().unwrap_or_default().to_string()).collect();
+        assert!(statuses.contains(&"New turn's step".to_string()), "{statuses:?}");
+        assert!(!statuses.contains(&"Old turn's step".to_string()), "{statuses:?}");
     }
 }

@@ -72,6 +72,33 @@ enum ISODate {
     private nonisolated(unsafe) static let fallback = ISO8601DateFormatter()
 }
 
+/// Verification only (DEBUG, `SQUIRCLE_PERF=1`): timed connection marks
+/// appended to Documents/connection-trace.log, to measure the real path on a
+/// simulator. A no-op otherwise.
+@MainActor
+enum ConnectionTrace {
+    #if DEBUG
+    static let enabled = ProcessInfo.processInfo.environment["SQUIRCLE_PERF"] == "1"
+    private static let start = ContinuousClock.now
+    private static let file: FileHandle? = {
+        guard enabled, let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("connection-trace.log") else { return nil }
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        return try? FileHandle(forWritingTo: url)
+    }()
+    static func mark(_ event: String, _ detail: @autoclosure () -> String = "") {
+        guard enabled, let file else { return }
+        let ms = start.duration(to: .now).components
+        let line = String(format: "%.3f %d %@ %@\n", Date().timeIntervalSince1970,
+                          Int(ms.seconds * 1000 + ms.attoseconds / 1_000_000_000_000_000), event, detail())
+        file.write(Data(line.utf8))
+    }
+    #else
+    static let enabled = false
+    @inline(__always) static func mark(_ event: String, _ detail: @autoclosure () -> String = "") {}
+    #endif
+}
+
 /// Refuses every redirect. A session's delegate is this, not the session's
 /// owner, so the session never keeps its owner alive.
 final class RefuseRedirects: NSObject, URLSessionTaskDelegate {
@@ -114,6 +141,15 @@ final class T3HTTP {
         guard let h = response as? HTTPURLResponse else { throw ClientError.response("T3") }
         guard (200..<300).contains(h.statusCode) else { throw ClientError.http("T3", h.statusCode) }
         return try JSONDecoder().decode(JSONValue.self, from: data)
+    }
+    /// T3's RPC socket accepts the session's bearer on the upgrade, like any
+    /// HTTPS request: no ticket round trip (a second TLS connection on a
+    /// cold start) before the socket can open.
+    func bearerSocketRequest(_ path: String) throws -> URLRequest {
+        var r = try request(path)
+        var c = URLComponents(url: r.url!, resolvingAgainstBaseURL: false)!
+        c.scheme = "wss"; r.url = c.url
+        return r
     }
     func socketRequest(_ path: String, query: [URLQueryItem] = []) async throws -> URLRequest {
         let ticket = try await json("/api/auth/websocket-ticket", body: .object([:]))
@@ -174,18 +210,26 @@ final class T3Gateway {
     func close() { onDisconnect = nil; disconnect(notify: false); http.invalidate() }
     func connect() async throws {
         disconnect(notify: false)
-        let ws = http.session.webSocketTask(with: try await http.socketRequest("/ws"))
+        ConnectionTrace.mark("socket.start")
+        let ws = http.session.webSocketTask(with: try http.bearerSocketRequest("/ws"))
         disconnect(notify: false); rejection = nil
         socket = ws; ws.maximumMessageSize = 32 * 1024 * 1024; ws.resume(); lastFrame = .now
         receiver = Task { [weak self] in
+            var first = true
             do {
                 while !Task.isCancelled {
                     let message = try await ws.receive()
                     self?.lastFrame = .now
                     let data: Data
                     switch message { case .data(let d): data = d; case .string(let s): data = Data(s.utf8); @unknown default: continue }
+                    if ConnectionTrace.enabled, first { ConnectionTrace.mark("socket.firstFrame"); first = false }
+                    let decodeStart = ContinuousClock.now
                     let frame = try JSONDecoder().decode(JSONValue.self, from: data)
+                    let decoded = ContinuousClock.now
                     for item in frame.array.isEmpty ? [frame] : frame.array { self?.receive(item) }
+                    if ConnectionTrace.enabled, data.count > 8192 {
+                        ConnectionTrace.mark("frame", "\(data.count)B decode=\(decodeStart.duration(to: decoded)) apply=\(decoded.duration(to: .now))")
+                    }
                 }
             } catch {
                 // A refused upgrade is not a network blip: say why.
