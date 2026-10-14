@@ -8,6 +8,7 @@ pub mod overlay;
 pub mod perf;
 pub mod preview;
 pub mod projects;
+pub mod push;
 pub mod server;
 pub mod sims;
 pub mod store;

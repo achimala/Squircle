@@ -78,6 +78,19 @@ directory and adds the T3 instance; `--remove` takes it out).
 The service wakes the agent with a `[worker update]` turn when a worker
 finishes, errors or needs input, once per turn outcome. Agents never poll.
 
+## Notifications
+
+The service sends the phone notifications and its Live Activity directly to
+APNs with your own auth key (no relay; a relay would replace only the
+transport). See [notifications](t3-native-migration.md#2026-10-14-notifications-and-the-live-activity-030-51)
+for creating the key.
+
+| Command | Result |
+| --- | --- |
+| `push setup --key-file AuthKey_ID.p8 --key-id ID --team-id TEAM [--remove]` | Check and store the key owner-only in the data directory; never printed. Works without the service |
+| `push test [--live-activity]` | Send a test notification (and start a test Live Activity) to registered phones; per-device result |
+| `push status` | Whether a key is set, registered phones (environment, notifications, Live Activity), no tokens |
+
 ## Import an existing app
 
 The native **+ → Mac browser or pasted path → scheme/name → Add** flow uses the
