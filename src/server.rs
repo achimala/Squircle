@@ -37,13 +37,13 @@ pub struct AppState {
     files: Arc<Store>,
     /// Serializes per-build diagnostic appends and reads (append-only files).
     diagnostics: Arc<Mutex<()>>,
-    cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    /// Build jobs: records, unpersisted results and live operations.
+    jobs: Arc<Jobs>,
     slots: Arc<Semaphore>,
     inspection_slots: Arc<Semaphore>,
     uploads: Arc<Semaphore>,
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
-    recovery_jobs: Arc<Mutex<HashMap<String, Job>>>,
     agents: Option<Arc<Agents>>,
     sims: Option<Arc<Sims>>,
     push: Option<Arc<Push>>,
@@ -51,23 +51,24 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(store: Store, public_url: Option<String>) -> Self {
-        Self {
+    /// Loads the job index; work a previous service left unfinished is
+    /// recorded as interrupted.
+    pub fn new(store: Store, public_url: Option<String>) -> Result<Self> {
+        Ok(Self {
+            jobs: Arc::new(Jobs::open(&store)?),
             files: Arc::new(store.clone()),
             store: Arc::new(Mutex::new(store)),
             diagnostics: Arc::default(),
-            cancellations: Arc::default(),
             slots: Arc::new(Semaphore::new(1)),
             inspection_slots: Arc::new(Semaphore::new(2)),
             uploads: Arc::new(Semaphore::new(1)),
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
-            recovery_jobs: Arc::default(),
             agents: None,
             sims: None,
             push: None,
             tasks: None,
-        }
+        })
     }
 }
 
@@ -297,33 +298,12 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         .map(artifact::validate_public_url)
         .transpose()?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    for mut job in store.list_jobs()? {
-        let mut changed = false;
-        if let Some(output) = job.output.as_mut()
-            && matches!(output.preview_state.as_deref(), Some("pending" | "running"))
-        {
-            output.preview_state = Some("failed".into());
-            output.preview_error =
-                Some("Service stopped during preview capture; no automatic retry was made".into());
-            changed = true;
-        }
-        if !job.state.terminal() {
-            job.state = BuildState::Interrupted;
-            job.updated_at = now();
-            job.error = Some("Service stopped during this job. Inspect artifacts/processes before submitting new work; no automatic retry was made.".into());
-            changed = true;
-        }
-        if changed {
-            job.updated_at = now();
-            store.save_job(&job)?;
-        }
-    }
     let tasks = Arc::new(Tasks::open(&store.root)?);
     let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?), tasks.clone())?;
     let push = Push::open(&store.root)?;
     agents.attach_push(push.clone());
     let sims = Sims::open(&store.root, agents.clone())?;
-    let mut state = AppState::new(store, public_url);
+    let mut state = tokio::task::spawn_blocking(move || AppState::new(store, public_url)).await??;
     state.agents = Some(agents.clone());
     state.sims = Some(sims.clone());
     state.push = Some(push.clone());
@@ -369,12 +349,10 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
                 let _store = shutdown.store.lock().unwrap();
                 shutdown.draining.store(true, Ordering::Release);
             }
-            for sender in shutdown.cancellations.lock().unwrap().values() {
-                let _ = sender.send(true);
-            }
+            shutdown.jobs.cancel_all();
             // Let cancelled runners reap their children and persist terminal state.
             for _ in 0..100 {
-                if shutdown.cancellations.lock().unwrap().is_empty() {
+                if shutdown.jobs.operations() == 0 {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -398,28 +376,14 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
 }
 
 async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let mut jobs = state
-        .store
-        .lock()
-        .unwrap()
-        .list_jobs()
-        .map_err(ApiError::internal)?;
-    for recovered in state.recovery_jobs.lock().unwrap().values() {
-        jobs.retain(|job| job.id != recovered.id);
-        jobs.push(recovered.clone());
-    }
-    Ok(Json(success(jobs)))
+    Ok(Json(success(state.jobs.list())))
 }
 async fn status(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let recovered = state.recovery_jobs.lock().unwrap().get(&id).cloned();
-    let job = match recovered {
-        Some(job) => job,
-        // job.json is replaced atomically, so reading it needs no record lock.
-        None => state.files.load_job(&id).map_err(ApiError::missing)?,
-    };
+    let view = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
+    let job = &view.job;
     let launches = {
         let (files, lock, id) = (state.files.clone(), state.diagnostics.clone(), id.clone());
         tokio::task::spawn_blocking(move || {
@@ -431,12 +395,12 @@ async fn status(
         .map_err(ApiError::internal)?
     };
     let log = state.files.job_dir(&id).ok().map(|dir| dir.join("build.log"));
-    let failure = match (&job.state, log) {
+    let failure = match (job.state(), log) {
         (BuildState::Failed | BuildState::Interrupted, Some(log)) => {
             let text = log_tail(&log, FAILURE_LOG_TAIL_BYTES).await;
-            let root = job.request.as_ref().and_then(|r| r.project.parent()).map(|p| p.to_string_lossy().into_owned());
+            let root = job.request().and_then(|r| r.project.parent()).map(|p| p.to_string_lossy().into_owned());
             let mut failure = crate::buildlog::failure(&String::from_utf8_lossy(&text), root.as_deref());
-            failure.message = job.error.as_deref().map(|error| {
+            failure.message = job.error().map(|error| {
                 error.rsplit_once("; see /").map_or(error, |(message, _)| message).to_string()
             });
             Some(failure)
@@ -444,7 +408,7 @@ async fn status(
         _ => None,
     };
     Ok(Json(success(
-        json!({"job":job,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty()),"failure":failure}),
+        json!({"job":view,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty()),"failure":failure}),
     )))
 }
 /// Failure summaries come from the end of a build log; logs can be very large.
@@ -507,128 +471,103 @@ async fn start(
             "Request ID must contain 1–128 letters, digits, underscores or hyphens",
         ));
     }
-    let (source_revision, source_dirty) = source_provenance(&request.project).await;
-    let (sender, receiver) = watch::channel(false);
-    let (job, dir) = {
+    let (revision, dirty) = source_provenance(&request.project).await;
+    let (job, lease, dir) = {
         let store = state.store.lock().unwrap();
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
-        let jobs = store.list_jobs().map_err(ApiError::internal)?;
         if let Some(key) = &request.request_id
-            && let Some(prior) = jobs
-                .iter()
-                .find(|j| j.request.as_ref().and_then(|r| r.request_id.as_ref()) == Some(key))
+            && let Some(prior) = state.jobs.with_request_id(key)
         {
-            if prior.request.as_ref() != Some(&request) {
+            if prior.job.request() != Some(&request) {
                 return Err(ApiError::new(StatusCode::CONFLICT, "request_id_conflict", "Request ID already belongs to different build arguments", "Use a new request ID for different work."));
             }
             return Ok(Json(success(json!({"job":prior,"replayed":true}))));
-        }
-        if state.cancellations.lock().unwrap().len() >= 16 {
-            return Err(ApiError::bad(
-                "Build/preview queue is full (16 jobs); wait or cancel a job",
-            ));
         }
         let job = Job {
             id: uuid::Uuid::new_v4().to_string(),
             created_at: now(),
             updated_at: now(),
-            state: BuildState::Queued,
-            request: Some(request.clone()),
-            output: None,
-            error: None,
-            source: "xcodebuild".into(),
-            source_revision,
-            source_dirty,
+            origin: BuildOrigin::Project { request: request.clone(), provenance: Provenance { revision, dirty } },
+            phase: JobPhase::Queued,
         };
         let dir = store.job_dir(&job.id).map_err(ApiError::internal)?;
-        store.save_job(&job).map_err(ApiError::internal)?;
-        state
-            .cancellations
-            .lock()
-            .unwrap()
-            .insert(job.id.clone(), sender);
-        (job, dir)
+        let lease = state.jobs.admit(job.clone()).map_err(admit_error)?;
+        (job, lease, dir)
     };
-    let response = job.clone();
+    let response = state.jobs.get(&job.id);
     tokio::spawn(async move {
         let mut job = job;
-        let mut receiver = receiver;
+        let mut receiver = lease.cancelled.clone();
         let permit = tokio::select! {
             result = state.slots.clone().acquire_owned() => result.ok(),
             _ = receiver.changed() => None,
         };
         if permit.is_none() || *receiver.borrow() {
-            job.state = BuildState::Cancelled;
+            job.phase = JobPhase::Cancelled { message: None };
         } else {
-            job.state = BuildState::Running;
+            job.phase = JobPhase::Running;
             job.updated_at = now();
-            let persisted = state.store.lock().unwrap().save_job(&job);
-            let result = match persisted {
+            let result = match state.jobs.commit(&lease, &job) {
                 Ok(()) => xcode::run(&request, &dir, receiver.clone()).await,
                 Err(error) => {
                     state.draining.store(true, Ordering::Release);
                     Err(error.context("Could not persist Running state; Xcode was not started"))
                 }
             };
-            match result {
-                Ok(output) => {
-                    job.state = BuildState::Succeeded;
-                    job.output = Some(output);
-                    if request.capture_preview {
-                        job.output.as_mut().unwrap().preview_state = Some("running".into());
-                        job.updated_at = now();
-                        let persisted = state.store.lock().unwrap().save_job(&job);
-                        let capture = match persisted {
-                            Ok(()) => match preview::simulator_id(None) {
-                                Ok(simulator) => {
-                                    preview::capture(&job, &dir, &simulator, receiver.clone()).await
-                                }
-                                Err(error) => Err(error),
-                            },
-                            Err(error) => {
-                                state.draining.store(true, Ordering::Release);
-                                Err(error.context("Could not persist preview state"))
-                            }
-                        };
-                        preview::apply_result(job.output.as_mut().unwrap(), capture);
+            job.phase = match result {
+                Ok(output) => JobPhase::Succeeded { output, preview: PreviewState::Absent },
+                Err(error) if *receiver.borrow() => JobPhase::Cancelled { message: Some(format!("{error:#}")) },
+                Err(error) => JobPhase::Failed { message: format!("{error:#}") },
+            };
+            if request.capture_preview && job.set_preview(PreviewState::Absent.capturing()) {
+                job.updated_at = now();
+                let capture = match state.jobs.commit(&lease, &job) {
+                    Ok(()) => match preview::simulator_id(None) {
+                        Ok(simulator) => preview::capture(&job, &dir, &simulator, receiver.clone()).await,
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => {
+                        state.draining.store(true, Ordering::Release);
+                        Err(error.context("Could not persist preview state"))
                     }
-                }
-                Err(error) => {
-                    job.state = if *receiver.borrow() {
-                        BuildState::Cancelled
-                    } else {
-                        BuildState::Failed
-                    };
-                    job.error = Some(format!("{error:#}"));
-                }
+                };
+                finish_preview(&mut job, capture);
             }
         }
         job.updated_at = now();
-        let persisted = state.store.lock().unwrap().save_job(&job);
-        if let Err(error) = persisted {
-            eprintln!("Cannot persist job {}: {error}", job.id);
+        if let Err(error) = state.jobs.finish(lease, &job) {
+            eprintln!("Cannot persist job {}: {error:#}. Service paused; the result is served from memory until shutdown.", job.id);
             state.draining.store(true, Ordering::Release);
-            job.error = Some(format!(
-                "{}; terminal result could not be persisted: {error}. Service paused; this result is retained in memory until shutdown.",
-                job.error.as_deref().unwrap_or("Build finished")
-            ));
-            state
-                .recovery_jobs
-                .lock()
-                .unwrap()
-                .insert(job.id.clone(), job.clone());
-        } else if job.state == BuildState::Succeeded {
-            sync_job_app(&state, &job).await;
         }
+        let app = build_app(&state, &job).await;
         if let Some(push) = &state.push {
-            push.build_finished(&job);
+            push.build_finished(&job, app.as_ref());
         }
-        state.cancellations.lock().unwrap().remove(&job.id);
         drop(permit);
     });
     Ok(Json(success(json!({"job":response,"replayed":false}))))
+}
+
+fn admit_error(error: AdmitError) -> ApiError {
+    match error {
+        AdmitError::Full => ApiError::bad(format!("Build/preview queue is full ({MAX_OPERATIONS} jobs); wait or cancel a job")),
+        AdmitError::Busy => ApiError::new(StatusCode::CONFLICT, "preview_in_progress", "This build already has work in progress", "Poll build status before recapturing."),
+        AdmitError::Refused(message) => ApiError::bad(message),
+        AdmitError::Persist(error) => ApiError::internal(format!("{error:#}")),
+    }
+}
+
+/// A capture's result on the job; a failed capture keeps the prior image.
+fn finish_preview(job: &mut Job, capture: Result<preview::Capture>) {
+    let Some(current) = job.preview() else { return };
+    let next = current.finish(capture.map(|c| PreviewArtifact {
+        path: c.path,
+        captured_at: c.captured_at,
+        source: PreviewSource::parse(&c.source),
+    }));
+    job.set_preview(next);
 }
 
 #[derive(Deserialize)]
@@ -644,36 +583,21 @@ async fn capture_preview(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let input = body(input)?;
     let simulator = preview::simulator_id(input.simulator.as_deref()).map_err(ApiError::bad)?;
-    let (sender, mut receiver) = watch::channel(false);
-    let (mut job, directory) = {
+    let (mut job, lease, directory) = {
         let store = state.store.lock().unwrap();
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
-        let mut job = store.load_job(&id).map_err(ApiError::missing)?;
-        if job.state != BuildState::Succeeded || job.request.is_none() || job.output.is_none() {
-            return Err(ApiError::bad(
-                "Preview requires a succeeded project build with a simulator build recipe",
-            ));
+        if state.jobs.get(&id).is_none() {
+            return Err(ApiError::missing(format!("No build {id}")));
         }
-        let mut cancellations = state.cancellations.lock().unwrap();
-        if cancellations.contains_key(&id) {
-            return Err(ApiError::new(StatusCode::CONFLICT, "preview_in_progress", "This build already has work in progress", "Poll build status before recapturing."));
-        }
-        if cancellations.len() >= 16 {
-            return Err(ApiError::bad("Build/preview queue is full (16 jobs)"));
-        }
-        let output = job.output.as_mut().unwrap();
-        output.preview_state = Some("pending".into());
-        output.preview_error = None;
-        job.updated_at = now();
-        store.save_job(&job).map_err(ApiError::internal)?;
-        cancellations.insert(id.clone(), sender);
+        let (job, lease) = state.jobs.begin_preview(&id).map_err(admit_error)?;
         let directory = store.job_dir(&id).map_err(ApiError::internal)?;
-        (job, directory)
+        (job, lease, directory)
     };
-    let response = job.clone();
+    let response = state.jobs.get(&id);
     tokio::spawn(async move {
+        let mut receiver = lease.cancelled.clone();
         let permit = tokio::select! {
             result = state.slots.clone().acquire_owned() => result.ok(),
             _ = receiver.changed() => None,
@@ -681,10 +605,10 @@ async fn capture_preview(
         let result = if permit.is_none() || *receiver.borrow() {
             Err(anyhow::anyhow!("Preview cancelled before capture"))
         } else {
-            job.output.as_mut().unwrap().preview_state = Some("running".into());
+            let capturing = job.preview().map(PreviewState::capturing).unwrap_or_default();
+            job.set_preview(capturing);
             job.updated_at = now();
-            let persisted = state.store.lock().unwrap().save_job(&job);
-            match persisted {
+            match state.jobs.commit(&lease, &job) {
                 Ok(()) => preview::capture(&job, &directory, &simulator, receiver).await,
                 Err(error) => {
                     state.draining.store(true, Ordering::Release);
@@ -692,33 +616,43 @@ async fn capture_preview(
                 }
             }
         };
-        preview::apply_result(job.output.as_mut().unwrap(), result);
+        finish_preview(&mut job, result);
         job.updated_at = now();
-        let persisted = state.store.lock().unwrap().save_job(&job);
-        if let Err(error) = persisted {
+        if let Err(error) = state.jobs.finish(lease, &job) {
+            eprintln!("Cannot persist preview of {id}: {error:#}. Service paused.");
             state.draining.store(true, Ordering::Release);
-            job.output.as_mut().unwrap().preview_error =
-                Some(format!("Preview result could not be persisted: {error}"));
-            state.recovery_jobs.lock().unwrap().insert(id.clone(), job);
         } else {
-            sync_job_app(&state, &job).await;
+            build_app(&state, &job).await;
         }
-        state.cancellations.lock().unwrap().remove(&id);
         drop(permit);
     });
     Ok((StatusCode::ACCEPTED, Json(success(json!({"job":response})))))
 }
 
-async fn sync_job_app(state: &AppState, job: &Job) {
+/// The catalog app a finished build belongs to. A succeeded build registers
+/// its app and publishes a newer preview; any other build is matched to an
+/// app already registered for its project and scheme (or bundle, for an
+/// import), so its notification can still open the app.
+async fn build_app(state: &AppState, job: &Job) -> Option<apps::AppRecord> {
     let (state, job) = (state.clone(), job.clone());
     // Copies the preview under the record lock; keep it off the async workers.
     let result = tokio::task::spawn_blocking(move || {
-        apps::sync_build_preview(&state.store.lock().unwrap(), &job).map_err(|e| (job.id.clone(), e))
+        let store = state.store.lock().unwrap();
+        if job.output().is_some() && job.request().is_some() {
+            apps::sync_build_preview(&store, &job).map(Some).map_err(|e| (job.id.clone(), e))
+        } else {
+            Ok(apps::list(&store).ok().and_then(|apps| apps::owner_of(&apps, &job).cloned()))
+        }
     })
     .await;
-    if let Ok(Err((id, error))) = result {
-        // Catalog publication is ancillary: never invalidate an exported IPA.
-        eprintln!("Could not sync app metadata for build {id}: {error:#}");
+    match result {
+        Ok(Ok(app)) => app,
+        Ok(Err((id, error))) => {
+            // Catalog publication is ancillary: never invalidate an exported IPA.
+            eprintln!("Could not sync app metadata for build {id}: {error:#}");
+            None
+        }
+        Err(_) => None,
     }
 }
 
