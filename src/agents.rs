@@ -380,6 +380,11 @@ impl Agents {
         self.thread(thread).and_then(|t| t["projectId"].as_str().map(str::to_string))
     }
 
+    /// A worker's title, even once T3 has archived its thread.
+    pub fn worker_title(&self, id: &str) -> Option<String> {
+        self.registry.lock().unwrap().workers.get(id).map(|w| w.title.clone())
+    }
+
     /// The user's latest message to an app agent: where a task it adds now
     /// came from.
     pub async fn source_message(&self, thread: &str) -> Option<Source> {

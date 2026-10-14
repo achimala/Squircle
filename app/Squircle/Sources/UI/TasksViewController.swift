@@ -262,7 +262,8 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     /// The thread a task is about right now: one waiting on you, else one
     /// working, else the newest.
     private func mainThread(of task: AppTask) -> String? {
-        (task.threads.first { $0.state == "needs-you" } ?? task.threads.first { $0.state == "working" } ?? task.threads.last)?.id
+        let threads = task.threads.filter { $0.state != "missing" }
+        return (threads.first { $0.state == "needs-you" } ?? threads.first { $0.state == "working" } ?? threads.last)?.id
     }
 
     // MARK: Table
@@ -500,10 +501,12 @@ private final class TaskCell: UITableViewCell {
         install.configuration?.title = title
 
         chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for thread in task.threads {
+        // Archived threads can't be opened any more.
+        let threads = task.threads.filter { $0.state != "missing" }
+        for thread in threads {
             chips.addArrangedSubview(chip(thread))
         }
-        chipScroll.isHidden = task.threads.isEmpty
+        chipScroll.isHidden = threads.isEmpty
 
         thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for media in task.media {
