@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// A finished turn's work, folded into one line.
 struct TurnSummary: Equatable {
@@ -123,8 +124,32 @@ enum ThreadItem: Equatable {
     /// Steps kept in view while a turn is running.
     static let liveWindow = 4
 
+    /// The conversation's rows. Views re-render on every model change (any
+    /// thread's), so the last few results are kept and reused while their
+    /// inputs are unchanged.
     static func items(messages: [ChatMessage], running: Bool, expanded: Set<String> = [], builds: [AppBuild] = [],
-                      changes: [TurnChanges] = [], simulators: [SimulatorUse] = [], now: Date = .now) -> [ThreadItem] {
+                      changes: [TurnChanges] = [], simulators: [SimulatorUse] = []) -> [ThreadItem] {
+        let inputs = TimelineInputs(messages: messages, running: running, expanded: expanded, builds: builds,
+                                    changes: changes, simulators: simulators)
+        if let hit = recent.withLock({ $0.first { $0.inputs == inputs }?.items }) { return hit }
+        let made = build(inputs)
+        recent.withLock { cache in
+            cache.removeAll { $0.inputs == inputs }
+            cache.insert((inputs, made), at: 0)
+            if cache.count > 3 { cache.removeLast() }
+        }
+        return made
+    }
+
+    private struct TimelineInputs: Equatable {
+        let messages: [ChatMessage], running: Bool, expanded: Set<String>, builds: [AppBuild]
+        let changes: [TurnChanges], simulators: [SimulatorUse]
+    }
+    private static let recent = Mutex<[(inputs: TimelineInputs, items: [ThreadItem])]>([])
+
+    private static func build(_ inputs: TimelineInputs) -> [ThreadItem] {
+        let (messages, running, expanded, builds, changes, simulators) =
+            (inputs.messages, inputs.running, inputs.expanded, inputs.builds, inputs.changes, inputs.simulators)
         // Split into turns at each of your messages.
         var turns: [(user: ChatMessage?, rest: [ChatMessage])] = []
         for message in messages {
@@ -335,12 +360,5 @@ enum ThreadItem: Equatable {
                            failed: steps.contains { $0.failed }, expanded: expanded)
     }
 
-    private static let iso: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    static func date(_ text: String) -> Date? {
-        iso.date(from: text) ?? ISO8601DateFormatter().date(from: text)
-    }
+    static func date(_ text: String) -> Date? { ISODate.parse(text) }
 }
