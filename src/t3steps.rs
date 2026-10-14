@@ -33,17 +33,32 @@ const CONTENT: &str = "case when json_type(payload_json,'$.data.result.content')
     then json_extract(payload_json,'$.data.result.content') else '[]' end";
 const IS_IMAGE: &str = "(case when type='object' then json_extract(value,'$.type') end)='image'";
 
-async fn query(sql: &str) -> Result<Vec<Value>> {
+/// How long a read may take. A Live Activity's step is worth little once
+/// late; a thread's details are read on request.
+const STEP_READ: std::time::Duration = std::time::Duration::from_secs(3);
+const DETAIL_READ: std::time::Duration = std::time::Duration::from_secs(15);
+/// Screenshots arrive as base64 rows; anything larger is not a step detail.
+const MAX_OUTPUT: usize = 64 * 1024 * 1024;
+
+/// One read-only query, supervised like every helper: bounded by `limit` and
+/// `MAX_OUTPUT`, and dropping the future kills `sqlite3`.
+async fn query(sql: &str, limit: std::time::Duration) -> Result<Vec<Value>> {
     let path = state_path();
     if !path.exists() {
         bail!("T3 state database not found at {}", path.display());
     }
     let uri = format!("file:{}?mode=ro", path.display());
-    let output = tokio::process::Command::new("/usr/bin/sqlite3")
-        .args(["-readonly", "-json", &uri, sql])
-        .output()
-        .await
-        .context("running sqlite3")?;
+    let mut command = tokio::process::Command::new("/usr/bin/sqlite3");
+    command.args(["-readonly", "-json", &uri, sql]);
+    let output = crate::xcode::run_bounded(
+        command,
+        crate::xcode::Sink::Capture(MAX_OUTPUT),
+        crate::xcode::Sink::Capture(64 * 1024),
+        tokio::time::Instant::now() + limit,
+        None,
+    )
+    .await
+    .context("running sqlite3")?;
     if !output.status.success() {
         bail!(
             "sqlite3 failed: {}",
@@ -113,7 +128,7 @@ pub async fn current_step(thread: &str) -> Result<Option<String>> {
          from projection_thread_activities
          where thread_id='{thread}' and kind in ('tool.started','tool.updated','tool.completed','task.progress','task.started')
          order by sequence desc, created_at desc limit 12"
-    )).await?;
+    ), STEP_READ).await?;
     Ok(rows.iter().find_map(|row| {
         let input = row["input"].as_str().and_then(|s| serde_json::from_str::<Value>(s).ok())?;
         describe(row["tool"].as_str().unwrap_or(""), &input)
@@ -171,7 +186,7 @@ pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
          where thread_id='{thread}' and kind in ('tool.started','tool.updated','tool.completed') {since}
            and (json_extract(payload_json,'$.data.input') is not null or images > 0)
          order by created_at"
-    ))
+    ), DETAIL_READ)
     .await?;
     let mut order: Vec<String> = Vec::new();
     let mut steps: std::collections::HashMap<String, Map<String, Value>> = Default::default();
@@ -231,7 +246,7 @@ pub async fn image(thread: &str, call: &str, index: usize) -> Result<Option<Valu
          where thread_id='{thread}' and json_extract(payload_json,'$.toolCallId')='{call}'
            and {IS_IMAGE}
          order by created_at desc, activity_id, json_each.key"
-    ))
+    ), DETAIL_READ)
     .await?;
     Ok(distinct(rows).into_iter().nth(index).map(|row| {
         json!({
@@ -305,7 +320,7 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
            and json_extract(a.payload_json,'$.data.toolName')='mcp__t3-code__device_screenshot'
            and (case when j.type='object' then json_extract(j.value,'$.type') end)='image'
          order by a.created_at desc limit 40"
-    ))
+    ), DETAIL_READ)
     .await?;
     let engine = base64::engine::general_purpose::STANDARD;
     for row in rows {
@@ -325,7 +340,7 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
         let full = query(&format!(
             "select json_extract(payload_json,'$.data.result.content[{index}].source.data') as data
              from projection_thread_activities where activity_id='{activity}'"
-        ))
+        ), DETAIL_READ)
         .await?;
         let Some(data) = full.first().and_then(|r| r["data"].as_str()) else { continue };
         return Ok(Some(json!({

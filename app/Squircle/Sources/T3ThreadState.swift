@@ -44,7 +44,23 @@ struct T3ThreadState: Codable {
         case "thread.activity-appended":
             var rows = t["activities"]?.array ?? []
             if !rows.contains(where: { $0["id"] == p["activity"]["id"] }) { rows.append(p["activity"]) }
+            // Like T3's own snapshot: the newest 500, and open requests.
+            if rows.count > 600 {
+                let cut = rows.count - 500
+                rows = rows.enumerated().filter { $0.offset >= cut || ($0.element["kind"].string ?? "").hasSuffix(".requested") }.map(\.element)
+            }
             t["activities"] = .array(rows)
+        case "thread.turn-diff-completed":
+            var rows = (t["checkpoints"]?.array ?? [])
+            let existing = rows.first { $0["turnId"] == p["turnId"] }
+            if existing.map({ $0["status"].string != "missing" }) == true, p["status"].string == "missing" { break }
+            rows.removeAll { $0["turnId"] == p["turnId"] }
+            var checkpoint = p.object; checkpoint["threadId"] = nil
+            rows.append(.object(checkpoint))
+            t["checkpoints"] = .array(rows.sorted { ($0["checkpointTurnCount"].int ?? 0) < ($1["checkpointTurnCount"].int ?? 0) })
+        case "thread.reverted":
+            // History was rewritten; only a snapshot shows it right.
+            sequence = -1; fromCache = true; return
         case "thread.meta-updated": for (key,value) in p.object where key != "threadId" { t[key] = value }
         case "thread.runtime-mode-set": t["runtimeMode"] = p["runtimeMode"]
         case "thread.interaction-mode-set": t["interactionMode"] = p["interactionMode"]

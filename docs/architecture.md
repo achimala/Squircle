@@ -125,13 +125,23 @@ Reduce Motion.
 
 `T3Gateway` speaks the verified Effect RPC JSON Request/Chunk/Ack/Exit protocol.
 HTTP and input/RPC WebSockets use a normal paired T3 session, scoped to
-orchestration read/operate, and short-lived WebSocket tickets. HTTPS requests
+orchestration read/operate. The RPC socket's upgrade carries the session's
+bearer like any HTTPS request (T3 0.0.45 accepts it; no ticket round trip);
+the device helper socket still uses a short-lived ticket. HTTPS requests
 reject redirects. The personal build seeds the device Keychain from ignored
 private configuration; the initial session expires after 30 days. Re-pairing
 currently requires updating the private build configuration. No credentials or
 private probes belong in Git.
 
-Snapshots recover server-owned state on reconnect. Sequenced events deduplicate
+Snapshots recover server-owned state on reconnect, but only when needed:
+the shell and an open thread resubscribe with `afterSequence` from what the
+phone already holds (this session or the disk cache), so T3 replays only
+the events since, or sends a snapshot when the gap is too large (2026-10-15:
+a long agent thread's snapshot is about 600 KB). A revert falls back to a
+snapshot. The Squircle service answers GET JSON with an ETag (unchanged
+polls get an empty 304) and gzip; the phone polls builds, apps, agents,
+simulators, tasks and the open thread's media in one parallel round every
+4 s. Sequenced events deduplicate
 replay and append streaming text deltas; an empty final text event preserves the
 accumulated response. The client does not retry a message command automatically
 when an acknowledgement is missing. It presents a retry error and refreshes
