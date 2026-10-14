@@ -1,7 +1,8 @@
 import UIKit
 
-/// Secondary sheet beside the agent: the app's other threads, newest first,
-/// and a way to start a new one. Picking one closes the sheet and pushes it in.
+/// The app's other threads, newest first, and a way to start a new one: the
+/// Tasks sheet's Threads tab (`embedded`, no header of its own) or a sheet of
+/// its own in the debug overlay. Picking one closes the sheet and pushes it in.
 @MainActor
 final class ThreadsViewController: UIViewController {
     /// A thread to open; nil starts a new one.
@@ -18,9 +19,12 @@ final class ThreadsViewController: UIViewController {
     private var renderedOrder: [String] = []
     private var observation: Task<Void, Never>?
 
-    init(model: SquircleModel, project: AppProject) {
+    private let embedded: Bool
+
+    init(model: SquircleModel, project: AppProject, embedded: Bool = false) {
         self.model = model
         self.project = project
+        self.embedded = embedded
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -29,7 +33,7 @@ final class ThreadsViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
+        if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = embedded ? nil : Theme.paper }
         titleLabel.textAlignment = .center
         titleLabel.accessibilityTraits = .header
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
@@ -44,10 +48,10 @@ final class ThreadsViewController: UIViewController {
         [close, titleLabel, create].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; header.addSubview($0) }
         [rows, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; scroll.addSubview($0) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 18),
+            header.topAnchor.constraint(equalTo: embedded ? view.topAnchor : view.safeAreaLayoutGuide.topAnchor, constant: embedded ? 0 : 18),
             header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
             header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
-            header.heightAnchor.constraint(equalToConstant: 44),
+            header.heightAnchor.constraint(equalToConstant: embedded ? 0 : 44),
             close.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             close.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             close.widthAnchor.constraint(equalToConstant: 44), close.heightAnchor.constraint(equalToConstant: 44),
@@ -56,7 +60,7 @@ final class ThreadsViewController: UIViewController {
             create.widthAnchor.constraint(equalToConstant: 44), create.heightAnchor.constraint(equalToConstant: 44),
             titleLabel.centerXAnchor.constraint(equalTo: header.centerXAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 14),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: embedded ? 0 : 14),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -68,6 +72,7 @@ final class ThreadsViewController: UIViewController {
             notice.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -32),
             notice.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -40)
         ])
+        header.isHidden = embedded
         let refresh = UIRefreshControl()
         refresh.addAction(UIAction { [weak self, weak refresh] _ in
             Task { await self?.model.refresh(); refresh?.endRefreshing() }

@@ -913,7 +913,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         controller.setBackButton(symbol: "chevron.down", label: "Minimize")
         controller.onBack = { [weak self] in self?.close() }
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
-        controller.onThreads = { [weak self] in self?.presentThreads() }
+        controller.onTasks = { [weak self] in self?.presentTasks() }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         agent = host(controller)
     }
@@ -971,10 +971,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     // MARK: Sheets
 
-    private func presentThreads() {
+    private func presentTasks() {
         guard let project, presentedViewController == nil, route.open, route.thread == nil else { return }
         Theme.selectionHaptic()
-        let controller = ThreadsViewController(model: model, project: project)
+        let controller = TasksViewController(model: model, project: project)
         controller.onOpen = { [weak self, weak controller] id in
             controller?.dismiss(animated: true) { self?.openThread(id) }
         }

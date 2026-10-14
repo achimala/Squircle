@@ -7,6 +7,13 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-14: tasks, version 0.3.0 (50).** Each app keeps a list of what you
+asked its agent for and where each stands: the agent adds and updates them
+(`squircle task`), linked workers and builds move them on, and old ones age
+into History. On the phone, Tasks replaces the Threads button (Threads is a
+tab inside) and a strip above the field counts what needs you. See
+[tasks](docs/task-tracking.md).
+
 **2026-10-14: restart and start fresh, version 0.3.0 (46).** An app's agent
 can be restarted (same history, current instructions) or started fresh (new
 thread with a handoff; the old one stays in Threads) from its ⋯ menu or by

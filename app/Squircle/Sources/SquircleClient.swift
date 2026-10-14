@@ -210,6 +210,40 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return reply.data["active"].array
     }
 
+    func tasks(projectID: String) async throws -> AppTasks {
+        struct Reply: Decodable { let ok: Bool; let data: AppTasks }
+        let reply: Reply = try await get(["v1", "tasks"], query: [URLQueryItem(name: "project", value: projectID)])
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data
+    }
+
+    func addTask(projectID: String, ask: String) async throws {
+        try await send(["v1", "tasks"], method: "POST", body: ["project": projectID, "ask": ask, "by_user": true])
+    }
+
+    /// The user's own change: a status, or first in its group.
+    func updateTask(id: String, status: AppTask.Status?, toTop: Bool) async throws {
+        var body: [String: Any] = ["by_user": true, "to_top": toTop]
+        if let status { body["status"] = status.rawValue }
+        try await send(["v1", "tasks", id], method: "PATCH", body: body)
+    }
+
+    func taskMediaFile(taskID: String, id: String) async throws -> Data {
+        let request = try request(["v1", "tasks", taskID, "media", id])
+        let (data, response) = try await session.data(for: request)
+        try validate(response, service: "Squircle")
+        return data
+    }
+
+    private func send(_ path: [String], method: String, body: [String: Any]) async throws {
+        var request = try request(path)
+        request.httpMethod = method
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        struct Reply: Decodable { let ok: Bool }
+        let reply: Reply = try await perform(request, service: "Squircle", exposeAPIError: true)
+        guard reply.ok else { throw ClientError.response("Squircle") }
+    }
+
     func mediaFile(threadID: String, id: String) async throws -> Data {
         let request = try request(["v1", "t3", "threads", threadID, "media", id])
         let (data, response) = try await session.data(for: request)

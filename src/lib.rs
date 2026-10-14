@@ -13,5 +13,6 @@ pub mod sims;
 pub mod store;
 pub mod symbolicate;
 pub mod t3;
+pub mod tasks;
 pub mod t3steps;
 pub mod xcode;
