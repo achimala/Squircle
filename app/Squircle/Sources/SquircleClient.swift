@@ -171,12 +171,14 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
     }
 
     /// Tool-call inputs and screenshot counts T3 leaves out of its stream.
-    func threadSteps(threadID: String, since: String?) async throws -> [JSONValue] {
+    /// Tool-call details, and every worker Squircle started.
+    /// `workers` is nil from a service older than the step history.
+    func threadSteps(threadID: String, since: String?) async throws -> (steps: [JSONValue], workers: [JSONValue]?) {
         struct Reply: Decodable { let ok: Bool; let data: JSONValue }
         let reply: Reply = try await get(["v1", "t3", "threads", threadID, "steps"],
                                          query: since.map { [URLQueryItem(name: "since", value: $0)] } ?? [])
         guard reply.ok else { throw ClientError.response("Squircle") }
-        return reply.data["steps"].array
+        return (reply.data["steps"].array, reply.data["workers"] == .null ? nil : reply.data["workers"].array)
     }
 
     func stepImage(threadID: String, callID: String, index: Int) async throws -> Data {

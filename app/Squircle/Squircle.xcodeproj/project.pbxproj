@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		01B7E72409266156BB49C33E /* CaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B031C12FA385E38F95AAF587 /* CaptureSession.swift */; };
 		01C183AE5505BED2A14E3B72 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF796323376B17E9A5610B5 /* Markdown.swift */; };
+		04DE0DC0D5FADCDE83698BB8 /* SquircleAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1BB7C210A5D1493DD8BAAA /* SquircleAction.swift */; };
 		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
 		12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
 		137F5D691337ACCA68558014 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
@@ -38,6 +39,7 @@
 		4DDFD13E3021EAE8FBD50E7D /* T3RuntimeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */; };
 		540C9A566D7E624B05F3C475 /* CaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B031C12FA385E38F95AAF587 /* CaptureSession.swift */; };
 		5437154D48528C4055384701 /* SimulatorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */; };
+		548C32A10537BFA96967F9CD /* SquircleActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC334D6BA2EF208D5744BEEE /* SquircleActionTests.swift */; };
 		55761DBC82306849B3DD6026 /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
 		59C2E7027B55B03E5809A83B /* ScreenshotBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */; };
 		5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9685CE2D9A277E148073C169 /* MotionAudit.swift */; };
@@ -59,6 +61,7 @@
 		9D1F202195C47DF92993790B /* PerfRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F9E05172DC12D427E2C642 /* PerfRecorder.swift */; };
 		9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
 		A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */; };
+		A2EDACED9AB17C1C38A6F3D4 /* SquircleAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1BB7C210A5D1493DD8BAAA /* SquircleAction.swift */; };
 		A3A54C0479DF84AA96EE8A82 /* PerfRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F9E05172DC12D427E2C642 /* PerfRecorder.swift */; };
 		A3E8C16A2A67B25E7C0C3B83 /* ThreadTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */; };
 		A431923743BEEBFEA90B97E2 /* T3RuntimeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */; };
@@ -113,6 +116,7 @@
 		44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadDetail.swift; sourceTree = "<group>"; };
 		48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCurtain.swift; sourceTree = "<group>"; };
 		4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViews.swift; sourceTree = "<group>"; };
+		4F1BB7C210A5D1493DD8BAAA /* SquircleAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleAction.swift; sourceTree = "<group>"; };
 		51AB12A9050AE317BDBA9C84 /* SpringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpringTests.swift; sourceTree = "<group>"; };
 		52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientModels.swift; sourceTree = "<group>"; };
 		5C2A80FAC707271FB5E24DAF /* HostCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostCapture.swift; sourceTree = "<group>"; };
@@ -145,6 +149,7 @@
 		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
 		FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppImportViewController.swift; sourceTree = "<group>"; };
 		FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3DeviceStream.swift; sourceTree = "<group>"; };
+		FC334D6BA2EF208D5744BEEE /* SquircleActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleActionTests.swift; sourceTree = "<group>"; };
 		FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Tests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -154,6 +159,7 @@
 			children = (
 				DB495D800CF688C469BFF725 /* AppProjectTests.swift */,
 				51AB12A9050AE317BDBA9C84 /* SpringTests.swift */,
+				FC334D6BA2EF208D5744BEEE /* SquircleActionTests.swift */,
 				FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */,
 			);
 			path = Tests;
@@ -227,6 +233,7 @@
 				6D09120CE693437EA02625DD /* AppConfiguration.swift */,
 				0882163016B1D5C885051FAD /* AppProject.swift */,
 				52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */,
+				4F1BB7C210A5D1493DD8BAAA /* SquircleAction.swift */,
 				613DF9097AAA330CB0F89A33 /* SquircleApp.swift */,
 				70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */,
 				EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */,
@@ -426,6 +433,7 @@
 				261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */,
 				5437154D48528C4055384701 /* SimulatorViews.swift in Sources */,
 				2FBB59AD4C1AE916730CEA4C /* SpringDriver.swift in Sources */,
+				A2EDACED9AB17C1C38A6F3D4 /* SquircleAction.swift in Sources */,
 				B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */,
 				9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */,
 				38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */,
@@ -453,6 +461,7 @@
 			files = (
 				0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */,
 				C5F5AE1D757E9658332F4638 /* SpringTests.swift in Sources */,
+				548C32A10537BFA96967F9CD /* SquircleActionTests.swift in Sources */,
 				A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -482,6 +491,7 @@
 				59C2E7027B55B03E5809A83B /* ScreenshotBinding.swift in Sources */,
 				856B0BA10D16A808D8A613D6 /* SimulatorViews.swift in Sources */,
 				398A5CE176B0173261406D64 /* SpringDriver.swift in Sources */,
+				04DE0DC0D5FADCDE83698BB8 /* SquircleAction.swift in Sources */,
 				4799E1F4447FF279740AD98A /* SquircleClient.swift in Sources */,
 				55761DBC82306849B3DD6026 /* SquircleModel.swift in Sources */,
 				CB3B7947C642FB450BF2C93F /* SquircleOverlay.swift in Sources */,

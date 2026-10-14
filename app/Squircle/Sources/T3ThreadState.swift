@@ -8,6 +8,9 @@ struct T3ThreadState: Codable {
     var details: [String: JSONValue] = [:]
     /// Newest step detail fetched, so later fetches ask only for what's new.
     var detailsSince: String?
+    /// Details older than version 2 lack what rebuilds steps T3 no longer
+    /// sends; such a cache fetches them all again.
+    var detailsVersion: Int?
     /// Recordings and images published into the thread.
     var media: [JSONValue] = []
     /// Restored from a cache: the next live snapshot replaces it whatever its
@@ -66,13 +69,28 @@ struct T3ThreadState: Codable {
             if message.role == "user" { message.captures = SentCapture.parse(m["text"].string ?? "") }
             if let update = Self.workerUpdate(m) {
                 message.content = update; message.isUpdate = true
-                message.threadIDs = m["context"]["records"].array.flatMap { $0["payload"]["workers"].array.compactMap { $0["id"].string } }
+                message.news = Self.workerNews(m)
+                message.threadIDs = message.news.map(\.id)
+            } else if message.role == "user", let author = Self.agentAuthor(m) {
+                message.agent = author
+                message.content = Self.task(message.content)
             }
             return (m["createdAt"].string ?? "", message)
         }
         let running = isRunning
         var steps: [String: Int] = [:]
-        for a in thread["activities"].array {
+        // T3 sends only a thread's newest activities; the Mac's details
+        // rebuild the tool calls before them.
+        let sent = Set(thread["activities"].array.compactMap { $0["payload"]["toolCallId"].string })
+        let rebuilt: [JSONValue] = details.compactMap { key, extra in
+            guard !sent.contains(key), let at = extra["started_at"].string, extra["input"] != .null else { return nil }
+            let finished = extra["finished"].string
+            return .from(["id": key, "kind": finished == nil ? "tool.updated" : "tool.completed", "createdAt": at,
+                          "tone": finished == "failed" ? "error" : "tool", "turnId": extra["turn_id"].string ?? "",
+                          "payload": ["toolCallId": key, "status": finished ?? "inProgress",
+                                      "data": ["toolName": extra["tool"].string ?? ""]]])
+        }.sorted { ($0["createdAt"].string ?? "") < ($1["createdAt"].string ?? "") }
+        for a in rebuilt + thread["activities"].array {
             let kind = a["kind"].string ?? "", p = a["payload"]
             if ["approval.", "user-input.", "context-window.", "runtime.warning", "checkpoint.captured"].contains(where: kind.hasPrefix) { continue }
             // A background task already appears as the tool call that started it.
@@ -114,7 +132,8 @@ struct T3ThreadState: Codable {
     static func enrich(_ activity: JSONValue, with extra: JSONValue) -> JSONValue {
         var a = activity.object, payload = activity["payload"].object, data = activity["payload"]["data"].object
         if extra["input"] != .null { data["input"] = extra["input"] }
-        if let tool = extra["tool"].string, data["toolName"] == nil { data["toolName"] = .string(tool) }
+        if let tool = extra["tool"].string, data["toolName"] == nil || data["toolName"] == .string("") { data["toolName"] = .string(tool) }
+        if let result = extra["result"].string { data["squircleResult"] = .string(result) }
         payload["data"] = .object(data); a["payload"] = .object(payload)
         return .object(a)
     }
@@ -125,8 +144,9 @@ struct T3ThreadState: Codable {
         guard message["role"].string == "user" else { return nil }
         let records = message["context"]["records"].array
         if records.contains(where: { $0["kind"].string == "squircle-handoff" }) { return "Started fresh" }
-        guard let record = records.first(where: { $0["kind"].string == "squircle-worker-update" }) else { return nil }
-        let lines = record["payload"]["workers"].array.map { worker -> String in
+        let record = records.first(where: { $0["kind"].string == "squircle-worker-update" })
+        guard record != nil || (message["text"].string ?? "").hasPrefix("[worker update]") else { return nil }
+        let lines = (record?["payload"]["workers"].array ?? []).map { worker -> String in
             let title = worker["title"].string ?? "A worker"
             switch worker["state"].string {
             case "needs-you": return title + " needs input"
@@ -136,6 +156,46 @@ struct T3ThreadState: Codable {
         }
         return lines.isEmpty ? "Workers moved on" : lines.joined(separator: " · ")
     }
+    /// Each worker in Squircle's wake-up message, from its record or, for
+    /// early messages without one, its text.
+    static func workerNews(_ message: JSONValue) -> [WorkerNews] {
+        let records = message["context"]["records"].array.filter { $0["kind"].string == "squircle-worker-update" }
+        let news = records.flatMap { $0["payload"]["workers"].array }.compactMap { worker -> WorkerNews? in
+            guard let id = worker["id"].string else { return nil }
+            return WorkerNews(id: id, title: worker["title"].string ?? "A worker", state: WorkerState(rawValue: worker["state"].string ?? "") ?? .done)
+        }
+        if !news.isEmpty || !records.isEmpty { return news }
+        // - "Title" (id, branch) finished its turn.
+        return (message["text"].string ?? "").split(separator: "\n").compactMap { line -> WorkerNews? in
+            guard line.hasPrefix("- \""), let close = line.range(of: "\" ("),
+                  let comma = line[close.upperBound...].firstIndex(where: { $0 == "," || $0 == ")" }) else { return nil }
+            let title = String(line[line.index(line.startIndex, offsetBy: 3)..<close.lowerBound])
+            let id = String(line[close.upperBound..<comma])
+            let state: WorkerState = line.contains("is waiting") ? .needsYou : line.contains("error") ? .error : .done
+            return SquircleAction.uuid(id).map { WorkerNews(id: $0, title: title, state: state) }
+        }
+    }
+
+    /// Squircle marks the messages it sends for an agent. A worker's task
+    /// from before the marks is known by the instructions Squircle appends.
+    static func agentAuthor(_ message: JSONValue) -> AgentAuthor? {
+        for record in message["context"]["records"].array {
+            switch record["kind"].string {
+            case "squircle-task": return AgentAuthor(kind: .task, from: record["payload"]["from"].string)
+            case "squircle-agent-message": return AgentAuthor(kind: .message, from: record["payload"]["from"].string)
+            default: continue
+            }
+        }
+        return (message["text"].string ?? "").contains(workerMarker) ? AgentAuthor(kind: .task, from: nil) : nil
+    }
+    /// Where Squircle's instructions to a worker start, after its task.
+    static let workerMarker = "\n\n---\nYou are a worker for this app's agent"
+    /// A worker's task without the instructions Squircle appends.
+    static func task(_ text: String) -> String {
+        guard let range = text.range(of: workerMarker, options: .backwards) else { return text }
+        return String(text[..<range.lowerBound])
+    }
+
     /// What the person typed, without the app context Squircle sends after it.
     static func spoken(_ text: String) -> String {
         let end = [text.range(of: SentCapture.marker), text.range(of: AppProject.contextMarker)].compactMap { $0?.lowerBound }.min()

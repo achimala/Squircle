@@ -31,6 +31,8 @@ final class SquircleModel {
     private var simulatorRefresh: Task<Void, Never>?
     private(set) var requests: [JSONValue] = [] { didSet { changed() } }
     private(set) var changes: [TurnChanges] = [] { didSet { changed() } }
+    /// Every worker Squircle started, archived ones too, by thread ID.
+    private(set) var workers: [String: KnownWorker] = [:] { didSet { changed() } }
     private(set) var modelSelection: JSONValue = .null { didSet { changed() } }
     private(set) var runtimeMode: T3RuntimeMode = .auto { didSet { changed() } }
     /// Each app's agent thread, by T3 project ID, from the Mac.
@@ -714,8 +716,14 @@ final class SquircleModel {
             try? await Task.sleep(for: .milliseconds(400))
             guard let self, !Task.isCancelled else { return }
             async let published = try? client.threadMedia(threadID: id)
-            guard let steps = try? await client.threadSteps(threadID: id, since: state.detailsSince),
+            let since = state.detailsVersion == 2 ? state.detailsSince : nil
+            guard let (steps, workers) = try? await client.threadSteps(threadID: id, since: since),
                   !Task.isCancelled, selectedSessionID == id else { return }
+            if let workers {
+                state.detailsVersion = 2
+                let known = Self.workers(workers)
+                if known != self.workers { self.workers = known }
+            }
             if let published = await published, published != media, selectedSessionID == id {
                 state.media = published
                 messages = conversation()
@@ -725,13 +733,24 @@ final class SquircleModel {
             for step in steps {
                 guard let key = step["id"].string else { continue }
                 var merged = state.details[key]?.object ?? [:]
-                for (field, value) in step.object { merged[field] = value }
+                for (field, value) in step.object where field != "started_at" || merged[field] == nil { merged[field] = value }
                 state.details[key] = .object(merged)
                 if let at = step["updated_at"].string, at > (state.detailsSince ?? "") { state.detailsSince = at }
             }
             messages = conversation()
             scheduleCacheWrite()
         }
+    }
+    struct KnownWorker: Equatable {
+        let title: String
+        let branch: String
+        let state: WorkerState?
+    }
+    private static func workers(_ list: [JSONValue]) -> [String: KnownWorker] {
+        Dictionary(list.compactMap { w in
+            w["id"].string.map { ($0, KnownWorker(title: w["title"].string ?? "", branch: w["branch"].string ?? "",
+                                                  state: WorkerState(rawValue: w["state"].string ?? ""))) }
+        }, uniquingKeysWith: { a, _ in a })
     }
     /// T3's conversation with the thread's published recordings in time order.
     private func conversation() -> [ChatMessage] {

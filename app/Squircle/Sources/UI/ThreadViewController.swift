@@ -577,7 +577,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private static func reuseIdentifier(for item: ThreadItem) -> String {
         switch item {
         case .header: return "header"
-        case .user, .update, .answer, .note, .thought: return "message"
+        case .user, .update, .answer, .note, .thought, .agentMessage, .action: return "message"
         case .step, .earlier: return "step"
         case .gallery: return "gallery"
         case .figure: return "figure"
@@ -591,9 +591,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private func renderItems(animated: Bool = false) {
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
-        let next = header + ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
-                                             builds: model.builds, changes: model.changes,
-                                             simulators: model.threadSimulators)
+        let next = header + resolve(ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
+                                                     builds: model.builds, changes: model.changes,
+                                                     simulators: model.threadSimulators))
         guard next != items else { return }
         let previous = itemsByID
         let first = items.isEmpty
@@ -632,6 +632,37 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         reportVisibleSimulators()
         if previous["live"] != nil, itemsByID["live"] == nil, let finished = next.last(where: { if case .summary = $0 { return true }; return false }) {
             celebrate(finished.id)
+        }
+    }
+
+    /// Names and live states for the workers action lines mention.
+    private func resolve(_ items: [ThreadItem]) -> [ThreadItem] {
+        guard items.contains(where: { if case .action = $0 { return true }; return false }) else { return items }
+        let workers = model.workers
+        let sessions = Dictionary(model.sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return items.compactMap { item in
+            guard case .action(var line) = item else { return item }
+            // A spawn's output is often cut short before it names the thread.
+            if line.thread == nil, case .action(let action) = line.kind, action.kind == .spawn {
+                line.thread = workers.first { action.branch != nil && $0.value.branch == action.branch }?.key
+                    ?? workers.first { action.title != nil && $0.value.title == action.title }?.key
+                    ?? sessions.values.first { action.title != nil && $0.title == action.title }?.id
+            }
+            guard let id = line.thread else {
+                if case .action(let action) = line.kind, action.unconfirmed { return nil }
+                line.name = line.title
+                return .action(line)
+            }
+            let session = sessions[id], known = workers[id]
+            line.name = session?.displayTitle(in: project) ?? known?.title ?? line.title
+            switch (session?.phase, known?.state) {
+            case (.working?, _): line.state = .working
+            case (.needsYou?, _): line.state = .needsYou
+            case (.idle?, .error?): line.state = .error
+            case (.idle?, _): line.state = .done
+            case (nil, let state): line.state = state ?? .archived
+            }
+            return .action(line)
         }
     }
 
@@ -800,6 +831,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.contentView.alpha = message.id == flyingID ? 0 : 1
         case .update(let message):
             (cell as? MessageCell)?.configure(message, style: .update, rendered: text(for: message, style: .update), expanded: true)
+        case .agentMessage(let message):
+            let open = expanded.contains(message.id)
+            (cell as? MessageCell)?.configure(message, style: .agent, rendered: agentText(message), expanded: open)
+        case .action(let line):
+            let open = expanded.contains(line.id)
+            let message = ChatMessage(id: line.id, role: "tool", content: "")
+            (cell as? MessageCell)?.configure(message, style: .action, rendered: actionText(line, expanded: open), expanded: open)
         case .answer(let message):
             (cell as? MessageCell)?.configure(message, style: .answer, rendered: text(for: message, style: .answer), expanded: true)
         case .note(let message):
@@ -890,7 +928,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         switch style {
         case .user:
             text = NSAttributedString(string: message.content, attributes: [.font: Theme.font(.body, 17), .foregroundColor: UIColor.label])
-        case .note, .thought:
+        case .note, .thought, .action, .agent:
             text = Markdown.render(message.content, font: Theme.font(.subheadline, 15), color: .secondaryLabel)
         case .answer:
             text = Markdown.render(message.content, font: Theme.font(.body, 17), color: message.failed ? Theme.failure : .label)
@@ -910,8 +948,91 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return text
     }
 
+    /// "Task from Squircle agent" over the task, rendered.
+    private func agentText(_ message: ChatMessage) -> NSAttributedString {
+        let from = message.agent?.from.flatMap { id in model.sessions.first { $0.id == id } }?.displayTitle(in: project)
+        let task = message.agent?.kind == .task
+        let label = (task ? "Task from " : "From ") + (from ?? (task ? "the app’s agent" : "an agent"))
+        let key = message.id + "agent"
+        if let cached = rendered[key], cached.source == label + message.content { return cached.text }
+        let font = Theme.font(.footnote, 13, .semibold)
+        let text = NSMutableAttributedString()
+        if let symbol = UIImage(systemName: task ? "list.bullet.rectangle" : "arrow.down.message",
+                                withConfiguration: UIImage.SymbolConfiguration(font: font))?
+            .withTintColor(.secondaryLabel, renderingMode: .alwaysOriginal) {
+            text.append(NSAttributedString(attachment: NSTextAttachment(image: symbol)))
+            text.append(NSAttributedString(string: " "))
+        }
+        text.append(NSAttributedString(string: label + "\n"))
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = 6
+        text.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: style],
+                           range: NSRange(location: 0, length: text.length))
+        text.append(Markdown.render(message.content.trimmingCharacters(in: .whitespacesAndNewlines),
+                                    font: Theme.font(.subheadline, 15), color: .label))
+        rendered[key] = (label + message.content, text)
+        return text
+    }
+
+    /// "Started worker · Dark mode  working", with the worker's live state.
+    private func actionText(_ line: ActionLine, expanded: Bool) -> NSAttributedString {
+        let font = Theme.font(.subheadline, 15), bold = Theme.font(.subheadline, 15, .semibold)
+        let name = line.name ?? "a worker"
+        let text = NSMutableAttributedString()
+        func add(_ string: String, _ font: UIFont, _ color: UIColor = .label) {
+            text.append(NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color]))
+        }
+        let symbol: String
+        var state: (String, UIColor)?
+        switch line.kind {
+        case .news(let news):
+            symbol = news == .needsYou ? "questionmark.bubble" : news == .error ? "exclamationmark.bubble" : "checkmark.bubble"
+            add("From ", bold); add(name, font)
+            state = news == .needsYou ? ("needs you", Theme.warning) : news == .error ? ("stopped with an error", Theme.failure) : ("finished", Theme.success)
+        case .action(let action):
+            symbol = action.symbol
+            switch action.kind {
+            case .spawn:
+                add(action.verb, bold); add(" · " + name, font)
+                if let live = line.state {
+                    let colors: [WorkerState: UIColor] = [.working: Theme.accent, .done: Theme.success, .needsYou: Theme.warning, .error: Theme.failure]
+                    state = (live.word, colors[live] ?? .tertiaryLabel)
+                }
+            case .send, .answer:
+                add(action.verb + " ", bold); add(name, font)
+                if let message = action.text?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty, !expanded {
+                    let first = message.split(whereSeparator: \.isNewline).first.map(String.init) ?? message
+                    add(" · " + first, font, .secondaryLabel)
+                }
+            case .read: add("Read ", bold); add(name + "’s reply", font)
+            case .archive: add("Archived ", bold); add(name, font)
+            case .buildStart: add(action.verb, bold); if let app = action.app { add(" · " + app, font) }
+            default: add(action.verb, bold)
+            }
+        }
+        if line.failed { state = ("failed", Theme.failure) }
+        if let (word, color) = state { add("  " + word, Theme.font(.footnote, 13, .medium), color) }
+        if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: UIImage.SymbolConfiguration(font: Theme.font(.footnote, 13, .medium)))?
+            .withTintColor(line.failed ? Theme.failure : line.running ? Theme.accent : .secondaryLabel, renderingMode: .alwaysOriginal) {
+            text.insert(NSAttributedString(string: "  ", attributes: [.font: font]), at: 0)
+            text.insert(NSAttributedString(attachment: NSTextAttachment(image: symbol)), at: 0)
+        }
+        // Wrapped lines start under the text, not the icon.
+        let hanging = NSMutableParagraphStyle()
+        hanging.headIndent = 27
+        hanging.paragraphSpacing = 4
+        text.addAttribute(.paragraphStyle, value: hanging, range: NSRange(location: 0, length: text.length))
+        if expanded, let message = line.text?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
+            add("\n", font)
+            text.append(Markdown.render(message, font: Theme.font(.subheadline, 15), color: .secondaryLabel))
+        }
+        return text
+    }
+
     private func tappable(_ item: ThreadItem?) -> Bool {
         switch item {
+        case .agentMessage: return true
+        case .action(let line): return line.text?.isEmpty == false || (line.thread != nil && line.state != .archived && onOpenThread != nil)
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
         case .earlier, .summary, .note, .thought, .changes: return true
         case .update(let message): return !message.threadIDs.isEmpty && onOpenThread != nil
@@ -937,6 +1058,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .header: return 44
         case .user(let message): return lines(message.content, per: 9.2) * 22 + 42
         case .update(let message): return lines(message.content, per: 7.2) * 18 + 24
+        case .agentMessage(let message): return min(9, lines(message.content, per: 7.6)) * 20 + 40
+        case .action: return 34
         case .answer(let message): return lines(message.content, per: 8.6) * 23 + 20
         case .note(let message): return min(4, lines(message.content, per: 7.6)) * 20 + 12
         case .thought: return 52
@@ -971,6 +1094,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .changes(let changes, _): showChanges(changes)
         case .note(let message), .thought(let message): toggle(message.id)
         case .update(let message): if let id = message.threadIDs.first { onOpenThread?(id) }
+        case .agentMessage(let message): toggle(message.id)
+        case .action(let line):
+            // T3 no longer lists an archived worker's thread.
+            if line.text?.isEmpty == false { toggle(line.id) } else if let id = line.thread, line.state != .archived { onOpenThread?(id) }
         default: break
         }
     }
