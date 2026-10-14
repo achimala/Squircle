@@ -73,6 +73,8 @@ final class SimulatorScreen: UIView {
 
 /// One T3 stream per simulator, shared by every screen showing it (a PiP
 /// and the turn it belongs to), running only while some screen shows it.
+/// Its owner calls `close()` when it goes away: a running stream holds
+/// itself until stopped.
 @MainActor
 final class SimulatorFeeds {
     private struct Weak { weak var screen: SimulatorScreen? }
@@ -87,21 +89,30 @@ final class SimulatorFeeds {
     private var feeds: [SimulatorTarget: Feed] = [:]
     private let model: SquircleModel
     private var active = true
+    private var closed = false
+    private var observers: [Task<Void, Never>] = []
     /// A feed's interactivity changed (input became ready or was lost).
     var onInteractive: (() -> Void)?
 
     init(model: SquircleModel) {
         self.model = model
-        Task { [weak self] in
-            for await _ in NotificationCenter.default.notifications(named: UIApplication.didEnterBackgroundNotification) {
-                self?.setActive(false)
-            }
+        for (name, active) in [(UIApplication.didEnterBackgroundNotification, false), (UIApplication.didBecomeActiveNotification, true)] {
+            observers.append(Task { [weak self] in
+                for await _ in NotificationCenter.default.notifications(named: name) {
+                    guard let self else { return }
+                    setActive(active)
+                }
+            })
         }
-        Task { [weak self] in
-            for await _ in NotificationCenter.default.notifications(named: UIApplication.didBecomeActiveNotification) {
-                self?.setActive(true)
-            }
-        }
+    }
+
+    /// Stops every stream and observer; nothing attaches afterwards.
+    func close() {
+        closed = true
+        observers.forEach { $0.cancel() }
+        observers = []
+        for feed in feeds.values { feed.stream.stop() }
+        feeds = [:]
     }
 
     private func setActive(_ value: Bool) {
@@ -117,7 +128,7 @@ final class SimulatorFeeds {
             release(old)
         }
         screen.target = target
-        guard let target, let feed = feeds[target] ?? makeFeed(target) else { return }
+        guard !closed, let target, let feed = feeds[target] ?? makeFeed(target) else { return }
         feed.screens.append(Weak(screen: screen))
         if let last = feed.last { screen.show(last) }
     }
@@ -134,8 +145,9 @@ final class SimulatorFeeds {
     private func makeFeed(_ target: SimulatorTarget) -> Feed? {
         guard let http = model.gateway?.http else { return nil }
         let feed = Feed(stream: T3DeviceStream(http: http, base: model.devices["hubBasePath"].string ?? "/api/device-hub", target: target))
-        feed.stream.onFrame = { [weak self, weak feed] buffer in
-            guard let feed else { return }
+        feed.stream.onFrame = { [weak self, weak feed, weak stream = feed.stream] buffer in
+            // A feed nobody owns any more must not keep its stream running.
+            guard let feed else { stream?.stop(); return }
             feed.last = buffer
             for weak in feed.screens { weak.screen?.show(buffer) }
             if feed.screens.contains(where: { $0.screen == nil }) { self?.release(target) }
@@ -697,6 +709,15 @@ final class SimulatorCell: TimelineCell {
     var onTap: (() -> Void)?
     private(set) var use: SimulatorUse?
     let screen = SimulatorScreen()
+    private weak var feeds: SimulatorFeeds?
+    /// False while its conversation is out of sight (covered or off screen).
+    var showing = true {
+        didSet {
+            guard showing != oldValue else { return }
+            attachFeed()
+            if showing, window != nil { player?.play() } else { player?.pause() }
+        }
+    }
     private let frameView = UIView()
     private let playerLayer = AVPlayerLayer()
     private var player: AVQueuePlayer?
@@ -732,11 +753,17 @@ final class SimulatorCell: TimelineCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ use: SimulatorUse, feeds: SimulatorFeeds?, video: URL?) {
+    /// `tappable` false: a preview only, not a button (a host that can't
+    /// bring a live simulator large).
+    func configure(_ use: SimulatorUse, feeds: SimulatorFeeds?, video: URL?, tappable: Bool) {
         self.use = use
+        if self.feeds !== feeds { self.feeds?.attach(screen, to: nil) }
+        self.feeds = feeds
         screen.isHidden = !use.live
         dot.isHidden = !use.live
-        feeds?.attach(screen, to: use.live ? use.target : nil)
+        attachFeed()
+        button.isEnabled = tappable
+        button.accessibilityTraits = tappable ? .button : .image
         button.accessibilityLabel = (use.live ? "Live simulator, " : "Simulator recording, ") + use.deviceName
         if use.live || video == nil {
             player?.pause(); player = nil; looper = nil; playerLayer.player = nil; playing = nil
@@ -748,19 +775,27 @@ final class SimulatorCell: TimelineCell {
             playerLayer.player = queue
             player = queue
             playing = video
-            if window != nil { queue.play() }
+            if window != nil, showing { queue.play() }
         }
         setNeedsLayout()
+    }
+
+    /// Only a cell in a window holds a live stream: one scrolled away,
+    /// waiting for reuse or in a hidden conversation lets it go.
+    private func attachFeed() {
+        feeds?.attach(screen, to: window != nil && showing && use?.live == true ? use?.target : nil)
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
         player?.pause()
+        feeds?.attach(screen, to: nil)
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { player?.pause() } else { player?.play() }
+        if window == nil || !showing { player?.pause() } else { player?.play() }
+        attachFeed()
     }
 
     override func layoutSubviews() {

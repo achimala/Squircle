@@ -1,6 +1,94 @@
 import AVKit
 import UIKit
 
+/// What a conversation needs from whatever shows it (the app or the debug
+/// overlay). Every capability is explicit: a host that can't bring a live
+/// simulator large says so, and the conversation then draws live simulators
+/// as plain previews instead of buttons that do nothing.
+@MainActor
+protocol ConversationHost: AnyObject {
+    /// Shared simulator streams the turn's live simulator plays from.
+    var simulatorFeeds: SimulatorFeeds { get }
+    /// Whether `expandSimulator` brings a live simulator large and touchable.
+    var expandsSimulators: Bool { get }
+    func expandSimulator(_ use: SimulatorUse)
+    /// Live simulator blocks at least half on screen in `conversation`;
+    /// empty when it goes away.
+    func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>)
+}
+
+/// How a message the conversation sent ended, addressed to the conversation
+/// that sent it.
+enum SendOutcome: Equatable {
+    /// T3 took it, in this thread (new when the conversation was a draft).
+    case sent(threadID: String)
+    case failed(String)
+}
+
+// W5: replace. A stand-in until the model sends to an explicit destination
+// itself; delete this extension when `SquircleModel` provides the method.
+extension SquircleModel {
+    func send(_ text: String, in project: AppProject, to threadID: String?, agent: Bool) async -> SendOutcome {
+        await send(text, in: project)
+        if let error { return .failed(error) }
+        guard let id = selectedSessionID else { return .failed(ClientError.configuration.localizedDescription) }
+        return .sent(threadID: id)
+    }
+}
+
+/// The values used most recently, at most `limit`, the least recently used
+/// dropped first. Emptied when the system runs low on memory: everything in
+/// it can be measured or loaded again.
+@MainActor
+final class RecentCache<Key: Hashable, Value> {
+    private let limit: Int
+    private var values: [Key: Value] = [:]
+    private var order: [Key] = []
+    private let pressure: Task<Void, Never>
+
+    init(limit: Int) {
+        self.limit = limit
+        let emptied = WeakBox<RecentCache>()
+        pressure = Task { @MainActor in
+            for await _ in NotificationCenter.default.notifications(named: UIApplication.didReceiveMemoryWarningNotification) {
+                guard let cache = emptied.value else { return }
+                cache.removeAll()
+            }
+        }
+        emptied.value = self
+    }
+
+    deinit { pressure.cancel() }
+
+    func value(for key: Key) -> Value? {
+        guard let value = values[key] else { return nil }
+        touch(key)
+        return value
+    }
+
+    func set(_ value: Value?, for key: Key) {
+        guard let value else { values[key] = nil; order.removeAll { $0 == key }; return }
+        values[key] = value
+        touch(key)
+        while order.count > limit { values[order.removeFirst()] = nil }
+    }
+
+    func removeAll() {
+        values = [:]
+        order = []
+    }
+
+    private func touch(_ key: Key) {
+        order.removeAll { $0 == key }
+        order.append(key)
+    }
+}
+
+@MainActor
+private final class WeakBox<Object: AnyObject> {
+    weak var value: Object?
+}
+
 /// One conversation with a coding agent, full height. A simulator the agent
 /// uses shows in the turn that used it (live, then its recording) and as a
 /// floating picture the app shows over every conversation (`SimulatorDock`).
@@ -9,12 +97,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     let project: AppProject
     var onBack: (() -> Void)?
     var currentSessionID: String? { sessionID }
-    /// Shared simulator streams; the turn's simulator plays from them.
-    var feeds: SimulatorFeeds?
-    /// A live simulator in the conversation was tapped: show it large.
-    var onExpandSimulator: ((SimulatorUse) -> Void)?
-    /// Live simulators whose block is on screen, so their PiP can step aside.
-    var onVisibleSimulators: ((Set<String>) -> Void)?
+    /// Whatever shows this conversation: simulator streams, bringing a
+    /// simulator large, and which live simulators are on screen.
+    weak var host: ConversationHost?
+    /// Transitional, for a host not yet adopting `ConversationHost`: live
+    /// simulators play from these as previews only.
+    @available(*, deprecated, message: "Set host")
+    var feeds: SimulatorFeeds? {
+        get { legacyFeeds }
+        set { legacyFeeds = newValue }
+    }
+    private var legacyFeeds: SimulatorFeeds?
+    private var simulatorFeeds: SimulatorFeeds? { host?.simulatorFeeds ?? legacyFeeds }
     /// The app's agent: one conversation per app that runs its threads.
     let isAgent: Bool
     /// The agent's update lines open the app's other threads (nil: a new one).
@@ -89,12 +183,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Measured row heights, so long conversations keep their place while
     /// rows above are measured, expanded or folded.
     private var heights: [String: CGFloat] {
-        get { Self.heightCache[sessionID ?? ""] ?? [:] }
-        set { Self.heightCache[sessionID ?? ""] = newValue }
+        get { Self.heightCache.value(for: sessionID ?? "") ?? [:] }
+        set { Self.heightCache.set(newValue, for: sessionID ?? "") }
     }
-    /// Row heights per thread, kept across visits so a returning thread lays
-    /// out at its true size and opens exactly at the bottom.
-    private static var heightCache: [String: [String: CGFloat]] = [:]
+    /// Row heights of the most recently visited threads, so a returning
+    /// thread lays out at its true size and opens exactly at the bottom.
+    private static let heightCache = RecentCache<String, [String: CGFloat]>(limit: 16)
     private var items: [ThreadItem] = []
     private var itemsByID: [String: ThreadItem] = [:]
     /// The turn the live line belonged to, so only that turn's own finish pulses.
@@ -498,7 +592,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         more.alpha = alpha
         builds.alpha = alpha
         jump.alpha = jumpShown ? alpha : 0
+        let shown = progress > 0.001
+        if shown != onScreen {
+            onScreen = shown
+            for case let cell as SimulatorCell in table.visibleCells { cell.showing = shown }
+        }
     }
+    /// Some of this conversation is in sight; live simulators stream only then.
+    private var onScreen = true
 
     // MARK: Content
 
@@ -910,8 +1011,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .simulator(let use):
             guard let cell = cell as? SimulatorCell else { return }
             let stepID = use.recordingID.map { "media:" + $0 }
-            cell.configure(use, feeds: feeds, video: stepID.flatMap(StepVideos.url(for:)))
-            cell.onTap = { [weak self] in self?.openSimulator(use) }
+            let tappable = !use.live || host?.expandsSimulators == true
+            cell.configure(use, feeds: simulatorFeeds, video: stepID.flatMap(StepVideos.url(for:)), tappable: tappable)
+            cell.showing = onScreen
+            cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
             if let stepID, StepVideos.url(for: stepID) == nil { loadRecording(stepID, item: item.id) }
         }
     }
@@ -932,7 +1035,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// Live: large over the conversation. Recorded: the recording, full screen.
     private func openSimulator(_ use: SimulatorUse) {
-        if use.live { onExpandSimulator?(use); return }
+        if use.live {
+            if let host, host.expandsSimulators { host.expandSimulator(use) }
+            return
+        }
         guard let id = use.recordingID, presentedViewController == nil else { return }
         Task { [weak self] in
             guard let self, let url = await model.loadVideo("media:" + id) else { return }
@@ -944,7 +1050,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// Live simulator blocks at least half on screen.
     private func reportVisibleSimulators() {
-        guard let onVisibleSimulators else { return }
+        guard let host else { return }
         let visible = table.bounds.inset(by: table.contentInset)
         var ids = Set<String>()
         for cell in table.visibleCells {
@@ -954,7 +1060,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
         if ids != reportedSimulators {
             reportedSimulators = ids
-            onVisibleSimulators(ids)
+            host.conversation(self, showsSimulators: ids)
         }
     }
     private var reportedSimulators = Set<String>()
@@ -1257,13 +1363,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         pinToBottom = true
         render()
         flySend(id: local, from: source)
-        Task { [weak self] in
-            guard let self else { return }
-            await model.send(text, in: project)
-            sessionID = model.selectedSessionID
+        let origin = sessionID
+        Task { [weak self, model, project, isAgent] in
+            let outcome = await model.send(text, in: project, to: origin, agent: isAgent)
+            // The answer belongs to the conversation that sent it: a draft
+            // becomes the thread T3 created, and nothing else moves.
+            guard let self, !tornDown else { return }
             sending = false
-            // A message the Mac did not accept goes back into the field.
-            if model.error != nil {
+            switch outcome {
+            case .sent(let id):
+                if sessionID == origin, origin == nil || origin == id { sessionID = id }
+            case .failed:
+                // A message the Mac did not accept goes back into the field.
                 if pendingSend?.id == local { pendingSend = nil }
                 if composer.text.isEmpty { composer.text = text }
             }
@@ -1485,9 +1596,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         observations.forEach { $0.cancel() }
         observations = []
         onBack = nil
-        onExpandSimulator = nil
-        onVisibleSimulators?([])
-        onVisibleSimulators = nil
+        host?.conversation(self, showsSimulators: [])
+        host = nil
+        legacyFeeds = nil
     }
 
     #if DEBUG

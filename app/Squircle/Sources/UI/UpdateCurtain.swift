@@ -11,7 +11,16 @@ final class UpdateCurtain: UIView {
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     private var onDismiss: (() -> Void)?
-    private var returned: NSObjectProtocol?
+    /// Steps aside to the Home Screen, then waits for the app to come back.
+    /// Ends with the curtain, however it goes.
+    private var stepAside: Task<Void, Never>?
+
+    /// Shows the curtain for `build` (the Mac reported every byte of it
+    /// sent), or with nil takes away one that is up.
+    static func sync(in view: UIView, build: AppBuild?, onDismiss: @escaping () -> Void) {
+        if let build { show(in: view, build: build, onDismiss: onDismiss) }
+        else { view.subviews.compactMap { $0 as? UpdateCurtain }.forEach { $0.remove() } }
+    }
 
     static func show(in view: UIView, build: AppBuild, onDismiss: @escaping () -> Void) {
         guard !view.subviews.contains(where: { $0 is UpdateCurtain }) else { return }
@@ -66,20 +75,22 @@ final class UpdateCurtain: UIView {
         // Step aside to the Home Screen so the icon's progress is visible.
         // If the update fails the app returns to the foreground; the curtain
         // then goes away.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
-            guard let self else { return }
-            returned = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
-                                                              object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.close() }
-            }
+        stepAside = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2.2))
+            guard !Task.isCancelled else { return }
+            let returned = NotificationCenter.default.notifications(named: UIApplication.didBecomeActiveNotification)
             UIApplication.shared.perform(NSSelectorFromString("suspend"))
+            for await _ in returned { break }
+            guard !Task.isCancelled, let self else { return }
+            remove()
+            onDismiss?()
         }
     }
 
-    private func close() {
-        if let returned { NotificationCenter.default.removeObserver(returned) }
-        returned = nil
+    /// Gone, and with it the step aside, whether or not it happened yet.
+    private func remove() {
+        stepAside?.cancel()
+        stepAside = nil
         removeFromSuperview()
-        onDismiss?()
     }
 }

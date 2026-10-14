@@ -58,7 +58,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Display order. It changes only while the grid is out of sight, so
     /// nothing rearranges under a finger.
     private var projects: [AppProject] = []
-    /// Pending model render (debounced) and portrait drawing.
+    /// Pending model render (at most one) and portrait drawing.
     private var renderTask: Task<Void, Never>?
     private var portraitTask: Task<Void, Never>?
     private var laidOut: StageLayout?
@@ -133,12 +133,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         Task { [weak self, updates = model.updates] in
             for await _ in updates {
                 guard let self else { return }
-                // Bursts of model changes render once, 80 ms after the last.
-                renderTask?.cancel()
+                // A burst of model changes renders the latest state once,
+                // 80 ms after its first change, however long the burst lasts.
+                guard renderTask == nil else { continue }
                 renderTask = Task { [weak self] in
                     try? await Task.sleep(for: .milliseconds(80))
-                    guard !Task.isCancelled else { return }
-                    self?.render()
+                    guard let self else { return }
+                    renderTask = nil
+                    render()
                 }
             }
         }
@@ -392,9 +394,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         renderControls()
         renderSimulators()
-        if let build = model.updatingTo {
-            UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
-        }
+        UpdateCurtain.sync(in: view, build: model.updatingTo) { [weak self] in self?.model.cancelUpdate() }
         if laidOut != nil { layoutGrid() }
         sync()
         schedulePortraits()
@@ -403,7 +403,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     /// The simulators the open app's agents are using, over its conversations.
     private func renderSimulators() {
-        guard let project = selectedProject else { dock.update(uses: [], currentThread: nil, titles: [:]); return }
+        // Home, once the app has slid away: no simulator floats or streams.
+        guard let project = selectedProject, route.app != nil || appSpring.value > 0.001 else { dock.update(uses: [], currentThread: nil, titles: [:]); return }
         var titles: [String: String] = [:]
         for session in model.sessions(for: project, includingAgent: true) { titles[session.id] = session.displayTitle(in: project) }
         if let agent = model.agentThreadID(for: project) { titles[agent] = project.name }
@@ -586,12 +587,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Adds a conversation as an opaque page that covers what is beneath it
     /// as it slides in, never text over text.
     private func host(_ controller: ThreadViewController, in host: UIView) {
-        controller.feeds = feeds
-        controller.onExpandSimulator = { [weak self] use in self?.dock.expand(use.id) }
-        controller.onVisibleSimulators = { [weak self, weak controller] ids in
-            guard let self, let controller, controller === (thread ?? agent) else { return }
-            dock.docked = ids
-        }
+        controller.host = self
         addChild(controller)
         controller.view.frame = view.bounds
         controller.view.backgroundColor = Theme.paper
@@ -848,6 +844,16 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         case .app: closeApp(); return true
         case .grid: return false
         }
+    }
+}
+
+extension StudioViewController: ConversationHost {
+    var simulatorFeeds: SimulatorFeeds { feeds }
+    var expandsSimulators: Bool { true }
+    func expandSimulator(_ use: SimulatorUse) { dock.expand(use.id) }
+    func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>) {
+        guard conversation === (thread ?? agent) else { return }
+        dock.docked = ids
     }
 }
 
