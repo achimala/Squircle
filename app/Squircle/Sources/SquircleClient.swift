@@ -269,6 +269,17 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         guard reply.ok else { throw ClientError.response("Squircle diagnostics") }
     }
 
+    /// Notifications: this phone's tokens, its Live Activities and what it shows.
+    /// The Mac decides what to send and how it reaches Apple.
+    func push(_ endpoint: String, _ body: [String: Any]) async throws {
+        var request = try request(["v1", "push", endpoint])
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        struct Reply: Decodable { let ok: Bool }
+        let reply: Reply = try await perform(request, service: "Squircle", exposeAPIError: true)
+        guard reply.ok else { throw ClientError.response("Squircle") }
+    }
+
     private func request(_ components: [String], query: [URLQueryItem] = []) throws -> URLRequest {
         var url = configuration.squircleURL
         for component in components {

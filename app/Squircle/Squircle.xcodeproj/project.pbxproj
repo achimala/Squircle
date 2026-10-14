@@ -12,6 +12,7 @@
 		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
 		12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
 		137F5D691337ACCA68558014 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
+		150D982A0801A3F17A5C0630 /* PushCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF7A7F6D85D75DFF1BED9836 /* PushCenter.swift */; };
 		2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */ = {isa = PBXBuildFile; fileRef = 27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */; };
 		22CAD50EF60BBEF3BB22B919 /* StageLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5F85DA67966D2090740EE5 /* StageLayout.swift */; };
 		261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */; };
@@ -48,11 +49,14 @@
 		6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		8561E88460F96DCD4AB29DB4 /* ThreadViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */; };
 		856B0BA10D16A808D8A613D6 /* SimulatorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */; };
+		871E8BD00509204FC051A81D /* SquircleWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5036FBEB6F4388E0E737FC4F /* SquircleWidgets.swift */; };
 		87256F7C2F8C28B7CD4FCF94 /* StudioViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */; };
 		87D6E7B728B1986849DCC922 /* StageLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5F85DA67966D2090740EE5 /* StageLayout.swift */; };
 		8BAA4E81B553C53F52679B42 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
+		8E05EDDC1E59BC47FF661B32 /* PushTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E789B7BEFACE83A6B725DF3 /* PushTarget.swift */; };
 		8ECBFCDE794CEEE7DA10B1CB /* ClientModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */; };
 		93827AAA4A823E5BCDF41C05 /* DiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */; };
+		952AEDBB410D133FE04E3DBB /* SquircleActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */; };
 		96D8D7C221734472B9BF0B8F /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
 		97B0E27B68EBBED4F0D63633 /* DiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */; };
 		97C1E54012EDF05F226B3682 /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
@@ -83,10 +87,13 @@
 		E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
 		EBB5E73877F124DDB564B2FB /* ThreadDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */; };
 		ED14D13BF4DEA33CADAEEEEC /* AttachmentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD8598F09B147F0F828D9AA7 /* AttachmentPicker.swift */; };
+		EF17406AB166353AD47A5EA0 /* SquircleActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */; };
 		EF2030F39BE56875E731AD9A /* ThreadCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA04F2B838066131F83E73E4 /* ThreadCells.swift */; };
 		F9ABC01D7F49133520F5279F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
 		FB3FA377C1D0CCED56B5215F /* HostCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C2A80FAC707271FB5E24DAF /* HostCapture.swift */; };
 		FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
+		FCD6CE4E2BFA8F5440565BF9 /* PushTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E789B7BEFACE83A6B725DF3 /* PushTarget.swift */; };
+		FE686FCBC5CE4E599092B5FE /* SquircleWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B0960CDAD4EDF34EF7986A50 /* SquircleWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -97,7 +104,28 @@
 			remoteGlobalIDString = 48CB356BF6191F55960F572B;
 			remoteInfo = Squircle;
 		};
+		CEAC0067F8E061329D5C63E0 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = B99870D716447DE6FD076F00 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 5CCAAE598C4761D920524F63;
+			remoteInfo = SquircleWidgets;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		0E06A001779A4C117A7B7354 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				FE686FCBC5CE4E599092B5FE /* SquircleWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		04F9E05172DC12D427E2C642 /* PerfRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfRecorder.swift; sourceTree = "<group>"; };
@@ -113,11 +141,13 @@
 		44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadDetail.swift; sourceTree = "<group>"; };
 		48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCurtain.swift; sourceTree = "<group>"; };
 		4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViews.swift; sourceTree = "<group>"; };
+		5036FBEB6F4388E0E737FC4F /* SquircleWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleWidgets.swift; sourceTree = "<group>"; };
 		51AB12A9050AE317BDBA9C84 /* SpringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpringTests.swift; sourceTree = "<group>"; };
 		52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientModels.swift; sourceTree = "<group>"; };
 		5C2A80FAC707271FB5E24DAF /* HostCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostCapture.swift; sourceTree = "<group>"; };
 		5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffViewer.swift; sourceTree = "<group>"; };
 		5DF796323376B17E9A5610B5 /* Markdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Markdown.swift; sourceTree = "<group>"; };
+		5E789B7BEFACE83A6B725DF3 /* PushTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushTarget.swift; sourceTree = "<group>"; };
 		613DF9097AAA330CB0F89A33 /* SquircleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleApp.swift; sourceTree = "<group>"; };
 		614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3RuntimeMode.swift; sourceTree = "<group>"; };
 		61BA8CB62C3A9F516000BF29 /* AgentStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentStep.swift; sourceTree = "<group>"; };
@@ -131,6 +161,7 @@
 		9AA8EBB035561F94C3724C6D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadTimeline.swift; sourceTree = "<group>"; };
 		B031C12FA385E38F95AAF587 /* CaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSession.swift; sourceTree = "<group>"; };
+		B0960CDAD4EDF34EF7986A50 /* SquircleWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = SquircleWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorViews.swift; sourceTree = "<group>"; };
 		C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Gateway.swift; sourceTree = "<group>"; };
 		CA04F2B838066131F83E73E4 /* ThreadCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadCells.swift; sourceTree = "<group>"; };
@@ -141,14 +172,24 @@
 		D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotBinding.swift; sourceTree = "<group>"; };
 		DB495D800CF688C469BFF725 /* AppProjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProjectTests.swift; sourceTree = "<group>"; };
 		DD8598F09B147F0F828D9AA7 /* AttachmentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentPicker.swift; sourceTree = "<group>"; };
+		EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleActivity.swift; sourceTree = "<group>"; };
 		EBD483A8574350974655CD0C /* T3ThreadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3ThreadState.swift; sourceTree = "<group>"; };
 		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
+		EF7A7F6D85D75DFF1BED9836 /* PushCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCenter.swift; sourceTree = "<group>"; };
 		FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppImportViewController.swift; sourceTree = "<group>"; };
 		FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3DeviceStream.swift; sourceTree = "<group>"; };
 		FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Tests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
+		09E2BCB3BB6DE16ED7C0CB0A /* Widgets */ = {
+			isa = PBXGroup;
+			children = (
+				5036FBEB6F4388E0E737FC4F /* SquircleWidgets.swift */,
+			);
+			path = Widgets;
+			sourceTree = "<group>";
+		};
 		1A20A1D58C7BB1C09D18E702 /* Tests */ = {
 			isa = PBXGroup;
 			children = (
@@ -162,10 +203,13 @@
 		1A6973C5AA1921BACE200F68 = {
 			isa = PBXGroup;
 			children = (
+				A21006BF9B278457A1BE32AA /* App */,
 				4910BC6CADEA4B125D88BB76 /* Overlay */,
 				6D3DA7CA0BBB806DCB782EA9 /* Resources */,
+				EA1947F310C56959A7266C62 /* Shared */,
 				8A958A1FE5BAB76B766844F3 /* Sources */,
 				1A20A1D58C7BB1C09D18E702 /* Tests */,
+				09E2BCB3BB6DE16ED7C0CB0A /* Widgets */,
 				F2356134AEAD3EDC720007DE /* Products */,
 			);
 			sourceTree = "<group>";
@@ -227,6 +271,7 @@
 				6D09120CE693437EA02625DD /* AppConfiguration.swift */,
 				0882163016B1D5C885051FAD /* AppProject.swift */,
 				52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */,
+				5E789B7BEFACE83A6B725DF3 /* PushTarget.swift */,
 				613DF9097AAA330CB0F89A33 /* SquircleApp.swift */,
 				70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */,
 				EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */,
@@ -239,12 +284,29 @@
 			path = Sources;
 			sourceTree = "<group>";
 		};
+		A21006BF9B278457A1BE32AA /* App */ = {
+			isa = PBXGroup;
+			children = (
+				EF7A7F6D85D75DFF1BED9836 /* PushCenter.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		EA1947F310C56959A7266C62 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
 		F2356134AEAD3EDC720007DE /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */,
 				3C480DAB8EE878E0069F36AD /* SquircleOverlay.framework */,
 				7A74125807E9A3E968F73119 /* SquircleTests.xctest */,
+				B0960CDAD4EDF34EF7986A50 /* SquircleWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -260,10 +322,12 @@
 				2B02C2EDDCC2CC2BD51A06F6 /* Bundle private Mac connection */,
 				134999952B6C50207950C0F0 /* Sources */,
 				B126382FE9DBCDE2575964E4 /* Resources */,
+				0E06A001779A4C117A7B7354 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				380F7245A3F10AFAFAB77A20 /* PBXTargetDependency */,
 			);
 			name = Squircle;
 			packageProductDependencies = (
@@ -271,6 +335,23 @@
 			productName = Squircle;
 			productReference = D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */;
 			productType = "com.apple.product-type.application";
+		};
+		5CCAAE598C4761D920524F63 /* SquircleWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A6163E9981ADD06C9B5CCC88 /* Build configuration list for PBXNativeTarget "SquircleWidgets" */;
+			buildPhases = (
+				3F08BEC656E7D03EA94AABD0 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SquircleWidgets;
+			packageProductDependencies = (
+			);
+			productName = SquircleWidgets;
+			productReference = B0960CDAD4EDF34EF7986A50 /* SquircleWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		8288D750D29F968E2804D1E8 /* SquircleOverlay */ = {
 			isa = PBXNativeTarget;
@@ -320,6 +401,10 @@
 						DevelopmentTeam = 2F26US4NAU;
 						ProvisioningStyle = Automatic;
 					};
+					5CCAAE598C4761D920524F63 = {
+						DevelopmentTeam = 2F26US4NAU;
+						ProvisioningStyle = Automatic;
+					};
 					8288D750D29F968E2804D1E8 = {
 						DevelopmentTeam = 2F26US4NAU;
 					};
@@ -345,6 +430,7 @@
 				48CB356BF6191F55960F572B /* Squircle */,
 				8288D750D29F968E2804D1E8 /* SquircleOverlay */,
 				90E1BAD7755E3E809A136B1C /* SquircleTests */,
+				5CCAAE598C4761D920524F63 /* SquircleWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -422,10 +508,13 @@
 				3B375023CFEB927A141C090E /* Markdown.swift in Sources */,
 				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
 				9D1F202195C47DF92993790B /* PerfRecorder.swift in Sources */,
+				150D982A0801A3F17A5C0630 /* PushCenter.swift in Sources */,
+				FCD6CE4E2BFA8F5440565BF9 /* PushTarget.swift in Sources */,
 				3A3E16EA445BF69E2C979A4F /* ScreenRecorder.swift in Sources */,
 				261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */,
 				5437154D48528C4055384701 /* SimulatorViews.swift in Sources */,
 				2FBB59AD4C1AE916730CEA4C /* SpringDriver.swift in Sources */,
+				EF17406AB166353AD47A5EA0 /* SquircleActivity.swift in Sources */,
 				B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */,
 				9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */,
 				38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */,
@@ -457,6 +546,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		3F08BEC656E7D03EA94AABD0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				952AEDBB410D133FE04E3DBB /* SquircleActivity.swift in Sources */,
+				871E8BD00509204FC051A81D /* SquircleWidgets.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		566272FD4D839A49D34430B4 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -478,6 +576,7 @@
 				B2B96A36977324FDBFA7E8F7 /* MotionAudit.swift in Sources */,
 				2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */,
 				A3A54C0479DF84AA96EE8A82 /* PerfRecorder.swift in Sources */,
+				8E05EDDC1E59BC47FF661B32 /* PushTarget.swift in Sources */,
 				462A9D97A5F00E2C5438DDF7 /* ScreenRecorder.swift in Sources */,
 				59C2E7027B55B03E5809A83B /* ScreenshotBinding.swift in Sources */,
 				856B0BA10D16A808D8A613D6 /* SimulatorViews.swift in Sources */,
@@ -505,6 +604,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		380F7245A3F10AFAFAB77A20 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 5CCAAE598C4761D920524F63 /* SquircleWidgets */;
+			targetProxy = CEAC0067F8E061329D5C63E0 /* PBXContainerItemProxy */;
+		};
 		8F66BBAFFA4E2E16B048A81F /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 48CB356BF6191F55960F572B /* Squircle */;
@@ -563,6 +667,42 @@
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = Debug;
+		};
+		598B99F52E959BB49C7396E5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				INFOPLIST_FILE = "Generated/Widgets-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle.Widgets;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		62A25BE56BA0083837F5A5AD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				INFOPLIST_FILE = "Generated/Widgets-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle.Widgets;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
 		};
 		7A0EE604B9984F30375FDA9E /* Release */ = {
 			isa = XCBuildConfiguration;
@@ -804,6 +944,15 @@
 			buildConfigurations = (
 				E663E9A22B10ACD379ECD3C1 /* Debug */,
 				30C260CF3B14EC876154EA87 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A6163E9981ADD06C9B5CCC88 /* Build configuration list for PBXNativeTarget "SquircleWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				598B99F52E959BB49C7396E5 /* Debug */,
+				62A25BE56BA0083837F5A5AD /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

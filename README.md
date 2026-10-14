@@ -7,6 +7,12 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-14: notifications and Live Activity, version 0.3.0 (49).** The Mac
+sends notifications (agent replied or asks, worker finished/needs
+you/errored, build done) and a Live Activity with the agent's current step
+straight to Apple with your own APNs key (`squircle push setup`). See
+[notifications](docs/t3-native-migration.md#2026-10-14-notifications-and-the-live-activity-030-49).
+
 **2026-10-14: restart and start fresh, version 0.3.0 (46).** An app's agent
 can be restarted (same history, current instructions) or started fresh (new
 thread with a handoff; the old one stays in Threads) from its ⋯ menu or by

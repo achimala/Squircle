@@ -1685,3 +1685,69 @@ menu (deferred through a running turn); its first reply was three short
 sentences naming the open item. Not yet checked on the physical phone.
 
 Squircle build `e76693ea-4f76-47c2-a735-b327e0ff49c5` (0.3.0 46, main at `adec020`) succeeded; not yet installed on the phone.
+
+## 2026-10-14 notifications and the Live Activity (0.3.0 49)
+
+User decision: notifications and a Live Activity sent straight from the Mac
+service to Apple with the user's own APNs auth key, no relay for now. A later
+App Store build may need a small relay, so sending sits behind one interface.
+
+- **Service (`src/push.rs`).** `Push` decides what to say; a `Transport`
+  delivers it. `Apns` is HTTP/2 to `api.sandbox.push.apple.com` or
+  `api.push.apple.com` (by the token's environment, which the phone reports),
+  with an ES256 provider token (JWT, `ring`) reused for 40 minutes and
+  refreshed on `ExpiredProviderToken`. A relay would be another `Transport`;
+  the phone's contract stays: `POST /v1/push/devices` (device token,
+  push-to-start token, bundle ID, environment), `/v1/push/activities`
+  (an activity's update token, or none when it ended), `/v1/push/presence`
+  (foreground and the conversation on screen), the alert's `squircle` key
+  (`project`, `thread`, `build`, `bundle`) and the activity's content state.
+  Tokens Apple reports gone (410, `BadDeviceToken`) are forgotten.
+- **Key.** `squircle push setup --key-file … --key-id … --team-id …` checks
+  the key and stores it in `<data>/push/apns.json` (0600); output and logs
+  never show it. The service reloads it when the file changes, no restart.
+  `push status` lists registered phones without tokens; `push test
+  [--live-activity]` sends one now.
+- **What notifies.** From T3's shell: the app agent replied (its reply's
+  first line), asks a question (the question) or stopped with an error; a
+  worker finished, needs you or errored; a device build succeeded or failed.
+  Title is the app's name, body one line. Notes within 3 s for one app are
+  one notification (up to four lines). Nothing for the thread the phone
+  reports showing (presence expires after 5 minutes), and the phone hides a
+  banner for the conversation on screen too.
+- **Live Activity.** One per app with an agent: the agent's current step
+  (from T3's state database, read-only, every 8 s while working), workers
+  running, and "Needs you". Started by push-to-start when work begins and the
+  phone isn't in the foreground, or by the app when it leaves with work in
+  progress; updated by `liveactivity` pushes (state changes at priority 10,
+  step text at most every 10 s at priority 5); ended 20 s after everything is
+  idle, dismissed 2 minutes later; stale after 15 minutes without word. The
+  widget extension (`SquircleWidgets`, the one place SwiftUI is used, as
+  ActivityKit requires) draws a small jelly cube in Clay terracotta, ochre
+  for needs-you and olive when done. Tapping it opens the app.
+- **Phone.** `PushCenter` (app target only, never the overlay) asks for
+  permission, registers tokens with the Mac on every return to the
+  foreground, reports presence, and opens a tapped notification's app,
+  thread or build. `aps-environment` is `development` in the entitlements;
+  the ad hoc (`release-testing`) export signs it as `production`, which the
+  app reads from its embedded provisioning profile.
+
+Tested without a key: JWT signature and claims verified against the key's
+public key, alert and activity payloads, burst coalescing, viewed-thread
+suppression, and the service path over HTTP/2 against a local fake APNs that
+answers 200 and 410. In the simulator the app got a device token and its
+Live Activity started and rendered (system log); a render of the views:
+working, needs you, done. Not yet checked with a real key or on the phone.
+
+### Creating the APNs key
+
+1. developer.apple.com/account → Certificates, IDs & Profiles → Keys → +.
+2. Name it (e.g. "Squircle push"), tick **Apple Push Notifications service
+   (APNs)**, Configure: environment **Sandbox & Production**, key
+   restriction **Team Scoped (All Topics)**. Save, Continue, Register.
+3. Download `AuthKey_XXXXXXXXXX.p8` (only possible once). Note the **Key
+   ID**; the **Team ID** is under Membership details (`2F26US4NAU`).
+4. On the Mac: `squircle push setup --key-file ~/Downloads/AuthKey_XXXXXXXXXX.p8
+   --key-id XXXXXXXXXX --team-id 2F26US4NAU`, then delete the download.
+5. Install the new Squircle build, open it, Allow notifications, then
+   `squircle push test --live-activity`.

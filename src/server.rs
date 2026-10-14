@@ -1,4 +1,4 @@
-use crate::{agents::Agents, apps, sims::Sims, artifact, model::*, preview, projects, store::Store, xcode};
+use crate::{agents::Agents, apps, push::Push, sims::Sims, artifact, model::*, preview, projects, store::Store, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -38,6 +38,7 @@ pub struct AppState {
     recovery_jobs: Arc<Mutex<HashMap<String, Job>>>,
     agents: Option<Arc<Agents>>,
     sims: Option<Arc<Sims>>,
+    push: Option<Arc<Push>>,
 }
 
 impl AppState {
@@ -52,6 +53,7 @@ impl AppState {
             recovery_jobs: Arc::default(),
             agents: None,
             sims: None,
+            push: None,
         }
     }
 }
@@ -179,6 +181,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/workers/{id}/answer", post(answer_worker))
         .route("/v1/workers/{id}/archive", post(archive_worker))
         .route("/v1/workers/cleanup", post(cleanup_workers))
+        .route("/v1/push", get(push_status))
+        .route("/v1/push/devices", post(push_register))
+        .route("/v1/push/activities", post(push_activity))
+        .route("/v1/push/presence", post(push_presence))
+        .route("/v1/push/test", post(push_test))
         .route("/v1/import", post(import))
         .route("/v1/diagnostics", post(ingest))
         .route(
@@ -230,16 +237,21 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         }
     }
     let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?))?;
-    tokio::spawn(agents.clone().run());
+    let push = Push::open(&store.root)?;
+    agents.attach_push(push.clone());
     let sims = Sims::open(&store.root, agents.clone())?;
-    tokio::spawn(sims.clone().run());
     let mut state = AppState::new(store, public_url);
-    state.agents = Some(agents);
-    state.sims = Some(sims);
+    state.agents = Some(agents.clone());
+    state.sims = Some(sims.clone());
+    state.push = Some(push.clone());
     eprintln!(
         "Squircle listening on {}. Keep this process running; HTTPS/Tailscale is managed separately.",
         listener.local_addr()?
     );
+    // After the announcement, which is the first line supervisors read.
+    tokio::spawn(agents.clone().run());
+    tokio::spawn(push.clone().run());
+    tokio::spawn(sims.clone().run());
     let shutdown = state.clone();
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
@@ -479,6 +491,9 @@ async fn start(
                 .insert(job.id.clone(), job.clone());
         } else if job.state == BuildState::Succeeded {
             sync_job_app(&state, &job);
+        }
+        if let Some(push) = &state.push {
+            push.build_finished(&job);
         }
         state.cancellations.lock().unwrap().remove(&job.id);
         drop(permit);
@@ -1947,4 +1962,59 @@ async fn cleanup_workers(
     auth(&state, &headers, false)?;
     let request = body(payload)?;
     Ok(Json(success(agents(&state)?.cleanup(&request.coordinator, request.dry_run).await.map_err(agent_error)?)))
+}
+
+fn push(state: &AppState) -> ApiResult<Arc<Push>> {
+    state.push.clone().ok_or_else(|| ApiError::internal("Notifications run only inside squircle serve"))
+}
+
+async fn push_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    Ok(Json(success(push(&state)?.status())))
+}
+
+async fn push_register(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<crate::push::Registration>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    push(&state)?.register(body(payload)?).map_err(ApiError::bad)?;
+    Ok(Json(success(json!({}))))
+}
+
+async fn push_activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<crate::push::ActivityRegistration>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    push(&state)?.register_activity(body(payload)?).map_err(ApiError::bad)?;
+    Ok(Json(success(json!({}))))
+}
+
+async fn push_presence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<crate::push::PresenceReport>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    push(&state)?.report_presence(body(payload)?).map_err(ApiError::bad)?;
+    Ok(Json(success(json!({}))))
+}
+
+#[derive(Deserialize)]
+struct PushTest {
+    #[serde(default)]
+    live_activity: bool,
+}
+
+async fn push_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<PushTest>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let request = body(payload)?;
+    Ok(Json(success(push(&state)?.test(request.live_activity).await)))
 }

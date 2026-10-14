@@ -79,6 +79,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private var dragStart: CGFloat = 0
     /// Inside `sync()`: the scene is drawn once, from the finished state.
     private var syncing = false
+    /// The conversation on screen changed (nil: none), for notifications.
+    var onViewing: ((String?) -> Void)?
+    /// A notification tapped before the apps arrived from the Mac.
+    private var pendingTarget: PushTarget?
 
     init(model: SquircleModel) {
         self.model = model
@@ -391,6 +395,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         if laidOut != nil { layoutGrid() }
         sync()
         schedulePortraits()
+        if let pendingTarget, !projects.isEmpty { open(pendingTarget) }
     }
 
     /// The simulators the open app's agents are using, over its conversations.
@@ -478,6 +483,43 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         sync()
     }
 
+    /// A tapped notification or Live Activity: its app, then its thread or
+    /// build. Whatever was presented gives way.
+    func open(_ target: PushTarget) {
+        let id = target.project.flatMap { p in projects.contains { $0.id == p } ? p : nil }
+            ?? target.bundle.flatMap { b in projects.first { $0.bundleID == b }?.id }
+        guard let id, let project = projects.first(where: { $0.id == id }) else {
+            pendingTarget = projects.isEmpty ? target : nil
+            return
+        }
+        pendingTarget = nil
+        if presentedViewController != nil { dismiss(animated: false) }
+        view.endEditing(true)
+        if let thread = target.thread, thread != model.agentThreadID(for: project) {
+            route = .thread(app: id, thread: thread)
+        } else {
+            route = .app(id)
+        }
+        sync()
+        guard let buildID = target.build else { return }
+        Task { [weak self] in
+            // Builds may still be on their way from the Mac.
+            for _ in 0..<20 {
+                guard let self else { return }
+                if let build = model.builds.first(where: { $0.id == buildID }) {
+                    guard presentedViewController == nil else { return }
+                    let navigation = UINavigationController(rootViewController: BuildDetailViewController(model: model, build: build))
+                    navigation.modalPresentationStyle = .pageSheet
+                    navigation.sheetPresentationController?.detents = [.large()]
+                    navigation.sheetPresentationController?.prefersGrabberVisible = true
+                    present(navigation, animated: true)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
     /// Makes what is mounted and where the springs head agree with the route.
     /// Safe to call at any moment, any number of times.
     private func sync() {
@@ -487,6 +529,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             syncing = false
             renderSimulators()
             applyScene()
+            onViewing?(route == .grid ? nil : route.thread != nil ? thread?.currentSessionID : agent?.currentSessionID)
         }
         // The thread level only exists inside its app; it leaves first.
         if spring.value <= 0.001, threadKey != nil, route.thread != threadKey || route.app != selectedID {
