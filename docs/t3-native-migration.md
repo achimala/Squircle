@@ -1427,3 +1427,5 @@ capture hooks kept for stills: `SQUIRCLE_BUILDS=1` (the app's builds),
 `SQUIRCLE_NO_DOCK=1` (hide simulator PiPs) and `SQUIRCLE_DEMO_SEND` on the
 agent (the send animation, never sent to T3). Checked in the simulator: Home,
 agent conversation, Builds and the overlay (full) in light and dark.
+Squircle build `715bcac7-ecac-4db7-ae31-a7c97b272ee4` (0.3.0 44, main at
+`dcda2df`); not yet on the phone.
