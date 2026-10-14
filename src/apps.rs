@@ -1,5 +1,8 @@
 //! Persistent app identity and agent-published, immutable screenshot artifacts.
-//! Callers hold the Store's outer mutex across these read/modify/write operations.
+//! Callers hold the Store's outer mutex across these read/modify/write operations,
+//! except `stage_preview`, which only writes a new, unreferenced artifact file.
+//! A record stays readable when its preview bytes go missing: the artifact is
+//! reported unavailable and a new publication repairs it.
 use crate::{
     model::{BuildRequest, Job, now},
     store::{Store, atomic_json, check_dir, open_private_read, private_dir, read_json},
@@ -114,15 +117,23 @@ pub fn get(store: &Store, id: &str) -> Result<AppRecord> {
             preview.path == preview_path(&directory, &preview.id),
             "stored app preview path is outside its artifact directory"
         );
-        check_dir(&directory.join("previews"))?;
-        // Reuse the store's no-follow open rather than trusting persisted paths.
-        let file = open_private_read(&preview.path)?;
-        ensure!(
-            file.metadata()?.len() <= MAX_PREVIEW_BYTES,
-            "preview exceeds 20 MiB"
-        );
     }
     Ok(app)
+}
+
+/// Opens an app's current preview artifact. Fails when its bytes are missing
+/// or invalid; the record itself stays usable (see `get`).
+pub fn open_preview(app: &AppRecord) -> Result<File> {
+    let preview = app.preview.as_ref().context("App has no published preview")?;
+    let directory = preview.path.parent().context("preview has no directory")?;
+    check_dir(directory)?;
+    // Reuse the store's no-follow open rather than trusting persisted paths.
+    let file = open_private_read(&preview.path)?;
+    ensure!(
+        file.metadata()?.len() <= MAX_PREVIEW_BYTES,
+        "preview exceeds 20 MiB"
+    );
+    Ok(file)
 }
 
 /// Re-registration reconciles identity, not editorial metadata. Use `update`
@@ -277,6 +288,68 @@ fn publish_at(
     publication: PreviewPublication,
     captured_at: u64,
 ) -> Result<AppRecord> {
+    let staged = stage_preview(&store.root, id, &publication.file)?;
+    commit_preview(store, id, publication, staged, captured_at)
+}
+
+/// A validated, synced preview file that no record references yet. Dropping
+/// it uncommitted removes the file.
+pub struct StagedPreview {
+    id: String,
+    path: Option<PathBuf>,
+}
+impl Drop for StagedPreview {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Validates and copies a screenshot into an app's artifact directory without
+/// touching its record, so callers can do this file I/O outside the store lock.
+pub fn stage_preview(root: &Path, id: &str, file: &Path) -> Result<StagedPreview> {
+    validate_id(id)?;
+    let directory = root.join("apps").join(id);
+    check_dir(&directory).context("app does not exist")?;
+    let bytes = read_png(file)?;
+    let previews = directory.join("previews");
+    private_dir(&previews)?;
+    let preview_id = Uuid::new_v4().to_string();
+    let path = preview_path(&directory, &preview_id);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut output = options.open(&path)?;
+    let staged = StagedPreview { id: preview_id, path: Some(path) };
+    output.write_all(&bytes)?;
+    output.sync_all()?;
+    File::open(&previews)?.sync_all()?;
+    Ok(staged)
+}
+
+/// Points the app at a staged preview. Works when the previous preview's bytes
+/// are missing, which is how a damaged catalog entry is repaired.
+pub fn publish_staged(
+    store: &Store,
+    id: &str,
+    publication: PreviewPublication,
+    staged: StagedPreview,
+) -> Result<AppRecord> {
+    commit_preview(store, id, publication, staged, now())
+}
+
+fn commit_preview(
+    store: &Store,
+    id: &str,
+    publication: PreviewPublication,
+    mut staged: StagedPreview,
+    captured_at: u64,
+) -> Result<AppRecord> {
     let mut app = get(store, id)?;
     text_limit(&publication.caption, "preview caption", 4096)?;
     if let Some(revision) = &publication.source_revision {
@@ -312,32 +385,11 @@ fn publish_at(
             );
         }
     }
-    let bytes = read_png(&publication.file)?;
     let directory = app_dir(store, id)?;
-    let previews = directory.join("previews");
-    private_dir(&previews)?;
-    let preview_id = Uuid::new_v4().to_string();
-    let path = preview_path(&directory, &preview_id);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options.open(&path)?;
-    let result = (|| -> Result<()> {
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        File::open(&previews)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&path);
-    }
-    result?;
+    let path = preview_path(&directory, &staged.id);
+    ensure!(staged.path.as_ref() == Some(&path), "staged preview belongs to another app");
     app.preview = Some(AppPreview {
-        id: preview_id,
+        id: staged.id.clone(),
         path,
         captured_at,
         build_id: publication.build_id,
@@ -349,6 +401,7 @@ fn publish_at(
     // A failed directory fsync can occur after app.json was atomically renamed.
     // Retain the complete image on uncertain publication rather than leave a
     // possibly published record pointing to a file we just removed.
+    staged.path = None;
     save(store, &app)?;
     Ok(app)
 }

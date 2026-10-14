@@ -226,7 +226,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/builds/{id}/diagnostics", get(diagnostics))
         .route("/v1/t3/threads/{thread}/steps", get(t3_steps))
         .route("/v1/t3/projects/{project}/screenshot", get(t3_project_screenshot))
-        .route("/v1/t3/threads/{thread}/media", get(thread_media))
+        .route("/v1/t3/threads/{thread}/media", get(thread_media).post(add_thread_media))
         .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
         .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
         .route("/v1/sims", get(list_sims).post(start_sim))
@@ -327,26 +327,28 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     state.sims = Some(sims.clone());
     state.push = Some(push.clone());
     state.tasks = Some(tasks.clone());
+    // Service loops, stopped explicitly once requests have drained.
+    let mut background = Vec::new();
     {
         // Linked workers and builds move tasks on; old ones age into History.
         let state = state.clone();
-        tokio::spawn(async move {
+        background.push(tokio::spawn(async move {
             loop {
                 if let Err(error) = tasks.tick(|task| task_signals(&state, task)) {
                     eprintln!("Tasks not updated: {error:#}");
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
-        });
+        }));
     }
     eprintln!(
         "Squircle listening on {}. Keep this process running; HTTPS/Tailscale is managed separately.",
         listener.local_addr()?
     );
     // After the announcement, which is the first line supervisors read.
-    tokio::spawn(agents.clone().run());
-    tokio::spawn(push.clone().run());
-    tokio::spawn(sims.clone().run());
+    background.push(tokio::spawn(agents.clone().run()));
+    background.push(tokio::spawn(push.clone().run()));
+    background.push(tokio::spawn(sims.clone().run()));
     let shutdown = state.clone();
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
@@ -376,8 +378,20 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
+            // Refuses new simulator starts, then stops and files recordings and
+            // closes their T3 device sessions. Anything cut off here is left in
+            // the durable ledger for the next start to recover.
+            if tokio::time::timeout(std::time::Duration::from_secs(10), sims.shutdown())
+                .await
+                .is_err()
+            {
+                eprintln!("Simulator shutdown timed out; the next start recovers it.");
+            }
         })
         .await?;
+    for task in background {
+        task.abort();
+    }
     drop(lock);
     Ok(())
 }
@@ -605,7 +619,7 @@ async fn start(
                 .unwrap()
                 .insert(job.id.clone(), job.clone());
         } else if job.state == BuildState::Succeeded {
-            sync_job_app(&state, &job);
+            sync_job_app(&state, &job).await;
         }
         if let Some(push) = &state.push {
             push.build_finished(&job);
@@ -686,7 +700,7 @@ async fn capture_preview(
                 Some(format!("Preview result could not be persisted: {error}"));
             state.recovery_jobs.lock().unwrap().insert(id.clone(), job);
         } else {
-            sync_job_app(&state, &job);
+            sync_job_app(&state, &job).await;
         }
         state.cancellations.lock().unwrap().remove(&id);
         drop(permit);
@@ -694,18 +708,28 @@ async fn capture_preview(
     Ok((StatusCode::ACCEPTED, Json(success(json!({"job":response})))))
 }
 
-fn sync_job_app(state: &AppState, job: &Job) {
-    if let Err(error) = apps::sync_build_preview(&state.store.lock().unwrap(), job) {
+async fn sync_job_app(state: &AppState, job: &Job) {
+    let (state, job) = (state.clone(), job.clone());
+    // Copies the preview under the record lock; keep it off the async workers.
+    let result = tokio::task::spawn_blocking(move || {
+        apps::sync_build_preview(&state.store.lock().unwrap(), &job).map_err(|e| (job.id.clone(), e))
+    })
+    .await;
+    if let Ok(Err((id, error))) = result {
         // Catalog publication is ancillary: never invalidate an exported IPA.
-        eprintln!(
-            "Could not sync app metadata for build {}: {error:#}",
-            job.id
-        );
+        eprintln!("Could not sync app metadata for build {id}: {error:#}");
     }
 }
 
 fn public_app(app: apps::AppRecord) -> Value {
+    // A missing artifact is the app's preview being unavailable, not an error;
+    // republishing repairs it.
+    let available = app.preview.is_none() || apps::open_preview(&app).is_ok();
     let mut value = serde_json::to_value(app).expect("app metadata serializes");
+    if !available {
+        value["preview"] = Value::Null;
+        value["preview_unavailable"] = json!(true);
+    }
     if let Some(preview) = value["preview"].as_object_mut() {
         preview.remove("path");
     }
@@ -851,12 +875,20 @@ async fn publish_app_preview(
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
     let app = tokio::task::spawn_blocking(move || {
+        // Copy and validate outside the record lock; only the commit holds it.
+        let staged = apps::stage_preview(&state.files.root, &id, &input.file).map_err(|error| {
+            if state.files.root.join("apps").join(&id).is_dir() {
+                ApiError::bad(format!("{error:#}"))
+            } else {
+                ApiError::missing(format!("{error:#}"))
+            }
+        })?;
         let store = state.store.lock().unwrap();
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
         apps::get(&store, &id).map_err(ApiError::missing)?;
-        apps::publish_preview(&store, &id, input).map_err(ApiError::bad)
+        apps::publish_staged(&store, &id, input, staged).map_err(ApiError::bad)
     })
     .await
     .map_err(ApiError::internal)??;
@@ -905,7 +937,7 @@ async fn thread_media(
     State(state): State<AppState>,
     Path(thread): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let root = state.store.lock().unwrap().root.clone();
+    let root = state.files.root.clone();
     let items = crate::media::list(&root, &thread).map_err(ApiError::bad)?;
     let items: Vec<Value> = items
         .into_iter()
@@ -914,11 +946,33 @@ async fn thread_media(
     Ok(Json(success(json!({"thread_id":thread,"media":items}))))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddMedia {
+    file: PathBuf,
+    caption: Option<String>,
+}
+
+/// Publishes a file on this Mac into a thread (`squircle media add`).
+async fn add_thread_media(
+    State(state): State<AppState>,
+    Path(thread): Path<String>,
+    payload: std::result::Result<Json<AddMedia>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let r = body(payload)?;
+    let root = state.files.root.clone();
+    let media = tokio::task::spawn_blocking(move || crate::media::add(&root, &thread, &r.file, r.caption.as_deref()))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::bad)?;
+    Ok(Json(success(json!({"id":media.id,"thread_id":media.thread_id,"kind":media.kind,"caption":media.caption,"content_type":media.content_type,"bytes":media.bytes,"created_at":media.created_at}))))
+}
+
 async fn thread_media_file(
     State(state): State<AppState>,
     Path((thread, id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let root = state.store.lock().unwrap().root.clone();
+    let root = state.files.root.clone();
     let media = crate::media::get(&root, &thread, &id).map_err(ApiError::missing)?;
     let file = tokio::fs::OpenOptions::new()
         .read(true)
@@ -963,6 +1017,7 @@ async fn app_preview(
         let app = apps::get(&store, &id).map_err(ApiError::missing)?;
         let preview = app
             .preview
+            .clone()
             .ok_or_else(|| ApiError::missing("App has no published preview"))?;
         if query
             .version
@@ -971,7 +1026,7 @@ async fn app_preview(
         {
             return Err(ApiError::new(StatusCode::CONFLICT, "preview_changed", "App preview has changed since metadata was read", "Refresh app metadata and request its current preview version."));
         }
-        let file = crate::store::open_private_read(&preview.path).map_err(ApiError::missing)?;
+        let file = apps::open_preview(&app).map_err(ApiError::missing)?;
         (file, preview.id)
     };
     let size = file.metadata().map_err(ApiError::internal)?.len();
@@ -1301,8 +1356,9 @@ fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, Job)> {
     }
     Ok((ticket, job))
 }
-/// Whether iOS has started downloading a link's IPA, which happens only after
-/// the person confirms the system install prompt.
+/// Whether iOS has started (`download_started_at`) and finished (`downloaded_at`)
+/// downloading a link's IPA; it fetches it only after the person confirms the
+/// system install prompt. Neither confirms installation.
 async fn link_status(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -1314,7 +1370,7 @@ async fn link_status(
         .load_ticket(&token)
         .map_err(|_| ApiError::missing("Unknown install link"))?;
     Ok(Json(success(
-        json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,"downloaded_at":ticket.downloaded_at}),
+        json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,"download_started_at":ticket.download_started_at,"downloaded_at":ticket.downloaded_at}),
     )))
 }
 fn private_headers() -> [(header::HeaderName, &'static str); 3] {
@@ -1365,27 +1421,55 @@ async fn download_ipa(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (mut ticket, job) = ticket_job(&state, &token)?;
-    if ticket.downloaded_at.is_none() {
-        ticket.downloaded_at = Some(now());
-        // Only informs the installing app; never blocks the download.
-        let _ = state.store.lock().unwrap().save_ticket(&ticket);
-    }
+    let (ticket, job) = ticket_job(&state, &token)?;
     let path = job.output.unwrap().ipa_path.unwrap();
     let file = tokio::fs::File::open(path)
         .await
         .map_err(ApiError::missing)?;
     let size = file.metadata().await.map_err(ApiError::internal)?.len();
+    // Evidence only, recorded as it happens: the IPA was opened for a request,
+    // then every byte was handed to the connection. Neither blocks the
+    // download, and neither proves installation or launch.
+    if ticket.download_started_at.is_none() {
+        let _ = mark_ticket(&state, &token, |t| t.download_started_at.get_or_insert(now()));
+    }
+    let sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = sent.clone();
+    let finished = futures_util::stream::once(async move {
+        if counter.load(Ordering::Acquire) == size {
+            let _ = tokio::task::spawn_blocking(move || {
+                mark_ticket(&state, &token, |t| t.downloaded_at.get_or_insert(now()))
+            })
+            .await;
+        }
+        Ok::<_, std::io::Error>(axum::body::Bytes::new())
+    });
+    use futures_util::StreamExt;
+    let stream = ReaderStream::new(file)
+        .inspect(move |chunk| {
+            if let Ok(chunk) = chunk {
+                sent.fetch_add(chunk.len() as u64, Ordering::AcqRel);
+            }
+        })
+        .chain(finished);
     let mut response = (
         private_headers(),
         [(header::CONTENT_TYPE, "application/octet-stream")],
-        Body::from_stream(ReaderStream::new(file)),
+        Body::from_stream(stream),
     )
         .into_response();
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, size.to_string().parse().unwrap());
     Ok(response)
+}
+
+/// Sets a ticket's evidence field once, under the record lock.
+fn mark_ticket(state: &AppState, token: &str, mark: impl FnOnce(&mut Ticket) -> &mut u64) -> Result<()> {
+    let store = state.store.lock().unwrap();
+    let mut ticket = store.load_ticket(token)?;
+    mark(&mut ticket);
+    store.save_ticket(&ticket)
 }
 
 #[derive(Deserialize, Default)]
@@ -1875,7 +1959,8 @@ fn agents(state: &AppState) -> ApiResult<Arc<Agents>> {
 
 async fn list_agents(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let agents = agents(&state)?;
-    Ok(Json(success(json!({"agents": agents.list(), "t3": agents.status()}))))
+    // How agents and the phone's worker prompts invoke this service's CLI.
+    Ok(Json(success(json!({"agents": agents.list(), "t3": agents.status(), "cli": agents.cli()}))))
 }
 
 #[derive(Deserialize)]
@@ -1883,15 +1968,24 @@ struct EnsureAgent {
     project_id: String,
     message: Option<String>,
     model: Option<String>,
+    /// T3's runtime mode for a new agent; None keeps the service default.
+    runtime_mode: Option<String>,
 }
+
+const RUNTIME_MODES: [&str; 4] = ["approval-required", "auto-accept-edits", "auto", "full-access"];
 
 async fn ensure_agent(
     State(state): State<AppState>,
     payload: std::result::Result<Json<EnsureAgent>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
+    if let Some(mode) = &request.runtime_mode
+        && !RUNTIME_MODES.contains(&mode.as_str())
+    {
+        return Err(ApiError::bad(format!("runtime_mode must be one of {}", RUNTIME_MODES.join(", "))));
+    }
     let agent = agents(&state)?
-        .ensure(&request.project_id, request.message.as_deref(), request.model.as_deref())
+        .ensure(&request.project_id, request.message.as_deref(), request.model.as_deref(), request.runtime_mode.as_deref())
         .await
         .map_err(agent_error)?;
     Ok(Json(success(json!({"agent": agent}))))
