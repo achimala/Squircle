@@ -29,10 +29,21 @@ pub struct Agent {
     pub project_id: String,
     pub thread_id: String,
     pub created_at: u64,
-    /// A restart or fresh start asked for mid-turn, done when the turn ends
-    /// (an agent cannot stop its own session while it runs).
+    /// Reserved before T3 is asked to create the thread, so a retry or a
+    /// restart finishes that thread instead of creating a second agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub creating: bool,
+    /// A restart or fresh start that has not finished yet: asked for
+    /// mid-turn (an agent cannot stop its own session while it runs), or one
+    /// that failed and is retried. Cleared only once it has succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<Reset>,
+    /// A fresh start's progress, so a retry resumes with the same new thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacing: Option<Replacement>,
+    /// Why the pending reset last failed; it is retried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_error: Option<String>,
     /// After a restart: the next turn's note carries the current instructions,
     /// because Claude restores a resumed session's original system prompt.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -49,6 +60,21 @@ pub enum Reset {
     Fresh { note: Option<String> },
 }
 
+/// A fresh start under way: the old thread has been stopped and renamed
+/// once the handoff is gathered; the rest is retried with these identities.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct Replacement {
+    pub previous: String,
+    pub thread_id: String,
+    pub model: String,
+    pub runtime_mode: String,
+    pub handoff: String,
+    pub message_id: String,
+    /// The handoff was dispatched at least once; check before sending again.
+    #[serde(default)]
+    pub handoff_sent: bool,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Worker {
     pub coordinator: String,
@@ -57,12 +83,27 @@ pub struct Worker {
     pub branch: String,
     pub base: String,
     pub created_at: u64,
-    /// The last state its coordinator was told about (`turn:state`), so a
-    /// restart neither repeats nor misses a wake-up.
+    /// The last state its coordinator was told about (`turn:state`, plus the
+    /// pending request for needs-you), so a restart neither repeats nor
+    /// misses a wake-up.
     #[serde(default)]
     pub notified: Option<String>,
     #[serde(default)]
     pub archived: bool,
+}
+
+/// A worker update for one agent, recorded before it is sent so a lost
+/// acknowledgement or a restart re-sends the same message, never a second.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Wake {
+    pub coordinator: String,
+    pub message_id: String,
+    /// Worker ID and the wake key it delivers.
+    pub workers: Vec<(String, String)>,
+    pub text: String,
+    pub record: Value,
+    #[serde(default)]
+    pub attempted: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -71,6 +112,41 @@ pub struct Registry {
     pub agents: BTreeMap<String, Agent>,
     #[serde(default)]
     pub workers: BTreeMap<String, Worker>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outbox: Vec<Wake>,
+}
+
+/// T3's runtime modes. A new app agent gets the one the user chose, or
+/// `full-access`; a fresh start keeps its predecessor's.
+const RUNTIME_MODES: [&str; 4] = ["approval-required", "auto-accept-edits", "auto", "full-access"];
+const AGENT_MODE: &str = "full-access";
+/// Workers run unattended in their own worktrees for an agent, not the user;
+/// an approval prompt would stall them until their agent noticed.
+const WORKER_MODE: &str = "full-access";
+
+fn runtime_mode(mode: Option<&str>) -> Result<String> {
+    let mode = mode.unwrap_or(AGENT_MODE);
+    ensure!(RUNTIME_MODES.contains(&mode), "Unknown runtime mode \"{mode}\". Modes: {}", RUNTIME_MODES.join(", "));
+    Ok(mode.into())
+}
+
+/// The part of T3 the agents use; a fake stands in for it in tests.
+pub trait Peer: Send + Sync {
+    fn call<'a>(&'a self, tag: &'a str, payload: Value) -> crate::push::BoxFuture<'a, Result<Value>>;
+    fn dispatch<'a>(&'a self, command: Value) -> crate::push::BoxFuture<'a, Result<Value>>;
+    fn snapshot<'a>(&'a self, tag: &'a str, payload: Value) -> crate::push::BoxFuture<'a, Result<Value>>;
+}
+
+impl Peer for T3 {
+    fn call<'a>(&'a self, tag: &'a str, payload: Value) -> crate::push::BoxFuture<'a, Result<Value>> {
+        Box::pin(T3::call(self, tag, payload))
+    }
+    fn dispatch<'a>(&'a self, command: Value) -> crate::push::BoxFuture<'a, Result<Value>> {
+        Box::pin(T3::dispatch(self, command))
+    }
+    fn snapshot<'a>(&'a self, tag: &'a str, payload: Value) -> crate::push::BoxFuture<'a, Result<Value>> {
+        Box::pin(T3::snapshot(self, tag, payload))
+    }
 }
 
 /// Marks a message Squircle sends for an agent (`squircle-task`: a worker's
@@ -117,7 +193,7 @@ impl crate::push::Threads for Agents {
     fn last_reply<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
         Box::pin(async move {
             let client = self.client().await.ok()?;
-            let detail = self.thread_detail(&client, thread).await.ok()?;
+            let detail = self.thread_detail(&*client, thread).await.ok()?;
             detail["messages"].as_array()?.iter().rev().find(|m| m["role"] == "assistant")
                 .and_then(|m| m["text"].as_str()).map(str::to_string)
         })
@@ -125,7 +201,7 @@ impl crate::push::Threads for Agents {
     fn question<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
         Box::pin(async move {
             let client = self.client().await.ok()?;
-            let detail = self.thread_detail(&client, thread).await.ok()?;
+            let detail = self.thread_detail(&*client, thread).await.ok()?;
             let (_, questions) = Self::pending_question(&detail)?;
             questions.first()?["question"].as_str().map(str::to_string)
         })
@@ -161,6 +237,33 @@ pub fn wake_key(thread: &Value) -> Option<String> {
     }
 }
 
+/// Whether the coordinator was already told about `key`. A needs-you key is
+/// stored with its request (`turn:needs-you:request`), which T3's shell row
+/// does not carry.
+fn notified_of(notified: Option<&str>, key: &str) -> bool {
+    notified.is_some_and(|n| n == key || n.strip_prefix(key).is_some_and(|rest| rest.starts_with(':')))
+}
+
+/// What to remember once a worker is working again: a question it was
+/// waiting on has been answered, so the next one in the same turn is new.
+fn progressed(notified: Option<&str>, thread: &Value) -> Option<String> {
+    let turn = thread["latestTurn"]["turnId"].as_str()?;
+    (worker_state(thread) == "working" && notified_of(notified, &format!("{turn}:needs-you")))
+        .then(|| format!("{turn}:working"))
+}
+
+/// The newest unanswered question or approval request in a thread's detail.
+fn pending_request(thread: &Value) -> Option<String> {
+    let activities = thread["activities"].as_array()?;
+    let resolved: Vec<&str> = activities.iter()
+        .filter(|a| matches!(a["kind"].as_str(), Some("user-input.resolved" | "user-input.answer-submitted" | "approval.resolved")))
+        .filter_map(|a| a["payload"]["requestId"].as_str()).collect();
+    activities.iter().rev()
+        .filter(|a| matches!(a["kind"].as_str(), Some("user-input.requested" | "approval.requested")))
+        .filter_map(|a| a["payload"]["requestId"].as_str())
+        .find(|r| !resolved.contains(r)).map(str::to_string)
+}
+
 #[derive(Default)]
 struct Shell {
     threads: HashMap<String, Value>,
@@ -176,7 +279,17 @@ pub struct Agents {
     shell: Mutex<Shell>,
     t3: RwLock<Option<Arc<T3>>>,
     status: Mutex<String>,
+    /// Stands in for T3 in tests.
+    fake: std::sync::OnceLock<Arc<dyn Peer>>,
     flush_scheduled: Mutex<bool>,
+    /// One flush at a time, so overlapping triggers cannot send twice.
+    flush_lock: tokio::sync::Mutex<()>,
+    flush_failures: Mutex<u32>,
+    /// One operation at a time per project (create, reset) and per worker
+    /// (archive), so concurrent requests see each other's result.
+    ops: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Projects whose reset is running or waiting to retry.
+    resets: Mutex<HashMap<String, u32>>,
     push: std::sync::OnceLock<Arc<crate::push::Push>>,
     tasks: Arc<Tasks>,
 }
@@ -206,10 +319,21 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
+/// The project root that contains `cwd` most closely, comparing resolved
+/// paths so symlinked aliases match. Two projects with the same root are
+/// ambiguous: all of their indexes.
+fn deepest_root(roots: &[&Path], cwd: &Path) -> std::result::Result<Option<usize>, Vec<usize>> {
+    let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let cwd = resolve(cwd);
+    let mut matches: Vec<(usize, usize)> = roots.iter().enumerate()
+        .map(|(index, root)| (index, resolve(root)))
+        .filter(|(_, root)| cwd.starts_with(root))
+        .map(|(index, root)| (index, root.components().count())).collect();
+    matches.sort_by_key(|(_, depth)| std::cmp::Reverse(*depth));
+    match matches.as_slice() {
+        [] => Ok(None),
+        [(index, depth), rest @ ..] if rest.first().is_none_or(|(_, d)| d < depth) => Ok(Some(*index)),
+        [(_, depth), ..] => Err(matches.iter().filter(|(_, d)| d == depth).map(|(i, _)| *i).collect()),
     }
 }
 
@@ -218,8 +342,12 @@ fn same_path(a: &Path, b: &Path) -> bool {
 struct GitState {
     branch: Option<String>,
     branch_exists: bool,
-    /// Commits on the branch whose change is not in its base (`git cherry`,
-    /// so rebased or cherry-picked merges count as merged).
+    /// The branch tip that was checked; deletion refuses a branch that moved.
+    tip: Option<String>,
+    /// Commits on the branch whose work is not known to be in its base:
+    /// none if the base contains the tip; otherwise `git cherry`'s unmatched
+    /// commits (so rebased or cherry-picked merges count as merged) plus
+    /// every merge commit, whose resolution `cherry` cannot compare.
     unmerged: usize,
     /// The worktree, if it still exists, and its uncommitted files.
     worktree: Option<PathBuf>,
@@ -247,13 +375,24 @@ async fn inspect(root: &Path, worktree: Option<&Path>, branch: Option<&str>, bas
     }
     let Some(branch) = branch.filter(|b| !b.is_empty()) else { return Ok(state) };
     state.branch = Some(branch.into());
-    state.branch_exists = git(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok();
-    if state.branch_exists {
+    state.tip = git(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}^{{commit}}")]).await.ok();
+    state.branch_exists = state.tip.is_some();
+    if let Some(tip) = &state.tip {
         let base = base.context("The worker has no base branch to compare with")?;
         ensure!(base != branch, "The worker's branch is its base");
-        state.unmerged = git(root, &["cherry", base, branch]).await
-            .with_context(|| format!("Cannot compare {branch} with {base}"))?
-            .lines().filter(|l| l.starts_with('+')).count();
+        let contained = Command::new("git").arg("-C").arg(root).args(["merge-base", "--is-ancestor", tip, base])
+            .status().await?.success();
+        if !contained {
+            let compare = |args: Vec<String>| async move {
+                git(root, &args.iter().map(String::as_str).collect::<Vec<_>>()).await
+                    .with_context(|| format!("Cannot compare {branch} with {base}"))
+            };
+            let picked = compare(vec!["cherry".into(), base.into(), tip.clone()]).await?
+                .lines().filter(|l| l.starts_with('+')).count();
+            let merges = compare(vec!["rev-list".into(), "--merges".into(), "--count".into(), format!("{base}..{tip}")]).await?
+                .parse::<usize>().unwrap_or(1);
+            state.unmerged = picked + merges;
+        }
     }
     Ok(state)
 }
@@ -265,7 +404,8 @@ struct Removed {
 }
 
 /// Removes what `inspect` found. Without `discard`, git itself refuses to
-/// drop uncommitted changes or a branch that is not fully merged.
+/// drop uncommitted changes, and the branch is deleted only at the tip that
+/// was checked (`branch -D` also refuses one checked out elsewhere).
 async fn remove(root: &Path, state: &GitState, discard: bool) -> Result<Removed> {
     let mut removed = Removed::default();
     if let Some(path) = &state.worktree {
@@ -277,11 +417,15 @@ async fn remove(root: &Path, state: &GitState, discard: bool) -> Result<Removed>
         removed.worktree = state.worktree.clone();
     }
     git(root, &["worktree", "prune"]).await?;
-    if let Some(branch) = state.branch.as_deref().filter(|_| state.branch_exists) {
-        // Callers checked it is merged (`cherry`, which `branch -d` doesn't
-        // understand for rebased merges) or chose to discard it.
-        git(root, &["branch", "-D", branch]).await?;
-        removed.branch = Some(branch.into());
+    if let (Some(branch), Some(tip)) = (state.branch.as_deref(), state.tip.as_deref()) {
+        let now = git(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}^{{commit}}")]).await.ok();
+        if now.is_some() {
+            ensure!(now.as_deref() == Some(tip), "{branch} moved while it was being archived; nothing more was deleted");
+            // `inspect` checked it is merged (`branch -d` doesn't understand
+            // rebased merges) or the caller chose to discard it.
+            git(root, &["branch", "-D", branch]).await?;
+            removed.branch = Some(branch.into());
+        }
     }
     Ok(removed)
 }
@@ -297,7 +441,12 @@ impl Agents {
             shell: Mutex::default(),
             t3: RwLock::new(None),
             status: Mutex::new("Not connected to T3".into()),
+            fake: std::sync::OnceLock::new(),
             flush_scheduled: Mutex::new(false),
+            flush_lock: tokio::sync::Mutex::new(()),
+            flush_failures: Mutex::new(0),
+            ops: Mutex::default(),
+            resets: Mutex::default(),
             push: std::sync::OnceLock::new(),
             tasks,
         }))
@@ -307,11 +456,20 @@ impl Agents {
         atomic_json(&self.root.join("agents.json"), registry)
     }
 
-    async fn client(&self) -> Result<Arc<T3>> {
+    async fn client(&self) -> Result<Arc<dyn Peer>> {
+        if let Some(fake) = self.fake.get() {
+            return Ok(fake.clone());
+        }
         if let Some(client) = self.t3.read().await.clone() {
             return Ok(client);
         }
         bail!("{}", self.status.lock().unwrap())
+    }
+
+    /// Holds the operation lock for a project or worker.
+    async fn op(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self.ops.lock().unwrap().entry(key.into()).or_default().clone();
+        lock.lock_owned().await
     }
 
     /// Keeps a live copy of T3's shell and delivers wake-ups. Reconnects with
@@ -344,6 +502,7 @@ impl Agents {
                 item = shell.recv() => {
                     let Some(item) = item else { break };
                     self.consume_shell(&item);
+                    self.note_progress();
                     if let Some(push) = self.push.get() { push.apps_changed(self.app_views()); }
                     self.schedule_flush();
                     self.run_due_resets();
@@ -444,7 +603,7 @@ impl Agents {
     pub async fn source_message(&self, thread: &str) -> Option<Source> {
         self.agent_for_thread(thread)?;
         let client = self.ready().await.ok()?;
-        let detail = self.thread_detail(&client, thread).await.ok()?;
+        let detail = self.thread_detail(&*client, thread).await.ok()?;
         detail["messages"].as_array()?.iter().rev()
             .find(|m| m["role"] == "user" && m["context"]["records"].as_array().is_none_or(|r| r.is_empty())
                 && !m["text"].as_str().unwrap_or("").starts_with('['))
@@ -454,7 +613,8 @@ impl Agents {
 
     /// The live T3 connection once its thread list has arrived.
     pub async fn connection(&self) -> Result<Arc<T3>> {
-        self.ready().await
+        self.ready().await?;
+        self.t3.read().await.clone().with_context(|| self.status())
     }
 
     /// The squircle invocation agents are told to use.
@@ -462,7 +622,7 @@ impl Agents {
         &self.cli
     }
 
-    async fn ready(&self) -> Result<Arc<T3>> {
+    async fn ready(&self) -> Result<Arc<dyn Peer>> {
         let client = self.client().await?;
         for _ in 0..50 {
             if self.shell.lock().unwrap().ready {
@@ -477,6 +637,11 @@ impl Agents {
 
     /// Wake-ups wait a few seconds so workers finishing together arrive as one note.
     fn schedule_flush(self: &Arc<Self>) {
+        self.schedule_flush_in(Duration::from_secs(4));
+    }
+
+    /// A failed flush retries with backoff even if T3 sends nothing new.
+    fn schedule_flush_in(self: &Arc<Self>, delay: Duration) {
         let mut scheduled = self.flush_scheduled.lock().unwrap();
         if *scheduled || !self.has_due_wakes() {
             return;
@@ -484,14 +649,43 @@ impl Agents {
         *scheduled = true;
         let this = self.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            tokio::time::sleep(delay).await;
             *this.flush_scheduled.lock().unwrap() = false;
-            if let Err(error) = this.flush().await {
-                eprintln!("Wake-up not delivered: {error:#}");
+            match this.flush().await {
+                Ok(()) => *this.flush_failures.lock().unwrap() = 0,
+                Err(error) => {
+                    eprintln!("Wake-up not delivered: {error:#}");
+                    let failures = {
+                        let mut failures = this.flush_failures.lock().unwrap();
+                        *failures = (*failures + 1).min(6);
+                        *failures
+                    };
+                    this.schedule_flush_in(Duration::from_secs(4 << failures));
+                }
             }
         });
     }
 
+    /// Remembers that a worker which waited on a question is working again.
+    fn note_progress(&self) {
+        let mut registry = self.registry.lock().unwrap();
+        let changed: Vec<(String, String)> = {
+            let shell = self.shell.lock().unwrap();
+            registry.workers.iter().filter(|(_, w)| !w.archived)
+                .filter_map(|(id, w)| Some((id.clone(), progressed(w.notified.as_deref(), shell.threads.get(id)?)?)))
+                .collect()
+        };
+        if changed.is_empty() { return }
+        for (id, key) in changed {
+            if let Some(worker) = registry.workers.get_mut(&id) { worker.notified = Some(key); }
+        }
+        if let Err(error) = self.save(&registry) {
+            eprintln!("Worker state not saved: {error:#}");
+        }
+    }
+
+    /// Workers whose state calls for a wake-up their coordinator has not had
+    /// and that is not already queued.
     fn due_wakes(&self) -> Vec<(String, Worker, String, &'static str)> {
         let registry = self.registry.lock().unwrap();
         let shell = self.shell.lock().unwrap();
@@ -501,31 +695,71 @@ impl Agents {
         registry.workers.iter().filter(|(_, w)| !w.archived).filter_map(|(id, worker)| {
             let thread = shell.threads.get(id)?;
             let key = wake_key(thread)?;
-            (worker.notified.as_deref() != Some(key.as_str()))
+            let queued = registry.outbox.iter().any(|w| w.workers.iter().any(|(queued, _)| queued == id));
+            (!queued && !notified_of(worker.notified.as_deref(), &key))
                 .then(|| (id.clone(), worker.clone(), key, worker_state(thread)))
         }).collect()
     }
 
     fn has_due_wakes(&self) -> bool {
-        !self.due_wakes().is_empty()
+        !self.registry.lock().unwrap().outbox.is_empty() || !self.due_wakes().is_empty()
     }
 
+    /// Queues the due wake-ups, then delivers the queue in order. Each queued
+    /// update keeps its message ID: after an unanswered or failed dispatch,
+    /// the agent's thread is checked for it before it is sent again.
     async fn flush(&self) -> Result<()> {
+        let _flushing = self.flush_lock.lock().await;
         let client = self.client().await?;
-        let mut by_coordinator: BTreeMap<String, Vec<(String, Worker, String, &'static str)>> = BTreeMap::new();
-        for due in self.due_wakes() {
-            by_coordinator.entry(due.1.coordinator.clone()).or_default().push(due);
+        let mut due = vec![];
+        for (id, worker, key, state) in self.due_wakes() {
+            // A question's request tells this one from an earlier one in the turn.
+            let key = if state == "needs-you" {
+                let detail = self.thread_detail(&*client, &id).await?;
+                match pending_request(&detail) { Some(request) => format!("{key}:{request}"), None => key }
+            } else { key };
+            if worker.notified.as_deref() != Some(key.as_str()) {
+                due.push((id, worker, key, state));
+            }
         }
-        for (coordinator, notes) in by_coordinator {
-            let Some(agent) = self.thread(&coordinator) else {
+        self.queue(due)?;
+        let outbox = self.registry.lock().unwrap().outbox.clone();
+        for wake in outbox {
+            let Some(agent) = self.thread(&wake.coordinator) else {
                 // Its agent is gone; nobody is left to tell.
-                let mut registry = self.registry.lock().unwrap();
-                for (id, _, key, _) in &notes {
-                    if let Some(worker) = registry.workers.get_mut(id) { worker.notified = Some(key.clone()); }
-                }
-                self.save(&registry)?;
+                self.delivered(&wake)?;
                 continue;
             };
+            if wake.attempted && self.has_message(&*client, &wake.coordinator, &wake.message_id).await? {
+                self.delivered(&wake)?;
+                continue;
+            }
+            {
+                let mut registry = self.registry.lock().unwrap();
+                if let Some(queued) = registry.outbox.iter_mut().find(|w| w.message_id == wake.message_id) { queued.attempted = true; }
+                self.save(&registry)?;
+            }
+            client.dispatch(json!({
+                "type": "thread.turn.start", "threadId": wake.coordinator,
+                "message": {"messageId": wake.message_id, "role": "user", "text": wake.text, "attachments": [],
+                            "context": {"version": 1, "records": [wake.record]}},
+                "runtimeMode": agent["runtimeMode"].as_str().unwrap_or(AGENT_MODE),
+                "interactionMode": "default",
+            })).await?;
+            self.delivered(&wake)?;
+        }
+        Ok(())
+    }
+
+    /// Records one update per coordinator for the given wake-ups.
+    fn queue(&self, due: Vec<(String, Worker, String, &'static str)>) -> Result<()> {
+        if due.is_empty() { return Ok(()) }
+        let mut by_coordinator: BTreeMap<String, Vec<(String, Worker, String, &'static str)>> = BTreeMap::new();
+        for due in due {
+            by_coordinator.entry(due.1.coordinator.clone()).or_default().push(due);
+        }
+        let mut registry = self.registry.lock().unwrap();
+        for (coordinator, notes) in by_coordinator {
             let lines: Vec<String> = notes.iter().map(|(id, w, _, state)| {
                 let what = match *state {
                     "needs-you" => "is waiting on a question or approval",
@@ -534,28 +768,36 @@ impl Agents {
                 };
                 format!("- \"{}\" ({id}, {}) {what}.", w.title, w.branch)
             }).collect();
-            let text = format!("[worker update]\n{}\nRun `squircle thread read ID` for details, then decide what to do next.", lines.join("\n"));
-            let record = json!({
-                "version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Worker update",
-                "kind": "squircle-worker-update",
-                "payload": {"workers": notes.iter().map(|(id, w, _, state)| json!({"id": id, "title": w.title, "branch": w.branch, "state": state})).collect::<Vec<_>>()}
+            registry.outbox.push(Wake {
+                coordinator,
+                message_id: uuid::Uuid::new_v4().to_string(),
+                workers: notes.iter().map(|(id, _, key, _)| (id.clone(), key.clone())).collect(),
+                text: format!("[worker update]\n{}\nRun `squircle thread read ID` for details, then decide what to do next.", lines.join("\n")),
+                record: json!({
+                    "version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Worker update",
+                    "kind": "squircle-worker-update",
+                    "payload": {"workers": notes.iter().map(|(id, w, _, state)| json!({"id": id, "title": w.title, "branch": w.branch, "state": state})).collect::<Vec<_>>()}
+                }),
+                attempted: false,
             });
-            client.dispatch(json!({
-                "type": "thread.turn.start", "threadId": coordinator,
-                "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": [],
-                            "context": {"version": 1, "records": [record]}},
-                "runtimeMode": agent["runtimeMode"].as_str().unwrap_or("full-access"),
-                "interactionMode": "default",
-            })).await?;
-            let mut registry = self.registry.lock().unwrap();
-            for (id, _, key, _) in &notes {
-                if let Some(worker) = registry.workers.get_mut(id) {
-                    worker.notified = Some(key.clone());
-                }
-            }
-            self.save(&registry)?;
         }
-        Ok(())
+        self.save(&registry)
+    }
+
+    fn delivered(&self, wake: &Wake) -> Result<()> {
+        let mut registry = self.registry.lock().unwrap();
+        for (id, key) in &wake.workers {
+            if let Some(worker) = registry.workers.get_mut(id) { worker.notified = Some(key.clone()); }
+        }
+        registry.outbox.retain(|w| w.message_id != wake.message_id);
+        self.save(&registry)
+    }
+
+    /// Whether T3 has a message with this ID in the thread.
+    async fn has_message(&self, client: &dyn Peer, thread: &str, message: &str) -> Result<bool> {
+        let detail = self.thread_detail(client, thread).await?;
+        Ok(detail["messages"].as_array().into_iter().flatten()
+            .any(|m| m["id"] == message || m["messageId"] == message))
     }
 
     // MARK: Agents
@@ -565,13 +807,14 @@ impl Agents {
     }
 
     /// The app agent for a T3 project, created on first use: a thread on
-    /// Squircle's instance in the project's folder.
-    pub async fn ensure(&self, project_id: &str, message: Option<&str>, model: Option<&str>) -> Result<Agent> {
+    /// Squircle's instance in the project's folder, in `runtime_mode` (the
+    /// mode of an existing agent is the phone's to change on its thread).
+    pub async fn ensure(&self, project_id: &str, message: Option<&str>, model: Option<&str>, runtime_mode: Option<&str>) -> Result<Agent> {
+        let mode = self::runtime_mode(runtime_mode)?;
         let client = self.ready().await?;
-        let existing = self.registry.lock().unwrap().agents.get(project_id).cloned();
-        let agent = match existing.filter(|a| self.thread(&a.thread_id).is_some_and(|t| t["archivedAt"].is_null())) {
-            Some(agent) => agent,
-            None => self.create(&client, project_id, model).await?,
+        let agent = {
+            let _op = self.op(project_id).await;
+            self.existing_or_create(&*client, project_id, model, &mode).await?
         };
         if let Some(text) = message.filter(|t| !t.trim().is_empty()) {
             self.send(&agent.thread_id, text).await?;
@@ -579,31 +822,83 @@ impl Agents {
         Ok(agent)
     }
 
-    async fn create(&self, client: &T3, project_id: &str, model: Option<&str>) -> Result<Agent> {
-        let project = self.shell.lock().unwrap().projects.get(project_id).cloned()
-            .with_context(|| format!("T3 has no project {project_id}"))?;
+    /// Call with the project's operation lock held.
+    async fn existing_or_create(&self, client: &dyn Peer, project_id: &str, model: Option<&str>, mode: &str) -> Result<Agent> {
+        let Some(agent) = self.registry.lock().unwrap().agents.get(project_id).cloned() else {
+            return self.create(client, project_id, model, mode).await;
+        };
+        if agent.replacing.is_some() {
+            return Ok(agent);
+        }
+        // A thread T3 has not sent yet may just be new: wait for it a moment
+        // (a reservation is finished below instead).
+        let row = match self.thread(&agent.thread_id) {
+            None if !agent.creating => self.wait_thread(&agent.thread_id).await.ok(),
+            row => row,
+        };
+        match row {
+            Some(row) if row["archivedAt"].is_null() => {
+                if agent.creating { self.created(project_id)?; }
+                Ok(agent)
+            }
+            // A reservation whose creation may not have reached T3: finish it
+            // under the same thread ID rather than starting another agent.
+            None if agent.creating => {
+                let dispatched = self.create_thread(client, project_id, &agent.thread_id, model, mode).await;
+                if self.wait_thread(&agent.thread_id).await.is_err() {
+                    dispatched?;
+                    bail!("T3 has not created the app agent's thread yet; try again");
+                }
+                self.created(project_id)?;
+                Ok(agent)
+            }
+            // Archived or deleted in T3: start a new agent.
+            _ => self.create(client, project_id, model, mode).await,
+        }
+    }
+
+    /// Reserves the new agent in the registry, then has T3 create its thread.
+    async fn create(&self, client: &dyn Peer, project_id: &str, model: Option<&str>, mode: &str) -> Result<Agent> {
         let config = client.call("server.getConfig", json!({})).await?;
         let ready = config["providers"].as_array().into_iter().flatten()
             .any(|p| p["instanceId"] == INSTANCE && p["status"] == "ready");
         ensure!(ready, "T3 has no ready \"{INSTANCE}\" agent instance. Run: squircle agent setup");
+        let agent = Agent {
+            project_id: project_id.into(), thread_id: uuid::Uuid::new_v4().to_string(), created_at: crate::model::now(),
+            creating: true, pending: None, replacing: None, reset_error: None, refresh: false,
+        };
+        {
+            let mut registry = self.registry.lock().unwrap();
+            registry.agents.insert(project_id.into(), agent.clone());
+            self.save(&registry)?;
+        }
+        self.create_thread(client, project_id, &agent.thread_id, model, mode).await?;
+        self.wait_thread(&agent.thread_id).await?;
+        self.created(project_id)?;
+        Ok(Agent { creating: false, ..agent })
+    }
 
+    async fn create_thread(&self, client: &dyn Peer, project_id: &str, thread_id: &str, model: Option<&str>, mode: &str) -> Result<()> {
+        let project = self.shell.lock().unwrap().projects.get(project_id).cloned()
+            .with_context(|| format!("T3 has no project {project_id}"))?;
         let model = model.map(str::to_string)
             .or_else(|| project["defaultModelSelection"]["model"].as_str().filter(|_| project["defaultModelSelection"]["instanceId"] == "claudeAgent").map(str::to_string))
             .unwrap_or_else(|| DEFAULT_MODEL.into());
-        let thread_id = uuid::Uuid::new_v4().to_string();
         let name = project["title"].as_str().unwrap_or("App");
         client.dispatch(json!({
             "type": "thread.create", "threadId": thread_id, "projectId": project_id,
             "title": format!("{name} agent"),
             "modelSelection": {"instanceId": INSTANCE, "model": model},
-            "runtimeMode": "full-access", "interactionMode": "default",
+            "runtimeMode": mode, "interactionMode": "default",
             "branch": null, "worktreePath": null,
         })).await?;
-        let agent = Agent { project_id: project_id.into(), thread_id, created_at: crate::model::now(), pending: None, refresh: false };
+        Ok(())
+    }
+
+    fn created(&self, project_id: &str) -> Result<()> {
         let mut registry = self.registry.lock().unwrap();
-        registry.agents.insert(project_id.into(), agent.clone());
-        self.save(&registry)?;
-        Ok(agent)
+        if let Some(agent) = registry.agents.get_mut(project_id) { agent.creating = false; }
+        self.save(&registry)
     }
 
     fn agent_for_thread(&self, thread_id: &str) -> Option<Agent> {
@@ -625,105 +920,183 @@ impl Agents {
     }
 
     /// Restarts or replaces an app's agent: now if it is between turns,
-    /// otherwise as soon as its turn ends.
+    /// otherwise as soon as its turn ends. The request is saved first and
+    /// cleared only once it succeeds; a failure is retried and shows as the
+    /// agent's `reset_error`.
     pub async fn reset(self: &Arc<Self>, project_id: Option<&str>, thread_id: Option<&str>, reset: Reset) -> Result<Value> {
         self.ready().await?;
-        let agent = self.find_agent(project_id, thread_id)?;
+        let project = self.find_agent(project_id, thread_id)?.project_id;
+        let _op = self.op(&project).await;
+        let agent = self.find_agent(Some(&project), None)?;
+        ensure!(agent.replacing.is_none(), "A fresh start of this agent is already under way");
         let row = self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
         let kind = match reset { Reset::Restart => "restart", Reset::Fresh { .. } => "fresh" };
-        if worker_state(&row) == "working" {
+        {
             let mut registry = self.registry.lock().unwrap();
-            if let Some(agent) = registry.agents.get_mut(&agent.project_id) {
+            if let Some(agent) = registry.agents.get_mut(&project) {
                 agent.pending = Some(reset);
+                agent.reset_error = None;
             }
             self.save(&registry)?;
+        }
+        if worker_state(&row) == "working" {
             return Ok(json!({"project_id": agent.project_id, "thread_id": agent.thread_id, "action": kind, "when": "after-turn",
                              "next": "Happens when the agent's current turn ends. If that is you: end your turn now, telling the user in a sentence."}));
         }
-        self.perform(&agent, reset).await
+        self.resets.lock().unwrap().insert(project.clone(), 0);
+        let result = self.perform(&project).await;
+        self.reset_finished(&project, &result);
+        result
     }
 
-    /// Starts the resets whose agent turn has ended.
+    /// Starts the resets whose agent turn has ended, and resumes interrupted ones.
     fn run_due_resets(self: &Arc<Self>) {
-        let due: Vec<(Agent, Reset)> = {
-            let mut registry = self.registry.lock().unwrap();
+        let due: Vec<String> = {
+            let registry = self.registry.lock().unwrap();
             let shell = self.shell.lock().unwrap();
             if !shell.ready { return }
-            let due: Vec<(Agent, Reset)> = registry.agents.values_mut().filter_map(|agent| {
-                let row = shell.threads.get(&agent.thread_id)?;
-                if agent.pending.is_none() || worker_state(row) == "working" { return None }
-                let reset = agent.pending.take()?;
-                Some((agent.clone(), reset))
-            }).collect();
-            if !due.is_empty() && let Err(error) = self.save(&registry) {
-                eprintln!("Agent reset not saved: {error:#}");
-            }
+            let mut running = self.resets.lock().unwrap();
+            let due: Vec<String> = registry.agents.values().filter(|agent| {
+                agent.pending.is_some() && !running.contains_key(&agent.project_id)
+                    && (agent.replacing.is_some() || shell.threads.get(&agent.thread_id).is_some_and(|row| worker_state(row) != "working"))
+            }).map(|a| a.project_id.clone()).collect();
+            for project in &due { running.insert(project.clone(), 0); }
             due
         };
-        for (agent, reset) in due {
-            let this = self.clone();
-            tokio::spawn(async move {
-                if let Err(error) = this.perform(&agent, reset).await {
-                    eprintln!("Agent reset failed: {error:#}");
-                }
-            });
+        for project in due {
+            self.clone().spawn_reset(project, Duration::ZERO);
         }
     }
 
-    async fn perform(&self, agent: &Agent, reset: Reset) -> Result<Value> {
+    fn spawn_reset(self: Arc<Self>, project: String, delay: Duration) {
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let result = {
+                let _op = self.op(&project).await;
+                self.perform(&project).await
+            };
+            if let Err(error) = &result {
+                eprintln!("Agent reset failed: {error:#}");
+            }
+            self.reset_finished(&project, &result);
+        });
+    }
+
+    /// Records the outcome; a failure keeps the request and retries it with
+    /// backoff, without waiting for T3 to send anything.
+    fn reset_finished(self: &Arc<Self>, project: &str, result: &Result<Value>) {
+        let mut registry = self.registry.lock().unwrap();
+        let Some(agent) = registry.agents.get_mut(project) else { return };
+        let error = result.as_ref().err().map(|e| format!("{e:#}"));
+        if agent.reset_error != error && agent.pending.is_some() {
+            agent.reset_error = error;
+            let _ = self.save(&registry);
+        }
+        let retry = registry.agents.get(project).is_some_and(|a| a.pending.is_some());
+        drop(registry);
+        let mut running = self.resets.lock().unwrap();
+        if retry && result.is_err() {
+            let failures = running.entry(project.into()).or_default();
+            *failures = (*failures + 1).min(6);
+            let delay = Duration::from_secs(4 << *failures);
+            drop(running);
+            self.clone().spawn_reset(project.into(), delay);
+        } else {
+            running.remove(project);
+        }
+    }
+
+    /// Carries out the project's pending reset. Call with its operation lock.
+    async fn perform(&self, project: &str) -> Result<Value> {
         let client = self.ready().await?;
-        let row = self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
-        let stop = || client.dispatch(json!({"type": "thread.session.stop", "threadId": agent.thread_id}));
-        let live = !row["session"].is_null() && row["session"]["status"] != "stopped";
+        let agent = self.find_agent(Some(project), None)?;
+        let Some(reset) = agent.pending.clone() else {
+            return Ok(json!({"project_id": project, "thread_id": agent.thread_id, "when": "done"}));
+        };
+        let stop = |thread: &str| client.dispatch(json!({"type": "thread.session.stop", "threadId": thread}));
+        let live = |row: &Value| !row["session"].is_null() && row["session"]["status"] != "stopped";
         match reset {
             Reset::Restart => {
-                if live { stop().await?; }
-                {
-                    let mut registry = self.registry.lock().unwrap();
-                    if let Some(agent) = registry.agents.get_mut(&agent.project_id) { agent.refresh = true; }
-                    self.save(&registry)?;
-                }
-                Ok(json!({"project_id": agent.project_id, "thread_id": agent.thread_id, "action": "restart", "when": "now",
+                let row = self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
+                if live(&row) { stop(&agent.thread_id).await?; }
+                self.update_agent(project, |a| { a.refresh = true; a.pending = None; a.reset_error = None; })?;
+                Ok(json!({"project_id": project, "thread_id": agent.thread_id, "action": "restart", "when": "now",
                           "next": "The agent's next message starts a new session with the same history and gets the current instructions."}))
             }
             Reset::Fresh { note } => {
-                let handoff = self.handoff(&client, agent, note.as_deref()).await?;
-                if live { stop().await?; }
-                let app = self.shell.lock().unwrap().projects.get(&agent.project_id)
-                    .and_then(|p| p["title"].as_str().map(str::to_string)).unwrap_or_else(|| "App".into());
-                let day = Command::new("date").arg("+%b %-d").output().await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-                client.dispatch(json!({"type": "thread.meta.update", "threadId": agent.thread_id,
-                                       "title": format!("{app} agent (until {day})")})).await?;
-                let model = row["modelSelection"]["model"].as_str().map(str::to_string);
-                let new = self.create(&client, &agent.project_id, model.as_deref()).await?;
+                let mut plan = match agent.replacing.clone() {
+                    Some(plan) => plan,
+                    None => {
+                        let row = self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
+                        let handoff = self.handoff(&*client, &agent, note.as_deref()).await?;
+                        if live(&row) { stop(&agent.thread_id).await?; }
+                        let app = self.shell.lock().unwrap().projects.get(project)
+                            .and_then(|p| p["title"].as_str().map(str::to_string)).unwrap_or_else(|| "App".into());
+                        let day = Command::new("date").arg("+%b %-d").output().await
+                            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+                        client.dispatch(json!({"type": "thread.meta.update", "threadId": agent.thread_id,
+                                               "title": format!("{app} agent (until {day})")})).await?;
+                        let plan = Replacement {
+                            previous: agent.thread_id.clone(),
+                            thread_id: uuid::Uuid::new_v4().to_string(),
+                            model: row["modelSelection"]["model"].as_str().unwrap_or(DEFAULT_MODEL).into(),
+                            runtime_mode: runtime_mode(row["runtimeMode"].as_str()).unwrap_or_else(|_| AGENT_MODE.into()),
+                            handoff,
+                            message_id: uuid::Uuid::new_v4().to_string(),
+                            handoff_sent: false,
+                        };
+                        self.update_agent(project, |a| a.replacing = Some(plan.clone()))?;
+                        plan
+                    }
+                };
+                if self.thread(&plan.thread_id).is_none() {
+                    let dispatched = self.create_thread(&*client, project, &plan.thread_id, Some(&plan.model), &plan.runtime_mode).await;
+                    if self.wait_thread(&plan.thread_id).await.is_err() {
+                        dispatched?;
+                        bail!("T3 has not created the new agent thread yet");
+                    }
+                }
                 {
                     let mut registry = self.registry.lock().unwrap();
-                    for worker in registry.workers.values_mut().filter(|w| w.coordinator == agent.thread_id) {
-                        worker.coordinator = new.thread_id.clone();
+                    for worker in registry.workers.values_mut().filter(|w| w.coordinator == plan.previous) {
+                        worker.coordinator = plan.thread_id.clone();
                     }
+                    for wake in registry.outbox.iter_mut().filter(|w| w.coordinator == plan.previous && !w.attempted) {
+                        wake.coordinator = plan.thread_id.clone();
+                    }
+                    if let Some(agent) = registry.agents.get_mut(project) { agent.thread_id = plan.thread_id.clone(); }
                     self.save(&registry)?;
                 }
-                let record = json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Handoff",
-                                    "kind": "squircle-handoff", "payload": {"previous": agent.thread_id}});
-                self.wait_thread(&new.thread_id).await?;
-                client.dispatch(json!({
-                    "type": "thread.turn.start", "threadId": new.thread_id,
-                    "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": handoff, "attachments": [],
-                                "context": {"version": 1, "records": [record]}},
-                    "runtimeMode": "full-access", "interactionMode": "default",
-                })).await?;
-                Ok(json!({"project_id": agent.project_id, "thread_id": new.thread_id, "previous_thread_id": agent.thread_id,
+                if !(plan.handoff_sent && self.has_message(&*client, &plan.thread_id, &plan.message_id).await?) {
+                    plan.handoff_sent = true;
+                    self.update_agent(project, |a| a.replacing = Some(plan.clone()))?;
+                    let record = json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Handoff",
+                                        "kind": "squircle-handoff", "payload": {"previous": plan.previous}});
+                    client.dispatch(json!({
+                        "type": "thread.turn.start", "threadId": plan.thread_id,
+                        "message": {"messageId": plan.message_id, "role": "user", "text": plan.handoff, "attachments": [],
+                                    "context": {"version": 1, "records": [record]}},
+                        "runtimeMode": plan.runtime_mode, "interactionMode": "default",
+                    })).await?;
+                }
+                self.update_agent(project, |a| { a.pending = None; a.replacing = None; a.reset_error = None; })?;
+                Ok(json!({"project_id": project, "thread_id": plan.thread_id, "previous_thread_id": plan.previous,
                           "action": "fresh", "when": "now",
                           "next": "The new agent has the handoff and is replying; the old conversation stays readable in the app's Threads."}))
             }
         }
     }
 
+    fn update_agent(&self, project: &str, change: impl FnOnce(&mut Agent)) -> Result<()> {
+        let mut registry = self.registry.lock().unwrap();
+        if let Some(agent) = registry.agents.get_mut(project) { change(agent); }
+        self.save(&registry)
+    }
+
     /// What a new agent needs from the old one, gathered without a model:
     /// the app, recent commits, open workers, what the user said lately, the
     /// old agent's last reply and its own note.
-    async fn handoff(&self, client: &T3, agent: &Agent, note: Option<&str>) -> Result<String> {
+    async fn handoff(&self, client: &dyn Peer, agent: &Agent, note: Option<&str>) -> Result<String> {
         let project = self.shell.lock().unwrap().projects.get(&agent.project_id).cloned().context("The app's T3 project is gone")?;
         let app = project["title"].as_str().unwrap_or("this app");
         let root = project["workspaceRoot"].as_str().map(PathBuf::from);
@@ -769,17 +1142,21 @@ impl Agents {
     /// role and reply style in brief (the system prompt has the rest), its
     /// thread ID (needed to spawn workers) and its workers right now.
     pub fn context(&self, cwd: &Path) -> String {
-        let agents = self.list();
-        let shell = self.shell.lock().unwrap();
-        let found = agents.into_iter().find_map(|a| {
-            let project = shell.projects.get(&a.project_id)?;
-            let root = project["workspaceRoot"].as_str()?;
-            (same_path(Path::new(root), cwd) || cwd.starts_with(root))
-                .then(|| (a, project["title"].as_str().unwrap_or("this app").to_string()))
-        });
-        drop(shell);
-        let Some((agent, app)) = found else {
-            return "[squircle] No app agent works in this folder.".into();
+        let candidates: Vec<(Agent, String, PathBuf)> = {
+            let agents = self.list();
+            let shell = self.shell.lock().unwrap();
+            agents.into_iter().filter_map(|a| {
+                let project = shell.projects.get(&a.project_id)?;
+                let root = PathBuf::from(project["workspaceRoot"].as_str()?);
+                Some((a, project["title"].as_str().unwrap_or("this app").to_string(), root))
+            }).collect()
+        };
+        let roots: Vec<&Path> = candidates.iter().map(|(_, _, root)| root.as_path()).collect();
+        let (agent, app) = match deepest_root(&roots, cwd) {
+            Ok(Some(index)) => (candidates[index].0.clone(), candidates[index].1.clone()),
+            Ok(None) => return "[squircle] No app agent works in this folder.".into(),
+            Err(tied) => return format!("[squircle] Several app agents work in this folder ({}); worker commands need the right thread ID.",
+                tied.iter().map(|i| candidates[*i].1.as_str()).collect::<Vec<_>>().join(", ")),
         };
         // Claude keeps a resumed session's first system prompt; a restarted
         // agent gets the current one here, once.
@@ -882,10 +1259,10 @@ impl Agents {
             "type": "thread.turn.start", "threadId": id,
             "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": [],
                         "context": {"version": 1, "records": [agent_message("squircle-task", Some(coordinator))]}},
-            "modelSelection": selection, "runtimeMode": "full-access", "interactionMode": "default",
+            "modelSelection": selection, "runtimeMode": WORKER_MODE, "interactionMode": "default",
             "bootstrap": {
                 "createThread": {"projectId": agent.project_id, "title": title, "modelSelection": selection,
-                                 "runtimeMode": "full-access", "interactionMode": "default", "branch": null, "worktreePath": null, "createdAt": now},
+                                 "runtimeMode": WORKER_MODE, "interactionMode": "default", "branch": null, "worktreePath": null, "createdAt": now},
                 "prepareWorktree": {"projectCwd": project["workspaceRoot"], "baseBranch": base, "branch": branch},
                 "runSetupScript": true,
             },
@@ -934,13 +1311,13 @@ impl Agents {
         client.dispatch(json!({
             "type": "thread.turn.start", "threadId": thread_id,
             "message": message,
-            "runtimeMode": thread["runtimeMode"].as_str().unwrap_or("full-access"),
+            "runtimeMode": thread["runtimeMode"].as_str().unwrap_or(AGENT_MODE),
             "interactionMode": thread["interactionMode"].as_str().unwrap_or("default"),
         })).await?;
         Ok(())
     }
 
-    async fn thread_detail(&self, client: &T3, id: &str) -> Result<Value> {
+    async fn thread_detail(&self, client: &dyn Peer, id: &str) -> Result<Value> {
         let snapshot = client.snapshot("orchestration.subscribeThread", json!({"threadId": id})).await?;
         let thread = &snapshot["snapshot"];
         Ok(if thread["thread"].is_object() { thread["thread"].clone() } else { thread.clone() })
@@ -960,7 +1337,7 @@ impl Agents {
 
     pub async fn read(&self, id: &str) -> Result<Value> {
         let client = self.ready().await?;
-        let thread = self.thread_detail(&client, id).await?;
+        let thread = self.thread_detail(&*client, id).await?;
         let worker = self.registry.lock().unwrap().workers.get(id).cloned();
         let last = thread["messages"].as_array().into_iter().flatten().rev()
             .find(|m| m["role"] == "assistant").and_then(|m| m["text"].as_str()).map(str::to_string);
@@ -985,7 +1362,7 @@ impl Agents {
     /// Answers every question in the thread's pending request with `text`.
     pub async fn answer(&self, id: &str, text: &str) -> Result<()> {
         let client = self.ready().await?;
-        let thread = self.thread_detail(&client, id).await?;
+        let thread = self.thread_detail(&*client, id).await?;
         let (request, questions) = Self::pending_question(&thread).context("That thread is not waiting on a question")?;
         let answers: serde_json::Map<String, Value> = questions.iter()
             .filter_map(|q| q["id"].as_str().or(q["question"].as_str()).map(|k| (k.to_string(), json!(text)))).collect();
@@ -993,25 +1370,35 @@ impl Agents {
         Ok(())
     }
 
-    /// Archives a worker: removes its worktree and deletes its branch. Refuses
-    /// while the branch has commits not in its base or the worktree has
-    /// uncommitted changes, unless `discard` drops them.
+    /// Archives a worker: stops it if `discard` lets a working one go,
+    /// removes its worktree and deletes its branch, then archives its thread.
+    /// Refuses while the branch has commits not in its base or the worktree
+    /// has uncommitted changes, unless `discard` drops them. Nothing is
+    /// removed until T3 reports the worker stopped; after a partial failure
+    /// running it again finishes the job.
     pub async fn archive(&self, id: &str, discard: bool) -> Result<Value> {
         let client = self.ready().await?;
+        let _op = self.op(id).await;
         let is_agent = self.registry.lock().unwrap().agents.values().any(|a| a.thread_id == id);
         ensure!(!is_agent, "That is an app agent's thread, not a worker");
-        let thread = self.thread(id);
         let worker = self.registry.lock().unwrap().workers.get(id).cloned();
-        ensure!(thread.is_some() || worker.is_some(), "T3 has no thread {id}");
+        ensure!(self.thread(id).is_some() || worker.is_some(), "T3 has no thread {id}");
+        let mut stopped = false;
+        if self.thread(id).is_some_and(|row| worker_state(&row) == "working") {
+            ensure!(discard, "That worker is still working; wait for it, or pass --discard to stop it and drop its work");
+            client.dispatch(json!({"type": "thread.session.stop", "threadId": id})).await?;
+            self.wait_stopped(id).await?;
+            stopped = true;
+        }
+        let thread = self.thread(id);
         let row = thread.clone().unwrap_or(Value::Null);
-        ensure!(discard || row.is_null() || worker_state(&row) != "working",
-            "That worker is still working; wait for it, or pass --discard to stop tracking it and drop its work");
         let branch = worker.as_ref().map(|w| w.branch.clone()).or_else(|| row["branch"].as_str().map(str::to_string));
         let base = worker.as_ref().map(|w| w.base.clone());
         let project = worker.as_ref().map(|w| w.project_id.clone()).or_else(|| row["projectId"].as_str().map(str::to_string));
         let root = project.and_then(|p| self.shell.lock().unwrap().projects.get(&p).and_then(|p| p["workspaceRoot"].as_str().map(PathBuf::from)));
         let worktree = row["worktreePath"].as_str().map(PathBuf::from);
-        let mut result = json!({"archived": id, "title": worker.as_ref().map(|w| w.title.clone()).or_else(|| row["title"].as_str().map(str::to_string))});
+        let mut result = json!({"archived": id, "stopped": stopped,
+                                "title": worker.as_ref().map(|w| w.title.clone()).or_else(|| row["title"].as_str().map(str::to_string))});
         if let Some(root) = &root {
             let base = match base {
                 Some(base) => base,
@@ -1021,13 +1408,15 @@ impl Agents {
             if let Some(reason) = state.blocker().filter(|_| !discard) {
                 bail!("Not archived: {reason}. Merge it first, or pass --discard to drop that work");
             }
-            let cleaned = remove(root, &state, discard).await?;
+            let cleaned = remove(root, &state, discard).await
+                .with_context(|| if stopped { "The worker was stopped, but its files were not all removed; run archive again" } else { "Its files were not all removed; run archive again" })?;
             result["removed_worktree"] = json!(cleaned.worktree);
             result["deleted_branch"] = json!(cleaned.branch);
             result["discarded"] = json!(discard && state.blocker().is_some());
         }
         if thread.is_some_and(|t| t["archivedAt"].is_null()) {
-            client.dispatch(json!({"type": "thread.archive", "threadId": id})).await?;
+            client.dispatch(json!({"type": "thread.archive", "threadId": id})).await
+                .context("Its files were removed, but T3 did not archive the thread; run archive again")?;
         }
         let mut registry = self.registry.lock().unwrap();
         if let Some(worker) = registry.workers.get_mut(id) {
@@ -1035,6 +1424,17 @@ impl Agents {
         }
         self.save(&registry)?;
         Ok(result)
+    }
+
+    /// Waits for T3 to report a stopped worker no longer working.
+    async fn wait_stopped(&self, id: &str) -> Result<()> {
+        for _ in 0..300 {
+            if self.thread(id).is_none_or(|row| worker_state(&row) != "working") {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        bail!("The worker did not stop within 30 seconds; nothing was removed")
     }
 
     /// Archives the coordinator's finished workers whose work is merged,
@@ -1065,7 +1465,10 @@ impl Agents {
             }
             if worker.archived {
                 if git.branch_exists || git.worktree.is_some() {
-                    if !dry_run { remove(&root, &git, false).await?; }
+                    if !dry_run {
+                        let _op = self.op(&id).await;
+                        remove(&root, &git, false).await?;
+                    }
                     deleted.push(entry);
                 }
             } else {
@@ -1111,6 +1514,277 @@ mod tests {
         assert_eq!(wake_key(&thread(Some("b"), "error", "error", false)).as_deref(), Some("b:error"));
     }
 
+    #[test]
+    fn a_second_question_in_a_turn_wakes_again() {
+        let asking = thread(Some("t"), "running", "running", true);
+        assert!(notified_of(Some("t:needs-you:A"), &wake_key(&asking).unwrap()));
+        assert!(!notified_of(Some("t:needs-you-later"), "t:needs-you"));
+        // Answered: working again forgets the question, so the next is new.
+        let working = thread(Some("t"), "running", "running", false);
+        assert_eq!(progressed(Some("t:needs-you:A"), &working).as_deref(), Some("t:working"));
+        assert!(!notified_of(Some("t:working"), &wake_key(&asking).unwrap()));
+        assert_eq!(progressed(Some("t:done"), &working), None);
+        let detail = |acts: Value| json!({"activities": acts});
+        let ask = |kind: &str, id: &str| json!({"kind": kind, "payload": {"requestId": id}});
+        assert_eq!(pending_request(&detail(json!([ask("user-input.requested", "A"), ask("user-input.resolved", "A"),
+            ask("approval.requested", "B")]))).as_deref(), Some("B"));
+        assert_eq!(pending_request(&detail(json!([ask("approval.requested", "B"), ask("approval.resolved", "B")]))), None);
+    }
+
+    #[test]
+    fn context_goes_to_the_deepest_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let example = repo.join("examples/App");
+        std::fs::create_dir_all(example.join("src")).unwrap();
+        std::os::unix::fs::symlink(&example, temp.path().join("alias")).unwrap();
+        let roots = [repo.as_path(), example.as_path()];
+        assert_eq!(deepest_root(&roots, &example.join("src")), Ok(Some(1)));
+        assert_eq!(deepest_root(&[example.as_path(), repo.as_path()], &example), Ok(Some(0)));
+        assert_eq!(deepest_root(&roots, &repo.join("examples")), Ok(Some(0)));
+        assert_eq!(deepest_root(&roots, &temp.path().join("alias/src")), Ok(Some(1)));
+        assert_eq!(deepest_root(&roots, temp.path()), Ok(None));
+        // `/repo-other` is not inside `/repo`.
+        assert_eq!(deepest_root(&roots, &temp.path().join("repo-other")), Ok(None));
+        assert_eq!(deepest_root(&[repo.as_path(), example.as_path(), repo.as_path()], &repo), Err(vec![0, 2]));
+    }
+
+    /// T3 as the agents see it: records commands, creates thread rows in
+    /// the shell after a delay, and remembers the messages it accepted.
+    #[derive(Default)]
+    struct Fake {
+        agents: std::sync::OnceLock<std::sync::Weak<Agents>>,
+        log: Mutex<Vec<Value>>,
+        messages: Mutex<HashMap<String, Vec<String>>>,
+        activities: Mutex<HashMap<String, Value>>,
+        /// The next dispatch of this type fails; `true` if T3 applied it anyway (a lost acknowledgement).
+        fail: Mutex<Vec<(&'static str, bool)>>,
+        shell_delay: Mutex<Duration>,
+        on_dispatch: Mutex<Option<Box<dyn Fn(&Value) + Send>>>,
+    }
+
+    impl Fake {
+        fn agents(&self) -> Arc<Agents> { self.agents.get().unwrap().upgrade().unwrap() }
+        fn sent(&self, kind: &str) -> Vec<Value> {
+            self.log.lock().unwrap().iter().filter(|c| c["type"] == kind).cloned().collect()
+        }
+    }
+
+    impl Peer for Fake {
+        fn call<'a>(&'a self, tag: &'a str, _: Value) -> crate::push::BoxFuture<'a, Result<Value>> {
+            assert_eq!(tag, "server.getConfig");
+            Box::pin(async { Ok(json!({"providers": [{"instanceId": INSTANCE, "status": "ready"}]})) })
+        }
+        fn dispatch<'a>(&'a self, command: Value) -> crate::push::BoxFuture<'a, Result<Value>> {
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                self.log.lock().unwrap().push(command.clone());
+                if let Some(hook) = &*self.on_dispatch.lock().unwrap() { hook(&command); }
+                let failure = {
+                    let mut fail = self.fail.lock().unwrap();
+                    fail.iter().position(|(kind, _)| command["type"] == *kind).map(|i| fail.remove(i).1)
+                };
+                if failure == Some(false) { bail!("T3 rejected the command") }
+                match command["type"].as_str() {
+                    Some("thread.create") => {
+                        let row = json!({"id": command["threadId"], "projectId": command["projectId"], "runtimeMode": command["runtimeMode"],
+                                         "modelSelection": command["modelSelection"], "session": null, "archivedAt": null});
+                        let (agents, delay) = (self.agents(), *self.shell_delay.lock().unwrap());
+                        tokio::spawn(async move {
+                            tokio::time::sleep(delay).await;
+                            agents.consume_shell(&json!({"kind": "thread-upserted", "thread": row}));
+                        });
+                    }
+                    Some("thread.turn.start") => {
+                        self.messages.lock().unwrap().entry(command["threadId"].as_str().unwrap().into()).or_default()
+                            .push(command["message"]["messageId"].as_str().unwrap().into());
+                    }
+                    _ => {}
+                }
+                if failure == Some(true) { bail!("T3 did not answer") }
+                Ok(json!({"sequence": 1}))
+            })
+        }
+        fn snapshot<'a>(&'a self, _: &'a str, payload: Value) -> crate::push::BoxFuture<'a, Result<Value>> {
+            Box::pin(async move {
+                let id = payload["threadId"].as_str().unwrap();
+                let messages: Vec<Value> = self.messages.lock().unwrap().get(id).into_iter().flatten()
+                    .map(|m| json!({"id": m, "role": "user", "text": "x"})).collect();
+                let activities = self.activities.lock().unwrap().get(id).cloned().unwrap_or(json!([]));
+                Ok(json!({"snapshot": {"thread": {"id": id, "messages": messages, "activities": activities}}}))
+            })
+        }
+    }
+
+    fn row(id: &str, project: &str, mode: &str, turn: &str, turn_state: &str, session: &str, needs: bool) -> Value {
+        json!({"id": id, "projectId": project, "runtimeMode": mode, "archivedAt": null,
+               "modelSelection": {"instanceId": INSTANCE, "model": "m"},
+               "latestTurn": {"turnId": turn, "state": turn_state}, "session": {"status": session},
+               "hasPendingApprovals": false, "hasPendingUserInput": needs})
+    }
+
+    /// Agents on a fake T3 with one project, `p`, rooted at `workspace`.
+    fn fake_agents(temp: &Path, workspace: &Path, threads: Vec<Value>) -> (Arc<Agents>, Arc<Fake>) {
+        let tasks = Arc::new(Tasks::open(temp).unwrap());
+        let agents = Agents::open(temp, "http://127.0.0.1:1", tasks).unwrap();
+        let fake = Arc::new(Fake::default());
+        fake.agents.set(Arc::downgrade(&agents)).unwrap();
+        assert!(agents.fake.set(fake.clone()).is_ok());
+        agents.consume_shell(&json!({"kind": "snapshot", "snapshot": {
+            "projects": [{"id": "p", "title": "App", "workspaceRoot": workspace}], "threads": threads}}));
+        (agents, fake)
+    }
+
+    fn registered(agents: &Agents, f: impl FnOnce(&mut Registry)) {
+        let mut registry = agents.registry.lock().unwrap();
+        f(&mut registry);
+        agents.save(&registry).unwrap();
+    }
+
+    fn worker(coordinator: &str) -> Worker {
+        Worker { coordinator: coordinator.into(), project_id: "p".into(), title: "W".into(), branch: "w".into(),
+                 base: "main".into(), created_at: 0, notified: None, archived: false }
+    }
+
+    fn agent(thread: &str) -> Agent {
+        Agent { project_id: "p".into(), thread_id: thread.into(), created_at: 0, creating: false, pending: None,
+                replacing: None, reset_error: None, refresh: false }
+    }
+
+    #[tokio::test]
+    async fn first_use_creates_one_agent_in_the_chosen_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![]);
+        // The shell shows the new thread only after both requests have asked.
+        *fake.shell_delay.lock().unwrap() = Duration::from_millis(300);
+        let (a, b) = tokio::join!(agents.ensure("p", None, None, Some("approval-required")),
+                                  agents.ensure("p", None, None, Some("approval-required")));
+        assert_eq!(a.unwrap().thread_id, b.unwrap().thread_id);
+        let created = fake.sent("thread.create");
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0]["runtimeMode"], "approval-required");
+        assert!(agents.ensure("p", None, None, Some("ask")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_creation_is_finished_not_repeated() {
+        let temp = tempfile::tempdir().unwrap();
+        let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![]);
+        fake.fail.lock().unwrap().push(("thread.create", false));
+        assert!(agents.ensure("p", None, None, None).await.is_err());
+        let reserved = agents.list()[0].clone();
+        assert!(reserved.creating);
+        let agent = agents.ensure("p", None, None, None).await.unwrap();
+        assert_eq!(agent.thread_id, reserved.thread_id);
+        assert!(!agents.list()[0].creating);
+        let created = fake.sent("thread.create");
+        assert_eq!(created.len(), 2);
+        assert!(created.iter().all(|c| c["threadId"] == reserved.thread_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_start_survives_a_lost_acknowledgement_and_keeps_the_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let (agents, fake) = fake_agents(temp.path(), temp.path(),
+            vec![row("old", "p", "approval-required", "t", "completed", "ready", false)]);
+        registered(&agents, |r| { r.agents.insert("p".into(), agent("old")); r.workers.insert("w1".into(), worker("old")); });
+        fake.fail.lock().unwrap().push(("thread.turn.start", true));
+        let error = agents.reset(Some("p"), None, Reset::Fresh { note: None }).await.unwrap_err();
+        assert!(format!("{error:#}").contains("did not answer"));
+        let saved = agents.list()[0].clone();
+        assert!(saved.pending.is_some() && saved.reset_error.is_some());
+        let plan = saved.replacing.unwrap();
+        // The retry finds the handoff delivered and does not send it again.
+        let _op = agents.op("p").await;
+        let done = agents.perform("p").await.unwrap();
+        assert_eq!(done["thread_id"], plan.thread_id.as_str());
+        let saved = agents.list()[0].clone();
+        assert!(saved.pending.is_none() && saved.replacing.is_none() && saved.thread_id == plan.thread_id);
+        assert_eq!(agents.registry.lock().unwrap().workers["w1"].coordinator, plan.thread_id);
+        let created = fake.sent("thread.create");
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0]["runtimeMode"], "approval-required");
+        let turns = fake.sent("thread.turn.start");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["runtimeMode"], "approval-required");
+    }
+
+    #[tokio::test]
+    async fn worker_updates_are_sent_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![
+            row("agent", "p", "full-access", "a", "completed", "ready", false),
+            row("w1", "p", "full-access", "t", "completed", "ready", false)]);
+        registered(&agents, |r| { r.agents.insert("p".into(), agent("agent")); r.workers.insert("w1".into(), worker("agent")); });
+        // Overlapping flushes.
+        let (a, b) = tokio::join!(agents.flush(), agents.flush());
+        a.unwrap(); b.unwrap();
+        assert_eq!(fake.sent("thread.turn.start").len(), 1);
+        // A lost acknowledgement, then a retry with nothing new from T3.
+        agents.consume_shell(&json!({"kind": "thread-upserted", "thread": row("w1", "p", "full-access", "t2", "completed", "ready", false)}));
+        fake.fail.lock().unwrap().push(("thread.turn.start", true));
+        assert!(agents.flush().await.is_err());
+        assert!(agents.has_due_wakes());
+        agents.flush().await.unwrap();
+        assert_eq!(fake.sent("thread.turn.start").len(), 2);
+        assert!(!agents.has_due_wakes());
+        // A restart reloads the same registry and has nothing to send.
+        let reopened = Agents::open(temp.path(), "http://127.0.0.1:1", Arc::new(Tasks::open(temp.path()).unwrap())).unwrap();
+        assert_eq!(reopened.registry.lock().unwrap().workers["w1"].notified.as_deref(), Some("t2:done"));
+
+        // Question A, answered (working), then question B in the same turn.
+        let asking = row("w1", "p", "full-access", "t3", "running", "running", true);
+        let ask = |id: &str| json!([{"kind": "user-input.requested", "payload": {"requestId": id}}]);
+        fake.activities.lock().unwrap().insert("w1".into(), ask("A"));
+        agents.consume_shell(&json!({"kind": "thread-upserted", "thread": asking}));
+        agents.flush().await.unwrap();
+        agents.flush().await.unwrap();
+        assert_eq!(fake.sent("thread.turn.start").len(), 3);
+        agents.consume_shell(&json!({"kind": "thread-upserted", "thread": row("w1", "p", "full-access", "t3", "running", "running", false)}));
+        agents.note_progress();
+        fake.activities.lock().unwrap().insert("w1".into(), ask("B"));
+        agents.consume_shell(&json!({"kind": "thread-upserted", "thread": row("w1", "p", "full-access", "t3", "running", "running", true)}));
+        agents.flush().await.unwrap();
+        assert_eq!(fake.sent("thread.turn.start").len(), 4);
+        assert_eq!(agents.registry.lock().unwrap().workers["w1"].notified.as_deref(), Some("t3:needs-you:B"));
+    }
+
+    #[tokio::test]
+    async fn discarding_stops_a_working_worker_before_removing_its_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        run(&root, &["init", "-q", "-b", "main"]).await;
+        commit(&root, "a").await;
+        let tree = temp.path().join("w");
+        run(&root, &["worktree", "add", "-q", "-b", "w", tree.to_str().unwrap()]).await;
+        commit(&tree, "b").await;
+        let mut working = row("w1", "p", "full-access", "t", "running", "running", false);
+        working["worktreePath"] = json!(tree);
+        let data = temp.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let (agents, fake) = fake_agents(&data, &root, vec![working.clone()]);
+        registered(&agents, |r| { r.workers.insert("w1".into(), worker("agent")); });
+        assert!(agents.archive("w1", false).await.is_err());
+        let (weak, checked) = (Arc::downgrade(&agents), tree.clone());
+        *fake.on_dispatch.lock().unwrap() = Some(Box::new(move |command| {
+            if command["type"] == "thread.session.stop" {
+                assert!(checked.exists(), "files removed before the worker stopped");
+                let mut stopped = working.clone();
+                stopped["latestTurn"]["state"] = json!("interrupted");
+                stopped["session"]["status"] = json!("stopped");
+                weak.upgrade().unwrap().consume_shell(&json!({"kind": "thread-upserted", "thread": stopped}));
+            } else if command["type"] == "thread.archive" {
+                assert!(!checked.exists());
+            }
+        }));
+        let result = agents.archive("w1", true).await.unwrap();
+        assert_eq!(result["stopped"], true);
+        let order: Vec<Value> = fake.log.lock().unwrap().iter().map(|c| c["type"].clone()).collect();
+        assert_eq!(order, [json!("thread.session.stop"), json!("thread.archive")]);
+        assert!(!tree.exists() && agents.registry.lock().unwrap().workers["w1"].archived);
+    }
+
     async fn run(dir: &Path, args: &[&str]) {
         git(dir, args).await.unwrap();
     }
@@ -1153,6 +1827,42 @@ mod tests {
         // A branch already gone with no worktree leaves nothing to do.
         let gone = inspect(root, None, Some("merged"), Some("main")).await.unwrap();
         assert!(gone.blocker().is_none() && !gone.branch_exists && gone.worktree.is_none());
+    }
+
+    #[tokio::test]
+    async fn keeps_a_unique_merge_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = &temp.path().join("repo");
+        std::fs::create_dir(root).unwrap();
+        run(root, &["init", "-q", "-b", "main"]).await;
+        commit(root, "a").await;
+        let edit = |text: &'static str| async move {
+            std::fs::write(root.join("value"), text).unwrap();
+            run(root, &["add", "value"]).await;
+            run(root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", text]).await;
+        };
+        for side in ["left", "right"] {
+            run(root, &["checkout", "-q", "-b", side, "main"]).await;
+            edit(side).await;
+        }
+        // Both main and the worker merge left and right, resolving differently.
+        for (branch, resolution) in [("main", "main's"), ("worker", "worker's")] {
+            if branch == "main" { run(root, &["checkout", "-q", "main"]).await } else { run(root, &["checkout", "-q", "-b", "worker", "left~1"]).await }
+            run(root, &["merge", "-q", "left"]).await;
+            let _ = git(root, &["-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "right"]).await;
+            edit(resolution).await;
+        }
+        run(root, &["checkout", "-q", "main"]).await;
+        // `git cherry` alone sees nothing unmerged.
+        assert!(!git(root, &["cherry", "main", "worker"]).await.unwrap().contains('+'));
+        let state = inspect(root, None, Some("worker"), Some("main")).await.unwrap();
+        assert!(state.blocker().is_some(), "{state:?}");
+        // A branch that moved after inspection is not deleted.
+        let tip = state.tip.clone();
+        run(root, &["branch", "-f", "worker", "main"]).await;
+        let merged = GitState { tip: tip.clone(), ..inspect(root, None, Some("worker"), Some("main")).await.unwrap() };
+        assert!(remove(root, &merged, false).await.is_err());
+        assert!(git(root, &["rev-parse", "--verify", "worker"]).await.is_ok());
     }
 }
 

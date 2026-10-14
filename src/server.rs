@@ -1822,7 +1822,7 @@ async fn ensure_agent(
     auth(&state, &headers, false)?;
     let request = body(payload)?;
     let agent = agents(&state)?
-        .ensure(&request.project_id, request.message.as_deref(), request.model.as_deref())
+        .ensure(&request.project_id, request.message.as_deref(), request.model.as_deref(), None)
         .await
         .map_err(agent_error)?;
     Ok(Json(success(json!({"agent": agent}))))
