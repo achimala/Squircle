@@ -422,7 +422,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let detail = model.error ?? (model.connected ? "Connected to \(model.hostName)" : model.status)
         connection.menu = UIMenu(title: detail, children: [
             UIAction(title: "Reconnect", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
-                Task { await self?.model.refresh() }
+                Task { await self?.model.reconnect() }
             }
         ])
     }
