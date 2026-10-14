@@ -11,9 +11,15 @@
 //! run) can finish: starting → recording → stopping → filing → finished or
 //! failed, with `close_pending` set from just before T3's device session is
 //! opened until T3 confirms it closed.
+//!
+//! The session is the simulator's lease: once it ends (`release_pending`),
+//! the simulator is shut down unless another session holds it or the pool's
+//! policy keeps it (`simpool`). Starts reuse a free booted simulator of
+//! Squircle's before booting another, and at most `max_leases` run at once.
 
 use crate::agents::{Agents, worker_state};
 use crate::media::{self, SimulatorClip};
+use crate::simpool::{Lease, Pool};
 use crate::store::{atomic_json, read_json};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -70,6 +76,9 @@ pub struct SimSession {
     pub close_pending: bool,
     #[serde(default)]
     pub close_error: Option<String>,
+    /// Ended, and its simulator is still to be shut down (if nothing else holds it).
+    #[serde(default)]
+    pub release_pending: bool,
 }
 
 impl SimSession {
@@ -124,9 +133,16 @@ pub trait Host: Send + Sync {
     fn record(&self, device: &str, path: &Path, log: std::fs::File) -> Result<Child>;
     /// A smaller copy of the recording, having removed the original.
     fn compact<'a>(&'a self, raw: &'a Path) -> Pending<'a, Option<PathBuf>>;
+    /// Booted simulators of Squircle's that nothing holds (`leases` do).
+    fn free<'a>(&'a self, leases: &'a [Lease]) -> Pending<'a, Vec<String>>;
+    /// `thread`'s lease on `device` ended: shut it down unless the policy keeps it.
+    fn release<'a>(&'a self, device: &'a str, thread: &'a str, leases: &'a [Lease]) -> Pending<'a, Result<()>>;
+    /// How many sessions may hold simulators at once.
+    fn max_leases(&self) -> usize;
+    fn title(&self, thread: &str) -> Option<String>;
 }
 
-struct AgentsHost(Arc<Agents>);
+struct AgentsHost(Arc<Agents>, Arc<Pool>);
 
 impl Host for AgentsHost {
     fn device<'a>(&'a self, method: &'a str, params: Value) -> Pending<'a, Result<Value>> {
@@ -163,6 +179,25 @@ impl Host for AgentsHost {
 
     fn compact<'a>(&'a self, raw: &'a Path) -> Pending<'a, Option<PathBuf>> {
         Box::pin(compact(raw))
+    }
+
+    fn free<'a>(&'a self, leases: &'a [Lease]) -> Pending<'a, Vec<String>> {
+        Box::pin(async move {
+            self.1.refresh(leases, false).await.map(|rows| rows.into_iter().filter(|r| r.free).map(|r| r.udid).collect())
+                .unwrap_or_default()
+        })
+    }
+
+    fn release<'a>(&'a self, device: &'a str, thread: &'a str, leases: &'a [Lease]) -> Pending<'a, Result<()>> {
+        Box::pin(self.1.release(device, thread, leases))
+    }
+
+    fn max_leases(&self) -> usize {
+        self.1.policy.max_leases
+    }
+
+    fn title(&self, thread: &str) -> Option<String> {
+        self.0.worker_title(thread)
     }
 }
 
@@ -242,8 +277,20 @@ fn is_recorder(pid: u32, session: &str) -> bool {
 }
 
 impl Sims {
-    pub fn open(root: &Path, agents: Arc<Agents>) -> Result<Arc<Self>> {
-        Self::with_host(root, Arc::new(AgentsHost(agents)))
+    pub fn open(root: &Path, agents: Arc<Agents>, pool: Arc<Pool>) -> Result<Arc<Self>> {
+        Self::with_host(root, Arc::new(AgentsHost(agents, pool)))
+    }
+
+    /// Every simulator a session has used, with when it was last used.
+    pub fn used(&self) -> Vec<(String, f64)> {
+        self.state.lock().unwrap().ledger.sessions.iter()
+            .map(|s| (s.device_id.clone(), s.ended_at.unwrap_or(s.started_at))).collect()
+    }
+
+    /// The simulators sessions hold now.
+    pub fn leases(&self) -> Vec<Lease> {
+        self.state.lock().unwrap().ledger.sessions.iter().filter(|s| s.holds_device())
+            .map(|s| Lease { device_id: s.device_id.to_ascii_uppercase(), thread_id: s.thread_id.clone() }).collect()
     }
 
     pub fn with_host(root: &Path, host: Arc<dyn Host>) -> Result<Arc<Self>> {
@@ -305,15 +352,38 @@ impl Sims {
                     || d["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(wanted)))
                 .with_context(|| format!("No iOS simulator {wanted} on this Mac; run squircle sim devices"))?,
             None => {
-                let last = self.state.lock().unwrap().ledger.sessions.iter().rev()
-                    .find(|s| s.thread_id == thread).map(|s| s.device_id.clone());
-                let busy = |d: &&&Value| held.iter().any(|s| Some(s.device_id.as_str()) == d["id"].as_str() && s.thread_id != thread);
-                simulators.iter().find(|d| last.as_deref() == d["id"].as_str() && !busy(d))
-                    .or_else(|| simulators.iter().find(|d| d["booted"] == true && !busy(d)))
-                    .or_else(|| simulators.iter().find(|d| !busy(d)))
-                    .context("Every simulator on this Mac is in another agent's session; pass --device")?
+                let (last, used) = {
+                    let state = self.state.lock().unwrap();
+                    let sessions = &state.ledger.sessions;
+                    (sessions.iter().rev().find(|s| s.thread_id == thread).map(|s| s.device_id.clone()),
+                     sessions.iter().map(|s| s.device_id.to_ascii_uppercase()).collect::<std::collections::HashSet<_>>())
+                };
+                let free = self.host.free(&self.leases()).await;
+                let id = |d: &Value| d["id"].as_str().unwrap_or("").to_ascii_uppercase();
+                let busy = |d: &Value| held.iter().any(|s| s.device_id.eq_ignore_ascii_case(&id(d)) && s.thread_id != thread);
+                let mine = |d: &Value| held.iter().any(|s| s.device_id.eq_ignore_ascii_case(&id(d)) && s.thread_id == thread);
+                // A booted simulator is taken only when it is Squircle's and
+                // free: never the user's own, nor another agent's.
+                let takeable = |d: &Value| !busy(d) && (d["booted"] != true || free.contains(&id(d)) || mine(d));
+                simulators.iter().copied().find(|d| last.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(&id(d))) && takeable(d))
+                    .or_else(|| simulators.iter().copied().find(|d| d["booted"] == true && takeable(d)))
+                    .or_else(|| simulators.iter().copied().find(|d| used.contains(&id(d)) && takeable(d)))
+                    .or_else(|| simulators.iter().copied().find(|d| takeable(d)))
+                    .context("No free simulator: the booted ones are the user's or other agents'; pass --device (squircle sim devices)")?
             }
         };
+        // At most `max_leases` simulators run for agents; reusing a free
+        // booted one adds none.
+        let max = self.host.max_leases();
+        let others: std::collections::BTreeSet<String> = held.iter().filter(|s| s.thread_id != thread)
+            .map(|s| s.device_id.to_ascii_uppercase()).collect();
+        let reusing = chosen["booted"] == true && device.is_none() && !others.contains(&chosen["id"].as_str().unwrap_or("").to_ascii_uppercase());
+        if others.len() >= max && !reusing {
+            let users: Vec<String> = held.iter().filter(|s| s.thread_id != thread)
+                .map(|s| format!("{} ({})", s.device_name, self.host.title(&s.thread_id).unwrap_or_else(|| s.thread_id.clone()))).collect();
+            bail!("{} simulators already run for other agents: {}. The limit is {max} (SQUIRCLE_MAX_SIMULATORS). \
+                   Try again when one stops (squircle sim status).", others.len(), users.join(", "));
+        }
         let device_id = chosen["id"].as_str().context("Simulator without an ID")?.to_string();
         let device_name = chosen["name"].as_str().unwrap_or("Simulator").to_string();
         let host_id = "local".to_string();
@@ -347,6 +417,7 @@ impl Sims {
             id: id.clone(), thread_id: thread.into(), host_id, device_id, device_name,
             started_at: now(), ended_at: None, state: "starting".into(), media_id: None,
             stop_reason: None, error: None, recorder_pid: None, close_pending: true, close_error: None,
+            release_pending: false,
         };
         {
             let mut state = self.state.lock().unwrap();
@@ -415,8 +486,8 @@ impl Sims {
             "status": status,
             "agent_device": agent_device(&session.thread_id, &session.host_id, &session.device_id),
             "next": format!("Drive it with agent_device.command plus agent_device.target_args (or T3's device_screenshot to look). \
-                When you are done with the simulator, run {cli} sim stop --thread {}; the recording then appears in this turn. \
-                If you forget, it stops when your turn ends.", session.thread_id),
+                When you are done with the simulator, run {cli} sim stop --thread {}; the recording then appears in this turn \
+                and the simulator shuts down. If you forget, that happens when your turn ends. Don't boot or create simulators yourself.", session.thread_id),
         })
     }
 
@@ -490,6 +561,7 @@ impl Sims {
             s.state = "filing".into();
             s.ended_at = Some(now());
             s.recorder_pid = None;
+            s.release_pending = true;
             if let Some(pid) = unidentified {
                 s.error = Some(format!("Process {pid} is no longer this session's recorder; it was left alone"));
             }
@@ -625,6 +697,47 @@ impl Sims {
                 self.close(&id).await;
             }
         }
+        if self.releases_owed() {
+            let _op = self.ops.lock().await;
+            self.release(None).await;
+        }
+    }
+
+    fn releases_owed(&self) -> bool {
+        self.state.lock().unwrap().ledger.sessions.iter().any(|s| s.release_pending && !s.holds_device() && !s.close_pending)
+    }
+
+    /// Shuts down the simulators of ended sessions that nothing else holds
+    /// (once their T3 device session is closed). Done or not, each is owed
+    /// once: the pool's own sweep stops one this misses.
+    async fn release(&self, wait: Option<Duration>) {
+        let (owed, leases) = {
+            let state = self.state.lock().unwrap();
+            let owed: Vec<(String, String, String)> = state.ledger.sessions.iter()
+                .filter(|s| s.release_pending && !s.holds_device() && !s.close_pending)
+                .map(|s| (s.id.clone(), s.device_id.to_ascii_uppercase(), s.thread_id.clone())).collect();
+            (owed, state.ledger.sessions.iter().filter(|s| s.holds_device())
+                .map(|s| Lease { device_id: s.device_id.to_ascii_uppercase(), thread_id: s.thread_id.clone() }).collect::<Vec<_>>())
+        };
+        let mut devices: Vec<(&String, &String)> = owed.iter().map(|(_, d, t)| (d, t))
+            .filter(|(d, _)| !leases.iter().any(|l| &l.device_id == *d)).collect();
+        devices.sort();
+        devices.dedup_by(|a, b| a.0 == b.0);
+        for (device, thread) in devices {
+            let released = self.host.release(device, thread, &leases);
+            let result = match wait {
+                Some(wait) => tokio::time::timeout(wait, released).await.unwrap_or_else(|_| Err(anyhow::anyhow!("timed out"))),
+                None => released.await,
+            };
+            if let Err(error) = result {
+                eprintln!("Simulator {device} not shut down after its session: {error:#}");
+            }
+        }
+        let mut state = self.state.lock().unwrap();
+        for session in state.ledger.sessions.iter_mut().filter(|s| owed.iter().any(|(id, ..)| *id == s.id)) {
+            session.release_pending = false;
+        }
+        let _ = self.save(&mut state);
     }
 
     fn due(&self) -> Vec<(String, &'static str)> {
@@ -670,6 +783,7 @@ impl Sims {
         futures_util::future::join_all(owed.iter().map(|id| async move {
             let _ = tokio::time::timeout(Duration::from_secs(3), self.close(id)).await;
         })).await;
+        self.release(Some(Duration::from_secs(4))).await;
         let mut state = self.state.lock().unwrap();
         if state.dirty {
             let _ = self.save(&mut state);
@@ -706,6 +820,8 @@ impl Drop for Startup<'_> {
         session.state = "failed".into();
         session.ended_at = Some(now());
         session.recorder_pid = None;
+        // T3's open may have booted it.
+        session.release_pending = true;
         session.error = Some(self.error.take().unwrap_or_else(|| "The start was cancelled".into()));
         let _ = self.sims.save(&mut state);
     }
@@ -772,6 +888,10 @@ mod tests {
     }
 
     impl Fake {
+        fn count(&self, call: &str) -> usize {
+            self.calls.lock().unwrap().iter().filter(|c| *c == call).count()
+        }
+
         fn closes(&self) -> usize {
             self.calls.lock().unwrap().iter().filter(|c| *c == "device.close").count()
         }
@@ -783,7 +903,8 @@ mod tests {
             let fails = method == "device.close" && self.close_fails.load(std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
                 ensure!(!fails, "disconnected");
-                Ok(json!({"devices": [{"id": "SIM1", "name": "iPhone", "platform": "ios", "hostId": "local", "booted": true}]}))
+                Ok(json!({"devices": [{"id": "SIM1", "name": "iPhone", "platform": "ios", "hostId": "local", "booted": true},
+                                       {"id": "SIM2", "name": "iPad", "platform": "ios", "hostId": "local", "booted": false}]}))
             })
         }
         fn working(&self, _: &str) -> Option<bool> { Some(true) }
@@ -806,6 +927,15 @@ mod tests {
         fn compact<'a>(&'a self, _: &'a Path) -> Pending<'a, Option<PathBuf>> {
             Box::pin(async { None })
         }
+        fn free<'a>(&'a self, _: &'a [Lease]) -> Pending<'a, Vec<String>> {
+            Box::pin(async { vec!["SIM1".into()] })
+        }
+        fn release<'a>(&'a self, device: &'a str, _: &'a str, _: &'a [Lease]) -> Pending<'a, Result<()>> {
+            self.calls.lock().unwrap().push(format!("release {device}"));
+            Box::pin(async { Ok(()) })
+        }
+        fn max_leases(&self) -> usize { 1 }
+        fn title(&self, _: &str) -> Option<String> { None }
     }
 
     fn sims(root: &Path, boot: Option<std::result::Result<(), ()>>) -> (Arc<Sims>, Arc<Fake>) {
@@ -908,5 +1038,27 @@ mod tests {
         assert_eq!(fake.closes(), 1);
         assert!(sims.start(THREAD, None).await.is_err());
         assert!(sims.state.lock().unwrap().recorders.is_empty());
+    }
+
+    /// A session's end shuts its simulator down once T3's device session is
+    /// closed; a start past the limit is refused rather than booting another.
+    #[tokio::test]
+    async fn ended_session_releases_its_simulator_and_the_limit_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sims, fake) = sims(dir.path(), Some(Ok(())));
+        sims.start(THREAD, None).await.unwrap();
+        let other = "0e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
+        assert!(sims.start(other, None).await.unwrap_err().to_string().contains("limit is 1"));
+        sims.stop(Some(THREAD), None).await.unwrap();
+        assert!(only_of(&sims, THREAD).release_pending);
+        sims.tick().await;
+        assert_eq!(fake.count("release SIM1"), 1);
+        assert!(!only_of(&sims, THREAD).release_pending);
+        sims.tick().await;
+        assert_eq!(fake.count("release SIM1"), 1, "released twice");
+    }
+
+    fn only_of(sims: &Sims, thread: &str) -> SimSession {
+        sims.state.lock().unwrap().ledger.sessions.iter().rev().find(|s| s.thread_id == thread).cloned().unwrap()
     }
 }

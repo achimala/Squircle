@@ -964,6 +964,12 @@ impl Agents {
         self.thread(thread).and_then(|t| t["projectId"].as_str().map(str::to_string))
     }
 
+    /// An app agent's or worker's thread (not one the user started in T3).
+    pub fn is_squircle_thread(&self, id: &str) -> bool {
+        let registry = self.registry.lock().unwrap();
+        registry.workers.contains_key(id) || registry.agents.values().any(|a| a.thread_id == id)
+    }
+
     /// A worker's title, even once T3 has archived its thread.
     pub fn worker_title(&self, id: &str) -> Option<String> {
         self.registry.lock().unwrap().workers.get(id).map(|w| w.title.clone())
@@ -1667,7 +1673,7 @@ impl Agents {
         let id = uuid::Uuid::new_v4().to_string();
         let text = format!(
             "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. Remove anything else you create (scratch simulators, temp services or files) before you finish. \
-             To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Drive it with the agent-device command it returns; run {cli} sim stop --thread {id} when done. Don't run agent-device record or device_open. \
+             To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Drive it with the agent-device command it returns; run {cli} sim stop --thread {id} when done (it shuts the simulator down). Use sim start for every simulator: don't boot or create simulators with simctl or xcodebuild, and don't run agent-device record or device_open. \
              For signed builds: {cli} build start --help. \
              A performance recording the user sends from the phone is a linked .perf.json: {cli} perf show PATH summarizes it (hitches with symbolicated main-thread stacks, timeline). \
              The user also reads your replies on their phone: keep them short and plain, show pictures as ![..](/absolute/path) and clips as [..](/absolute/path) \

@@ -44,7 +44,8 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `media add --thread T3_ID --file PATH --caption TEXT` | Publish an mp4/mov/png/jpg into a T3 thread; Squircle shows it inline. Writes this Mac's data directory (private whatever the umask) and refuses a non-loopback `--server`; the service's `POST /v1/t3/threads/{thread}/media` does the same remotely. Simulator flows use `sim start`/`sim stop`, which file their own recordings |
 | `media list --thread T3_ID` | Media published into that thread |
 | `sim start --thread T3_ID [--device NAME\|UDID]` | Open, boot and record a simulator for that thread; returns the agent-device command. The phone shows it live |
-| `sim stop --thread T3_ID`, `sim status [--thread T3_ID]`, `sim devices` | File the recording in the turn and close T3's device session (also when the turn ends); sessions; simulators in use |
+| `sim stop --thread T3_ID`, `sim status [--thread T3_ID]`, `sim devices` | File the recording in the turn, close T3's device session and shut the simulator down (also when the turn ends); every booted simulator with its owner (session, T3 device session, agent outside a session, or unowned) plus sessions; simulators in use |
+| `sim cleanup [--dry-run]` | Apply the simulator policy now: shut down simulators Squircle or its agents booted that nothing holds, delete agent-created ones unused for a day. The service applies it every minute (`SQUIRCLE_SIM_IDLE_MINUTES`, default 10); at most `SQUIRCLE_MAX_SIMULATORS` sessions (default 3) |
 | `logs ID --since N --limit N` | Persisted diagnostic events, record cursor |
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
 | `symbolicate --report PATH --dsym PATH` | Local Xcode symbolication attempt for Apple-text reports |
