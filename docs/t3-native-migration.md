@@ -1909,3 +1909,19 @@ T3's config locally and drops `workspaceSnapshots`, `skills` and
 `slashCommands`: 24 KB (2 KB gzipped). The socket's large-reply allowance is
 gone. T3's shell snapshot is separate: 92 KB for 62 unarchived threads (about
 1.4 KB each), growing until workers are archived.
+
+## 2026-10-15 no hidden agents
+
+Incident: asked to "have Astra xhigh agents scan the codebase", an app agent
+started seven `codex exec` processes from Bash in the background, so nothing
+showed in Threads, Tasks or the chat. Delegated work, reviews and research
+included, must be T3 workers (`squircle thread spawn` with
+`--provider/--model/--effort`). The agent definition and the per-turn note
+say so in one sentence, and the plugin's `PreToolUse` hook
+(`squircle agent guard`, `src/guard.rs`) denies the app agent Bash/Monitor
+commands that run `codex` (other than help, version, login, mcp and the like)
+or `claude` (other than help, version, mcp, config, plugin, doctor, update),
+through env prefixes, full paths, wrappers (`nohup`, `timeout`, `xargs`, …),
+`sh -c`, `eval`, command substitution and `npx`, and the Agent/Task and
+Workflow tools, pointing to the exact `thread spawn` command. Workers run on
+other T3 instances without the plugin and are unaffected.
