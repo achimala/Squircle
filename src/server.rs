@@ -1859,7 +1859,9 @@ struct SpawnWorker {
     branch: String,
     base: Option<String>,
     prompt: String,
+    provider: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
 }
 
 async fn spawn_worker(
@@ -1870,7 +1872,7 @@ async fn spawn_worker(
     auth(&state, &headers, false)?;
     let r = body(payload)?;
     let worker = agents(&state)?
-        .spawn(&r.coordinator, &r.title, &r.branch, r.base.as_deref(), &r.prompt, r.model.as_deref())
+        .spawn(&r.coordinator, &r.title, &r.branch, r.base.as_deref(), &r.prompt, r.provider.as_deref(), r.model.as_deref(), r.effort.as_deref())
         .await
         .map_err(agent_error)?;
     Ok(Json(success(worker)))

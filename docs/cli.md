@@ -70,7 +70,7 @@ directory and adds the T3 instance; `--remove` takes it out).
 | `agent restart --project ID\|--thread ID` | Relaunch the agent's Claude session on the same thread; its next turn gets the current instructions (once, in the turn note) with history kept. Runs when the agent's turn ends |
 | `agent fresh --project ID\|--thread ID [--handoff TEXT]` | Replace the agent with a new thread seeded by a handoff (app, recent commits, workers, recent user messages, last reply, the note); the old thread is renamed "… (until DATE)" and stays in Threads; workers move over. Runs when the agent's turn ends |
 | `agent list`, `agent context [--hook]` | Agents; the per-turn note (thread ID, live workers) its hook injects |
-| `thread spawn --coordinator ID --title T --branch B --prompt P` | Worker thread in its own worktree, branched from the checkout's current branch |
+| `thread spawn --coordinator ID --title T --branch B --prompt P [--provider codex] [--model M] [--effort E]` | Worker thread in its own worktree, branched from the checkout's current branch; Claude by default, any ready T3 provider/model/effort (checked against T3's server config) |
 | `thread send ID TEXT`, `thread read ID`, `thread answer ID TEXT` | Message, inspect (last reply, diff stat, pending question), answer |
 | `thread status [--coordinator ID]`, `thread archive ID [--discard]` | Worker states; archive after merge removes the worktree and deletes the branch, refusing unmerged commits (`git cherry` against the base) or uncommitted changes unless `--discard` |
 | `thread cleanup --coordinator ID [--dry-run]` | Archive finished workers whose work is merged, delete merged branches of earlier archived workers, prune stale worktrees; lists what it leaves and why |
