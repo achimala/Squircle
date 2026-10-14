@@ -970,4 +970,41 @@ mod tests {
         assert_eq!(fs::read(&outside)?, b"do not change");
         Ok(())
     }
+
+    #[test]
+    fn job_index_owns_leases_and_serves_a_result_the_disk_refused() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let store = Store::open(temporary.path().to_owned())?;
+        let jobs = Jobs::open(&store)?;
+        let mut queued = job();
+        queued.origin = BuildOrigin::Project {
+            request: serde_json::from_value(json!({"project": "/P.xcodeproj", "scheme": "P", "configuration": "Debug",
+                "mode": "simulator", "export_options": null, "request_id": "k"}))?,
+            provenance: Default::default(),
+        };
+        queued.phase = JobPhase::Queued;
+        let lease = jobs.admit(queued.clone()).unwrap();
+        assert!(matches!(jobs.begin_preview(&queued.id), Err(AdmitError::Busy)));
+        assert_eq!(jobs.with_request_id("k").map(|v| v.job.id), Some(queued.id.clone()));
+        // Cancellation reaches the live operation.
+        assert_eq!(jobs.cancel(&queued.id), Some((BuildState::Queued, Some(OperationKind::Build))));
+        assert!(*lease.cancelled.borrow());
+        // The disk refuses the terminal write: the result is still what readers see.
+        let directory = store.job_dir(&queued.id)?;
+        fs::remove_dir_all(&directory)?;
+        fs::write(&directory, b"not a directory")?;
+        let mut cancelled = queued.clone();
+        cancelled.phase = JobPhase::Cancelled { message: None };
+        let stale = Lease { id: queued.id.clone(), lease: 0, cancelled: lease.cancelled.clone() };
+        assert!(jobs.finish(lease, &cancelled).is_err());
+        let view = jobs.get(&queued.id).unwrap();
+        assert_eq!((view.job.state(), view.revision), (BuildState::Cancelled, 2));
+        assert!(matches!(view.record, Record::UnpersistedTerminal { .. }));
+        assert!(serde_json::to_value(&view)?["persistence_error"].is_string());
+        assert_eq!(jobs.operations(), 0);
+        // An ended lease commits nothing more.
+        assert!(jobs.commit(&stale, &queued).is_err());
+        assert_eq!(jobs.get(&queued.id).unwrap().job.state(), BuildState::Cancelled);
+        Ok(())
+    }
 }

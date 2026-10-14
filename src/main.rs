@@ -340,7 +340,7 @@ enum TaskCommand {
         #[arg(long, help = "One line saying what it shows")]
         caption: Option<String>,
     },
-    /// The app's tasks, open first; --all adds done ones and History.
+    /// The app's tasks, open first; --all adds done ones and History, newest first, a page at a time.
     List {
         #[arg(long, help = "Your thread ID (the app is taken from it)")]
         thread: Option<String>,
@@ -348,6 +348,8 @@ enum TaskCommand {
         project: Option<String>,
         #[arg(long)]
         all: bool,
+        #[arg(long, requires = "all", help = "With --all: the next History page, from a reply's history_next")]
+        history_before: Option<String>,
     },
     /// One task with its linked threads, builds, media and history.
     Show { id: String },
@@ -1140,17 +1142,23 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             TaskCommand::Attach { id, file, caption } => post(cli, &format!("/v1/tasks/{}/media", task_id(id)?),
                 json!({"file":std::path::absolute(file)?,"caption":caption})).await?,
             TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,
-            TaskCommand::List { thread, project, all } => {
+            TaskCommand::List { thread, project, all, history_before } => {
                 let query = url::form_urlencoded::Serializer::new(String::new())
-                    .extend_pairs(thread.as_ref().map(|t| ("thread", t)))
-                    .extend_pairs(project.as_ref().map(|p| ("project", p))).finish();
+                    .extend_pairs(thread.as_ref().map(|t| ("thread", t.as_str())))
+                    .extend_pairs(project.as_ref().map(|p| ("project", p.as_str())))
+                    .extend_pairs(history_before.as_ref().map(|c| ("history_before", c.as_str())))
+                    // Without --all History is dropped anyway; don't expand it.
+                    .extend_pairs((!*all).then_some(("history_limit", "1"))).finish();
                 let mut value = get(cli, &format!("/v1/tasks?{query}")).await?;
                 if !*all && value["ok"] == true {
                     let data = &mut value["data"];
                     if let Some(tasks) = data["tasks"].as_array_mut() {
                         tasks.retain(|t| !matches!(t["status"].as_str(), Some("done" | "dropped")));
                     }
-                    if let Some(object) = data.as_object_mut() { object.remove("history"); }
+                    if let Some(object) = data.as_object_mut() {
+                        object.remove("history");
+                        object.remove("history_next");
+                    }
                 }
                 value
             }

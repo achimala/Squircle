@@ -800,19 +800,27 @@ async fn import_app(
     Ok(Json(success(public_app(app))))
 }
 
+// App records are replaced atomically, so reads need no record lock; the
+// catalog scan and preview checks are file I/O, kept off the async workers.
 async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let apps = apps::list(&state.store.lock().unwrap()).map_err(ApiError::internal)?;
-    Ok(Json(success(
-        apps.into_iter().map(public_app).collect::<Vec<_>>(),
-    )))
+    let apps = tokio::task::spawn_blocking(move || {
+        apps::list(&state.files).map(|apps| apps.into_iter().map(public_app).collect::<Vec<_>>())
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    Ok(Json(success(apps)))
 }
 
 async fn get_app(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let app = apps::get(&state.store.lock().unwrap(), &id).map_err(ApiError::missing)?;
-    Ok(Json(success(public_app(app))))
+    let app = tokio::task::spawn_blocking(move || apps::get(&state.files, &id).map(public_app))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::missing)?;
+    Ok(Json(success(app)))
 }
 
 async fn register_app(
@@ -1583,7 +1591,7 @@ async fn build_log(
     page: std::result::Result<Query<LogPage>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let page = parse_query(page)?;
-    state.files.load_job(&id).map_err(ApiError::missing)?;
+    state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     let path = state.files.job_dir(&id).map_err(ApiError::bad)?.join("build.log");
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut file = match tokio::fs::File::open(path).await {
@@ -1644,6 +1652,28 @@ mod tests {
         let mut unzipped = Vec::new();
         std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut unzipped).unwrap();
         assert_eq!(unzipped, body);
+    }
+
+    #[test]
+    fn history_pages_are_stable_and_complete() {
+        let at = |t: &(&'static str, u64)| HistoryCursor { archived_at: t.1, id: t.0.into() };
+        let history = || vec![("a", 5), ("b", 9), ("c", 5), ("d", 1), ("e", 7)];
+        let mut seen = vec![];
+        let mut cursor = None;
+        loop {
+            let (page, next) = history_page(history(), at, cursor.as_ref(), 2);
+            seen.extend(page.into_iter().map(|t| t.0));
+            match next {
+                Some(next) => cursor = Some(HistoryCursor::parse(&next.to_string()).unwrap()),
+                None => break,
+            }
+        }
+        assert_eq!(seen, ["b", "e", "c", "a", "d"]);
+        // A task leaving History doesn't shift the next page.
+        let first = history_page(history(), at, None, 2).1.unwrap();
+        let fewer: Vec<_> = history().into_iter().filter(|t| t.0 != "b").collect();
+        assert_eq!(history_page(fewer, at, Some(&first), 2).0.iter().map(|t| t.0).collect::<Vec<_>>(), ["c", "a"]);
+        assert!(HistoryCursor::parse("x").is_err());
     }
 
     #[tokio::test]
@@ -2302,7 +2332,7 @@ async fn list_tasks(
         let mut all = tasks.list(&project);
         all.sort_by(|a, b| a.order.total_cmp(&b.order));
         let (history, active): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.archived_at.is_some());
-        let (page, next) = history_page(history, before.as_ref(), limit);
+        let (page, next) = history_page(history, HistoryCursor::of, before.as_ref(), limit);
         json!({
             "project_id": project,
             "tasks": active.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
@@ -2345,16 +2375,22 @@ impl std::fmt::Display for HistoryCursor {
 
 /// One page of History after `before`, newest first, and the cursor for the
 /// next page if there is more. Stable while tasks enter History or leave it.
-fn history_page(mut history: Vec<tasks::Task>, before: Option<&HistoryCursor>, limit: usize) -> (Vec<tasks::Task>, Option<HistoryCursor>) {
-    history.sort_by(|a, b| HistoryCursor::of(a).key().cmp(&HistoryCursor::of(b).key()));
-    let mut page: Vec<tasks::Task> = history.into_iter()
-        .filter(|t| before.is_none_or(|b| HistoryCursor::of(t).key() > b.key()))
+fn history_page<T>(
+    history: Vec<T>,
+    position: impl Fn(&T) -> HistoryCursor,
+    before: Option<&HistoryCursor>,
+    limit: usize,
+) -> (Vec<T>, Option<HistoryCursor>) {
+    let mut history: Vec<(HistoryCursor, T)> = history.into_iter().map(|t| (position(&t), t)).collect();
+    history.sort_by(|a, b| a.0.key().cmp(&b.0.key()));
+    let mut page: Vec<(HistoryCursor, T)> = history.into_iter()
+        .filter(|(at, _)| before.is_none_or(|b| at.key() > b.key()))
         .take(limit + 1)
         .collect();
     let more = page.len() > limit;
     page.truncate(limit);
-    let next = if more { page.last().map(HistoryCursor::of) } else { None };
-    (page, next)
+    let next = if more { page.last().map(|(at, _)| at.clone()) } else { None };
+    (page.into_iter().map(|(_, t)| t).collect(), next)
 }
 
 #[derive(Deserialize)]
