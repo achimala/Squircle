@@ -10,6 +10,8 @@ final class ThreadsViewController: UIViewController {
     private let model: SquircleModel
     private var project: AppProject
     private let scroll = UIScrollView()
+    /// The list, for a host that floats its own controls over it.
+    var scrollView: UIScrollView { loadViewIfNeeded(); return scroll }
     private let rows = UIStackView()
     private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
     private let titleLabel = Theme.label("Threads", Theme.font(.headline, 17, .semibold))

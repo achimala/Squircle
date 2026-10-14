@@ -19,8 +19,11 @@ user or auto).
 question → needs you; a worker working or a build queued/running → in
 progress; the newest linked build succeeded → ready to try. An explicit
 status from the agent or the user holds until a linked worker's or build's
-state changes (the task remembers the states it last saw). The service checks
-every 3 s.
+state changes (the task remembers the states it last saw). A link going
+missing (an archived worker) doesn't count. Once done or dropped, a task
+reopens only for new work: a new linked worker or build, or a linked worker
+working or asking again; old work finishing leaves it closed (2026-10-14,
+after the user's Done kept reverting). The service checks every 3 s.
 
 **History:** done and dropped tasks leave the active list after a day, open
 ones that nothing touched for three days too. Nothing is deleted; any change
@@ -43,8 +46,11 @@ instructions say the same.
   Done (today's). Rows show the ask, the note, linked threads as chips (tap
   opens the thread), thumbnails (tap opens the picture or plays the clip) and
   Install when a linked build is ready. Tapping a row opens its most relevant
-  thread. Swipe: Done / Drop, or Top; long press: any status, Move to Top.
-  + adds a task. History folds at the bottom, with search.
+  thread. Swipe: Done / Drop (the row moves at once), or Top; long press:
+  any status, Move to Top. History folds at the bottom, with search. No +:
+  tasks come only from what you tell the agent (user, 2026-10-14). The
+  header is the close button and the switch on glass over a soft scroll
+  edge; group names are small labels that scroll with their rows.
 - **Strip** above the message field on the agent while tasks are open:
   "1 needs you · 5 working · 3 to try"; tapping opens Tasks. The conversation
   keeps clear of it (it counts as part of the field for the bottom inset).

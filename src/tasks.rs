@@ -138,11 +138,25 @@ impl Task {
         self.archived_at = None;
     }
 
-    /// Follows linked workers and builds: when their states differ from
-    /// what was last seen, the status they imply replaces the current one.
+    /// Follows linked workers and builds: when one of them has news since
+    /// the status was last decided, the status they imply replaces the
+    /// current one. A link going missing (an archived worker) is no news.
+    /// A done or dropped task reopens only for new work: a new link, or a
+    /// linked worker working or asking again, not old work finishing.
     /// Returns whether anything changed.
     pub fn follow(&mut self, signature: &str, derived: Option<Status>, now: u64) -> bool {
         if self.seen == signature {
+            return false;
+        }
+        let seen: Vec<&str> = self.seen.split(' ').collect();
+        let news: Vec<(&str, &str)> = signature.split(' ')
+            .filter(|entry| !entry.is_empty() && !seen.contains(entry))
+            .filter_map(|entry| entry.rsplit_once(':'))
+            .filter(|(_, state)| *state != "missing")
+            .collect();
+        let linked = |id: &str| seen.iter().any(|entry| entry.rsplit_once(':').is_some_and(|(seen, _)| seen == id));
+        let new_work = news.iter().any(|(id, state)| !linked(id) || matches!(*state, "working" | "needs-you"));
+        if news.is_empty() || (!self.status.open() && !new_work) {
             return false;
         }
         self.seen = signature.to_string();
@@ -356,6 +370,27 @@ mod tests {
         task.set(Status::Done, By::User, None, 14);
         task.follow("w:done", derive(&["done"], &[]), 15);
         assert_eq!(task.status, Status::Done);
+    }
+
+    #[test]
+    fn a_closed_task_reopens_only_for_new_work() {
+        let mut task = task();
+        task.follow("w:working b:running", derive(&["working"], &["running"]), 10);
+        // The user calls it done while the worker and its build still run.
+        task.set(Status::Done, By::User, None, 11);
+        task.seen = "w:working b:running".into();
+        // Old work finishing, or the worker being archived, leaves it done.
+        assert!(!task.follow("w:done b:succeeded", derive(&["done"], &["succeeded"]), 12));
+        assert!(!task.follow("w:missing b:succeeded", derive(&["missing"], &["succeeded"]), 13));
+        assert_eq!(task.status, Status::Done);
+        // A new build is new work.
+        assert!(task.follow("w:missing b:succeeded c:running", derive(&["missing"], &["succeeded", "running"]), 14));
+        assert_eq!(task.status, Status::InProgress);
+        // An open status ignores a worker going missing too.
+        task.set(Status::NeedsYou, By::Agent, None, 15);
+        task.seen = "w:done b:succeeded c:succeeded".into();
+        assert!(!task.follow("w:missing b:succeeded c:succeeded", derive(&["missing"], &["succeeded", "succeeded"]), 16));
+        assert_eq!(task.status, Status::NeedsYou);
     }
 
     #[test]

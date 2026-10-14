@@ -12,8 +12,13 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     private var project: AppProject
     private let tabs = UISegmentedControl(items: ["Tasks", "Threads"])
     private let close = Theme.glassButton(symbol: "xmark", identifier: "tasks.close", accessibilityLabel: "Close")
-    private let create = Theme.glassButton(symbol: "plus", identifier: "tasks.new", accessibilityLabel: "Add task")
-    private let table = UITableView(frame: .zero, style: .plain)
+    private let header = UIView()
+    /// The switch sits on glass like the close button, so rows passing
+    /// under it don't show through.
+    private let tabsGlass = Theme.glassSurface(cornerRadius: 20)
+    // Grouped, so the small group names scroll with their rows instead of
+    // sticking over them.
+    private let table = UITableView(frame: .zero, style: .grouped)
     private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
     private lazy var threads = ThreadsViewController(model: model, project: project, embedded: true)
     private var dataSource: UITableViewDiffableDataSource<Group, String>!
@@ -62,7 +67,6 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         super.viewDidLoad()
         if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
-        create.addAction(UIAction { [weak self] _ in self?.createTapped() }, for: .touchUpInside)
         tabs.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.renderTab() }, for: .valueChanged)
 
         table.backgroundColor = .clear
@@ -70,6 +74,10 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         table.delegate = self
         table.keyboardDismissMode = .onDrag
         table.sectionHeaderTopPadding = 0
+        table.sectionFooterHeight = 0
+        table.tableHeaderView = UIView(frame: CGRect(x: 0, y: 0, width: 0, height: CGFloat.leastNonzeroMagnitude))
+        table.contentInsetAdjustmentBehavior = .never
+        table.register(TaskGroupHeader.self, forHeaderFooterViewReuseIdentifier: "group")
         table.register(TaskCell.self, forCellReuseIdentifier: "task")
         table.register(TaskSearchCell.self, forCellReuseIdentifier: Self.searchRow)
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] table, path, id in
@@ -107,33 +115,49 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         dataSource.defaultRowAnimation = .fade
 
         notice.textAlignment = .center
-        let header = UIView()
-        [header, table, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
-        [close, tabs, create].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; header.addSubview($0) }
+        [table, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         addChild(threads)
         threads.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(threads.view)
         threads.didMove(toParent: self)
+        // The lists run under the controls, which float on the sheet's own
+        // glass; rows fade softly beneath them.
+        header.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(header)
+        [close, tabsGlass].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; header.addSubview($0) }
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        tabsGlass.contentView.addSubview(tabs)
+        if #available(iOS 26.0, *) {
+            table.topEdgeEffect.style = .soft
+            threads.scrollView.topEdgeEffect.style = .soft
+            let edge = UIScrollEdgeElementContainerInteraction()
+            edge.edge = .top
+            header.addInteraction(edge)
+            self.edge = edge
+        }
+        threads.scrollView.contentInsetAdjustmentBehavior = .never
         threads.onOpen = { [weak self] id in self?.onOpen?(id) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 18),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
-            header.heightAnchor.constraint(equalToConstant: 44),
+            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 14),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            header.heightAnchor.constraint(equalToConstant: 40),
             close.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             close.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            close.widthAnchor.constraint(equalToConstant: 44), close.heightAnchor.constraint(equalToConstant: 44),
-            create.trailingAnchor.constraint(equalTo: header.trailingAnchor),
-            create.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            create.widthAnchor.constraint(equalToConstant: 44), create.heightAnchor.constraint(equalToConstant: 44),
-            tabs.centerXAnchor.constraint(equalTo: header.centerXAnchor),
-            tabs.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            tabs.widthAnchor.constraint(equalToConstant: 200),
-            table.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+            close.widthAnchor.constraint(equalToConstant: 40), close.heightAnchor.constraint(equalToConstant: 40),
+            tabsGlass.centerXAnchor.constraint(equalTo: header.centerXAnchor),
+            tabsGlass.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            tabsGlass.widthAnchor.constraint(equalToConstant: 196),
+            tabsGlass.heightAnchor.constraint(equalToConstant: 40),
+            tabs.topAnchor.constraint(equalTo: tabsGlass.contentView.topAnchor, constant: 3),
+            tabs.bottomAnchor.constraint(equalTo: tabsGlass.contentView.bottomAnchor, constant: -3),
+            tabs.leadingAnchor.constraint(equalTo: tabsGlass.contentView.leadingAnchor, constant: 3),
+            tabs.trailingAnchor.constraint(equalTo: tabsGlass.contentView.trailingAnchor, constant: -3),
+            table.topAnchor.constraint(equalTo: view.topAnchor),
             table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            threads.view.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+            threads.view.topAnchor.constraint(equalTo: view.topAnchor),
             threads.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             threads.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             threads.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -158,13 +182,28 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     }
 
     private var onTasks: Bool { tabs.selectedSegmentIndex == 0 }
+    /// Tells the soft top edge of the shown list where the controls are.
+    private var edge: UIInteraction?
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        // Both lists start just below the controls and scroll up under them.
+        let top = header.frame.maxY + 4
+        for scroll in [table, threads.scrollView] where scroll.contentInset.top != top {
+            let atTop = scroll.contentOffset.y <= -scroll.contentInset.top
+            scroll.contentInset.top = top
+            scroll.verticalScrollIndicatorInsets.top = top
+            if atTop { scroll.contentOffset.y = -top }
+        }
+    }
 
     private func renderTab() {
         table.isHidden = !onTasks
         threads.view.isHidden = onTasks
         notice.isHidden = !onTasks || !list.tasks.isEmpty || !list.history.isEmpty
-        create.accessibilityLabel = onTasks ? "Add task" : "New thread"
-        create.configuration?.image = UIImage(systemName: onTasks ? "plus" : "square.and.pencil")
+        if #available(iOS 26.0, *), let edge = edge as? UIScrollEdgeElementContainerInteraction {
+            edge.scrollView = onTasks ? table : threads.scrollView
+        }
     }
 
     private func task(_ id: String) -> AppTask? {
@@ -204,29 +243,26 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             let old = previous.tasks.first { $0.id == task.id } ?? previous.history.first { $0.id == task.id }
             return old != nil && old != task
         }.map(\.id).filter { snapshot.itemIdentifiers.contains($0) }
-        snapshot.reconfigureItems(changed)
-        dataSource.apply(snapshot, animatingDifferences: previous != AppTasks() && view.window != nil)
+        // The model changes every few seconds for unrelated reasons. Applying
+        // an unchanged list anyway resets an open swipe, and its Done and Drop
+        // then ignore taps.
+        let current = dataSource.snapshot()
+        let same = current.sectionIdentifiers == snapshot.sectionIdentifiers && snapshot.sectionIdentifiers.allSatisfy {
+            current.itemIdentifiers(inSection: $0) == snapshot.itemIdentifiers(inSection: $0)
+        }
+        if !same || !changed.isEmpty {
+            snapshot.reconfigureItems(changed)
+            dataSource.apply(snapshot, animatingDifferences: previous != AppTasks() && view.window != nil)
+        }
+        // Group headers aren't reloaded with their rows; their counts are kept here.
+        for (index, group) in snapshot.sectionIdentifiers.enumerated() {
+            (table.headerView(forSection: index) as? TaskGroupHeader).map { configure($0, group) }
+        }
         notice.text = model.error == nil ? "No tasks yet" : model.error
         renderTab()
     }
 
     // MARK: Actions
-
-    private func createTapped() {
-        guard onTasks else { onOpen?(nil); return }
-        let alert = UIAlertController(title: "New task", message: nil, preferredStyle: .alert)
-        alert.addTextField { field in
-            field.placeholder = "What do you want done?"
-            field.autocapitalizationType = .sentences
-        }
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Add", style: .default) { [weak self, weak alert] _ in
-            guard let self, let text = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !text.isEmpty else { return }
-            Task { await self.model.addTask(text, in: self.project) }
-        })
-        present(alert, animated: true)
-    }
 
     private func set(_ task: AppTask, _ status: AppTask.Status? = nil, toTop: Bool = false) {
         Theme.selectionHaptic()
@@ -278,17 +314,19 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         guard let group = dataSource.sectionIdentifier(for: section) else { return nil }
-        let count = group == .history ? list.history.count : dataSource.snapshot().numberOfItems(inSection: group)
-        let header = TaskGroupHeader()
-        header.configure(group.title, count: count, color: group.color,
-                         chevron: group == .history ? (showsHistory ? "chevron.up" : "chevron.down") : nil)
-        if group == .history {
-            header.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(toggleHistory)))
-        }
+        let header = tableView.dequeueReusableHeaderFooterView(withIdentifier: "group") as! TaskGroupHeader
+        configure(header, group)
         return header
     }
 
-    @objc private func toggleHistory() {
+    private func configure(_ header: TaskGroupHeader, _ group: Group) {
+        let count = group == .history ? list.history.count : dataSource.snapshot().numberOfItems(inSection: group)
+        header.configure(group.title, count: count, color: group.color,
+                         chevron: group == .history ? (showsHistory ? "chevron.up" : "chevron.down") : nil)
+        header.onTap = group == .history ? { [weak self] in self?.toggleHistory() } : nil
+    }
+
+    private func toggleHistory() {
         Theme.selectionHaptic()
         showsHistory.toggle()
         if !showsHistory { query = "" }
@@ -347,28 +385,33 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     }
 }
 
-/// A status group's name and count, as plain coloured text.
-private final class TaskGroupHeader: UIView {
-    private let name = Theme.label("", Theme.font(.subheadline, 15, .semibold))
-    private let count = Theme.label("", Theme.font(.subheadline, 15, .semibold), color: .tertiaryLabel)
+/// A status group's name and count: a small coloured label over its rows.
+private final class TaskGroupHeader: UITableViewHeaderFooterView {
+    var onTap: (() -> Void)?
+    private let name = Theme.label("", Theme.font(.footnote, 13, .semibold))
+    private let count = Theme.label("", Theme.font(.footnote, 13), color: .tertiaryLabel)
     private let chevron = UIImageView()
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    override init(reuseIdentifier: String?) {
+        super.init(reuseIdentifier: reuseIdentifier)
+        backgroundConfiguration = .clear()
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
         chevron.tintColor = .tertiaryLabel
         chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .footnote, scale: .small)
         let line = UIStackView(arrangedSubviews: [name, count, chevron, UIView()])
-        line.spacing = 6
-        line.alignment = .center
+        line.spacing = 5
+        line.alignment = .firstBaseline
         line.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(line)
+        contentView.addSubview(line)
         NSLayoutConstraint.activate([
-            line.topAnchor.constraint(equalTo: topAnchor, constant: 18),
-            line.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
-            line.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 28),
-            line.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24)
+            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
+            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
+            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28),
+            line.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24)
         ])
     }
+
+    @objc private func tapped() { onTap?() }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
