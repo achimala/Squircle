@@ -62,13 +62,16 @@ final class GlassJelly: UIView {
 
     private let shadow = CAShapeLayer()
     private let frost = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
-    /// The blur shows exactly where the jelly is: its coverage, drawn by the
-    /// same shader at a lower resolution.
-    private let frostMask = MetalView()
+    /// The blur shows where the jelly is: its outline, as a path (a second
+    /// Metal pass here cost a whole frame on the phone).
+    private let frostMask = ShapeView()
     private let contentMask = CAShapeLayer()
     /// One layer draws the whole jelly: pill or panel, neck and cube.
     private let metal = CAMetalLayer()
     private static let margin: CGFloat = 60
+    /// The Metal layer's size grows and shrinks in steps of this many
+    /// points, so resizing the panel doesn't reallocate drawables each frame.
+    private static let sizeStep: CGFloat = 96
 
     // Blob: squash (points the sides move out, the top and bottom in),
     // shear (points the top moves left), lag (points behind the frame).
@@ -114,21 +117,26 @@ final class GlassJelly: UIView {
     private var last: CFTimeInterval?
     private var drawn: JellyUniforms?
     private var drawnCanvas = CGRect.zero
+    /// The owner's layout drew since the last tick: the tick needn't.
+    private var drewInLayout = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         shadow.fillColor = UIColor.clear.cgColor
         shadow.shadowOffset = CGSize(width: 0, height: 6)
         layer.addSublayer(shadow)
+        frostMask.shape.fillColor = UIColor.black.cgColor
         frost.mask = frostMask
         frost.isUserInteractionEnabled = false
         addSubview(frost)
-        for target in [metal, frostMask.metal] {
-            target.device = JellyRenderer.device
-            target.pixelFormat = .bgra8Unorm
-            target.isOpaque = false
-            target.framebufferOnly = true
-        }
+        metal.device = JellyRenderer.device
+        metal.pixelFormat = .bgra8Unorm
+        metal.isOpaque = false
+        metal.framebufferOnly = true
+        // Drawn on the main thread, in the same transaction as the text it
+        // carries (see `render`).
+        metal.presentsWithTransaction = true
+        metal.anchorPoint = .zero
         layer.addSublayer(metal)
         contentMask.fillColor = UIColor.black.cgColor
         content.layer.mask = contentMask
@@ -170,6 +178,9 @@ final class GlassJelly: UIView {
         creatureSquash.velocity -= 1.2
     }
 
+    /// The creature is never still (it breathes, blinks and glances), so a
+    /// display link runs at the screen's full rate whenever it is on screen;
+    /// iOS stops it with the app in the background, and it ends with the window.
     override func didMoveToWindow() {
         super.didMoveToWindow()
         link?.invalidate()
@@ -177,12 +188,9 @@ final class GlassJelly: UIView {
         last = nil
         guard window != nil else { return }
         metal.contentsScale = min(2, window?.screen.scale ?? 2)
-        metal.presentsWithTransaction = true
-        frostMask.metal.presentsWithTransaction = true
-        frostMask.metal.contentsScale = 1
         let proxy = DisplayLinkProxy { [weak self] link in self?.tick(link) }
         let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         self.link = link
     }
@@ -192,23 +200,35 @@ final class GlassJelly: UIView {
     func layoutChanged() {
         guard window != nil else { return }
         draw()
+        drewInLayout = true
     }
 
     private func tick(_ link: CADisplayLink) {
+        // Real time between frames, however late they come; long gaps (a
+        // stall, the app returning) skip ahead rather than replay.
         let now = link.targetTimestamp
-        var dt = CGFloat(min(1.0 / 20.0, max(0.001, now - (last ?? (now - link.duration)))))
+        var dt = CGFloat(min(0.25, max(0.001, now - (last ?? (now - link.duration)))))
         #if DEBUG
         dt /= CGFloat(SpringDriver.debugSlowMotion)
         #endif
         last = now
-        time += dt
-        toneTime += dt
         sense(dt)
-        stepBlob(dt)
-        stepCreature(dt)
-        stepFace(dt)
-        stepBridge(dt)
-        draw()
+        // The springs step at most a 60th of a second at a time, so a slow
+        // frame moves them as far as it should without going unstable.
+        var left = min(dt, 0.1)
+        while left > 1e-4 {
+            let h = min(left, 1.0 / 60.0)
+            left -= h
+            time += h
+            toneTime += h
+            stepBlob(h)
+            stepCreature(h)
+            stepFace(h)
+            stepBridge(h)
+        }
+        time += dt - min(dt, 0.1)
+        toneTime += dt - min(dt, 0.1)
+        if drewInLayout { drewInLayout = false } else { draw() }
     }
 
     // MARK: Blob
@@ -559,7 +579,17 @@ final class GlassJelly: UIView {
         CATransaction.setDisableActions(true)
         frost.frame = canvas
         frostMask.frame = frost.bounds
-        if frostMask.metal.drawableSize != canvas.size { frostMask.metal.drawableSize = canvas.size }
+        let toCanvas = CGAffineTransform(translationX: -canvas.minX, y: -canvas.minY)
+        let covered = CGMutablePath()
+        covered.addPath(outline, transform: toCanvas)
+        if bridgeConnected {
+            let neck = CGMutablePath()
+            neck.move(to: rootNow)
+            neck.addLine(to: creature)
+            covered.addPath(neck.copy(strokingWithWidth: 2 * min(Self.endRadius, waist + 3), lineCap: .round, lineJoin: .round,
+                                      miterLimit: 1, transform: toCanvas))
+        }
+        frostMask.shape.path = covered
         // One soft shadow in its colour.
         shadow.frame = bounds
         shadow.shadowPath = outline
@@ -575,16 +605,19 @@ final class GlassJelly: UIView {
         var toContent = CGAffineTransform(translationX: bodyRect.midX, y: bodyRect.midY)
         contentMask.frame = content.bounds
         contentMask.path = rest.copy(using: &toContent)
-        if metal.frame != canvas {
-            metal.frame = canvas
-            metal.drawableSize = CGSize(width: canvas.width * metal.contentsScale, height: canvas.height * metal.contentsScale)
+        // The layer starts at the canvas and is at least as large, in steps.
+        var size = metal.bounds.size
+        func stepped(_ needed: CGFloat, _ now: CGFloat) -> CGFloat {
+            needed > now || needed < now - 2 * Self.sizeStep ? ceil(needed / Self.sizeStep) * Self.sizeStep : now
         }
-        CATransaction.commit()
+        size = CGSize(width: stepped(canvas.width, size.width), height: stepped(canvas.height, size.height))
+        metal.position = canvas.origin
+        if metal.bounds.size != size {
+            metal.bounds = CGRect(origin: .zero, size: size)
+            metal.drawableSize = CGSize(width: size.width * metal.contentsScale, height: size.height * metal.contentsScale)
+        }
         render(&u, into: metal)
-        var coverage = u
-        coverage.mode = 2
-        coverage.scale = 1
-        render(&coverage, into: frostMask.metal)
+        CATransaction.commit()
     }
 
     private var fillVector: SIMD4<Float> {
@@ -606,8 +639,14 @@ final class GlassJelly: UIView {
         encoder.setFragmentBytes(&u, length: MemoryLayout<JellyUniforms>.stride, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
-        commands.present(drawable)
+        // With `presentsWithTransaction`, the drawable must be presented from
+        // this thread once the GPU has the work, so it lands in this
+        // transaction. (Presenting from the command buffer did so from a
+        // Metal thread, outside any flushed transaction: on the phone the
+        // drawables stayed held and `nextDrawable` blocked the main thread.)
         commands.commit()
+        commands.waitUntilScheduled()
+        drawable.present()
     }
 }
 
@@ -630,12 +669,6 @@ private struct Mode {
             if value * velocity > 0 { velocity *= -0.3 }
         }
     }
-}
-
-/// A view whose layer Metal draws into, for masks.
-final class MetalView: UIView {
-    override class var layerClass: AnyClass { CAMetalLayer.self }
-    var metal: CAMetalLayer { layer as! CAMetalLayer }
 }
 
 /// A view whose layer is a shape, for masks.
@@ -900,6 +933,34 @@ enum JellyRenderer {
         return smin(smin(body, neck, 7.0), head, 7.0);
     }
 
+    // The face, paper and material on a point of the surface.
+    static float4 shade(float3 pos, float3 n, float dBody, float dHead, float2 rested, float px, Scene sc, constant Uniforms& u) {
+        // Faces turned up a touch lighter, so the cube reads as a cube.
+        float shape = 1.0 + 0.25 * (-n.y) - 0.1 * abs(n.x);
+        float4 j = jelly(n, float3(0.0, 0.0, -1.0), shape, u);
+        float3 col = j.rgb;
+        float a = j.a;
+
+        // Paper inside the panel as it opens (its flat front only), so text reads.
+        float bevel = clamp(min(u.half_.x, u.half_.y) * 0.8, 5.0, 16.0);
+        float depth = clamp(-blob(rested, u) / bevel, 0.0, 1.0);
+        float bodyness = smoothstep(2.0, -0.5, dBody);
+        float f = u.fill.a * smoothstep(0.15, 0.9, depth) * smoothstep(0.75, 0.97, -n.z) * bodyness;
+        col = col * (1.0 - f) + u.fill.rgb * f;
+        a = a * (1.0 - f) + f;
+
+        // The face, on the cube's front.
+        if (dHead < 3.0) {
+            float3 l = sc.inv * (pos - sc.cube);
+            float front = smoothstep(-sc.s * 0.2, -sc.s * 0.34, l.z) * smoothstep(3.0, 0.5, dHead);
+            float4 face = eyes(l.xy / u.stubs.z, px * 0.9, u.tint.rgb, u);
+            float k = face.a * front;
+            col = col * (1.0 - k) + face.rgb * k;
+            a = clamp(a * (1.0 - k) + k, 0.0, 1.0);
+        }
+        return float4(min(col, float3(a)), a);
+    }
+
     fragment float4 jellyFragment(VOut in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
         float2 p = in.position.xy / u.scale + u.origin;
         float px = 1.0 / u.scale;
@@ -907,11 +968,29 @@ enum JellyRenderer {
         sc.inv = transpose(turn(u.pose.x, u.pose.y, u.pose.z));
         sc.cube = float3(u.creature.xy, 0.0);
         sc.s = u.creature.z * u.stubs.z;
-        // Far from everything: nothing to march.
         float2 q2 = rest(p, u);
-        float bound = min(blob(q2, u), length(p - u.creature.xy) - sc.s * 0.95);
-        bound = min(bound, segment(p, u.gaze.zw, u.creature.xy) - u.bridge.z);
-        if (bound > 10.0) { return float4(0.0); }
+        float d2 = blob(q2, u);
+        // The outline's slope on screen (before any branch), for the bevel.
+        float2 slope = float2(dfdx(d2), dfdy(d2)) * u.scale;
+        // How close the cube and the neck come, as seen from the front (a
+        // bound on their 3D distance, squashed or turned).
+        float near = min(length(p - u.creature.xy) - sc.s * 1.15, segment(p, u.gaze.zw, u.creature.xy) - u.bridge.z);
+        // Far from everything: nothing to draw.
+        if (min(d2, near) > 10.0) { return float4(0.0); }
+
+        if (near > 8.0) {
+            // Only the body here (the joins' smooth unions reach 7 points):
+            // its extruded outline is solved directly, no marching.
+            float T = clamp(min(u.half_.x, u.half_.y) * 0.55, 8.0, 12.0);
+            float wx = d2 + T;
+            if (wx - T >= px) { return float4(0.0); }
+            float cover = clamp(1.0 - (wx - T) / px, 0.0, 1.0);
+            float out = clamp(wx, 0.0, T);
+            float z = -sqrt(max(T * T - out * out, 0.0));
+            float g = max(length(slope), 1e-4);
+            float3 n = wx <= 0.0 ? float3(0.0, 0.0, -1.0) : normalize(float3(slope / g * out, z));
+            return shade(float3(p, z), n, 0.0, 1e4, q2, px, sc, u) * cover;
+        }
 
         float3 ro = float3(p, -60.0), rd = float3(0.0, 0.0, 1.0);
         float t = 0.0, dmin = 1e4;
@@ -924,7 +1003,6 @@ enum JellyRenderer {
             if (t > 120.0) break;
         }
         float cover = hit ? 1.0 : clamp(1.0 - dmin / px, 0.0, 1.0);
-        if (u.mode > 1.5) { return float4(0.0, 0.0, 0.0, cover); }
         if (cover <= 0.0) { return float4(0.0); }
         float3 pos = ro + rd * t;
         float e = 0.15;
@@ -932,29 +1010,7 @@ enum JellyRenderer {
                            + float3(-1, -1, 1) * scene(pos + float3(-1, -1, 1) * e, sc, u)
                            + float3(-1, 1, -1) * scene(pos + float3(-1, 1, -1) * e, sc, u)
                            + float3(1, 1, 1) * scene(pos + float3(1, 1, 1) * e, sc, u));
-        // Faces turned up a touch lighter, so the cube reads as a cube.
-        float shape = 1.0 + 0.25 * (-n.y) - 0.1 * abs(n.x);
-        float4 j = jelly(n, -rd, shape, u);
-        float3 col = j.rgb;
-        float a = j.a;
-
-        float dBody = slab(pos, u), dHead = cubeD(pos, sc, u);
-        // Paper inside the panel as it opens (its flat front only), so text reads.
-        float bevel = clamp(min(u.half_.x, u.half_.y) * 0.8, 5.0, 16.0);
-        float depth = clamp(-blob(rest(pos.xy, u), u) / bevel, 0.0, 1.0);
-        float bodyness = smoothstep(2.0, -0.5, dBody);
-        float f = u.fill.a * smoothstep(0.15, 0.9, depth) * smoothstep(0.75, 0.97, -n.z) * bodyness;
-        col = col * (1.0 - f) + u.fill.rgb * f;
-        a = a * (1.0 - f) + f;
-
-        // The face, on the cube's front.
-        float3 l = sc.inv * (pos - sc.cube);
-        float front = smoothstep(-sc.s * 0.2, -sc.s * 0.34, l.z) * smoothstep(3.0, 0.5, dHead);
-        float4 face = eyes(l.xy / u.stubs.z, px * 0.9, u.tint.rgb, u);
-        float k = face.a * front;
-        col = col * (1.0 - k) + face.rgb * k;
-        a = clamp(a * (1.0 - k) + k, 0.0, 1.0);
-        return float4(min(col, float3(a)), a) * cover;
+        return shade(pos, n, slab(pos, u), cubeD(pos, sc, u), rest(pos.xy, u), px, sc, u) * cover;
     }
     """
 }

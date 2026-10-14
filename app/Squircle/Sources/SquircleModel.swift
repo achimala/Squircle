@@ -35,6 +35,8 @@ final class SquircleModel {
     private(set) var workers: [String: KnownWorker] = [:] { didSet { changed() } }
     private(set) var modelSelection: JSONValue = .null { didSet { changed() } }
     private(set) var runtimeMode: T3RuntimeMode = .auto { didSet { changed() } }
+    /// The selected app's tasks, from the Mac (`squircle task`).
+    private(set) var tasks: [String: AppTasks] = [:] { didSet { if tasks != oldValue { changed() } } }
     /// Each app's agent thread, by T3 project ID, from the Mac.
     private(set) var agents: [String: String] = [:] { didSet { if agents != oldValue { shellChanged() } } }
     /// The open draft is a first message to the app's agent.
@@ -50,17 +52,22 @@ final class SquircleModel {
         return stream
     }
     private func changed() { for observer in observers.values { observer.yield() } }
-    /// Calls `action` once a burst of changes has been quiet for `delay`, for
-    /// as long as `owner` lives. Cancel the task to stop sooner.
+    /// Calls `action` `delay` after a change, once for all the changes in
+    /// between, for as long as `owner` lives. Cancel the task to stop sooner.
+    /// (Not a debounce: changes that never pause, such as a view whose own
+    /// render touches the model, must not hold every update back forever.)
     func observe<Owner: AnyObject>(by owner: Owner, after delay: Duration,
                                    _ action: @escaping @MainActor (Owner) -> Void) -> Task<Void, Never> {
         Task { [weak owner, updates = self.updates] in
             var pending: Task<Void, Never>?
+            var waiting = false
             for await _ in updates {
                 guard owner != nil else { break }
-                pending?.cancel()
+                guard !waiting else { continue }
+                waiting = true
                 pending = Task { [weak owner] in
                     try? await Task.sleep(for: delay)
+                    waiting = false
                     guard !Task.isCancelled, let owner else { return }
                     action(owner)
                 }
@@ -418,6 +425,8 @@ final class SquircleModel {
         return sessions.filter { sessionProjects[$0.id] == project.id && (includingAgent || $0.id != agent) }
     }
     func agentThreadID(for project: AppProject) -> String? { agents[project.id] }
+    /// The Mac's Squircle service, for notification registration.
+    var service: SquircleClient? { client }
     /// Restarts the app's agent session, or replaces it with a new thread;
     /// the Mac does it once the agent's turn ends, and the agent view
     /// follows the new thread when the Mac reports it.
@@ -992,7 +1001,38 @@ final class SquircleModel {
             builds = try await b; appMetadata = try await m; reconcileProjects()
             if let known = try? await a { agents = known }
             await refreshSimulators()
+            await refreshTasks()
         } catch { /* T3 chat remains usable if the build service is temporarily offline. */ }
+    }
+    func tasks(for project: AppProject) -> AppTasks { tasks[project.id] ?? AppTasks() }
+    func refreshTasks() async {
+        guard let client, let id = selectedProjectID, let list = try? await client.tasks(projectID: id) else { return }
+        tasks[id] = list
+    }
+    func addTask(_ ask: String, in project: AppProject) async {
+        guard let client else { return }
+        do { try await client.addTask(projectID: project.id, ask: ask) } catch { self.error = error.localizedDescription }
+        await refreshTasks()
+    }
+    func updateTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) async {
+        guard let client else { return }
+        do { try await client.updateTask(id: task.id, status: status, toTop: toTop) } catch { self.error = error.localizedDescription }
+        await refreshTasks()
+    }
+    private var taskMedia: [String: Data] = [:]
+    /// A picture or clip attached to a task, downloaded once.
+    func taskMediaData(task: String, media: String) async -> Data? {
+        if let data = taskMedia[media] { return data }
+        guard let client, let data = try? await client.taskMediaFile(taskID: task, id: media) else { return nil }
+        taskMedia[media] = data
+        return data
+    }
+    /// A clip attached to a task as a file to play.
+    func taskVideo(task: String, media: String) async -> URL? {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("task-\(media).mp4")
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        guard let data = await taskMediaData(task: task, media: media), (try? data.write(to: url)) != nil else { return nil }
+        return url
     }
     func previewData(for metadata: AppMetadata) async throws -> Data {
         guard let client else { throw ClientError.configuration }; let key = metadata.id + (metadata.preview?.id ?? "")

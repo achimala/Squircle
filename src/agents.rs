@@ -7,6 +7,7 @@
 
 use crate::store::{atomic_json, private_dir, read_json};
 use crate::t3::{T3, T3Config};
+use crate::tasks::{Source, Status, Tasks};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -80,6 +81,60 @@ fn agent_message(kind: &str, from: Option<&str>) -> Value {
            "kind": kind, "payload": {"from": from}})
 }
 
+/// A worker's T3 model selection, checked against the providers T3 reports
+/// ready. Claude by default, on the app agent's model; another provider
+/// defaults to its own default model. Squircle's own instance carries the
+/// app-agent plugin, so it is not offered to workers.
+fn worker_selection(config: &Value, provider: Option<&str>, model: Option<&str>, effort: Option<&str>, agent_model: Option<&str>) -> Result<Value> {
+    let ready: Vec<&Value> = config["providers"].as_array().into_iter().flatten()
+        .filter(|p| p["status"] == "ready" && p["enabled"] != false && p["instanceId"] != INSTANCE)
+        .collect();
+    let names = |items: Vec<&str>| items.join(", ");
+    let instance = provider.unwrap_or("claudeAgent");
+    let provider = ready.iter().find(|p| p["instanceId"] == instance).with_context(|| format!(
+        "T3 has no ready provider \"{instance}\". Ready: {}", names(ready.iter().filter_map(|p| p["instanceId"].as_str()).collect())))?;
+    let models: Vec<&Value> = provider["models"].as_array().into_iter().flatten().collect();
+    let model = model.map(str::to_string).or_else(|| match instance {
+        "claudeAgent" => Some(agent_model.unwrap_or(DEFAULT_MODEL).to_string()),
+        _ => models.iter().find(|m| m["isDefault"] == true).or(models.first()).and_then(|m| m["slug"].as_str()).map(str::to_string),
+    }).with_context(|| format!("T3 lists no models for \"{instance}\""))?;
+    let entry = models.iter().find(|m| m["slug"] == model.as_str()).with_context(|| format!(
+        "\"{instance}\" has no model \"{model}\". Models: {}", names(models.iter().filter_map(|m| m["slug"].as_str()).collect())))?;
+    let mut selection = json!({"instanceId": instance, "model": model});
+    if let Some(effort) = effort {
+        // Claude calls it "effort", Codex "reasoningEffort".
+        let option = entry["capabilities"]["optionDescriptors"].as_array().into_iter().flatten()
+            .find(|o| o["type"] == "select" && matches!(o["id"].as_str(), Some("effort" | "reasoningEffort")))
+            .with_context(|| format!("{model} has no reasoning effort setting"))?;
+        let levels: Vec<&str> = option["options"].as_array().into_iter().flatten().filter_map(|o| o["id"].as_str()).collect();
+        ensure!(levels.contains(&effort), "{model} has no effort \"{effort}\". Levels: {}", names(levels));
+        selection["options"] = json!([{"id": option["id"], "value": effort}]);
+    }
+    Ok(selection)
+}
+
+impl crate::push::Threads for Agents {
+    fn last_reply<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let client = self.client().await.ok()?;
+            let detail = self.thread_detail(&client, thread).await.ok()?;
+            detail["messages"].as_array()?.iter().rev().find(|m| m["role"] == "assistant")
+                .and_then(|m| m["text"].as_str()).map(str::to_string)
+        })
+    }
+    fn question<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let client = self.client().await.ok()?;
+            let detail = self.thread_detail(&client, thread).await.ok()?;
+            let (_, questions) = Self::pending_question(&detail)?;
+            questions.first()?["question"].as_str().map(str::to_string)
+        })
+    }
+    fn current_step<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
+        Box::pin(async move { crate::t3steps::current_step(thread).await.ok().flatten() })
+    }
+}
+
 /// What a worker is doing, from T3's shell row.
 pub fn worker_state(thread: &Value) -> &'static str {
     if thread["hasPendingApprovals"] == true || thread["hasPendingUserInput"] == true {
@@ -122,6 +177,8 @@ pub struct Agents {
     t3: RwLock<Option<Arc<T3>>>,
     status: Mutex<String>,
     flush_scheduled: Mutex<bool>,
+    push: std::sync::OnceLock<Arc<crate::push::Push>>,
+    tasks: Arc<Tasks>,
 }
 
 fn quote(path: &Path) -> String {
@@ -230,7 +287,7 @@ async fn remove(root: &Path, state: &GitState, discard: bool) -> Result<Removed>
 }
 
 impl Agents {
-    pub fn open(root: &Path, server: &str) -> Result<Arc<Self>> {
+    pub fn open(root: &Path, server: &str, tasks: Arc<Tasks>) -> Result<Arc<Self>> {
         let path = root.join("agents.json");
         let registry = if path.try_exists()? { read_json(&path)? } else { Registry::default() };
         Ok(Arc::new(Self {
@@ -241,6 +298,8 @@ impl Agents {
             t3: RwLock::new(None),
             status: Mutex::new("Not connected to T3".into()),
             flush_scheduled: Mutex::new(false),
+            push: std::sync::OnceLock::new(),
+            tasks,
         }))
     }
 
@@ -285,6 +344,7 @@ impl Agents {
                 item = shell.recv() => {
                     let Some(item) = item else { break };
                     self.consume_shell(&item);
+                    if let Some(push) = self.push.get() { push.apps_changed(self.app_views()); }
                     self.schedule_flush();
                     self.run_due_resets();
                 }
@@ -333,9 +393,58 @@ impl Agents {
         self.shell.lock().unwrap().threads.get(id).cloned()
     }
 
+    /// Notifications and Live Activities follow the agents from here on.
+    pub fn attach_push(self: &Arc<Self>, push: Arc<crate::push::Push>) {
+        push.set_threads(self.clone());
+        let _ = self.push.set(push);
+    }
+
+    /// Each app's agent and live workers, for notifications.
+    fn app_views(&self) -> Vec<crate::push::AppView> {
+        let registry = self.registry.lock().unwrap();
+        let shell = self.shell.lock().unwrap();
+        registry.agents.values().map(|agent| crate::push::AppView {
+            project_id: agent.project_id.clone(),
+            app: shell.projects.get(&agent.project_id).and_then(|p| p["title"].as_str()).unwrap_or("App").to_string(),
+            agent: shell.threads.get(&agent.thread_id).map(|row| (agent.thread_id.clone(), row.clone())),
+            workers: registry.workers.iter()
+                .filter(|(_, w)| !w.archived && w.coordinator == agent.thread_id)
+                .filter_map(|(id, w)| Some((id.clone(), w.title.clone(), shell.threads.get(id)?.clone())))
+                .collect(),
+        }).collect()
+    }
+
     /// A thread's row in T3's shell, if T3 has sent it.
     pub fn thread_row(&self, id: &str) -> Option<Value> {
         self.thread(id)
+    }
+
+    /// The T3 project a thread belongs to: an app agent's, a worker's, or
+    /// any thread T3 has sent.
+    pub fn project_of(&self, thread: &str) -> Option<String> {
+        {
+            let registry = self.registry.lock().unwrap();
+            if let Some(agent) = registry.agents.values().find(|a| a.thread_id == thread) {
+                return Some(agent.project_id.clone());
+            }
+            if let Some(worker) = registry.workers.get(thread) {
+                return Some(worker.project_id.clone());
+            }
+        }
+        self.thread(thread).and_then(|t| t["projectId"].as_str().map(str::to_string))
+    }
+
+    /// The user's latest message to an app agent: where a task it adds now
+    /// came from.
+    pub async fn source_message(&self, thread: &str) -> Option<Source> {
+        self.agent_for_thread(thread)?;
+        let client = self.ready().await.ok()?;
+        let detail = self.thread_detail(&client, thread).await.ok()?;
+        detail["messages"].as_array()?.iter().rev()
+            .find(|m| m["role"] == "user" && m["context"]["records"].as_array().is_none_or(|r| r.is_empty())
+                && !m["text"].as_str().unwrap_or("").starts_with('['))
+            .and_then(|m| m["id"].as_str().or(m["messageId"].as_str()))
+            .map(|id| Source { thread_id: thread.into(), message_id: id.into() })
     }
 
     /// The live T3 connection once its thread list has arrived.
@@ -685,10 +794,21 @@ impl Agents {
             workers.iter().map(|w| format!("\n- {} [{}] {} ({})", w["title"].as_str().unwrap_or(""), w["branch"].as_str().unwrap_or(""),
                 w["state"].as_str().unwrap_or(""), w["id"].as_str().unwrap_or(""))).collect()
         };
+        let mut open: Vec<_> = self.tasks.list(&agent.project_id).into_iter()
+            .filter(|t| t.archived_at.is_none() && t.status.open()).collect();
+        let rank = |s: Status| [Status::NeedsYou, Status::InProgress, Status::ReadyToTry, Status::Queued].iter().position(|x| *x == s);
+        open.sort_by(|a, b| rank(a.status).cmp(&rank(b.status)).then(a.order.total_cmp(&b.order)));
+        let tasks = if open.is_empty() { " none".to_string() } else {
+            open.iter().take(40).map(|t| format!("\n- [{}] {}{} ({})", t.status.label(), t.ask.replace('\n', " "),
+                if t.note.is_empty() { String::new() } else { format!(" — {}", t.note) }, t.id)).collect()
+        };
         format!(
             "[squircle] You are {app}'s app agent: you coordinate, and worker threads do the implementation \
              (`{cli} thread --help`), unless the user says otherwise; archive a worker once its work is merged or abandoned, \
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
+             Your tasks, the user's open asks (`{cli} task --help`):{tasks}\n\
+             Add a task for each new ask, in the user's words; link its workers (`thread spawn --task`) and builds (`build start --task`), \
+             attach screenshots or clips worth seeing, and set its status and note when that changes (linked workers and builds move it too).\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
              copied out of /tmp into ~/.t3/userdata/attachments; a build you start or check this turn shows as an Install card. \
              No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.{refreshed}",
@@ -725,7 +845,9 @@ impl Agents {
         }).collect()
     }
 
-    pub async fn spawn(&self, coordinator: &str, title: &str, branch: &str, base: Option<&str>, prompt: &str, model: Option<&str>) -> Result<Value> {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spawn(&self, coordinator: &str, title: &str, branch: &str, base: Option<&str>, prompt: &str,
+                       provider: Option<&str>, model: Option<&str>, effort: Option<&str>) -> Result<Value> {
         let client = self.ready().await?;
         let agent = self.agent_for_thread(coordinator)
             .with_context(|| format!("{coordinator} is not an app agent's thread"))?;
@@ -733,10 +855,10 @@ impl Agents {
         ensure!(!branch.is_empty() && !branch.contains(char::is_whitespace) && !branch.contains(".."), "Invalid branch name");
         let project = self.shell.lock().unwrap().projects.get(&agent.project_id).cloned().context("The app's T3 project is gone")?;
         let coordinator_thread = self.thread(coordinator).context("The app agent's thread is gone")?;
-        let model = model.map(str::to_string)
-            .or_else(|| coordinator_thread["modelSelection"]["model"].as_str().map(str::to_string))
-            .unwrap_or_else(|| DEFAULT_MODEL.into());
-        let selection = json!({"instanceId": "claudeAgent", "model": model});
+        let config = client.call("server.getConfig", json!({})).await?;
+        let selection = worker_selection(&config, provider, model, effort,
+                                         coordinator_thread["modelSelection"]["model"].as_str())?;
+        let (instance, model) = (selection["instanceId"].clone(), selection["model"].clone());
         let checkout = PathBuf::from(project["workspaceRoot"].as_str().context("The project has no folder")?);
         let current = git(&checkout, &["symbolic-ref", "--short", "HEAD"]).await.unwrap_or_else(|_| "HEAD".into());
         let base = base.unwrap_or(&current);
@@ -771,7 +893,7 @@ impl Agents {
             });
             self.save(&registry)?;
         }
-        Ok(json!({"id": id, "title": title, "branch": branch, "base": base, "model": model,
+        Ok(json!({"id": id, "title": title, "branch": branch, "base": base, "provider": instance, "model": model, "effort": effort,
                   "next": "The worker is running. End your turn; a [worker update] arrives when it finishes."}))
     }
 

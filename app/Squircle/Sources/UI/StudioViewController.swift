@@ -79,6 +79,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private var dragStart: CGFloat = 0
     /// Inside `sync()`: the scene is drawn once, from the finished state.
     private var syncing = false
+    /// The conversation on screen changed (nil: none), for notifications.
+    var onViewing: ((String?) -> Void)?
+    /// A notification tapped before the apps arrived from the Mac.
+    private var pendingTarget: PushTarget?
 
     init(model: SquircleModel) {
         self.model = model
@@ -168,7 +172,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it)
     /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` brings
     /// the first simulator large; `SQUIRCLE_BUILDS=1` shows the app's builds and
-    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills. `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
+    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads` opens Tasks on either tab. `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
@@ -189,6 +193,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 }
                 if let text = environment["SQUIRCLE_DEMO_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugFlySend(text) }
+                }
+                if let tab = environment["SQUIRCLE_TASKS"] {
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentTasks(threads: tab == "threads") }
                 }
                 if environment["SQUIRCLE_BUILDS"] == "1" {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentBuilds() }
@@ -391,6 +398,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         if laidOut != nil { layoutGrid() }
         sync()
         schedulePortraits()
+        if let pendingTarget, !projects.isEmpty { open(pendingTarget) }
     }
 
     /// The simulators the open app's agents are using, over its conversations.
@@ -478,6 +486,43 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         sync()
     }
 
+    /// A tapped notification or Live Activity: its app, then its thread or
+    /// build. Whatever was presented gives way.
+    func open(_ target: PushTarget) {
+        let id = target.project.flatMap { p in projects.contains { $0.id == p } ? p : nil }
+            ?? target.bundle.flatMap { b in projects.first { $0.bundleID == b }?.id }
+        guard let id, let project = projects.first(where: { $0.id == id }) else {
+            pendingTarget = projects.isEmpty ? target : nil
+            return
+        }
+        pendingTarget = nil
+        if presentedViewController != nil { dismiss(animated: false) }
+        view.endEditing(true)
+        if let thread = target.thread, thread != model.agentThreadID(for: project) {
+            route = .thread(app: id, thread: thread)
+        } else {
+            route = .app(id)
+        }
+        sync()
+        guard let buildID = target.build else { return }
+        Task { [weak self] in
+            // Builds may still be on their way from the Mac.
+            for _ in 0..<20 {
+                guard let self else { return }
+                if let build = model.builds.first(where: { $0.id == buildID }) {
+                    guard presentedViewController == nil else { return }
+                    let navigation = UINavigationController(rootViewController: BuildDetailViewController(model: model, build: build))
+                    navigation.modalPresentationStyle = .pageSheet
+                    navigation.sheetPresentationController?.detents = [.large()]
+                    navigation.sheetPresentationController?.prefersGrabberVisible = true
+                    present(navigation, animated: true)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+
     /// Makes what is mounted and where the springs head agree with the route.
     /// Safe to call at any moment, any number of times.
     private func sync() {
@@ -487,6 +532,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             syncing = false
             renderSimulators()
             applyScene()
+            onViewing?(route == .grid ? nil : route.thread != nil ? thread?.currentSessionID : agent?.currentSessionID)
         }
         // The thread level only exists inside its app; it leaves first.
         if spring.value <= 0.001, threadKey != nil, route.thread != threadKey || route.app != selectedID {
@@ -524,7 +570,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         model.selectProject(project)
         let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
-        controller.onThreads = { [weak self] in self?.presentThreads() }
+        controller.onTasks = { [weak self] in self?.presentTasks() }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         host(controller, in: agentHost)
         controller.onBack = { [weak self] in self?.closeApp() }
@@ -766,10 +812,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         present(controller, animated: true)
     }
 
-    private func presentThreads() {
+    private func presentTasks(threads: Bool = false) {
         guard let project = selectedProject, presentedViewController == nil, route == .app(project.id) else { return }
         Theme.selectionHaptic()
-        let controller = ThreadsViewController(model: model, project: project)
+        let controller = TasksViewController(model: model, project: project, threads: threads)
         controller.onOpen = { [weak self, weak controller] id in
             controller?.dismiss(animated: true) { self?.openThread(id) }
         }

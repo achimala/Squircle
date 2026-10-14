@@ -162,8 +162,9 @@ final class MessageCell: TimelineCell {
         let user = style == .user
         text.attributedText = rendered
         text.textContainerInset = user ? UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0) : .zero
-        let folded = [.thought, .note, .action, .agent].contains(style) && !expanded
-        text.textContainer.maximumNumberOfLines = folded ? [.thought: 2, .action: 2, .agent: 9][style] ?? 4 : 0
+        // Reasoning reads in full; long notes and agents' messages fold until tapped.
+        let folded = [.note, .action, .agent].contains(style) && !expanded
+        text.textContainer.maximumNumberOfLines = folded ? [.action: 2, .agent: 9][style] ?? 4 : 0
         text.textContainer.lineBreakMode = folded ? .byTruncatingTail : .byWordWrapping
         // Selecting text matters for answers; quieter rows are tapped to unfold.
         text.isUserInteractionEnabled = style == .answer || style == .user

@@ -1070,6 +1070,34 @@ Measured on a 60 fps recording of rapid status changes: the cube's edge moves
 only in smooth multi-frame eases (within one pixel otherwise). Clips:
 `jelly7-*.mp4`, still `jelly7-rest.png`. Not on the phone.
 
+**On the phone (2026-10-14, user on iPhone 17 Pro Max: "like 10fps … contents
+disappear while resizing … dead frozen … keeps showing shimmer text
+forever").** Causes found (the phone was not reachable from the Mac; fixes
+checked in the simulator and by GPU timing on the Mac):
+- The jelly set `presentsWithTransaction` but presented from the command
+  buffer (a Metal thread, outside any flushed transaction). Drawables stayed
+  held, so `nextDrawable` blocked the main thread up to a second per frame:
+  the 10 fps, the frozen creature, and the jelly blanking while drawables
+  were reallocated every frame of a resize. Now: commit, `waitUntilScheduled`,
+  `present()` on the main thread inside the layout's transaction; the Metal
+  layer grows and shrinks in 96-point steps instead of every frame.
+- The body is no longer ray-marched: its extruded outline is solved directly;
+  only fragments within 8 points of the cube or neck march. The blur's mask
+  is a shape layer, not a second Metal pass. Same image (old vs new differ
+  only along the one-pixel antialiased edge); Mac GPU time for a full-screen
+  panel 0.43 → 0.10 ms, and the 1x mask pass is gone.
+- The creature ticks on real time (springs stepped in ≤1/60 s pieces) on a
+  120 Hz display link; injection now sets `CADisableMinimumFrameDurationOnPhone`
+  in the app's Info.plist, without which iOS caps display links at 60 Hz.
+  Layout and tick draw once per frame between them.
+- The shimmer: the agent ended its turn after starting a worker, and the
+  bubble showed any working thread's title, shimmering, ahead of "Done". Now
+  only the agent's own work shimmers; when it finishes the bubble says Done,
+  then "Worker · title" (or "2 workers") plainly while workers run.
+  `SquircleModel.observe` is now a throttle, not a debounce, so constant
+  model changes can never hold an update back.
+Not yet verified on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
@@ -1658,7 +1686,95 @@ sentences naming the open item. Not yet checked on the physical phone.
 
 Squircle build `e76693ea-4f76-47c2-a735-b327e0ff49c5` (0.3.0 46, main at `adec020`) succeeded; not yet installed on the phone.
 
-## 2026-10-14 Squircle actions in the conversation
+## 2026-10-14 notifications and the Live Activity (0.3.0 51)
+
+User decision: notifications and a Live Activity sent straight from the Mac
+service to Apple with the user's own APNs auth key, no relay for now. A later
+App Store build may need a small relay, so sending sits behind one interface.
+
+- **Service (`src/push.rs`).** `Push` decides what to say; a `Transport`
+  delivers it. `Apns` is HTTP/2 to `api.sandbox.push.apple.com` or
+  `api.push.apple.com` (by the token's environment, which the phone reports),
+  with an ES256 provider token (JWT, `ring`) reused for 40 minutes and
+  refreshed on `ExpiredProviderToken`. A relay would be another `Transport`;
+  the phone's contract stays: `POST /v1/push/devices` (device token,
+  push-to-start token, bundle ID, environment), `/v1/push/activities`
+  (an activity's update token, or none when it ended), `/v1/push/presence`
+  (foreground and the conversation on screen), the alert's `squircle` key
+  (`project`, `thread`, `build`, `bundle`) and the activity's content state.
+  Tokens Apple reports gone (410, `BadDeviceToken`) are forgotten.
+- **Key.** `squircle push setup --key-file … --key-id … --team-id …` checks
+  the key and stores it in `<data>/push/apns.json` (0600); output and logs
+  never show it. The service reloads it when the file changes, no restart.
+  `push status` lists registered phones without tokens; `push test
+  [--live-activity]` sends one now.
+- **What notifies.** From T3's shell: the app agent replied (its reply's
+  first line), asks a question (the question) or stopped with an error; a
+  worker finished, needs you or errored; a device build succeeded or failed.
+  Title is the app's name, body one line. Notes within 3 s for one app are
+  one notification (up to four lines). Nothing for the thread the phone
+  reports showing (presence expires after 5 minutes), and the phone hides a
+  banner for the conversation on screen too.
+- **Live Activity.** One per app with an agent: the agent's current step
+  (from T3's state database, read-only, every 8 s while working), workers
+  running, and "Needs you". Started by push-to-start when work begins and the
+  phone isn't in the foreground, or by the app when it leaves with work in
+  progress; updated by `liveactivity` pushes (state changes at priority 10,
+  step text at most every 10 s at priority 5); ended 20 s after everything is
+  idle, dismissed 2 minutes later; stale after 15 minutes without word. The
+  widget extension (`SquircleWidgets`, the one place SwiftUI is used, as
+  ActivityKit requires) draws a small jelly cube in Clay terracotta, ochre
+  for needs-you and olive when done. Tapping it opens the app.
+- **Phone.** `PushCenter` (app target only, never the overlay) asks for
+  permission, registers tokens with the Mac on every return to the
+  foreground, reports presence, and opens a tapped notification's app,
+  thread or build. `aps-environment` is `development` in the entitlements;
+  the ad hoc (`release-testing`) export signs it as `production`, which the
+  app reads from its embedded provisioning profile.
+
+Tested without a key: JWT signature and claims verified against the key's
+public key, alert and activity payloads, burst coalescing, viewed-thread
+suppression, and the service path over HTTP/2 against a local fake APNs that
+answers 200 and 410. In the simulator the app got a device token and its
+Live Activity started and rendered (system log); a render of the views:
+working, needs you, done. Not yet checked with a real key or on the phone.
+
+### Creating the APNs key
+
+1. developer.apple.com/account → Certificates, IDs & Profiles → Keys → +.
+2. Name it (e.g. "Squircle push"), tick **Apple Push Notifications service
+   (APNs)**, Configure: environment **Sandbox & Production**, key
+   restriction **Team Scoped (All Topics)**. Save, Continue, Register.
+3. Download `AuthKey_XXXXXXXXXX.p8` (only possible once). Note the **Key
+   ID**; the **Team ID** is under Membership details (`2F26US4NAU`).
+4. On the Mac: `squircle push setup --key-file ~/Downloads/AuthKey_XXXXXXXXXX.p8
+   --key-id XXXXXXXXXX --team-id 2F26US4NAU`, then delete the download.
+5. Install the new Squircle build, open it, Allow notifications, then
+   `squircle push test --live-activity`.
+## 2026-10-14 simulator deck
+
+User, after trying several simulators on the phone: "we need to stack em
+somehow and let them fan out when tapped … it's so in the way". With two or
+more, `SimulatorDock` now shows one deck in the corner, 80 pt wide (was 96, or
+78 each when 3+ sat in a column): the most recently started simulator on top,
+up to two more peeking below it, darker, and a count badge. Tapping the deck
+fans the pictures out from the corner into a row with each thread's name
+beneath (a `fan` spring, interruptible like the others); tapping one brings it
+large as before, and shrinking it returns it to the deck. A tap or drag outside
+the row gathers it. One simulator stays a single small picture. Pictures that
+can't be seen (behind the deck's top, or docked in the conversation) detach
+from their feed and keep their last frame; a feed whose screens are all gone
+stops streaming, so hidden simulators don't decode.
+
+**Verified (simulator, iOS 27.0, Debug, four live sessions: this worker's, two
+scratch worker threads' and another worker's):** deck with badge "4"; the
+DEBUG `SQUIRCLE_SIM_FAN=1` sequence (same paths as taps) fanned the row,
+expanded the second picture, shrank it into the deck, fanned and gathered;
+screenshots at ~2.5 per second showed each step moving continuously, no
+jumps. Not verified: real finger taps (T3's agent-device daemon was not
+running), the phone.
+
+## 2026-10-14 Squircle actions in the conversation (0.3.0 52)
 
 User: what the agent does through Squircle (starting workers, messages
 between threads, builds, simulators) showed only sometimes; messages agents

@@ -7,7 +7,7 @@ settings:
   base:
     DEVELOPMENT_TEAM: 2F26US4NAU
     SWIFT_VERSION: "5.0"
-    CURRENT_PROJECT_VERSION: 47
+    CURRENT_PROJECT_VERSION: 52
     MARKETING_VERSION: 0.3.0
     SQUIRCLE_BUILD_ID: ""
     SQUIRCLE_CLIENT_CONFIG: $(SRCROOT)/../../.squircle/client-t3.json
@@ -17,9 +17,13 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+      - path: App
+      - path: Shared
       - path: Overlay
         excludes: [OverlayLoader.c]
       - path: Resources/Assets.xcassets
+    dependencies:
+      - target: SquircleWidgets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.dreamslate.Squircle
@@ -61,6 +65,33 @@ targets:
         SquircleBuildID: $(SQUIRCLE_BUILD_ID)
         NSLocalNetworkUsageDescription: Connect to your Mac for agent conversations and app builds.
         NSCameraUsageDescription: Take a photo to send to the coding agent.
+        NSSupportsLiveActivities: YES
+        NSSupportsLiveActivitiesFrequentUpdates: YES
+        CFBundleURLTypes:
+          - CFBundleURLName: ai.dreamslate.Squircle
+            CFBundleURLSchemes: [squircle]
+  # The Live Activity (Lock Screen and Dynamic Island); the Mac drives it by push.
+  SquircleWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widgets
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ai.dreamslate.Squircle.Widgets
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+        SKIP_INSTALL: YES
+    info:
+      path: Generated/Widgets-Info.plist
+      properties:
+        CFBundleDisplayName: Squircle
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
   # Debug overlay the Squircle CLI injects into apps it signs for your phone.
   # It reuses the app's own sources; it is never linked by any app project.
   SquircleOverlay:

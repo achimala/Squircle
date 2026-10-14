@@ -81,7 +81,17 @@ pub fn recording_path(root: &Path, thread: &str, session: &str) -> Result<PathBu
 }
 
 fn store(root: &Path, thread: &str, file: &Path, caption: Option<&str>, simulator: Option<SimulatorClip>, take: bool) -> Result<Media> {
-    let dir = directory(root, thread)?;
+    store_in(&directory(root, thread)?, thread, file, caption, simulator, take)
+}
+
+/// Copies `file` into another owner's media folder (a task's, say); its
+/// records carry `owner` as their thread ID.
+pub fn add_in(dir: &Path, owner: &str, file: &Path, caption: Option<&str>) -> Result<Media> {
+    store_in(dir, owner, file, caption, None, false)
+}
+
+fn store_in(dir: &Path, thread: &str, file: &Path, caption: Option<&str>, simulator: Option<SimulatorClip>, take: bool) -> Result<Media> {
+    let dir = dir.to_path_buf();
     let (kind, content_type) = kind(file)?;
     let size = fs::metadata(file).with_context(|| format!("Reading {}", file.display()))?.len();
     if size == 0 || size > MAX_BYTES {
@@ -122,7 +132,10 @@ fn store(root: &Path, thread: &str, file: &Path, caption: Option<&str>, simulato
 }
 
 pub fn list(root: &Path, thread: &str) -> Result<Vec<Media>> {
-    let dir = directory(root, thread)?;
+    list_in(&directory(root, thread)?)
+}
+
+pub fn list_in(dir: &Path) -> Result<Vec<Media>> {
     let Ok(entries) = fs::read_dir(&dir) else { return Ok(Vec::new()) };
     let mut items: Vec<Media> = entries
         .flatten()
@@ -142,8 +155,12 @@ pub fn list(root: &Path, thread: &str) -> Result<Vec<Media>> {
 }
 
 pub fn get(root: &Path, thread: &str, id: &str) -> Result<Media> {
+    get_in(&directory(root, thread)?, id)
+}
+
+pub fn get_in(dir: &Path, id: &str) -> Result<Media> {
     uuid::Uuid::parse_str(id).context("Media ID must be a UUID")?;
-    list(root, thread)?
+    list_in(dir)?
         .into_iter()
         .find(|m| m.id == id)
         .context("No such media in this thread")

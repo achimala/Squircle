@@ -70,13 +70,26 @@ directory and adds the T3 instance; `--remove` takes it out).
 | `agent restart --project ID\|--thread ID` | Relaunch the agent's Claude session on the same thread; its next turn gets the current instructions (once, in the turn note) with history kept. Runs when the agent's turn ends |
 | `agent fresh --project ID\|--thread ID [--handoff TEXT]` | Replace the agent with a new thread seeded by a handoff (app, recent commits, workers, recent user messages, last reply, the note); the old thread is renamed "… (until DATE)" and stays in Threads; workers move over. Runs when the agent's turn ends |
 | `agent list`, `agent context [--hook]` | Agents; the per-turn note (thread ID, live workers) its hook injects |
-| `thread spawn --coordinator ID --title T --branch B --prompt P` | Worker thread in its own worktree, branched from the checkout's current branch |
+| `thread spawn --coordinator ID --title T --branch B --prompt P [--provider codex] [--model M] [--effort E]` | Worker thread in its own worktree, branched from the checkout's current branch; Claude by default, any ready T3 provider/model/effort (checked against T3's server config) |
 | `thread send ID TEXT`, `thread read ID`, `thread answer ID TEXT` | Message, inspect (last reply, diff stat, pending question), answer |
 | `thread status [--coordinator ID]`, `thread archive ID [--discard]` | Worker states; archive after merge removes the worktree and deletes the branch, refusing unmerged commits (`git cherry` against the base) or uncommitted changes unless `--discard` |
 | `thread cleanup --coordinator ID [--dry-run]` | Archive finished workers whose work is merged, delete merged branches of earlier archived workers, prune stale worktrees; lists what it leaves and why |
 
 The service wakes the agent with a `[worker update]` turn when a worker
 finishes, errors or needs input, once per turn outcome. Agents never poll.
+
+## Notifications
+
+The service sends the phone notifications and its Live Activity directly to
+APNs with your own auth key (no relay; a relay would replace only the
+transport). See [notifications](t3-native-migration.md#2026-10-14-notifications-and-the-live-activity-030-51)
+for creating the key.
+
+| Command | Result |
+| --- | --- |
+| `push setup --key-file AuthKey_ID.p8 --key-id ID --team-id TEAM [--remove]` | Check and store the key owner-only in the data directory; never printed. Works without the service |
+| `push test [--live-activity]` | Send a test notification (and start a test Live Activity) to registered phones; per-device result |
+| `push status` | Whether a key is set, registered phones (environment, notifications, Live Activity), no tokens |
 
 ## Import an existing app
 

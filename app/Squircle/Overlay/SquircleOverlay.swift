@@ -358,15 +358,20 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         working = Dictionary(active.map { ($0.id, title($0)) }, uniquingKeysWith: { a, _ in a })
 
         // What the bubble says: whoever needs you, else what the agent is
-        // doing (its live step), else a working thread.
+        // doing (its live step), else that something just finished, else
+        // the workers still running, calmly: the agent's turn has ended, so
+        // nothing shimmers for them (with no agent, a thread is the work).
         var headline: String?, tone: LiveCapsule.Tone, started: Date?
+        let workers = active.filter { $0.id != agentID }
         if let waiting = active.first(where: { $0.phase == .needsYou }) {
             (headline, tone, started) = ("Needs you · " + title(waiting), .needsYou, nil)
-        } else if let busy = active.first(where: { $0.id == agentID }) ?? active.first {
+        } else if let busy = active.first(where: { $0.id == agentID }) ?? (agentID == nil ? active.first : nil) {
             let live = model.selectedSessionID == busy.id ? liveStatus() : nil
             (headline, tone, started) = (live?.headline ?? title(busy), .working, live?.started)
         } else if let finished, finished.until > now {
             (headline, tone, started) = (finished.text, .done, nil)
+        } else if let worker = workers.first {
+            (headline, tone, started) = (workers.count == 1 ? "Worker · " + title(worker) : "\(workers.count) workers", .idle, nil)
         } else {
             (headline, tone, started) = (nil, .idle, nil)
         }
@@ -908,7 +913,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         controller.setBackButton(symbol: "chevron.down", label: "Minimize")
         controller.onBack = { [weak self] in self?.close() }
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
-        controller.onThreads = { [weak self] in self?.presentThreads() }
+        controller.onTasks = { [weak self] in self?.presentTasks() }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         agent = host(controller)
     }
@@ -966,10 +971,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     // MARK: Sheets
 
-    private func presentThreads() {
+    private func presentTasks() {
         guard let project, presentedViewController == nil, route.open, route.thread == nil else { return }
         Theme.selectionHaptic()
-        let controller = ThreadsViewController(model: model, project: project)
+        let controller = TasksViewController(model: model, project: project)
         controller.onOpen = { [weak self, weak controller] id in
             controller?.dismiss(animated: true) { self?.openThread(id) }
         }

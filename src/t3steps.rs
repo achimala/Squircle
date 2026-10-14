@@ -100,6 +100,51 @@ fn trim_input(input: &Value) -> Value {
     Value::Object(out)
 }
 
+/// What a working thread is doing now, said briefly ("Edited Theme.swift"):
+/// its latest tool call with an input, for the Live Activity.
+pub async fn current_step(thread: &str) -> Result<Option<String>> {
+    if !valid(thread, &[]) {
+        bail!("invalid thread ID");
+    }
+    let rows = query(&format!(
+        "select json_extract(payload_json,'$.data.toolName') as tool,
+                json_extract(payload_json,'$.data.input') as input,
+                json_extract(payload_json,'$.title') as title
+         from projection_thread_activities
+         where thread_id='{thread}' and kind in ('tool.started','tool.updated','tool.completed','task.progress','task.started')
+         order by sequence desc, created_at desc limit 12"
+    )).await?;
+    Ok(rows.iter().find_map(|row| {
+        let input = row["input"].as_str().and_then(|s| serde_json::from_str::<Value>(s).ok())?;
+        describe(row["tool"].as_str().unwrap_or(""), &input)
+    }))
+}
+
+fn describe(tool: &str, input: &Value) -> Option<String> {
+    let text = |key: &str| input[key].as_str().map(str::trim).filter(|s| !s.is_empty());
+    let file = |key: &str| text(key).and_then(|p| p.rsplit('/').next()).map(str::to_string);
+    let line = match tool {
+        "Bash" => text("description").map(str::to_string)
+            .or_else(|| text("command").map(|c| format!("Ran {}", c.split_whitespace().next().unwrap_or("a command"))))?,
+        "Read" => format!("Read {}", file("file_path")?),
+        "Edit" | "MultiEdit" | "NotebookEdit" => format!("Edited {}", file("file_path").or_else(|| file("notebook_path"))?),
+        "Write" => format!("Wrote {}", file("file_path")?),
+        "Grep" => format!("Searched for “{}”", text("pattern")?),
+        "Glob" => "Looked for files".into(),
+        "WebSearch" => format!("Searched the web for “{}”", text("query")?),
+        "WebFetch" => "Read a web page".into(),
+        "Agent" | "Task" => text("description")?.to_string(),
+        "TodoWrite" => "Updated the plan".into(),
+        "Skill" => format!("Used {}", text("skill")?),
+        _ => return None,
+    };
+    let mut chars = line.chars();
+    let mut out: String = chars.by_ref().take(80).collect();
+    if chars.next().is_some() { out.push('…') }
+    let mut first = out.chars();
+    Some(first.next().map(|c| c.to_uppercase().chain(first).collect()).unwrap_or_default())
+}
+
 /// One entry per tool call that has an input or returned images, keyed by
 /// T3's `toolCallId`. `since` (an ISO timestamp) limits to newer activity.
 /// Each also says when it started, its turn and whether it finished or

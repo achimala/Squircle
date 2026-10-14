@@ -19,14 +19,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     let isAgent: Bool
     /// The agent's update lines open the app's other threads (nil: a new one).
     var onOpenThread: ((String?) -> Void)?
-    var onThreads: (() -> Void)?
+    /// The app's tasks, with its threads a tab away.
+    var onTasks: (() -> Void)?
     var onBuilds: (() -> Void)?
-    private let threads = Theme.glassButton(symbol: "list.bullet", identifier: "agent.threads", accessibilityLabel: "Threads")
+    private let tasks = Theme.glassButton(symbol: "checklist", identifier: "agent.tasks", accessibilityLabel: "Tasks")
+    /// Open tasks at a glance, just above the field; tapping opens Tasks.
+    private let strip = TaskStrip()
+    private var stripGap: NSLayoutConstraint?
+    private var stripCollapsed: NSLayoutConstraint?
     private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "agent.builds", accessibilityLabel: "Builds")
     /// The floating buttons at the top, in reading order.
     private var topControls: [UIView] {
         guard isAgent else { return [back, more] }
-        return compactControls ? [more] : [back, threads, builds, more]
+        return compactControls ? [more] : [back, tasks, builds, more]
     }
     /// The debug overlay's agent shows only ⋯ (its handle closes it, and
     /// Threads and Builds move into the menu). Set before it loads.
@@ -92,6 +97,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private static var heightCache: [String: [String: CGFloat]] = [:]
     private var items: [ThreadItem] = []
     private var itemsByID: [String: ThreadItem] = [:]
+    /// The turn the live line belonged to, so only that turn's own finish pulses.
+    private var liveTurn: String?
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
     private var rendered: [String: (source: String, text: NSAttributedString)] = [:]
     private var expanded = Set<String>()
@@ -205,7 +212,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func moreMenu() -> [UIMenuElement] {
         var items: [UIMenuElement] = []
         if isAgent, compactControls {
-            items.append(UIAction(title: "Threads", image: UIImage(systemName: "list.bullet")) { [weak self] _ in self?.onThreads?() })
+            items.append(UIAction(title: "Tasks", image: UIImage(systemName: "checklist")) { [weak self] _ in self?.onTasks?() })
             items.append(UIAction(title: "Builds", image: UIImage(systemName: "shippingbox")) { [weak self] _ in self?.onBuilds?() })
         }
         if let onToggleFull {
@@ -302,12 +309,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         view.addSubview(back)
         if isAgent {
             back.accessibilityLabel = "Apps"
-            threads.addAction(UIAction { [weak self] _ in self?.onThreads?() }, for: .touchUpInside)
+            tasks.addAction(UIAction { [weak self] _ in self?.onTasks?() }, for: .touchUpInside)
             builds.addAction(UIAction { [weak self] _ in self?.onBuilds?() }, for: .touchUpInside)
-            [threads, builds].forEach(view.addSubview)
+            [tasks, builds].forEach(view.addSubview)
         }
         view.addSubview(more)
-        [back, threads, builds, more].forEach { $0.isHidden = !topControls.contains($0) }
+        [back, tasks, builds, more].forEach { $0.isHidden = !topControls.contains($0) }
 
         requestDetail.lineBreakMode = .byTruncatingTail
         requestButtons.spacing = 8
@@ -338,7 +345,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }, for: .touchUpInside)
         jump.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
         jump.configuration?.contentInsets = .zero
-        [request, notice, jump, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        strip.isHidden = true
+        strip.addAction(UIAction { [weak self] _ in self?.onTasks?() }, for: .touchUpInside)
+        [request, notice, jump, strip, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        let stripGap = strip.bottomAnchor.constraint(equalTo: composer.topAnchor)
+        let stripCollapsed = strip.heightAnchor.constraint(equalToConstant: 0)
+        self.stripGap = stripGap
+        self.stripCollapsed = stripCollapsed
         edgeConstraints = [
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
@@ -350,9 +363,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         NSLayoutConstraint.activate(edgeConstraints + [
             notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
-            jump.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
+            stripGap, stripCollapsed,
+            strip.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            strip.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            jump.bottomAnchor.constraint(equalTo: strip.topAnchor, constant: -8),
             jump.widthAnchor.constraint(equalToConstant: 34), jump.heightAnchor.constraint(equalToConstant: 34),
-            notice.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8),
+            notice.bottomAnchor.constraint(equalTo: strip.topAnchor, constant: -8),
             request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8),
             requestStack.topAnchor.constraint(equalTo: request.contentView.topAnchor, constant: 14),
             requestStack.bottomAnchor.constraint(equalTo: request.contentView.bottomAnchor, constant: -12),
@@ -374,7 +390,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             bottom.edge = .bottom
             composer.addInteraction(bottom)
         }
-        view.accessibilityElements = topControls + [draftScroll, table, request, notice, jump, composer]
+        view.accessibilityElements = topControls + [draftScroll, table, request, notice, jump, strip, composer]
 
         observations = [model.observe(by: self, after: .milliseconds(50)) { $0.render() }]
         model.selectProject(project)
@@ -399,7 +415,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // Bounds and centre: the overlay's handle may be shifting them.
         let x = overlayLayout?.inset ?? 16, y = safeArea.top + (overlayLayout?.inset ?? 4)
         back.place(in: CGRect(x: x, y: y, width: 44, height: 44))
-        threads.place(in: CGRect(x: x + 54, y: y, width: 44, height: 44))
+        tasks.place(in: CGRect(x: x + 54, y: y, width: 44, height: 44))
         builds.place(in: CGRect(x: x + 108, y: y, width: 44, height: 44))
         more.place(in: CGRect(x: view.bounds.width - x - 44, y: y, width: 44, height: 44))
         layoutConversation()
@@ -434,7 +450,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
         placeFade()
         // The jump button floats over the conversation; it takes no row.
-        let floor = request.isHidden ? (notice.isHidden ? composer.frame.minY : notice.frame.minY) : request.frame.minY
+        let field = strip.isHidden ? composer.frame.minY : strip.frame.minY
+        let floor = request.isHidden ? (notice.isHidden ? field : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
         let insets = UIEdgeInsets(top: controlsBottom + 6, left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
@@ -464,7 +481,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard y != visibleTop else { return }
         visibleTop = y
         let shift = CGAffineTransform(translationX: 0, y: y)
-        for control in [back, threads, builds, more] { control.transform = shift }
+        for control in [back, tasks, builds, more] { control.transform = shift }
         placeFade()
     }
     private var visibleTop: CGFloat = 0
@@ -474,7 +491,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     func setTransitionProgress(_ progress: CGFloat) {
         let alpha = ((progress - 0.55) / 0.45).clamped()
         back.alpha = alpha
-        threads.alpha = alpha
+        tasks.alpha = alpha
         more.alpha = alpha
         builds.alpha = alpha
         jump.alpha = jumpShown ? alpha : 0
@@ -512,10 +529,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         composer.send.isEnabled = !sending
         draftScroll.isHidden = showsConversation
         table.isHidden = !showsConversation
-        view.accessibilityElements = topControls + [showsConversation ? table : draftScroll, request, notice, jump, composer]
+        view.accessibilityElements = topControls + [showsConversation ? table : draftScroll, request, notice, jump, strip, composer]
         let session = model.sessions.first { $0.id == sessionID }
         threadTitle = isAgent ? project.name : session?.displayTitle(in: project) ?? ""
         renderAgent()
+        renderStrip()
         let attached = model.attachments.count
         composer.show(model.attachments)
         if attached != shownAttachments, view.window != nil {
@@ -535,6 +553,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             view.setNeedsLayout()
         }
         renderItems()
+    }
+
+    /// Shown on the app's agent while it has open tasks.
+    private func renderStrip() {
+        let open = isAgent ? model.tasks(for: project).tasks.filter { $0.status.open } : []
+        let hidden = open.isEmpty
+        strip.configure(open)
+        guard hidden != strip.isHidden else { return }
+        strip.isHidden = hidden
+        stripCollapsed?.isActive = hidden
+        stripGap?.constant = hidden ? 0 : -8
+        view.setNeedsLayout()
     }
 
     private func renderAgent() {
@@ -591,7 +621,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private func renderItems(animated: Bool = false) {
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
-        let next = header + resolve(ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
+        let messages = displayedMessages()
+        let next = header + resolve(ThreadItem.items(messages: messages, running: model.isRunning, expanded: expanded,
                                                      builds: model.builds, changes: model.changes,
                                                      simulators: model.threadSimulators))
         guard next != items else { return }
@@ -630,8 +661,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
         updateSticky()
         reportVisibleSimulators()
-        if previous["live"] != nil, itemsByID["live"] == nil, let finished = next.last(where: { if case .summary = $0 { return true }; return false }) {
-            celebrate(finished.id)
+        // Only the turn that was live pulses, when it folds into its own
+        // summary; a quick reply with no steps must not light up an older one.
+        let wasLive = liveTurn
+        liveTurn = itemsByID["live"] == nil ? nil : messages.last(where: { $0.role == "user" })?.id ?? "start"
+        if previous["live"] != nil, liveTurn == nil, let turn = wasLive, itemsByID["summary:" + turn] != nil {
+            celebrate("summary:" + turn)
         }
     }
 
@@ -1034,7 +1069,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .agentMessage: return true
         case .action(let line): return line.text?.isEmpty == false || (line.thread != nil && line.state != .archived && onOpenThread != nil)
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
-        case .earlier, .summary, .note, .thought, .changes: return true
+        case .earlier, .summary, .note, .changes: return true
         case .update(let message): return !message.threadIDs.isEmpty && onOpenThread != nil
         default: return false
         }
@@ -1092,7 +1127,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .earlier(let turn, _): toggle(turn)
         case .summary(let summary): toggle(summary.turn)
         case .changes(let changes, _): showChanges(changes)
-        case .note(let message), .thought(let message): toggle(message.id)
+        case .note(let message): toggle(message.id)
         case .update(let message): if let id = message.threadIDs.first { onOpenThread?(id) }
         case .agentMessage(let message): toggle(message.id)
         case .action(let line):
@@ -1108,6 +1143,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let keepBottom = pinToBottom
         pinToBottom = false
         renderItems(animated: true)
+        // A note's fold isn't part of its item, so its row refreshes itself.
+        if case .note = itemsByID[id] {
+            var snapshot = dataSource.snapshot()
+            snapshot.reconfigureItems([id])
+            dataSource.apply(snapshot, animatingDifferences: true)
+        }
         pinToBottom = keepBottom
     }
 
