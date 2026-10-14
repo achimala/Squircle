@@ -1539,3 +1539,5 @@ sentences; Start Fresh from the ⋯ menu in the simulator switched the open
 conversation in place. LanguageApp's agent was started fresh from the ⋯
 menu (deferred through a running turn); its first reply was three short
 sentences naming the open item. Not yet checked on the physical phone.
+
+Squircle build `e76693ea-4f76-47c2-a735-b327e0ff49c5` (0.3.0 46, main at `adec020`) succeeded; not yet installed on the phone.
