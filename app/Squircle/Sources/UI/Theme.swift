@@ -172,8 +172,14 @@ enum Theme {
 
 enum Motion {
     /// The system setting, plus a DEBUG-only launch argument used by UI tests.
+    #if DEBUG
+    /// Verification only: overrides the setting (the overlay's jelly stress).
+    nonisolated(unsafe) static var debugReduced: Bool?
+    #endif
+
     static var reduced: Bool {
         #if DEBUG
+        if let debugReduced { return debugReduced }
         if ProcessInfo.processInfo.arguments.contains("--reduce-motion") { return true }
         #endif
         return UIAccessibility.isReduceMotionEnabled

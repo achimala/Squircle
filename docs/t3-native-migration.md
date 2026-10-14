@@ -1121,6 +1121,34 @@ live simulator rows are previews, not buttons (`expandsSimulators = false`);
 a closed panel or covered conversation releases its streams. Not yet checked
 on the phone.
 
+**Jelly stuck mid-stretch (user on the phone, 2026-10-15: "jelly thing just
+gets stuck randomly"; screenshot: a long thin neck from the tucked pill to a
+cube outside the drawn area).** Cause: the creature's jump detector compares
+the anchor's move with the last velocity. When the bubble stopped dead from
+fast motion (over ~24 points a frame: 2,900 pt/s at 120 Hz, 1,450 at 60), the
+stop itself read as a jump, and that branch returned before updating the
+velocity, so every following still frame read as a jump again: the phantom
+velocity and acceleration held the cube off its anchor with clamps and pinch
+off (`gliding`), the display link ran at full rate and nothing changed. Fixes:
+- A jump carries no motion: velocity and acceleration restart from rest.
+- It may sleep only when the whole body is at rest (every spring, the cube on
+  its anchor, the bridge and its stubs, no press or glide) **and** the screen
+  shows that pose: a frame counts as shown only once presented (a frame with
+  no drawable, or in the background, doesn't), so the final rest frame is
+  always drawn. Previously a failed draw was remembered as drawn.
+- Background: no GPU work; back in front it draws its pose again and doesn't
+  read the time away as motion. Any non-finite value resets it to rest. The
+  merged bridge's stubs and Reduce Motion's glide no longer keep it awake.
+- DEBUG `SQUIRCLE_JELLY_STRESS=1` (`SQUIRCLE_JELLY_STRESS_SECONDS`, under
+  `SQUIRCLE_OVERLAY_DEMO`): random flings, drags, pokes, background/foreground,
+  status changes, open/close/full, Reduce Motion and dropped frames, settling
+  every nine actions; each frame audited (asleep while moving or showing a
+  stale pose, awake with its pose unshown for a second, cube beyond reach,
+  invalid values). Before the fix: 7 of 8 settles failed (the phantom pull).
+  After: 201 actions, 25 settles, 0 unsettled, 0 violations (iPhone simulator,
+  iOS 27.0); recorded frames show it settling after every throw. Not yet on
+  the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
