@@ -32,6 +32,10 @@ targets:
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Push needs a profile with the Push Notifications capability, which
+        # automatic signing makes only with an Apple account in Xcode; until
+        # then builds use the wildcard team profile and leave push out.
+        # Turn it on: SquirclePush.entitlements.
         CODE_SIGN_ENTITLEMENTS: Resources/Squircle.entitlements
     preBuildScripts:
       - name: Swift concurrency only (no new Combine or Dispatch)
