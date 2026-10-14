@@ -29,8 +29,9 @@ final class ScreenshotBinding {
     deinit { loading?.cancel(); restoring?.cancel() }
 
     /// The Mac catalog's published preview wins; then the newest build
-    /// capture; then the newest real screenshot an agent took in the app's
-    /// threads. Only an app with none of these shows "No screenshot yet".
+    /// capture; then the newest simulator screenshot T3 took in the app's
+    /// threads (the Mac picks only those, never an image an agent read).
+    /// Only an app with none of these shows "No screenshot yet".
     func update(model: SquircleModel, project: AppProject) {
         let metadata = model.metadata(for: project).flatMap { $0.preview == nil ? nil : $0 }
         let build = metadata == nil ? model.builds(for: project).first(where: { $0.previewAvailable }) : nil
@@ -39,7 +40,7 @@ final class ScreenshotBinding {
         let version = latest.map { String(Int($0.timeIntervalSince1970 / 300)) } ?? "none"
         let published: String? = metadata.flatMap { record in record.preview.map { "app:\(record.id):\($0.id)" } }
         let captured: String? = build.map { "build:\($0.id):\($0.previewCapturedAt?.timeIntervalSince1970 ?? 0)" }
-        let threads: String = latest == nil ? "missing" : "t3:\(project.id):\(version)"
+        let threads: String = latest == nil ? "missing" : Self.capturePrefix + "\(project.id):\(version)"
         let key = published ?? captured ?? threads
         guard key != sourceKey else { return }
         sourceKey = key
@@ -79,10 +80,10 @@ final class ScreenshotBinding {
                 guard let self, !Task.isCancelled, self.sourceKey == key else { return }
                 // No capture in the threads yet is the honest "missing" state.
                 if self.stage?.screen(for: self.id).hasScreenshot != true {
-                    self.stage?.setScreen(key.hasPrefix("t3:") ? .missing : .unavailable, for: self.id)
+                    self.stage?.setScreen(key.hasPrefix(Self.capturePrefix) ? .missing : .unavailable, for: self.id)
                 }
                 self.onChange?()
-                if !key.hasPrefix("t3:") { self.sourceKey = "" } // Retry on the next metadata refresh.
+                if !key.hasPrefix(Self.capturePrefix) { self.sourceKey = "" } // Retry on the next metadata refresh.
             }
         }
     }
@@ -98,6 +99,9 @@ final class ScreenshotBinding {
             guard let self, !Task.isCancelled else { return }
             restoring = nil
             cachedKey = saved?.key ?? ""
+            // Saved before the Mac checked where thread images came from:
+            // possibly a mockup an agent read, so never shown.
+            if saved?.key.hasPrefix("t3:") == true { image = nil }
             if let image, stage?.screen(for: id).hasScreenshot != true {
                 stage?.setScreen(.image(image), for: id)
                 onChange?()
@@ -105,6 +109,9 @@ final class ScreenshotBinding {
             next()
         }
     }
+
+    /// Keys of simulator captures from the app's threads.
+    private static let capturePrefix = "capture:"
 
     nonisolated private static let directory: URL? = FileManager.default
         .urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("Screenshots", isDirectory: true)
@@ -122,8 +129,14 @@ final class ScreenshotBinding {
         return (key, blob.subdata(in: (4 + length)..<blob.count))
     }
 
-    nonisolated private static func store(_ data: Data, key: String, for id: String) {
-        Task.detached(priority: .utility) {
+    /// The last write started for each app; the next waits for it, so the
+    /// newest capture is always the one left on disk.
+    private static var writes: [String: Task<Void, Never>] = [:]
+
+    private static func store(_ data: Data, key: String, for id: String) {
+        let previous = writes[id]
+        writes[id] = Task.detached(priority: .utility) {
+            await previous?.value
             guard let directory, let url = file(for: id) else { return }
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let keyData = Data(key.utf8)
