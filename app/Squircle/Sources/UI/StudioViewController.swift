@@ -155,6 +155,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: StudioViewController, _: UITraitCollection) in
             controller.schedulePortraits()
         }
+        // Portraits skipped while in the background are drawn on return.
+        Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: UIApplication.willEnterForegroundNotification) {
+                self?.schedulePortraits()
+            }
+        }
         render()
     }
 
@@ -734,14 +740,20 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
     }
 
-    /// Draws one stale grid portrait. False when none is stale.
+    /// Draws one stale grid portrait. False when none is stale, or when
+    /// none can be drawn now. iOS forbids GPU work in the background, where
+    /// it still flips the appearance for its app switcher snapshots; a
+    /// portrait drawn then comes back solid black. Those wait for the return
+    /// to the foreground, and a failed draw stays stale for the next pass.
     private func drawNextPortrait() -> Bool {
+        guard UIApplication.shared.applicationState != .background else { return false }
         for (index, project) in projects.enumerated() {
             guard let cell = cells[project.id] else { continue }
             let pose = gridPose(index), key = portraitKey(project.id, pose)
             guard cell.portraitKey != key else { continue }
+            guard let image = stage.portrait(for: project.id, pose: pose, scale: displayScale) else { return false }
             cell.portraitKey = key
-            cell.portrait.image = stage.portrait(for: project.id, pose: pose, scale: displayScale)
+            cell.portrait.image = image
             return true
         }
         return false

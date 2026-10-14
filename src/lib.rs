@@ -2,6 +2,7 @@ pub mod agents;
 pub mod apps;
 pub mod artifact;
 pub mod buildlog;
+pub mod guard;
 pub mod media;
 pub mod model;
 pub mod overlay;

@@ -46,7 +46,9 @@ instructions say the same.
   Done (today's). Rows show the ask, the note, linked threads as chips (tap
   opens the thread), thumbnails (tap opens the picture or plays the clip) and
   Install when a linked build is ready. Tapping a row opens its most relevant
-  thread. Swipe: Done / Drop (the row moves at once), or Top; long press:
+  thread. Swipe (UIKit's own actions): Done / Drop (the row moves at once
+  and holds until the Mac confirms), or Top; the list holds still while a
+  swipe is open and catches up when it closes; long press:
   any status, Move to Top. History folds at the bottom, with search. No +:
   tasks come only from what you tell the agent (user, 2026-10-14). The
   header is the close button and the switch on glass over a soft scroll

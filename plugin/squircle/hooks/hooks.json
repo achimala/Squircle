@@ -3,6 +3,9 @@
     "UserPromptSubmit": [
       { "hooks": [{ "type": "command", "command": "{{CLI}} agent context --hook", "timeout": 20 }] }
     ],
+    "PreToolUse": [
+      { "matcher": "Bash|Monitor|Agent|Task|Workflow", "hooks": [{ "type": "command", "command": "{{CLI}} agent guard", "timeout": 10 }] }
+    ],
     "SessionStart": [
       { "matcher": "compact", "hooks": [{ "type": "command", "command": "{{CLI}} agent context --hook", "timeout": 20 }] }
     ]

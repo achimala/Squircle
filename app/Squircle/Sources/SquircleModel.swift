@@ -1382,23 +1382,33 @@ final class SquircleModel {
     func tasks(for project: AppProject) -> AppTasks { tasks[project.id] ?? AppTasks() }
     func refreshTasks() async {
         guard let client, let id = selectedProjectID, let list = try? await client.tasks(projectID: id) else { return }
-        tasks[id] = list
+        tasks[id] = taskEdits.reduce(list) { list, edit in Self.apply(edit.value, to: edit.key, in: list) }
     }
     func addTask(_ ask: String, in project: AppProject) async {
         guard let client else { return }
         do { try await client.addTask(projectID: project.id, ask: ask) } catch { self.error = error.localizedDescription }
         await refreshTasks()
     }
+    /// Swiped status and Top changes the Mac hasn't confirmed yet. A refresh
+    /// already on its way would otherwise put the row back for a moment.
+    private var taskEdits: [String: (status: AppTask.Status?, toTop: Bool)] = [:]
+    /// Moves the row at once, before the Mac answers.
+    func markTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) {
+        taskEdits[task.id] = (status, toTop)
+        for (project, list) in tasks { tasks[project] = Self.apply((status, toTop), to: task.id, in: list) }
+    }
+    private static func apply(_ edit: (status: AppTask.Status?, toTop: Bool), to id: String, in list: AppTasks) -> AppTasks {
+        var list = list
+        guard let index = list.tasks.firstIndex(where: { $0.id == id }) else { return list }
+        if let status = edit.status { list.tasks[index].status = status }
+        if edit.toTop { list.tasks.insert(list.tasks.remove(at: index), at: 0) }
+        return list
+    }
     func updateTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) async {
         guard let client else { return }
-        // The row moves as you swipe; the Mac's answer confirms or undoes it.
-        if let status {
-            for (project, list) in tasks {
-                guard let index = list.tasks.firstIndex(where: { $0.id == task.id }) else { continue }
-                tasks[project]?.tasks[index].status = status
-            }
-        }
+        markTask(task, status: status, toTop: toTop)
         do { try await client.updateTask(id: task.id, status: status, toTop: toTop) } catch { self.error = error.localizedDescription }
+        taskEdits[task.id] = nil
         await refreshTasks()
     }
     private var taskMedia = BoundedCache<String, Data>(budget: 16 << 20, cost: \.count)
