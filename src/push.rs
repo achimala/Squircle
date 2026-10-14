@@ -744,27 +744,28 @@ impl Push {
 
     // MARK: Builds
 
-    pub fn build_finished(self: &Arc<Self>, job: &crate::model::Job) {
+    pub fn build_finished(self: &Arc<Self>, job: &crate::model::Job, app: Option<&crate::apps::AppRecord>) {
         use crate::model::{BuildMode, BuildState};
-        let Some(request) = &job.request else { return };
+        let Some(request) = job.request() else { return };
         if request.mode != BuildMode::Archive {
             return; // Agents' simulator builds are their own business.
         }
-        let output = job.output.as_ref();
-        let app = output.map(|o| o.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| request.scheme.clone());
-        let line = match job.state {
+        let output = job.output();
+        let name = output.map(|o| o.title.clone()).filter(|t| !t.is_empty()).unwrap_or_else(|| request.scheme.clone());
+        let line = match job.state() {
             BuildState::Succeeded => match output {
                 Some(o) => format!("Build {} is ready to install", o.build_number),
                 None => "Build is ready to install".into(),
             },
             BuildState::Failed => {
-                let reason = job.error.as_deref().map(summary_line).filter(|l| !l.is_empty());
+                let reason = job.error().map(summary_line).filter(|l| !l.is_empty());
                 reason.map_or("Build failed".into(), |r| format!("Build failed: {r}"))
             }
             _ => return,
         };
-        let target = Target { build: Some(job.id.clone()), bundle: output.map(|o| o.bundle_id.clone()), ..Target::default() };
-        self.notify(Note { app, line, target });
+        let bundle = output.map(|o| o.bundle_id.clone()).or_else(|| app.and_then(|a| a.bundle_id.clone()));
+        let target = Target { build: Some(job.id.clone()), bundle, ..Target::default() };
+        self.notify(Note { app: name, line, target });
     }
 
     // MARK: Agents

@@ -330,7 +330,7 @@ fn symbol_file(image: &Image, given: &[PathBuf], store: Option<&Store>, preferre
         let mut jobs = store.list_jobs().unwrap_or_default();
         jobs.sort_by_key(|j| preferred_job != Some(j.id.as_str()));
         for job in jobs {
-            for dsym in job.output.iter().flat_map(|o| o.dsym_paths.iter()) {
+            for dsym in job.output().into_iter().flat_map(|o| o.dsym_paths.iter()) {
                 if let Some(found) = matching(dsym, &uuid, uuids) {
                     return Ok((found, format!("dSYM of build {}", job.id)));
                 }

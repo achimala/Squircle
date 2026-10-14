@@ -78,11 +78,6 @@ impl From<BuildArtifacts> for BuildOutput {
             } => (None, None, app, dsyms, metadata),
         };
         BuildOutput {
-            preview_path: None,
-            preview_state: None,
-            preview_error: None,
-            preview_captured_at: None,
-            preview_source: None,
             archive_path: archive,
             ipa_path: ipa,
             app_path: Some(app),

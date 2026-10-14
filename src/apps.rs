@@ -4,7 +4,7 @@
 //! A record stays readable when its preview bytes go missing: the artifact is
 //! reported unavailable and a new publication repairs it.
 use crate::{
-    model::{BuildRequest, Job, now},
+    model::{BuildRequest, Job, PreviewArtifact, PreviewSource, PreviewState, now},
     store::{Store, atomic_json, check_dir, open_private_read, private_dir, read_json},
 };
 use anyhow::{Context, Result, ensure};
@@ -100,6 +100,18 @@ pub fn list(store: &Store) -> Result<Vec<AppRecord>> {
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok(apps)
+}
+
+/// The registered app a build belongs to: its project and scheme, or for an
+/// imported IPA its bundle.
+pub fn owner_of<'a>(apps: &'a [AppRecord], job: &Job) -> Option<&'a AppRecord> {
+    match job.request() {
+        Some(request) => apps.iter().find(|app| app.project == request.project && app.scheme == request.scheme),
+        None => {
+            let bundle = &job.output()?.bundle_id;
+            apps.iter().find(|app| app.bundle_id.as_ref() == Some(bundle))
+        }
+    }
 }
 
 pub fn get(store: &Store, id: &str) -> Result<AppRecord> {
@@ -226,10 +238,9 @@ pub fn publish_preview(
 /// never replaces agent-edited names/summaries or a more recent agent preview.
 pub fn sync_build_preview(store: &Store, job: &Job) -> Result<AppRecord> {
     let request = job
-        .request
-        .as_ref()
+        .request()
         .context("build has no project recipe to associate with an app")?;
-    let output = job.output.as_ref().context("build has no app metadata")?;
+    let output = job.output().context("build has no app metadata")?;
     let app = register(
         store,
         AppRegistration {
@@ -244,9 +255,10 @@ pub fn sync_build_preview(store: &Store, job: &Job) -> Result<AppRecord> {
             summary: String::new(),
         },
     )?;
-    let (Some(file), Some(captured_at)) = (&output.preview_path, output.preview_captured_at) else {
+    let Some(PreviewArtifact { path: file, captured_at, source }) = job.preview().and_then(PreviewState::artifact) else {
         return Ok(app);
     };
+    let captured_at = *captured_at;
     if app
         .preview
         .as_ref()
@@ -254,8 +266,8 @@ pub fn sync_build_preview(store: &Store, job: &Job) -> Result<AppRecord> {
     {
         return Ok(app);
     }
-    let from_current_tree = output.preview_source.as_deref() == Some("current_working_tree");
-    let from_built_product = output.preview_source.as_deref() == Some("built_simulator_product");
+    let from_current_tree = *source == Some(PreviewSource::CurrentWorkingTree);
+    let from_built_product = *source == Some(PreviewSource::BuiltSimulatorProduct);
     publish_at(
         store,
         &app.id,
@@ -272,7 +284,7 @@ pub fn sync_build_preview(store: &Store, job: &Job) -> Result<AppRecord> {
             // An archive's later simulator rebuild did not capture its submission
             // revision. Do not turn the old observation into false provenance.
             source_revision: if from_built_product {
-                job.source_revision.clone()
+                job.provenance().and_then(|p| p.revision.clone())
             } else {
                 None
             },
@@ -364,8 +376,7 @@ fn commit_preview(
         validate_id(build_id)?;
         let job = store.load_job(build_id)?;
         let output = job
-            .output
-            .as_ref()
+            .output()
             .context("associated build has no app output")?;
         if let Some(bundle) = &app.bundle_id {
             ensure!(
@@ -373,7 +384,7 @@ fn commit_preview(
                 "preview build belongs to a different app bundle"
             );
         }
-        if let Some(request) = job.request {
+        if let Some(request) = job.request() {
             ensure!(
                 request.project.canonicalize()? == app.project && request.scheme == app.scheme,
                 "preview build belongs to a different project or scheme"

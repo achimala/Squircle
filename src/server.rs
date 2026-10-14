@@ -1,4 +1,4 @@
-use crate::{agents::Agents, apps, push::Push, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::Store, xcode};
+use crate::{agents::Agents, apps, push::Push, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::{AdmitError, Jobs, MAX_OPERATIONS, Store}, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -614,7 +614,7 @@ fn finish_preview(job: &mut Job, capture: Result<preview::Capture>) {
     let next = current.finish(capture.map(|c| PreviewArtifact {
         path: c.path,
         captured_at: c.captured_at,
-        source: PreviewSource::parse(&c.source),
+        source: Some(c.source),
     }));
     job.set_preview(next);
 }
@@ -1035,13 +1035,14 @@ async fn download_preview(
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     let path = {
-        let store = state.store.lock().unwrap();
-        let job = store.load_job(&id).map_err(ApiError::missing)?;
+        let job = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?.job;
         let path = job
-            .output
-            .and_then(|output| output.preview_path)
+            .preview()
+            .and_then(|preview| preview.artifact())
+            .map(|artifact| artifact.path.clone())
             .ok_or_else(|| ApiError::missing("This build has no captured preview"))?;
-        let expected = store
+        let expected = state
+            .files
             .job_dir(&id)
             .map_err(ApiError::missing)?
             .join("preview.png");
@@ -1166,19 +1167,9 @@ async fn cancel(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let job = state
-        .store
-        .lock()
-        .unwrap()
-        .load_job(&id)
-        .map_err(ApiError::missing)?;
-    let requested = if let Some(sender) = state.cancellations.lock().unwrap().get(&id) {
-        sender.send(true).is_ok()
-    } else {
-        false
-    };
+    let (job_state, operation) = state.jobs.cancel(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     Ok(Json(success(
-        json!({"build_id":id,"cancel_requested":requested,"state":job.state}),
+        json!({"build_id":id,"cancel_requested":operation.is_some(),"state":job_state}),
     )))
 }
 
@@ -1253,17 +1244,12 @@ fn import_ipa(
         id,
         created_at: now(),
         updated_at: now(),
-        state: BuildState::Succeeded,
-        request: None,
-        output: Some(output),
-        error: None,
-        source: "imported_ipa_signature_not_verified".into(),
-        source_revision: None,
-        source_dirty: None,
+        origin: BuildOrigin::Imported,
+        phase: JobPhase::Succeeded { output, preview: PreviewState::Absent },
     };
     // Work admitted before shutdown may finish. Publication occurs only after
     // the copied IPA has been synced and its metadata validated.
-    state.store.lock().unwrap().save_job(&job)?;
+    state.jobs.insert(job.clone())?;
     Ok(job)
 }
 
@@ -1291,15 +1277,8 @@ async fn create_link(
             "Start serve with --public-url https://YOUR-MAC-HOSTNAME to create install links",
         )
     })?;
-    let store = state.store.lock().unwrap();
-    let job = store.load_job(&id).map_err(ApiError::missing)?;
-    if job.state != BuildState::Succeeded
-        || job
-            .output
-            .as_ref()
-            .and_then(|o| o.ipa_path.as_ref())
-            .is_none()
-    {
+    let job = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?.job;
+    if job.ipa().is_none() {
         return Err(ApiError::bad(
             "Build has no exported IPA; simulator products cannot be installed this way",
         ));
@@ -1309,36 +1288,30 @@ async fn create_link(
         build_id: id.clone(),
         expires_at: now() + input.ttl_seconds,
         base_url: base.clone(),
-        download_started_at: None,
-        downloaded_at: None,
+        transfer: TransferEvidence::NotStarted,
     };
-    store.save_ticket(&ticket).map_err(ApiError::internal)?;
+    state.store.lock().unwrap().save_ticket(&ticket).map_err(ApiError::internal)?;
     let page = format!("{base}/install/{}", ticket.token);
     Ok(Json(success(
         json!({"build_id":id,"page_url":page,"manifest_url":format!("{page}/manifest.plist"),"install_url":artifact::install_url(&format!("{page}/manifest.plist")),"expires_at":ticket.expires_at,"installation_confirmed":false}),
     )))
 }
-fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, Job)> {
-    let store = state.store.lock().unwrap();
-    let ticket = store
+/// A ticket's build, which has an IPA: only that can be installed.
+fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, String, BuildOutput)> {
+    let ticket = state
+        .store
+        .lock()
+        .unwrap()
         .load_ticket(token)
         .map_err(|_| ApiError::missing("Invalid install link"))?;
     if ticket.expires_at <= now() {
         return Err(ApiError::new(StatusCode::GONE, "link_expired", "Install link expired", "Request a new install link for the same build."));
     }
-    let job = store
-        .load_job(&ticket.build_id)
-        .map_err(ApiError::missing)?;
-    if job.state != BuildState::Succeeded
-        || job
-            .output
-            .as_ref()
-            .and_then(|o| o.ipa_path.as_ref())
-            .is_none()
-    {
-        return Err(ApiError::missing("No IPA for this build"));
+    let job = state.jobs.get(&ticket.build_id).ok_or_else(|| ApiError::missing("No IPA for this build"))?.job;
+    match job.output() {
+        Some(output) if output.ipa_path.is_some() => Ok((ticket, job.id.clone(), output.clone())),
+        _ => Err(ApiError::missing("No IPA for this build")),
     }
-    Ok((ticket, job))
 }
 /// Whether iOS has started (`download_started_at`) and finished (`downloaded_at`)
 /// downloading a link's IPA; it fetches it only after the person confirms the
@@ -1354,7 +1327,7 @@ async fn link_status(
         .load_ticket(&token)
         .map_err(|_| ApiError::missing("Unknown install link"))?;
     Ok(Json(success(
-        json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,"download_started_at":ticket.download_started_at,"downloaded_at":ticket.downloaded_at}),
+        json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,"transfer":ticket.transfer}),
     )))
 }
 fn private_headers() -> [(header::HeaderName, &'static str); 3] {
@@ -1368,8 +1341,7 @@ async fn install_page(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, job) = ticket_job(&state, &token)?;
-    let output = job.output.unwrap();
+    let (ticket, build_id, output) = ticket_job(&state, &token)?;
     let link = artifact::install_url(&format!(
         "{}/install/{}/manifest.plist",
         ticket.base_url, token
@@ -1380,7 +1352,7 @@ async fn install_page(
         artifact::escape_html(&output.version),
         artifact::escape_html(&output.build_number),
         artifact::escape_html(&link),
-        job.id
+        build_id
     );
     Ok((private_headers(), Html(html)).into_response())
 }
@@ -1388,9 +1360,9 @@ async fn download_manifest(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, job) = ticket_job(&state, &token)?;
+    let (ticket, _, output) = ticket_job(&state, &token)?;
     let bytes = artifact::manifest(
-        &job.output.unwrap(),
+        &output,
         &format!("{}/install/{}/app.ipa", ticket.base_url, token),
     )
     .map_err(ApiError::internal)?;
@@ -1405,8 +1377,8 @@ async fn download_ipa(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, job) = ticket_job(&state, &token)?;
-    let path = job.output.unwrap().ipa_path.unwrap();
+    let (ticket, _, output) = ticket_job(&state, &token)?;
+    let path = output.ipa_path.expect("ticket_job checks the IPA");
     let file = tokio::fs::File::open(path)
         .await
         .map_err(ApiError::missing)?;
@@ -1414,8 +1386,8 @@ async fn download_ipa(
     // Evidence only, recorded as it happens: the IPA was opened for a request,
     // then every byte was handed to the connection. Neither blocks the
     // download, and neither proves installation or launch.
-    if ticket.download_started_at.is_none() {
-        let _ = mark_ticket(&state, &token, |t| t.download_started_at.get_or_insert(now()));
+    if ticket.transfer == TransferEvidence::NotStarted {
+        let _ = mark_ticket(&state, &token, |t| t.opened(now()));
     }
     // Hyper stops polling a body once Content-Length bytes are out, so the
     // finish is recorded when it drops the body, not by a trailing chunk.
@@ -1453,16 +1425,21 @@ impl Drop for Delivered {
         }
         // One small record write, like `download_started_at` above.
         if let Some((state, token)) = self.ticket.take() {
-            let _ = mark_ticket(&state, &token, |t| t.downloaded_at.get_or_insert(now()));
+            let _ = mark_ticket(&state, &token, |t| t.completed(now()));
         }
     }
 }
 
-/// Sets a ticket's evidence field once, under the record lock.
-fn mark_ticket(state: &AppState, token: &str, mark: impl FnOnce(&mut Ticket) -> &mut u64) -> Result<()> {
+/// Advances a ticket's transfer evidence under the record lock. Evidence
+/// only moves forward; a repeated mark keeps the first times.
+fn mark_ticket(state: &AppState, token: &str, mark: impl FnOnce(TransferEvidence) -> TransferEvidence) -> Result<()> {
     let store = state.store.lock().unwrap();
     let mut ticket = store.load_ticket(token)?;
-    mark(&mut ticket);
+    let next = mark(ticket.transfer);
+    if next == ticket.transfer {
+        return Ok(());
+    }
+    ticket.transfer = next;
     store.save_ticket(&ticket)
 }
 

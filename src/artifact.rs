@@ -58,11 +58,6 @@ pub fn inspect_ipa(path: &Path) -> Result<BuildOutput> {
         .unwrap_or(&bundle_id)
         .to_owned();
     Ok(BuildOutput {
-        preview_path: None,
-        preview_state: None,
-        preview_error: None,
-        preview_captured_at: None,
-        preview_source: None,
         archive_path: None,
         ipa_path: Some(path.to_path_buf()),
         app_path: None,
@@ -157,11 +152,6 @@ mod tests {
     #[test]
     fn manifest_round_trips_xml_and_uses_build_number() {
         let output = BuildOutput {
-            preview_path: None,
-            preview_state: None,
-            preview_error: None,
-            preview_captured_at: None,
-            preview_source: None,
             archive_path: None,
             ipa_path: None,
             app_path: None,
