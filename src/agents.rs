@@ -32,6 +32,10 @@ pub struct Agent {
     /// (an agent cannot stop its own session while it runs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<Reset>,
+    /// After a restart: the next turn's note carries the current instructions,
+    /// because Claude restores a resumed session's original system prompt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refresh: bool,
 }
 
 /// `restart` relaunches the agent's Claude session on the same thread, so the
@@ -473,7 +477,7 @@ impl Agents {
             "runtimeMode": "full-access", "interactionMode": "default",
             "branch": null, "worktreePath": null,
         })).await?;
-        let agent = Agent { project_id: project_id.into(), thread_id, created_at: crate::model::now(), pending: None };
+        let agent = Agent { project_id: project_id.into(), thread_id, created_at: crate::model::now(), pending: None, refresh: false };
         let mut registry = self.registry.lock().unwrap();
         registry.agents.insert(project_id.into(), agent.clone());
         self.save(&registry)?;
@@ -552,8 +556,13 @@ impl Agents {
         match reset {
             Reset::Restart => {
                 if live { stop().await?; }
+                {
+                    let mut registry = self.registry.lock().unwrap();
+                    if let Some(agent) = registry.agents.get_mut(&agent.project_id) { agent.refresh = true; }
+                    self.save(&registry)?;
+                }
                 Ok(json!({"project_id": agent.project_id, "thread_id": agent.thread_id, "action": "restart", "when": "now",
-                          "next": "The agent's next message starts a new session with the current instructions and the same history."}))
+                          "next": "The agent's next message starts a new session with the same history and gets the current instructions."}))
             }
             Reset::Fresh { note } => {
                 let handoff = self.handoff(&client, agent, note.as_deref()).await?;
@@ -644,6 +653,17 @@ impl Agents {
         let Some((agent, app)) = found else {
             return "[squircle] No app agent works in this folder.".into();
         };
+        // Claude keeps a resumed session's first system prompt; a restarted
+        // agent gets the current one here, once.
+        let refreshed = if agent.refresh {
+            let mut registry = self.registry.lock().unwrap();
+            if let Some(agent) = registry.agents.get_mut(&agent.project_id) { agent.refresh = false; }
+            let _ = self.save(&registry);
+            std::fs::read_to_string(self.root.join("plugin/squircle/agents/app-agent.md")).ok()
+                .and_then(|t| t.splitn(3, "---\n").nth(2).map(|body| format!(
+                    "\n[squircle] You were restarted. Your instructions are now the following; they replace any earlier version:\n{}", body.trim())))
+                .unwrap_or_default()
+        } else { String::new() };
         let workers = self.workers(Some(&agent.thread_id));
         let board = if workers.is_empty() {
             "none".to_string()
@@ -657,7 +677,7 @@ impl Agents {
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
              copied out of /tmp into ~/.t3/userdata/attachments; a build you start or check this turn shows as an Install card. \
-             No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.",
+             No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.{refreshed}",
             cli = self.cli, id = agent.thread_id,
         )
     }
