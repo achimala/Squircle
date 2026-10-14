@@ -1,8 +1,12 @@
 import Foundation
+import os
 
 final class SquircleClient {
     let configuration: AppConfiguration
     private let session: URLSession
+    /// The last body and ETag of each polled reply: the service answers an
+    /// unchanged one with an empty 304, so a poll costs a few hundred bytes.
+    private let validated = OSAllocatedUnfairLock<[URL: (etag: String, data: Data)]>(initialState: [:])
 
     init(configuration: AppConfiguration, sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.configuration = configuration
@@ -20,7 +24,7 @@ final class SquircleClient {
 
     func builds() async throws -> [AppBuild] {
         struct Reply: Decodable { let ok: Bool; let data: [AppBuild] }
-        let reply: Reply = try await get(["v1", "builds"])
+        let reply: Reply = try await get(["v1", "builds"], revalidate: true)
         guard reply.ok else { throw ClientError.response("Squircle") }
         return reply.data
     }
@@ -44,7 +48,7 @@ final class SquircleClient {
     func fetchAppMetadata() async throws -> [AppMetadata] {
         struct Reply: Decodable { let ok: Bool; let data: [AppMetadata] }
         do {
-            let reply: Reply = try await get(["v1", "apps"])
+            let reply: Reply = try await get(["v1", "apps"], revalidate: true)
             guard reply.ok else { throw ClientError.response("Squircle") }
             return reply.data
         } catch let error as ClientError where error.isMissing {
@@ -94,7 +98,7 @@ final class SquircleClient {
     /// Each app's agent thread on the Mac, and how to run its CLI.
     func agents() async throws -> AgentDirectory {
         do {
-            return try AgentDirectory.decode(try await get(["v1", "agents"]) as JSONValue)
+            return try AgentDirectory.decode(try await get(["v1", "agents"], revalidate: true) as JSONValue)
         } catch let error as ClientError where error.isMissing {
             return AgentDirectory() // An older Squircle service has no app agents.
         }
@@ -200,7 +204,7 @@ final class SquircleClient {
     /// Recordings and images agents published into a thread.
     func threadMedia(threadID: String) async throws -> [JSONValue] {
         struct Reply: Decodable { let ok: Bool; let data: JSONValue }
-        let reply: Reply = try await get(["v1", "t3", "threads", threadID, "media"])
+        let reply: Reply = try await get(["v1", "t3", "threads", threadID, "media"], revalidate: true)
         guard reply.ok else { throw ClientError.response("Squircle") }
         return reply.data["media"].array
     }
@@ -217,14 +221,14 @@ final class SquircleClient {
     /// Simulator sessions Squircle is recording for agents (`squircle sim`).
     func simulatorSessions() async throws -> [JSONValue] {
         struct Reply: Decodable { let ok: Bool; let data: JSONValue }
-        let reply: Reply = try await get(["v1", "sims"])
+        let reply: Reply = try await get(["v1", "sims"], revalidate: true)
         guard reply.ok else { throw ClientError.response("Squircle") }
         return reply.data["active"].array
     }
 
     func tasks(projectID: String) async throws -> AppTasks {
         struct Reply: Decodable { let ok: Bool; let data: AppTasks }
-        let reply: Reply = try await get(["v1", "tasks"], query: [URLQueryItem(name: "project", value: projectID)])
+        let reply: Reply = try await get(["v1", "tasks"], query: [URLQueryItem(name: "project", value: projectID)], revalidate: true)
         guard reply.ok else { throw ClientError.response("Squircle") }
         return reply.data
     }
@@ -342,12 +346,27 @@ final class SquircleClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
     }
-    private func get<T: Decodable>(_ path: [String], query: [URLQueryItem] = []) async throws -> T {
-        try await perform(request(path, query: query), service: "Squircle")
+    /// `revalidate`: for replies polled every few seconds; an unchanged one
+    /// costs no body.
+    private func get<T: Decodable>(_ path: [String], query: [URLQueryItem] = [], revalidate: Bool = false) async throws -> T {
+        try await perform(request(path, query: query), service: "Squircle", revalidate: revalidate)
     }
-    private func perform<T: Decodable>(_ request: URLRequest, service: String, exposeAPIError: Bool = false) async throws -> T {
+    private func perform<T: Decodable>(_ request: URLRequest, service: String, exposeAPIError: Bool = false,
+                                       revalidate: Bool = false) async throws -> T {
         do {
-            let (data, response) = try await session.data(for: request)
+            var request = request
+            let url = request.url
+            let known = revalidate ? url.flatMap { url in validated.withLock { $0[url] } } : nil
+            if let known { request.setValue(known.etag, forHTTPHeaderField: "If-None-Match") }
+            var (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, let url, revalidate {
+                if http.statusCode == 304, let known {
+                    data = known.data
+                    response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil) ?? response
+                } else if http.statusCode == 200, let etag = http.value(forHTTPHeaderField: "ETag") {
+                    validated.withLock { $0[url] = (etag, data) }
+                }
+            }
             if exposeAPIError, let response = response as? HTTPURLResponse,
                !(200..<300).contains(response.statusCode), ![401, 403].contains(response.statusCode),
                let message = backendMessage(data) {

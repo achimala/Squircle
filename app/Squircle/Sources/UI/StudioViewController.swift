@@ -187,6 +187,22 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         func value(_ key: String) -> CGFloat? { environment[key].flatMap(Double.init).map { CGFloat($0) } }
         if let slow = value("SQUIRCLE_SLOW") { SpringDriver.debugSlowMotion = Double(slow) }
         if environment["SQUIRCLE_NO_DOCK"] == "1" { dock.isHidden = true }
+        // `SQUIRCLE_PERF_APP`: once connected, open this app (traced).
+        if let name = environment["SQUIRCLE_PERF_APP"] {
+            // A headless simulator never makes the scene active; the phone does.
+            model.startMetadataUpdates()
+            Task { [weak self] in
+                while let self, !(model.connected && projects.contains { $0.name == name }) { try? await Task.sleep(for: .milliseconds(100)) }
+                try? await Task.sleep(for: .seconds(value("SQUIRCLE_PERF_WAIT").map(Double.init) ?? 3))
+                guard let self, let project = projects.first(where: { $0.name == name }) else { return }
+                ConnectionTrace.mark("tap.app", name)
+                openApp(project.id); appSpring.set(1)
+                guard let thread = environment["SQUIRCLE_PERF_THREAD"] else { return }
+                try? await Task.sleep(for: .seconds(3))
+                ConnectionTrace.mark("tap.thread", thread)
+                openThread(thread)
+            }
+        }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard let self else { return }
