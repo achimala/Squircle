@@ -100,15 +100,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Whatever shows this conversation: simulator streams, bringing a
     /// simulator large, and which live simulators are on screen.
     weak var host: ConversationHost?
-    /// Transitional, for a host not yet adopting `ConversationHost`: live
-    /// simulators play from these as previews only.
-    @available(*, deprecated, message: "Set host")
-    var feeds: SimulatorFeeds? {
-        get { legacyFeeds }
-        set { legacyFeeds = newValue }
-    }
-    private var legacyFeeds: SimulatorFeeds?
-    private var simulatorFeeds: SimulatorFeeds? { host?.simulatorFeeds ?? legacyFeeds }
+    private var simulatorFeeds: SimulatorFeeds? { host?.simulatorFeeds }
     /// The app's agent: one conversation per app that runs its threads.
     let isAgent: Bool
     /// The agent's update lines open the app's other threads (nil: a new one).
@@ -1598,7 +1590,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         onBack = nil
         host?.conversation(self, showsSimulators: [])
         host = nil
-        legacyFeeds = nil
     }
 
     #if DEBUG

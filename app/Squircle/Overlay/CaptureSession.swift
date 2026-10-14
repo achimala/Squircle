@@ -47,11 +47,11 @@ final class CaptureSession {
 
     static let limit: Duration = .seconds(60)
     private var state = State.idle
-    private let make: (Kind, UIWindow) -> CaptureProducer?
+    private let make: @MainActor (Kind, UIWindow) -> CaptureProducer?
     /// Called when a recording reaches `limit` and should stop.
     var onLimit: (() -> Void)?
 
-    init(make: @escaping (Kind, UIWindow) -> CaptureProducer? = CaptureSession.recorder) {
+    init(make: @escaping @MainActor (Kind, UIWindow) -> CaptureProducer? = CaptureSession.recorder) {
         self.make = make
     }
 

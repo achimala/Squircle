@@ -151,6 +151,8 @@ final class GlassJelly: UIView {
         contentMask.fillColor = UIColor.black.cgColor
         content.layer.mask = contentMask
         addSubview(content)
+        // Light or dark: its colours change, so it draws again.
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.wake() }
         // Reduce Motion turned off brings the breath back.
         motionSetting = Task { [weak self] in
             for await _ in NotificationCenter.default.notifications(named: UIAccessibility.reduceMotionStatusDidChangeNotification) {
@@ -222,11 +224,6 @@ final class GlassJelly: UIView {
         link.preferredFrameRateRange = Cadence.moving.rate ?? .default
         link.add(to: .main, forMode: .common)
         self.link = link
-    }
-
-    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-        super.traitCollectionDidChange(previous)
-        wake()
     }
 
     /// The owner moved or resized it: draw now, in the same transaction, so
@@ -544,7 +541,7 @@ final class GlassJelly: UIView {
                 hold = 0.6
             } else if Motion.reduced {
                 // Still: it looks ahead, and only at what you do.
-                hold = 1
+                hold = 10
             } else if tone == .working, opened < 0.5 {
                 // Reading along the line, a word or two at a time.
                 readStep = (readStep + 1) % 4

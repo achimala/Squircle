@@ -118,6 +118,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private let model: SquircleModel
     /// Simulator streams for the turns' live simulators.
     private lazy var feeds = SimulatorFeeds(model: model)
+    /// Torn down: its window was replaced or its scene went away.
+    private var closed = false
     private var route = OverlayRoute()
 
     /// The bubble and the panel: one piece of glass jelly.
@@ -654,16 +656,19 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // drifts a third as far left and fades out first, so text never sits
         // over text.
         let t = push.value.clamped(), width = body.bounds.width
+        // A closed panel shows no conversation: its live simulators let go
+        // of their streams.
+        let inSight: CGFloat = page.isHidden ? 0 : 1
         if let agent {
             place(agent, offset: -width * 0.3 * t)
             agent.host.alpha = (1 - t * 2).clamped()
-            agent.controller.setTransitionProgress(1 - t)
+            agent.controller.setTransitionProgress((1 - t) * inSight)
         }
         if let thread {
             place(thread, offset: width * (1 - t))
             // Only while the agent still shows beneath it.
             thread.host.backgroundColor = paper.withAlphaComponent(paper.cgColor.alpha * ((1 - t) * 2).clamped())
-            thread.controller.setTransitionProgress(t)
+            thread.controller.setTransitionProgress(t * inSight)
         }
 
         // Touches go where the route is headed, from the first frame.
@@ -956,7 +961,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// A conversation; a simulator the agent uses shows in its turn (you are
     /// already in the app, so no picture-in-picture).
     private func host(_ controller: ThreadViewController) -> Mounted {
-        controller.feeds = feeds
+        controller.host = self
         controller.onToggleFull = { [weak self] in self?.toggleFull() }
         controller.isFull = { [weak self] in self?.route.full ?? false }
         controller.appAttachments = appAttachments
@@ -987,6 +992,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Its window is being replaced or its scene went away: nothing it
     /// started outlives it (recording, conversations, observers).
     func tearDown() {
+        guard !closed else { return }
+        closed = true
         capture.cancel()
         observations.forEach { $0.cancel() }
         observations = []
@@ -998,6 +1005,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             mounted.host.removeFromSuperview()
             mounted.controller.removeFromParent()
         }
+        feeds.close()
     }
 
     // MARK: Sheets
@@ -1337,6 +1345,16 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         }
     }
     #endif
+}
+
+/// The overlay shows the agent's simulator live in its turn as a preview
+/// only: you are already in the app, so there is no picture-in-picture or
+/// large touchable simulator to bring up (user, 2026-10-13).
+extension OverlayController: ConversationHost {
+    var simulatorFeeds: SimulatorFeeds { feeds }
+    var expandsSimulators: Bool { false }
+    func expandSimulator(_ use: SimulatorUse) {}
+    func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>) {}
 }
 
 /// The glass's frame as one spring: origin and size move together toward a
