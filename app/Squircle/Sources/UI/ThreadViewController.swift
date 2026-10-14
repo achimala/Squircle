@@ -564,7 +564,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func renderItems(animated: Bool = false) {
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
         let next = header + ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
-                                             builds: model.builds(for: project), changes: model.changes,
+                                             builds: model.builds, changes: model.changes,
                                              simulators: model.threadSimulators)
         guard next != items else { return }
         let previous = itemsByID
