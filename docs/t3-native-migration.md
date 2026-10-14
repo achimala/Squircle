@@ -917,6 +917,25 @@ with the fade present throughout, the capture flight. Letters Abroad build:
 job `9c690d0f-f240-4376-a154-d163edad6d97` (overlay key `5f304350…`, main at
 `713918a`); not yet on the phone.
 
+**Fluid bubble, launch in place (user, 2026-10-14):** "as the agent changes
+what it's doing the bubble resizes and text changes kinda abruptly and often
+clips off … the squircle button flies into place from some random location".
+Causes: the bubble's line was laid out at the glass's width every frame, so it
+re-truncated as the width sprang, and the opening progress averaged width and
+height, so a width change alone read as partly open (the line was squeezed to
+the new width and stretched, and the panel's paper blurred in). At launch the
+first `render()` animated the glass's spring from its zero frame before the
+first layout. Now `LiveCapsule` lays each line out at its own text width
+(within `widthLimit`, truncated there), moves lines only by transform, and
+fades its trailing 9 pt, so the springing edge reveals or hides text softly;
+the old task rises and fades out quickly as the new one rises in. A task shows
+at least 1.1 s; changes within that collapse into the latest (tone changes,
+such as Needs you, show at once). Opening progress is by height only. The
+glass gets no frame until the first layout in a window, then grows in at its
+resting place (`appear`, scale 0.5 → 1 with a little overshoot, fading in).
+DEBUG: `SQUIRCLE_BUBBLE_DEMO=1` loops made-up statuses. Checked frame by
+frame in a real-speed simulator recording (iPhone 17 Pro, iOS 27.0).
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
