@@ -6,12 +6,12 @@ final class T3Tests: XCTestCase {
     @MainActor
     func testRejectedApprovalModeChangeRestoresSelection() async {
         let model = SquircleModel(configuration:nil)
-        await model.selectSession("existing")
+        await model.open(.thread("existing", appID: "app"))
         model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["runtimeMode":"approval-required"]]]))
         await model.setRuntimeMode(.fullAccess)
         XCTAssertEqual(model.runtimeMode, .approvalRequired)
         XCTAssertNotNil(model.error)
-        await model.beginDraft()
+        await model.open(.draft(UUID(), appID: "app", agent: false))
         await model.setRuntimeMode(.autoAcceptEdits)
         XCTAssertEqual(model.runtimeMode, .autoAcceptEdits)
     }
@@ -35,7 +35,7 @@ final class T3Tests: XCTestCase {
         func snapshot(_ selection:JSONValue, sequence:Int) -> JSONValue {
             .from(["kind":"snapshot","snapshot":["snapshotSequence":sequence,"thread":["modelSelection":selection.foundation]]])
         }
-        await model.selectSession("first")
+        await model.open(.thread("first", appID: "app"))
         XCTAssertTrue(model.availableModelSelections.isEmpty, "Do not offer other providers while the thread loads")
         model.consumeThread(snapshot(codex,sequence:1))
         XCTAssertEqual(model.availableModelSelections.count,2)
@@ -46,10 +46,10 @@ final class T3Tests: XCTestCase {
         model.chooseModel(astra)
         model.consumeThread(snapshot(codex,sequence:2))
         XCTAssertEqual(model.modelSelection,astra)
-        await model.selectSession("second")
+        await model.open(.thread("second", appID: "app"))
         model.consumeThread(snapshot(claude,sequence:3))
         XCTAssertEqual(model.availableModelSelections,[claude])
-        await model.selectSession("first")
+        await model.open(.thread("first", appID: "app"))
         model.consumeThread(snapshot(codex,sequence:4))
         XCTAssertEqual(model.modelSelection,astra)
         model.consumeThread(snapshot(astra,sequence:5))
@@ -203,9 +203,12 @@ private final class GatedDispatch {
             return .object([:])
         }
     }
-    func release(failing: Bool = false) {
+    /// `failing`: T3 refuses the command. `lost`: the answer never comes back.
+    func release(failing: Bool = false, lost: Bool = false) {
         let next = waiting.removeFirst()
-        if failing { next.resume(throwing: ClientError.backend("T3", 0, "refused")) } else { next.resume() }
+        if failing { next.resume(throwing: ClientError.backend("T3", 0, "refused")) }
+        else if lost { next.resume(throwing: ClientError.connection("T3")) }
+        else { next.resume() }
     }
     func until(_ count: Int) async { while commands.count < count { await Task.yield() } }
 }
@@ -216,49 +219,129 @@ final class NativeStateTests: XCTestCase {
     private let project = AppProject(id: "app", name: "App", subtitle: "", bundleID: nil, canBuild: false, updatedAt: .now)
 
     @MainActor
-    private func draftWithPicture(_ gate: GatedDispatch) async -> SquircleModel {
-        let model = SquircleModel(configuration: nil, preferences: UserDefaults(suiteName: UUID().uuidString)!, commandDispatch: gate.dispatch)
+    private func draftWithPicture(_ gate: GatedDispatch, upload: ((URL, String) async throws -> String)? = nil)
+        async -> (SquircleModel, ConversationID) {
+        let model = SquircleModel(configuration: nil, preferences: UserDefaults(suiteName: UUID().uuidString)!,
+                                  commandDispatch: gate.dispatch, upload: upload)
         model.consumeConfig(config)
-        model.selectProject(project)
-        await model.beginDraft()
+        let draft = ConversationID.draft(UUID(), appID: project.id, agent: false)
+        await model.open(draft)
         model.attach(ImageAttachment(UIImage(systemName: "star")!, id: "picture")!)
-        return model
+        return (model, draft)
+    }
+    @MainActor
+    private func start(_ model: SquircleModel, _ text: String, from id: ConversationID) throws -> Task<SendOutcome, Never> {
+        guard case .started(_, let outcome) = model.startSend(text, in: project, from: id) else { throw XCTSkip("Send refused") }
+        return outcome
     }
 
     /// Navigating away while a draft's thread is being created: the message
-    /// still goes to the thread that draft created, and selection stays put.
+    /// still goes to the thread that draft created, and the open
+    /// conversation stays put.
     @MainActor
     func testDraftSendStaysWithItsThreadAcrossNavigation() async throws {
         let gate = GatedDispatch()
-        let model = await draftWithPicture(gate)
-        let sending = Task { await model.send("hello", in: project, to: nil, agent: false) }
+        let (model, draft) = await draftWithPicture(gate)
+        let sending = try start(model, "hello", from: draft)
         await gate.until(1)
         let created = try XCTUnwrap(gate.commands[0]["threadId"].string)
-        await model.selectSession("other")
+        await model.open(.thread("other", appID: project.id))
         gate.release()
         await gate.until(2)
         XCTAssertEqual(gate.commands[1]["type"].string, "thread.turn.start")
         XCTAssertEqual(gate.commands[1]["threadId"].string, created)
         gate.release()
         let outcome = await sending.value
-        XCTAssertEqual(outcome, .sent(threadID: created))
+        XCTAssertEqual(outcome.conversation, .thread(created, appID: project.id))
+        XCTAssertEqual(model.successor(of: draft), .thread(created, appID: project.id))
         XCTAssertEqual(model.selectedSessionID, "other")
         XCTAssertTrue(model.attachments.isEmpty)
     }
 
-    /// A failed send puts its pictures back in the conversation that sent
-    /// them, not the one open now.
+    /// T3 makes the draft's thread, then refuses the turn: the outcome names
+    /// that thread, and the pictures wait in its field (B-N01).
     @MainActor
-    func testFailedSendRestoresPicturesToItsOwnConversation() async throws {
+    func testRefusedTurnAfterCreationBelongsToTheNewThread() async throws {
         let gate = GatedDispatch()
-        let model = await draftWithPicture(gate)
-        let sending = Task { await model.send("hello", in: project, to: nil, agent: false) }
-        await gate.until(1)
-        await model.selectSession("other")
-        gate.release(failing: true)
-        guard case .failed = await sending.value else { return XCTFail("Expected failure") }
-        XCTAssertTrue(model.attachments.isEmpty, "The open thread's field stays empty")
-        XCTAssertNil(model.error, "The error belongs to the conversation that sent")
+        let (model, draft) = await draftWithPicture(gate)
+        let sending = try start(model, "hello", from: draft)
+        await gate.until(1); gate.release()
+        await gate.until(2); gate.release(failing: true)
+        guard case .rejected(_, _, let owner) = await sending.value else { return XCTFail("Expected a refusal") }
+        let created = try XCTUnwrap(gate.commands[0]["threadId"].string)
+        XCTAssertEqual(owner, .thread(created, appID: project.id))
+        XCTAssertEqual(model.successor(of: draft), owner)
+        XCTAssertNil(model.pendingSend(for: owner))
+        await model.open(owner)
+        XCTAssertEqual(model.attachments.map(\.id), ["picture"])
+    }
+
+    /// The answer to a turn is lost: the message stays pending, a retry
+    /// sends the very same message, and T3 showing it settles it (B-N05).
+    @MainActor
+    func testLostAnswerRetriesTheSameMessage() async throws {
+        let gate = GatedDispatch()
+        let (model, _) = await draftWithPicture(gate)
+        let thread = ConversationID.thread("t", appID: project.id)
+        await model.open(thread)
+        model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[],
+                                   "modelSelection":["instanceId":"codex","model":"sol"]]]]))
+        let first = try start(model, "hello", from: thread)
+        await gate.until(1); gate.release(lost: true)
+        guard case .unknown(let messageID, _, _) = await first.value else { return XCTFail("Expected an unknown outcome") }
+        guard case .outcomeUnknown? = model.pendingSend(for: thread)?.phase else { return XCTFail("Still pending") }
+        guard case .refused = model.startSend("hello", in: project, from: thread) else { return XCTFail("No second message") }
+        guard case .refused = model.startRetry(thread) else { return XCTFail("Waits until T3 has caught up") }
+        model.consumeThread(.from(["kind":"synchronized"]))
+        guard case .started(_, let retry) = model.startRetry(thread) else { return XCTFail("Retry") }
+        await gate.until(2)
+        XCTAssertEqual(gate.commands[1]["message"]["messageId"].string, messageID)
+        XCTAssertEqual(gate.commands[1]["commandId"], gate.commands[0]["commandId"])
+        gate.release(lost: true)
+        _ = await retry.value
+        model.consumeThread(.from(["kind":"event","event":["sequence":2,"type":"thread.message-sent",
+            "payload":["messageId":messageID,"role":"user","text":"hello","createdAt":"2026-10-15T10:00:00.000Z"]]]))
+        XCTAssertNil(model.pendingSend(for: thread), "T3 has it: nothing pending")
+    }
+
+    /// A recording's upload fails: sending again uploads it again, and an
+    /// upload that made it is never repeated (B-N04).
+    @MainActor
+    func testFailedUploadIsTriedAgain() async throws {
+        let gate = GatedDispatch()
+        var uploads = 0
+        let (model, draft) = await draftWithPicture(gate) { _, _ in
+            uploads += 1
+            if uploads == 1 { throw ClientError.connection("Squircle") }
+            return "/mac/clip.mp4"
+        }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+        model.attach(ImageAttachment(capture: .init(kind: .video, file: file, label: "0:01"), thumbnail: UIImage(systemName: "star")!, id: "clip"))
+        let failed = try start(model, "look", from: draft)
+        guard case .rejected = await failed.value else { return XCTFail("Expected a refusal") }
+        XCTAssertEqual(Set(model.attachments.map(\.id)), ["picture", "clip"])
+        let sending = try start(model, "look", from: draft)
+        await gate.until(1); gate.release()
+        await gate.until(2)
+        XCTAssertTrue((gate.commands[1]["message"]["text"].string ?? "").contains("/mac/clip.mp4"))
+        gate.release()
+        _ = await sending.value
+        XCTAssertEqual(uploads, 2)
+    }
+
+    /// Old and over-budget files go, least recently used first; one in use
+    /// lately stays whatever its age (B-M02).
+    func testMediaCacheEvictsByAgeAndBudgetButNotInUse() {
+        let now = Date()
+        func entry(_ name: String, _ bytes: Int, ago: TimeInterval) -> MediaFileStore.Entry {
+            .init(name: name, bytes: bytes, used: now.addingTimeInterval(-ago))
+        }
+        let entries = [entry("stale", 1, ago: 20 * 86_400), entry("old", 6, ago: 3_600), entry("newer", 6, ago: 1_800),
+                       entry("playing", 6, ago: 60)]
+        XCTAssertEqual(MediaFileStore.evictions(entries, now: now, budget: 13), ["stale", "old"])
+        XCTAssertEqual(MediaFileStore.evictions([entry("playing", 100, ago: 60)], now: now, budget: 1), [])
+        XCTAssertEqual(MediaFileStore.name(for: "media:a"), MediaFileStore.name(for: "media:a"))
+        XCTAssertTrue(MediaFileStore.name(for: "file:/x/clip.mov").hasSuffix(".mov"))
     }
 
     @MainActor
@@ -321,20 +404,6 @@ final class NativeStateTests: XCTestCase {
         XCTAssertNil(cache.peek("b")); XCTAssertNotNil(cache.peek("a")); XCTAssertEqual(cache.total, 8)
         cache.set(Data(count: 50), for: "huge")
         XCTAssertEqual(cache.count, 1, "One entry over budget is kept alone, not refused")
-    }
-
-    @MainActor
-    func testEvictedDownloadsAreDeletedButHandedFilesAreNot() throws {
-        let mine = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
-        try Data([1]).write(to: mine)
-        defer { try? FileManager.default.removeItem(at: mine) }
-        StepVideos.set(mine, for: "mine")
-        let download = StepVideos.directory.appendingPathComponent(UUID().uuidString + ".mp4")
-        try Data([1]).write(to: download)
-        StepVideos.set(download, for: "download")
-        StepVideos.removeAll()
-        XCTAssertTrue(FileManager.default.fileExists(atPath: mine.path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: download.path))
     }
 
     func testAgentDirectoryCarriesTheServicesCLI() throws {

@@ -226,22 +226,29 @@ final class SquircleClient {
         return reply.data["active"].array
     }
 
-    func tasks(projectID: String) async throws -> AppTasks {
+    /// Active tasks and History's newest page, or with `historyBefore` (a
+    /// previous page's `historyNext`) the next older page.
+    func tasks(projectID: String, historyBefore: String? = nil) async throws -> AppTasks {
         struct Reply: Decodable { let ok: Bool; let data: AppTasks }
-        let reply: Reply = try await get(["v1", "tasks"], query: [URLQueryItem(name: "project", value: projectID)], revalidate: true)
+        var query = [URLQueryItem(name: "project", value: projectID)]
+        if let historyBefore { query.append(URLQueryItem(name: "history_before", value: historyBefore)) }
+        let reply: Reply = try await get(["v1", "tasks"], query: query, revalidate: historyBefore == nil)
         guard reply.ok else { throw ClientError.response("Squircle") }
         return reply.data
     }
 
-    func addTask(projectID: String, ask: String) async throws {
-        try await send(["v1", "tasks"], method: "POST", body: ["project": projectID, "ask": ask, "by_user": true])
-    }
-
-    /// The user's own change: a status, or first in its group.
-    func updateTask(id: String, status: AppTask.Status?, toTop: Bool) async throws {
+    /// The user's own change: a status, or first in its group. Returns the
+    /// task's revision that holds it (nil from an older service).
+    func updateTask(id: String, status: AppTask.Status?, toTop: Bool) async throws -> UInt64? {
         var body: [String: Any] = ["by_user": true, "to_top": toTop]
         if let status { body["status"] = status.rawValue }
-        try await send(["v1", "tasks", id], method: "PATCH", body: body)
+        var request = try request(["v1", "tasks", id])
+        request.httpMethod = "PATCH"
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        struct Reply: Decodable { struct Data: Decodable { struct Task: Decodable { let revision: UInt64? }; let task: Task? }; let ok: Bool; let data: Data? }
+        let reply: Reply = try await perform(request, service: "Squircle", exposeAPIError: true)
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data?.task?.revision
     }
 
     func taskMediaFile(taskID: String, id: String) async throws -> Data {
@@ -249,6 +256,11 @@ final class SquircleClient {
         let (data, response) = try await session.data(for: request)
         try validate(response, service: "Squircle")
         return data
+    }
+
+    /// A task's clip, streamed to a file on disk and moved to `destination`.
+    func downloadTaskMedia(taskID: String, id: String, to destination: URL) async throws {
+        try await download(request(["v1", "tasks", taskID, "media", id]), to: destination)
     }
 
     private func send(_ path: [String], method: String, body: [String: Any]) async throws {
@@ -265,6 +277,23 @@ final class SquircleClient {
         let (data, response) = try await session.data(for: request)
         try validate(response, service: "Squircle")
         return data
+    }
+
+    /// A published recording, streamed to a file on disk and moved to
+    /// `destination`: a long one is hundreds of megabytes, never held in memory.
+    func downloadMedia(threadID: String, id: String, to destination: URL) async throws {
+        try await download(request(["v1", "t3", "threads", threadID, "media", id]), to: destination)
+    }
+
+    private func download(_ request: URLRequest, to destination: URL) async throws {
+        do {
+            let (file, response) = try await session.download(for: request)
+            defer { try? FileManager.default.removeItem(at: file) }
+            try validate(response, service: "Squircle")
+            try MediaFileStore.move(file, to: destination)
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as ClientError { throw error }
+        catch { if Task.isCancelled { throw CancellationError() }; throw ClientError.connection("Squircle") }
     }
 
     /// A simulator recording's poster (a small JPEG), when Squircle took one.

@@ -2,7 +2,19 @@ import Foundation
 
 /// Server sequence numbers prevent replayed chunks from duplicating messages.
 struct T3ThreadState: Codable {
-    private(set) var sequence = -1
+    /// Where this state came from, and how far into T3's events it is.
+    enum Provenance: Codable, Equatable {
+        /// Nothing yet, or history T3 rewrote (a revert): only a snapshot
+        /// shows it right.
+        case none
+        /// A copy kept on the phone: the next live snapshot replaces it
+        /// whatever its sequence, so a reset server can never leave a
+        /// thread stuck. Events after its sequence still apply.
+        case cached(sequence: Int)
+        /// From T3 on this connection.
+        case live(sequence: Int)
+    }
+    private(set) var provenance = Provenance.none
     private(set) var thread: JSONValue = .null
     /// Inputs and screenshot counts from the Mac, keyed by tool call.
     var details: [String: JSONValue] = [:]
@@ -13,20 +25,28 @@ struct T3ThreadState: Codable {
     var detailsVersion: Int?
     /// Recordings and images published into the thread.
     var media: [JSONValue] = []
-    /// Restored from a cache: the next live snapshot replaces it whatever its
-    /// sequence, so a reset server can never leave a thread stuck.
-    var fromCache = false
+    /// T3's sequence this state is at; -1 for none.
+    var sequence: Int {
+        switch provenance { case .none: -1; case .cached(let s), .live(let s): s }
+    }
+    var isLive: Bool { if case .live = provenance { return true }; return false }
+    /// The same state as a copy kept on the phone, never live authority.
+    var restored: T3ThreadState {
+        var copy = self
+        if case .live(let s) = provenance { copy.provenance = .cached(sequence: s) }
+        return copy
+    }
     var activityCount: Int { thread["activities"].array.count }
     mutating func consume(_ item: JSONValue) {
         if item["kind"].string == "snapshot" {
             let snapshot = item["snapshot"]
-            guard let seq = snapshot["snapshotSequence"].int, seq >= sequence || fromCache else { return }
-            sequence = seq; thread = snapshot["thread"]; fromCache = false; return
+            guard let seq = snapshot["snapshotSequence"].int, seq >= sequence || !isLive else { return }
+            provenance = .live(sequence: seq); thread = snapshot["thread"]; return
         }
         guard item["kind"].string == "event" else { return }
         let event = item["event"]
-        guard let seq = event["sequence"].int, seq > sequence else { return }
-        sequence = seq
+        guard let seq = event["sequence"].int, seq > sequence, provenance != .none else { return }
+        provenance = .live(sequence: seq)
         let p = event["payload"]; var t = thread.object
         switch event["type"].string {
         case "thread.message-sent":
@@ -60,7 +80,7 @@ struct T3ThreadState: Codable {
             t["checkpoints"] = .array(rows.sorted { ($0["checkpointTurnCount"].int ?? 0) < ($1["checkpointTurnCount"].int ?? 0) })
         case "thread.reverted":
             // History was rewritten; only a snapshot shows it right.
-            sequence = -1; fromCache = true; return
+            provenance = .none; return
         case "thread.meta-updated": for (key,value) in p.object where key != "threadId" { t[key] = value }
         case "thread.runtime-mode-set": t["runtimeMode"] = p["runtimeMode"]
         case "thread.interaction-mode-set": t["interactionMode"] = p["interactionMode"]
@@ -231,6 +251,8 @@ struct T3ThreadState: Codable {
             return TurnChanges(turnID: turn, count: count, assistantMessageID: c["assistantMessageId"].string, files: files)
         }
     }
+    /// Whether T3 has the user message with this ID.
+    func hasMessage(_ id: String) -> Bool { thread["messages"].array.contains { $0["id"].string == id || $0["messageId"].string == id } }
     var pendingRequests: [JSONValue] {
         let activities = thread["activities"].array
         let finished = Set(activities.filter {

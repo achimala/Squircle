@@ -3,60 +3,214 @@ import Foundation
 import Network
 import UIKit
 
-/// How a message the conversation sent ended, addressed to the conversation
-/// that sent it.
+/// Which conversation: a T3 thread, or a draft T3 hasn't been told about
+/// yet (each draft its own, so a late send can't land in a later one). Its
+/// identity is the draft or thread ID; the app it belongs to never changes.
+enum ConversationID: Hashable {
+    case draft(UUID, appID: String, agent: Bool)
+    case thread(String, appID: String)
+    var threadID: String? { if case .thread(let id, _) = self { return id }; return nil }
+    var appID: String { switch self { case .draft(_, let app, _), .thread(_, let app): app } }
+    /// A first message to the app's agent.
+    var isAgentDraft: Bool { if case .draft(_, _, true) = self { return true }; return false }
+    static func == (a: Self, b: Self) -> Bool {
+        switch (a, b) {
+        case (.draft(let x, _, _), .draft(let y, _, _)): x == y
+        case (.thread(let x, _), .thread(let y, _)): x == y
+        default: false
+        }
+    }
+    func hash(into hasher: inout Hasher) {
+        switch self {
+        case .draft(let id, _, _): hasher.combine(0); hasher.combine(id)
+        case .thread(let id, _): hasher.combine(1); hasher.combine(id)
+        }
+    }
+}
+
+/// A message on its way to T3, under the conversation that owns it (a
+/// draft's moves to its thread once T3 made it). Its message ID is chosen
+/// before the first attempt and kept for every retry, so a lost answer can
+/// never turn into a second message. A refused message is no longer pending.
+struct PendingSend: Equatable {
+    enum Phase: Equatable {
+        /// Recordings on their way to the Mac.
+        case preparing
+        /// T3 making the draft's thread.
+        case creating
+        /// T3 asked to start the turn.
+        case awaitingAcceptance
+        /// T3 took it; pending until the message shows in the thread.
+        case accepted
+        /// The answer was lost: T3 may or may not have it.
+        case outcomeUnknown(String)
+    }
+    let messageID: String
+    let text: String
+    let images: Int
+    let phase: Phase
+}
+
+/// How a send ended. `conversation` owns the message now: the thread a
+/// draft created, even when the turn then failed.
 enum SendOutcome: Equatable {
-    /// T3 took it, in this thread (new when the conversation was a draft).
-    case sent(threadID: String)
-    case failed(String)
+    case accepted(messageID: String, conversation: ConversationID)
+    /// T3 or the Mac refused it, or it never left: the pictures are back in
+    /// the owner's field, the text is the caller's to put back.
+    case rejected(messageID: String, reason: String, conversation: ConversationID)
+    /// It may have arrived; still pending as `outcomeUnknown` until T3
+    /// shows it or a retry sends the same message again.
+    case unknown(messageID: String, reason: String, conversation: ConversationID)
+    var conversation: ConversationID {
+        switch self { case .accepted(_, let c), .rejected(_, _, let c), .unknown(_, _, let c): c }
+    }
+}
+
+enum SendStart {
+    case started(messageID: String, outcome: Task<SendOutcome, Never>)
+    case refused(String)
+}
+
+/// The connection to T3. Every subscription callback carries the attempt
+/// that made it, so one ending during setup fails that attempt, and one from
+/// an older attempt changes nothing.
+enum ConnectionPhase: Equatable {
+    /// Closed for good, or no configuration.
+    case stopped
+    /// Background time ran out; reconnects on return.
+    case suspended
+    /// T3 refused this build's session; retrying can't help.
+    case refused
+    /// An attempt under way, or the wait before the next one.
+    case connecting(Attempt)
+    case ready(Session)
+    struct Attempt: Equatable {
+        let id: Int
+        /// The first failure in this run of attempts.
+        let failingSince: ContinuousClock.Instant?
+    }
+    struct Session: Equatable {
+        let attempt: Int
+        let since: ContinuousClock.Instant
+    }
+}
+
+/// Something fetched from the Mac and kept fresh: never requested, in
+/// flight, here, or failed with when to try again. Each keeps what it last had.
+enum ResourceState<Value: Equatable>: Equatable {
+    case absent
+    case loading(previous: Value?)
+    case ready(Value, fetchedAt: ContinuousClock.Instant)
+    case failed(previous: Value?, failure: String, retryAt: ContinuousClock.Instant)
+    var value: Value? {
+        switch self {
+        case .absent: nil
+        case .loading(let previous), .failed(let previous, _, _): previous
+        case .ready(let value, _): value
+        }
+    }
+}
+
+/// What a screen needs kept fresh from the Mac while it shows.
+enum RefreshNeed: Hashable {
+    case tasks(appID: String)
+    /// The thread's published media, while the conversation shows.
+    case conversation(ConversationID)
+}
+
+/// Held for as long as a screen needs something refreshed; released on
+/// `end()` or when the lease goes away.
+final class RefreshLease {
+    private var onEnd: (@MainActor () -> Void)?
+    init(_ onEnd: @escaping @MainActor () -> Void) { self.onEnd = onEnd }
+    @MainActor func end() { onEnd?(); onEnd = nil }
+    deinit { if let onEnd { Task { @MainActor in onEnd() } } }
+}
+
+/// Installing a build of this very app: what has been observed of it.
+/// "Transferred" means the Mac sent every byte, not that iOS installed it.
+enum InstallAttempt: Equatable {
+    case none
+    case requestingLink(AppBuild)
+    /// iOS's prompt is up; nothing fetched yet.
+    case prompting(AppBuild, link: URL, deadline: ContinuousClock.Instant)
+    /// iOS is fetching the IPA.
+    case watching(AppBuild, link: URL, deadline: ContinuousClock.Instant)
+    case transferred(AppBuild)
+    case ended(String?)
 }
 
 @MainActor
 final class SquircleModel {
-    /// The conversation on screen: a T3 thread, or a draft T3 hasn't been
-    /// told about yet (each draft its own, so a late send can't land in a
-    /// later one).
-    enum Conversation: Hashable {
-        case thread(String)
-        case draft(UUID, projectID: String?, agent: Bool)
-    }
-    private(set) var open: Conversation = .draft(UUID(), projectID: nil, agent: false) { didSet { changed() } }
-    var selectedSessionID: String? { if case .thread(let id) = open { return id }; return nil }
-    /// The open draft is a first message to the app's agent.
-    private var draftIsAgent: Bool { if case .draft(_, _, true) = open { return true }; return false }
+    /// The conversation the model follows: its state, subscription and
+    /// field. Nil until a screen opens one.
+    private(set) var open: ConversationID? { didSet { changed() } }
+    var openConversation: ConversationID? { open }
+    var selectedSessionID: String? { open?.threadID }
     private(set) var sessions: [ChatSession] = [] { didSet { if sessions != oldValue { changed() } } }
-    private(set) var messages: [ChatMessage] = [] { didSet { changed() } }
     private(set) var builds: [AppBuild] = [] { didSet { changed() } }
     private(set) var projects: [AppProject] = [] { didSet { if projects != oldValue { changed() } } }
     private(set) var appMetadata: [AppMetadata] = [] { didSet { changed() } }
     private(set) var selectedProjectID: String? { didSet { changed() } }
     private(set) var buildingProjectIDs = Set<String>() { didSet { changed() } }
-    private(set) var connected = false { didSet { changed() } }
-    private(set) var isRunning = false { didSet { changed() } }
-    private(set) var isLoading = false { didSet { changed() } }
-    private(set) var status = "Connecting" { didSet { changed() } }
+    private(set) var connection: ConnectionPhase { didSet { if connection != oldValue { changed() } } }
+    var connected: Bool { if case .ready = connection { return true }; return false }
+    /// Trying to connect, and not yet long enough to call it offline.
+    var isLoading: Bool {
+        guard case .connecting(let attempt) = connection else { return false }
+        return !Self.offline(attempt)
+    }
+    var status: String {
+        switch connection {
+        case .stopped: "Closed"
+        case .suspended: "Connecting"
+        case .refused: "Not signed in"
+        case .connecting(let attempt): Self.offline(attempt) ? "Offline" : "Connecting"
+        case .ready: isRunning ? "Working" : "Connected"
+        }
+    }
+    private static func offline(_ attempt: ConnectionPhase.Attempt) -> Bool {
+        attempt.failingSince.map { $0.duration(to: .now) >= reconnectGrace } ?? false
+    }
     var error: String? { didSet { changed() } }
     var composerPrefill: String? { didSet { changed() } }
     /// Pictures in each conversation's message field, sent with its next message.
-    private var drafts: [Conversation: [ImageAttachment]] = [:] { didSet { changed() } }
+    private var drafts: [ConversationID: [ImageAttachment]] = [:] { didSet { changed() } }
     /// Pictures in the open conversation's field.
-    var attachments: [ImageAttachment] { drafts[open] ?? [] }
-    /// A build of the running app whose installation was just confirmed;
-    /// the app steps aside so iOS can replace it.
-    private(set) var updatingTo: AppBuild? { didSet { changed() } }
-    private(set) var providers: [JSONValue] = [] { didSet { changed() } }
+    var attachments: [ImageAttachment] { open.flatMap { drafts[$0] } ?? [] }
+    private(set) var installAttempt = InstallAttempt.none { didSet { changed() } }
+    /// A build of the running app the Mac finished sending; the app steps
+    /// aside so iOS can replace it.
+    var updatingTo: AppBuild? { if case .transferred(let build) = installAttempt { return build }; return nil }
+    /// T3's providers and models, through the service.
+    private(set) var catalog = ResourceState<[JSONValue]>.absent { didSet { changed() } }
+    var providers: [JSONValue] { catalog.value ?? [] }
     private(set) var devices: JSONValue = .null { didSet { changed(); scheduleSimulatorRefresh() } }
     /// Sessions Squircle is recording for agents, from the Mac.
     private(set) var recording: [JSONValue] = [] { didSet { if recording != oldValue { changed() } } }
     private var simulatorRefresh: Task<Void, Never>?
-    private(set) var requests: [JSONValue] = [] { didSet { changed() } }
+    /// The open thread's requests, as T3 last reported them.
+    private var observedRequests: [JSONValue] = [] { didSet { if observedRequests != oldValue { changed() } } }
+    /// Requests answered from here, until T3 reports them resolved: request ID → command ID.
+    private var responding: [String: String] = [:] { didSet { changed() } }
+    /// Requests waiting for you: T3's, less those being answered.
+    var requests: [JSONValue] {
+        responding.isEmpty ? observedRequests : observedRequests.filter { responding[$0["payload"]["requestId"].string ?? ""] == nil }
+    }
     private(set) var changes: [TurnChanges] = [] { didSet { changed() } }
     /// Every worker Squircle started, archived ones too, by thread ID.
     private(set) var workers: [String: KnownWorker] = [:] { didSet { changed() } }
-    private(set) var modelSelection: JSONValue = .null { didSet { changed() } }
-    private(set) var runtimeMode: T3RuntimeMode = .auto { didSet { changed() } }
-    /// The selected app's tasks, from the Mac (`squircle task`).
-    private(set) var tasks: [String: AppTasks] = [:] { didSet { if tasks != oldValue { changed() } } }
+    /// Model and approval choices made here that T3 hasn't reported back yet.
+    private struct LocalChoice: Equatable { var model: JSONValue?; var mode: T3RuntimeMode? }
+    private var choices: [ConversationID: LocalChoice] = [:] { didSet { changed() } }
+    /// The model you chose last, for new drafts.
+    private var preferredModel: JSONValue?
+    /// Each app's tasks as the Mac last sent them (History's newest page).
+    private var observedTasks: [String: AppTasks] = [:] { didSet { if observedTasks != oldValue { changed() } } }
+    /// Older History pages loaded on request, by app.
+    private struct OlderHistory: Equatable { var tasks: [AppTask] = []; var next: String? }
+    private var olderHistory: [String: OlderHistory] = [:] { didSet { changed() } }
+    private var historyLoads: Set<String> = []
     /// Each app's agent thread, by T3 project ID, from the Mac.
     private(set) var agents: [String: String] = [:] { didSet { if agents != oldValue { shellChanged() } } }
     /// The exact command that runs the Mac's Squircle CLI, from the service.
@@ -97,8 +251,6 @@ final class SquircleModel {
             pending?.cancel()
         }
     }
-    private var pendingRuntimeModes: [String:T3RuntimeMode] = [:]
-    private var pendingModelSelections: [String:JSONValue] = [:]
     var hostName: String { configuration?.t3URL.host ?? "Your Mac" }
     let configuration: AppConfiguration?
     let gateway: T3Gateway?
@@ -109,8 +261,15 @@ final class SquircleModel {
     private var homeLoad: Task<Void, Never>?
     /// Reading the open thread from disk; its subscription resumes from it.
     private var diskLoad: (id: String, task: Task<Void, Never>)?
-    private var state = T3ThreadState()
+    /// The open thread as T3 reported it, or a copy kept on the phone.
+    private var state = T3ThreadState() { didSet { changed() } }
+    /// The open thread's rows and the state they were made from.
+    private var transcript = Transcript.empty { didSet { changed() } }
+    var messages: [ChatMessage] { transcript.rows }
     private var threadSubscription: String?
+    /// The open thread whose subscription has caught up with T3 on this
+    /// connection: only then can a missing message be told from a late one.
+    private var threadSynced: String?
     private var refreshing = false
     private var monitor: Task<Void,Never>?
     private var connector: Task<Void,Never>?
@@ -118,32 +277,28 @@ final class SquircleModel {
     private var nap: Task<Void,Never>?
     /// Reconnect was tapped: abandon the attempt under way and start afresh.
     private var retryNow = false
-    private var failingSince: ContinuousClock.Instant?
-    /// When T3's config (models, about 1 MB) last arrived; it rarely changes,
-    /// so a reconnect doesn't fetch it again.
-    private var configLoaded: ContinuousClock.Instant?
+    private var attempts = 0
     private var configLoader: Task<Void,Never>?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
-    /// Background time ran out and the socket was closed; reconnect on return.
-    private var suspended = false
     /// Each app's newest preview picture: (version, PNG) by app.
     private var previewCache = BoundedCache<String, (version: String, data: Data)>(budget: 24 << 20, cost: { $0.data.count })
     private var launchReported = false
     private var sessionProjects: [String:String] = [:]
-    /// Conversations with a send under way.
-    private var submitting = Set<Conversation>()
+    /// Messages on their way, by the conversation that owns each.
+    private var sends: [ConversationID: SendOperation] = [:] { didSet { changed() } }
+    /// The thread each sent draft became.
+    private var successors: [ConversationID: ConversationID] = [:]
     private var stepDetails: Task<Void,Never>?
     /// Activities the details fetch was last asked for (the fetch itself
     /// retries until it succeeds; `detailsSince` moves only on success).
     private var stepDetailsCount = -1
     /// Threads seen this session, so returning to one shows it at once.
-    private var threadCache = BoundedCache<String, CachedThread>(budget: 12)
-    private struct CachedThread { var state: T3ThreadState; var messages: [ChatMessage] }
+    private var threadCache = BoundedCache<String, Transcript>(budget: 12)
     private var cacheWrite: Task<Void, Never>?
     private let disk = DiskCache()
     private var diskGeneration: UInt64 = 0
-    /// Rebuilds `messages` off the main actor; `conversationDirty` asks for
-    /// another pass once the one under way is done.
+    /// Rebuilds the transcript off the main actor; `conversationDirty` asks
+    /// for another pass once the one under way is done.
     private var conversationBuild: Task<Void, Never>?
     private var conversationDirty = false
     private var networkWatcher: Task<Void, Never>?
@@ -151,31 +306,34 @@ final class SquircleModel {
     private var threadResubscribe: Task<Void, Never>?
     private var debugDrops: Task<Void, Never>?
     private var installWatch: Task<Void, Never>?
-    /// When the current connection came up, and how many subscriptions T3
-    /// ended soon after one did: the next attempt waits longer each time.
-    private var connectedAt: ContinuousClock.Instant?
+    /// How many subscriptions T3 ended soon after a connection came up: the
+    /// next attempt waits longer each time.
     private var unstableCount = 0
     private static let subscriptionLost = "T3 stopped sending updates; reconnecting."
     private var media: [JSONValue] { state.media }
     private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
+    private let upload: ((URL, String) async throws -> String)?
     private let preferences: UserDefaults
     /// Inside another app's debug overlay, only that app is shown.
     let scopeBundleID: String?
+    /// What screens currently need refreshed.
+    private var leases: [UUID: RefreshNeed] = [:]
     private static let preferredModelKey = "squircle.t3.preferredModel"
     static let agentInstance = "squircle"
 
     /// Once a thread has an agent session, T3 cannot migrate it to another provider.
     var availableModelProviders: [JSONValue] {
-        guard selectedSessionID != nil else {
+        guard let open else { return [] }
+        guard let thread = open.threadID else {
             // An app agent runs on Squircle's own Claude instance; other
             // threads never do.
             let agentProviders = providers.filter { $0["instanceId"].string == Self.agentInstance }
-            if draftIsAgent { return agentProviders.isEmpty ? providers : agentProviders }
+            if open.isAgentDraft { return agentProviders.isEmpty ? providers : agentProviders }
             return providers.filter { $0["instanceId"].string != Self.agentInstance }
         }
         let instance = state.thread["session"]["providerInstanceId"].string
             ?? state.thread["modelSelection"]["instanceId"].string
-            ?? sessions.first(where: { $0.id == selectedSessionID })?.modelSelection["instanceId"].string
+            ?? sessions.first(where: { $0.id == thread })?.modelSelection["instanceId"].string
         guard let instance else { return [] }
         return providers.filter { $0["instanceId"].string == instance }
     }
@@ -226,15 +384,18 @@ final class SquircleModel {
         let option = provider["models"].array.first { $0["slug"] == selection["model"] }
         return Self.shortName(option?["name"].string ?? selection["model"].string ?? "Model", maker: provider["displayName"].string ?? "")
     }
+    /// Each available provider's default model.
+    private var providerDefaults: [JSONValue] {
+        availableModelProviders.compactMap { provider in
+            guard let option = provider["models"].array.first(where: { $0["isDefault"].bool }) ?? provider["models"].array.first else { return nil }
+            return JSONValue.from(["instanceId":provider["instanceId"].string!,"model":option["slug"].string!])
+        }
+    }
     var quickModelSelections: [JSONValue] {
         var choices: [JSONValue] = []
-        if isValidModel(modelSelection) { choices.append(modelSelection) }
-        for provider in availableModelProviders {
-            if let option = provider["models"].array.first(where: { $0["isDefault"].bool }) ?? provider["models"].array.first {
-                let selection = JSONValue.from(["instanceId":provider["instanceId"].string!,"model":option["slug"].string!])
-                if !choices.contains(where: { sameModel($0, selection) }) { choices.append(selection) }
-            }
-        }
+        let current = modelSelection
+        if isValidModel(current) { choices.append(current) }
+        for selection in providerDefaults where !choices.contains(where: { sameModel($0, selection) }) { choices.append(selection) }
         return Array(choices.prefix(4))
     }
     private func sameModel(_ lhs: JSONValue, _ rhs: JSONValue) -> Bool {
@@ -243,35 +404,53 @@ final class SquircleModel {
     private func isValidModel(_ selection: JSONValue) -> Bool {
         availableModelSelections.contains { sameModel($0, selection) }
     }
+    /// The open conversation's model: your choice T3 hasn't confirmed yet,
+    /// else the thread's, else (a draft) the one you used last.
+    var modelSelection: JSONValue {
+        guard let open else { return .null }
+        if let chosen = choices[open]?.model { return chosen }
+        if let thread = open.threadID {
+            let saved = state.thread["modelSelection"]
+            return saved != .null ? saved : sessions.first(where: { $0.id == thread })?.modelSelection ?? .null
+        }
+        if let preferredModel, isValidModel(preferredModel) { return preferredModel }
+        // An agent draft keeps your preferred model on Squircle's instance.
+        if open.isAgentDraft, let model = preferredModel?["model"].string {
+            let agentChoice = JSONValue.from(["instanceId": Self.agentInstance, "model": model])
+            if isValidModel(agentChoice) { return agentChoice }
+        }
+        return providerDefaults.first ?? availableModelSelections.first ?? .null
+    }
+    /// The open conversation's approval mode, the same way.
+    var runtimeMode: T3RuntimeMode {
+        guard let open else { return .auto }
+        if let chosen = choices[open]?.mode { return chosen }
+        guard open.threadID != nil else { return .auto }
+        return state.thread["runtimeMode"].string.flatMap(T3RuntimeMode.init(rawValue:)) ?? .auto
+    }
     func consumeConfig(_ config: JSONValue) {
-        providers = config["providers"].array.filter {
+        let providers = config["providers"].array.filter {
             $0["enabled"].bool && $0["status"].string == "ready" && !($0["instanceId"].string ?? "").isEmpty
         }.map { provider in
             var value = provider.object
             value["models"] = .array(provider["models"].array.filter { !($0["slug"].string ?? "").isEmpty })
-            return .object(value)
+            return JSONValue.object(value)
         }.filter { !$0["models"].array.isEmpty }
-        if selectedSessionID == nil { restorePreferredModel() }
-    }
-    private func restorePreferredModel() {
-        let saved = preferences.data(forKey: Self.preferredModelKey).flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) }
-        // An agent draft keeps your preferred model on Squircle's instance.
-        let agentChoice = saved.map { JSONValue.from(["instanceId": Self.agentInstance, "model": $0["model"].string ?? ""]) }
-        if let saved, isValidModel(saved) {
-            modelSelection = saved
-        } else if draftIsAgent, let agentChoice, isValidModel(agentChoice) {
-            modelSelection = agentChoice
-        } else { modelSelection = quickModelSelections.first ?? availableModelSelections.first ?? .null }
+        catalog = .ready(providers, fetchedAt: .now)
     }
 
     init(configuration: AppConfiguration? = try? AppConfiguration.load(), preferences: UserDefaults = .standard,
-         commandDispatch: ((JSONValue) async throws -> JSONValue)? = nil, scopeBundleID: String? = nil) {
+         commandDispatch: ((JSONValue) async throws -> JSONValue)? = nil,
+         upload: ((URL, String) async throws -> String)? = nil, scopeBundleID: String? = nil) {
         self.preferences = preferences
         self.scopeBundleID = scopeBundleID
         self.commandDispatch = commandDispatch
+        self.upload = upload
         self.configuration = configuration
         client = configuration.map { SquircleClient(configuration:$0) }
         gateway = configuration.map(T3Gateway.init(configuration:))
+        connection = configuration == nil ? .stopped : .connecting(.init(id: 0, failingSince: nil))
+        preferredModel = preferences.data(forKey: Self.preferredModelKey).flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) }
         selectedProjectID = UserDefaults.standard.string(forKey:"squircle.t3.selectedProject")
         if case .failed(let status) = AppConfiguration.Shared.lastStore.withLock({ $0 }) {
             error = "Squircle couldn’t share its Mac connection with app overlays (Keychain error \(status)). Apps you build may show as unpaired."
@@ -282,10 +461,12 @@ final class SquircleModel {
                 guard let home = await disk.loadHome(), let self, shell == .null else { return }
                 shell = home.shell; if appMetadata.isEmpty { appMetadata = home.metadata }; shellChanged()
             }
+            Task { await StepVideos.list() }
         }
         gateway?.onDisconnect = { [weak self] in
             guard let self else { return }
-            connected = false; status = "Reconnecting"; threadSubscription = nil; connectedAt = nil
+            if case .ready = connection { connection = .connecting(.init(id: attempts, failingSince: nil)) }
+            threadSubscription = nil; threadSynced = nil
             log("T3 socket dropped; reconnecting"); ConnectionTrace.mark("disconnected")
             keepConnected()
         }
@@ -310,24 +491,26 @@ final class SquircleModel {
     func close() {
         guard !closed else { return }
         saveCurrentThread()
-        closed = true; suspended = true
+        closed = true; connection = .stopped
         for task in [connector, nap, configLoader, monitor, networkWatcher, memoryWatcher, stepDetails, cacheWrite, homeWrite,
                      simulatorRefresh, conversationBuild, threadResubscribe, debugDrops, installWatch] { task?.cancel() }
         connector = nil; nap = nil; configLoader = nil; monitor = nil; networkWatcher = nil; memoryWatcher = nil
         stepDetails = nil; cacheWrite = nil; homeWrite = nil; simulatorRefresh = nil; conversationBuild = nil
         threadResubscribe = nil; debugDrops = nil; installWatch = nil
-        for upload in captureUploads.values { upload.cancel() }
-        captureUploads.removeAll()
+        for case .uploading(_, let upload) in captureTransfers.values { upload.cancel() }
+        captureTransfers.removeAll()
         gateway?.close(); client?.invalidate()
         endBackgroundTask()
-        connected = false; status = "Closed"
         let finished = observers.values; observers.removeAll()
         for observer in finished { observer.finish() }
     }
     func refresh() async {
         guard gateway != nil, client != nil else { error = ClientError.configuration.localizedDescription; return }
         // The service doesn't depend on T3: both load at once.
-        if !connected { failingSince = nil; keepConnected(); nap?.cancel() }
+        switch connection {
+        case .connecting, .refused: connection = .connecting(.init(id: attempts, failingSince: nil)); keepConnected(); nap?.cancel()
+        case .ready, .suspended, .stopped: break
+        }
         await refreshServices()
     }
     /// Builds, app metadata and agents come from the Squircle service, not T3.
@@ -359,51 +542,72 @@ final class SquircleModel {
     /// How long T3 may stay unreachable before Squircle says so. Shorter
     /// outages (an app switch, a network handover) reconnect silently.
     static let reconnectGrace: Duration = .seconds(8)
+    /// The attempt subscriptions belong to now: the one under way or the
+    /// one that connected.
+    private var currentAttempt: Int? {
+        switch connection {
+        case .connecting(let attempt): attempt.id
+        case .ready(let session): session.attempt
+        default: nil
+        }
+    }
+    /// Retry at once, as if nothing had failed yet.
+    private func forgetFailures() {
+        if case .connecting(let attempt) = connection { connection = .connecting(.init(id: attempt.id, failingSince: nil)) }
+    }
     /// Keeps T3's socket up while Squircle is in use: the first attempt is
     /// immediate, then 0.5 s doubling to 15 s. One connector at a time;
     /// `nap?.cancel()` makes it try again now.
     private func keepConnected() {
-        guard gateway != nil, connector == nil, !connected, !suspended else { return }
-        isLoading = true
+        guard gateway != nil, connector == nil, case .connecting = connection else { return }
         // T3 ended a subscription soon after the last connection came up:
         // wait before trying again, longer each time.
         let first: Duration = unstableCount == 0 ? .zero : min(.milliseconds(500) * (1 << min(unstableCount, 6)), .seconds(30))
         connector = Task { [weak self] in
             var delay = first
-            while let self, !connected, !suspended {
+            while let self, case .connecting = connection {
                 if delay > .zero, !retryNow {
                     let nap = Task { [delay] in _ = try? await Task.sleep(for: delay) }
                     self.nap = nap; await nap.value; self.nap = nil
-                    if suspended { break }
                 }
                 retryNow = false
-                do { try await openConnection() }
+                guard case .connecting(let previous) = connection else { break }
+                attempts += 1
+                let attempt = attempts
+                connection = .connecting(.init(id: attempt, failingSince: previous.failingSince))
+                do { try await openConnection(attempt) }
                 catch where Self.isRejected(error) {
                     // Retrying can't fix a refused credential; say what to do.
                     log("T3 refused this build's session: \(error.localizedDescription)")
                     self.error = "T3 no longer accepts this build’s session. Pair Squircle with T3 again on your Mac and install a new build."
-                    status = "Not signed in"; isLoading = false
+                    connection = .refused
                     break
                 } catch {
                     log("T3 connect failed: \(error.localizedDescription)")
-                    let since = failingSince ?? .now; failingSince = since
-                    if since.duration(to: .now) >= Self.reconnectGrace {
-                        // Truly unreachable: say so, and stop looking busy.
-                        self.error = error.localizedDescription; status = "Offline"; isLoading = false
-                    }
+                    guard case .connecting(let now) = connection, now.id == attempt else { continue }
+                    let since = now.failingSince ?? .now
+                    connection = .connecting(.init(id: attempt, failingSince: since))
+                    // Truly unreachable: say so.
+                    if since.duration(to: .now) >= Self.reconnectGrace { self.error = error.localizedDescription }
                     delay = delay == .zero ? .milliseconds(500) : min(delay * 2, .seconds(15))
                 }
             }
             guard let self else { return }
-            connector = nil; isLoading = false
+            connector = nil
             if connected { await ensureScopedProject() }
         }
     }
     /// Reconnect, tapped: a fresh attempt now, without the backoff or an
-    /// attempt stuck waiting on a slow socket.
+    /// attempt stuck waiting on a slow socket. Models load again if they failed.
     func reconnect() async {
+        loadProvidersIfDue(force: { if case .failed = catalog { return true }; return false }())
         guard !connected else { await refreshServices(); return }
-        failingSince = nil; error = nil; status = "Connecting"; isLoading = true
+        error = nil
+        switch connection {
+        case .refused: connection = .connecting(.init(id: attempts, failingSince: nil))
+        case .connecting: forgetFailures()
+        case .ready, .suspended, .stopped: return
+        }
         if connector != nil { retryNow = true; gateway?.disconnect(notify: false) }
         keepConnected(); nap?.cancel()
     }
@@ -413,9 +617,9 @@ final class SquircleModel {
     }
     /// One connection attempt: socket, live subscriptions, and the open
     /// thread resubscribed. Its transcript stays on screen meanwhile; T3's
-    /// snapshot then brings it up to date. Models load afterwards from the
-    /// service, which trims T3's 1 MB config.
-    private func openConnection() async throws {
+    /// snapshot then brings it up to date. A subscription T3 ends before
+    /// this finishes fails the attempt.
+    private func openConnection(_ attempt: Int) async throws {
         guard let gateway else { throw ClientError.configuration }
         ConnectionTrace.mark("connect.start")
         await homeLoad?.value; homeLoad = nil
@@ -426,46 +630,62 @@ final class SquircleModel {
             var shellRequest: [String: Any] = ["requestCompletionMarker": true]
             if let sequence = shell["snapshotSequence"].int { shellRequest["afterSequence"] = sequence }
             try await gateway.subscribe("orchestration.subscribeShell", .from(shellRequest), receive: { [weak self] in self?.consumeShell($0, batched: true) },
-                                        ended: { [weak self] in self?.connectionSubscriptionEnded("shell", $0) })
+                                        ended: { [weak self] in self?.connectionSubscriptionEnded("shell", $0, attempt: attempt) })
             // Its first value is the whole device state.
             try await gateway.subscribe("subscribeDeviceState", receive: { [weak self] in self?.consumeDevices($0) },
-                                        ended: { [weak self] in self?.connectionSubscriptionEnded("devices", $0) })
-            threadSubscription = nil
-            if let id = selectedSessionID { try await subscribeThread(id) }
+                                        ended: { [weak self] in self?.connectionSubscriptionEnded("devices", $0, attempt: attempt) })
+            threadSubscription = nil; threadSynced = nil
+            if let id = selectedSessionID { try await subscribeThread(id, attempt: attempt) }
             ConnectionTrace.mark("connect.subscribed")
-            // The socket may have failed while subscribing; then try again.
-            guard gateway.isOpen, !suspended else { throw ClientError.connection("T3") }
+            // The socket may have failed, or T3 ended a subscription, while
+            // subscribing; then try again.
+            guard gateway.isOpen, case .connecting(let current) = connection, current.id == attempt else { throw ClientError.connection("T3") }
         } catch { gateway.disconnect(notify: false); throw gateway.rejection ?? error }
-        connected = true; status = isRunning ? "Working" : "Connected"; failingSince = nil; connectedAt = .now
+        connection = .ready(.init(attempt: attempt, since: .now))
         // An unstable connection keeps saying so until it holds.
         if unstableCount == 0 || error != Self.subscriptionLost { error = nil }
         log("T3 connected"); ConnectionTrace.mark("connected")
-        loadConfig()
+        loadProvidersIfDue()
         // A thread opened while this attempt was under way.
-        if let id = selectedSessionID, threadSubscription == nil { await selectSession(id) }
+        if let id = selectedSessionID, threadSubscription == nil { await subscribeOpenThread(id) }
     }
     /// T3 ended the shell or device subscription while the socket stayed
-    /// up: the phone would show Connected and never update. Start again.
-    private func connectionSubscriptionEnded(_ name: String, _ failure: Error?) {
-        guard let gateway, connected else { return }
+    /// up: the phone would show Connected and never update. During setup
+    /// that attempt fails; once connected, start again.
+    private func connectionSubscriptionEnded(_ name: String, _ failure: Error?, attempt: Int) {
+        guard let gateway, currentAttempt == attempt else { return }
         log("T3 ended the \(name) subscription: \(failure?.localizedDescription ?? "completed")")
-        let quick = connectedAt.map { $0.duration(to: .now) < .seconds(60) } ?? true
+        let quick: Bool
+        if case .ready(let session) = connection { quick = session.since.duration(to: .now) < .seconds(60) } else { quick = true }
         unstableCount = quick ? unstableCount + 1 : 1
         error = Self.subscriptionLost
-        gateway.disconnect(notify: true)
+        if case .ready = connection { gateway.disconnect(notify: true) } else { gateway.disconnect(notify: false) }
     }
     /// The connection held for a minute: forget earlier instability.
     private func noteStability() {
-        guard unstableCount > 0, connected, let connectedAt, connectedAt.duration(to: .now) >= .seconds(60) else { return }
+        guard unstableCount > 0, case .ready(let session) = connection, session.since.duration(to: .now) >= .seconds(60) else { return }
         unstableCount = 0
         if error == Self.subscriptionLost { error = nil }
     }
-    private func loadConfig() {
-        guard configLoader == nil, configLoaded.map({ $0.duration(to: .now) > .seconds(600) }) ?? true else { return }
+    /// Loads T3's providers through the service when they're missing,
+    /// failed and due a retry, or ten minutes old. The metadata loop calls
+    /// this every pass, so a failure recovers without a new connection.
+    private func loadProvidersIfDue(force: Bool = false) {
+        guard let client, configLoader == nil else { return }
+        switch catalog {
+        case .loading: return
+        case .ready(_, let fetchedAt) where !force && fetchedAt.duration(to: .now) < .seconds(600): return
+        case .failed(_, _, let retryAt) where !force && ContinuousClock.now < retryAt: return
+        default: break
+        }
+        let previous = catalog.value
+        catalog = .loading(previous: previous)
         configLoader = Task { [weak self] in
-            // A failure here is retried on the next connection.
-            if let config = try? await self?.client?.providers() {
-                self?.consumeConfig(config); self?.configLoaded = .now
+            do {
+                let config = try await client.providers()
+                self?.consumeConfig(config)
+            } catch {
+                self?.catalog = .failed(previous: previous, failure: error.localizedDescription, retryAt: .now + .seconds(5))
             }
             self?.configLoader = nil
         }
@@ -481,9 +701,10 @@ final class SquircleModel {
     }
     private func backgroundExpired() {
         log("T3 background time ran out; closing")
-        suspended = true; nap?.cancel()
+        if connection != .stopped { connection = .suspended }
+        nap?.cancel()
         // Close cleanly rather than leave a socket that dies while suspended.
-        gateway?.disconnect(notify: false); connected = false; threadSubscription = nil; status = "Connecting"
+        gateway?.disconnect(notify: false); threadSubscription = nil; threadSynced = nil
         endBackgroundTask()
     }
     private func endBackgroundTask() {
@@ -498,12 +719,18 @@ final class SquircleModel {
     /// Back in the foreground: reconnect at once if the socket was closed,
     /// otherwise check that it still answers.
     func enteringForeground() {
-        endBackgroundTask(); suspended = false
+        endBackgroundTask()
         guard let gateway else { return }
-        if connected {
+        switch connection {
+        case .ready:
             // A dead socket reports itself through `onDisconnect`.
             Task { _ = await gateway.probe() }
-        } else { failingSince = nil; keepConnected(); nap?.cancel() }
+        case .suspended:
+            connection = .connecting(.init(id: attempts, failingSince: nil)); keepConnected(); nap?.cancel()
+        case .connecting:
+            forgetFailures(); keepConnected(); nap?.cancel()
+        case .refused, .stopped: break
+        }
     }
     /// The network changed (Wi-Fi to cellular, back online): a socket on the
     /// old path is likely dead, and a waiting reconnect should try now.
@@ -517,12 +744,15 @@ final class SquircleModel {
                 #if DEBUG
                 if ProcessInfo.processInfo.environment["SQUIRCLE_METERED"] == "1" { metered = true }
                 #endif
-                guard let before = previous, path.status == .satisfied, !suspended else { continue }
-                if connected {
+                guard let before = previous, path.status == .satisfied else { continue }
+                switch connection {
+                case .ready:
                     if before.status != .satisfied || before.availableInterfaces.map(\.name) != path.availableInterfaces.map(\.name) {
                         _ = await gateway?.probe()
                     }
-                } else { failingSince = nil; keepConnected(); nap?.cancel() }
+                case .connecting: forgetFailures(); keepConnected(); nap?.cancel()
+                case .suspended, .refused, .stopped: break
+                }
             }
         }
     }
@@ -593,7 +823,7 @@ final class SquircleModel {
             let working = ["running","starting"].contains(t["session"]["status"].string ?? "")
             let phase: ChatSession.Phase = t["hasPendingApprovals"].bool || t["hasPendingUserInput"].bool ? .needsYou : working ? .working : .idle
             return ChatSession(id:t["id"].string ?? "",title:t["title"].string ?? "New thread",updatedAt:t["updatedAt"].date,
-                               phase:phase,modelSelection:t["modelSelection"])
+                               phase:phase,modelSelection:t["modelSelection"],latestTurn:TurnObservation(t["latestTurn"]))
         }.sorted { $0.updatedAt > $1.updatedAt }
         reconcileProjects()
         if ConnectionTrace.enabled, liveShell, !tracedHome, !projects.isEmpty {
@@ -632,55 +862,65 @@ final class SquircleModel {
     }
     func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
-    /// Shows a thread immediately from what was last seen of it this
-    /// session; a copy on disk follows a moment later, read off the main
-    /// actor. The live subscription then brings it up to date.
-    func prepareSession(_ id: String) {
-        guard selectedSessionID != id || (state.sequence < 0 && diskLoad?.id != id) else { return }
+
+    // MARK: Opening conversations
+
+    /// Puts `id` on screen at once: a thread from what was last seen of it
+    /// this session (a copy on disk follows a moment later, read off the
+    /// main actor), a draft empty. `open(_:)` then subscribes.
+    func show(_ id: ConversationID) {
+        if let thread = id.threadID {
+            guard open != id || (state.sequence < 0 && diskLoad?.id != thread) else { return }
+        } else {
+            guard open != id else { return }
+        }
         saveCurrentThread()
         threadResubscribe?.cancel(); threadResubscribe = nil
-        open = .thread(id); requests = []; isRunning = false
-        ConnectionTrace.mark("thread.open", id); tracedRows = false
+        conversationBuild?.cancel(); conversationBuild = nil; conversationDirty = false
         stepDetails?.cancel(); stepDetailsCount = -1
-        if let cached = threadCache.value(for: id) {
-            show(cached.state, messages: cached.messages)
+        // A message T3 took needs no echo once nobody looks at it.
+        sends = sends.filter { $0.value.phase != .accepted || $0.key == id }
+        open = id; threadSynced = nil; error = nil
+        if let thread = id.threadID { sessionProjects[thread] = sessionProjects[thread] ?? id.appID }
+        ConnectionTrace.mark("thread.open", id.threadID ?? "draft"); tracedRows = false
+        guard let thread = id.threadID else {
+            state = T3ThreadState(); transcript = .empty; deriveFromState()
+            return
+        }
+        if let cached = threadCache.value(for: thread) {
+            ConnectionTrace.mark("thread.cached", "seq=\(cached.state.sequence) memory=true")
+            state = cached.state.restored; transcript = cached; deriveFromState()
         } else {
-            show(T3ThreadState(), messages: [])
+            state = T3ThreadState(); transcript = .empty; deriveFromState()
             guard configuration != nil else { return }
-            diskLoad = (id, Task { [weak self, disk] in
-                guard let loaded = await disk.loadThread(id), let self,
-                      selectedSessionID == id, state.sequence < 0 else { return }
-                show(loaded, messages: nil)
+            diskLoad = (thread, Task { [weak self, disk] in
+                guard let loaded = await disk.loadThread(thread), let self,
+                      selectedSessionID == thread, state.sequence < 0 else { return }
+                ConnectionTrace.mark("thread.cached", "seq=\(loaded.sequence) memory=false")
+                state = loaded.restored; deriveFromState(); rebuildConversation()
             })
         }
     }
-    /// Puts `restored` on screen as the open thread's state; `messages` nil
-    /// derives them.
-    private func show(_ restored: T3ThreadState, messages derived: [ChatMessage]?) {
-        guard let id = selectedSessionID else { return }
-        ConnectionTrace.mark("thread.cached", "seq=\(restored.sequence) memory=\(derived != nil)")
-        state = restored
-        if state.sequence >= 0 { state.fromCache = true }
-        if let derived { conversationBuild?.cancel(); conversationBuild = nil; conversationDirty = false; messages = derived }
-        else { rebuildConversation() }
-        requests = state.pendingRequests; changes = state.changes; isRunning = state.isRunning
-        runtimeMode = pendingRuntimeModes[id] ?? state.thread["runtimeMode"].string.flatMap(T3RuntimeMode.init(rawValue:)) ?? .auto
-        if let pending = pendingModelSelections[id] { modelSelection = pending }
-        else if state.thread["modelSelection"] != .null { modelSelection = state.thread["modelSelection"] }
-    }
-    func selectSession(_ id: String) async {
-        prepareSession(id)
+    /// Shows `id` and follows it live: its thread's subscription replaces
+    /// the previous one.
+    func open(_ id: ConversationID) async {
+        show(id)
         guard let gateway else { return }
         let previousSubscription = threadSubscription; threadSubscription = nil
         await gateway.unsubscribe(previousSubscription)
-        guard selectedSessionID == id else { return }
+        guard open == id, let thread = id.threadID else { return }
+        await subscribeOpenThread(thread)
+    }
+    /// The thread a sent draft became, for the rest of the session.
+    func successor(of id: ConversationID) -> ConversationID? { successors[id] }
+    private func subscribeOpenThread(_ id: String) async {
         // While reconnecting, the new connection subscribes the open thread.
-        guard connected else { return }
-        do { try await subscribeThread(id); error = nil }
+        guard selectedSessionID == id, case .ready(let session) = connection else { return }
+        do { try await subscribeThread(id, attempt: session.attempt); error = nil }
         catch where Self.isTransient(error) {}
         catch { self.error = error.localizedDescription }
     }
-    private func subscribeThread(_ id: String, fresh: Bool = false) async throws {
+    private func subscribeThread(_ id: String, fresh: Bool = false, attempt: Int) async throws {
         guard let gateway else { return }
         if let load = diskLoad, load.id == id { await load.task.value }
         if diskLoad?.id == id { diskLoad = nil }
@@ -693,54 +933,46 @@ final class SquircleModel {
         let subscription = try await gateway.subscribe("orchestration.subscribeThread", .from(request), receive: { [weak self] item in
             guard let self, selectedSessionID == id else { return }
             consumeThread(item)
-        }, ended: { [weak self] failure in self?.threadSubscriptionEnded(id, failure) })
+        }, ended: { [weak self] failure in self?.threadSubscriptionEnded(id, failure, attempt: attempt) })
         guard selectedSessionID == id else { await gateway.unsubscribe(subscription); return }
         threadSubscription = subscription
     }
     private func resubscribeFresh(_ id: String) {
         threadResubscribe?.cancel()
         threadResubscribe = Task { [weak self] in
-            guard let self, selectedSessionID == id, connected else { return }
-            let previous = threadSubscription; threadSubscription = nil
+            guard let self, selectedSessionID == id, case .ready(let session) = connection else { return }
+            let previous = threadSubscription; threadSubscription = nil; threadSynced = nil
             await gateway?.unsubscribe(previous)
-            try? await subscribeThread(id, fresh: true)
+            try? await subscribeThread(id, fresh: true, attempt: session.attempt)
         }
     }
     /// T3 ended the open thread's subscription with the socket still up.
-    /// Subscribe again, waiting longer each time; after a few tries say so.
-    private func threadSubscriptionEnded(_ id: String, _ failure: Error?) {
-        guard selectedSessionID == id, connected else { return }
-        threadSubscription = nil
+    /// During setup that attempt fails. Once connected, subscribe again,
+    /// waiting longer each time; after a few tries say so.
+    private func threadSubscriptionEnded(_ id: String, _ failure: Error?, attempt: Int) {
+        guard currentAttempt == attempt, selectedSessionID == id else { return }
+        guard case .ready = connection else {
+            log("T3 ended thread \(id)'s subscription during setup")
+            gateway?.disconnect(notify: false)
+            return
+        }
+        threadSubscription = nil; threadSynced = nil
         log("T3 ended thread \(id)'s subscription: \(failure?.localizedDescription ?? "completed")")
         threadResubscribe?.cancel()
         threadResubscribe = Task { [weak self] in
             var delay: Duration = .seconds(1)
-            for attempt in 1...5 {
+            for retry in 1...5 {
                 try? await Task.sleep(for: delay)
-                guard !Task.isCancelled, let self, selectedSessionID == id, connected, threadSubscription == nil else { return }
+                guard !Task.isCancelled, let self, selectedSessionID == id, currentAttempt == attempt, connected,
+                      threadSubscription == nil else { return }
                 guard sessions.contains(where: { $0.id == id }) || shell == .null else {
                     error = "This thread is no longer on your Mac."; return
                 }
-                do { try await subscribeThread(id); return }
-                catch { if attempt >= 3 { self.error = "This thread stopped updating: " + error.localizedDescription } }
+                do { try await subscribeThread(id, attempt: attempt); return }
+                catch { if retry >= 3 { self.error = "This thread stopped updating: " + error.localizedDescription } }
                 delay = min(delay * 2, .seconds(30))
             }
         }
-    }
-    /// A new conversation that T3 has not been told about yet. The thread is
-    /// created by its first message, so abandoned drafts leave nothing behind.
-    func beginDraft(agent: Bool = false) async {
-        saveCurrentThread()
-        threadResubscribe?.cancel(); threadResubscribe = nil
-        // Pictures left in drafts nobody can reach any more.
-        drafts = drafts.filter { key, _ in if case .draft = key { return submitting.contains(key) }; return true }
-        open = .draft(UUID(), projectID: selectedProjectID, agent: agent)
-        messages = []; requests = []; changes = []; state = T3ThreadState(); isRunning = false; error = nil
-        conversationBuild?.cancel(); conversationBuild = nil; conversationDirty = false
-        runtimeMode = .auto
-        restorePreferredModel()
-        let previousSubscription = threadSubscription; threadSubscription = nil
-        await gateway?.unsubscribe(previousSubscription)
     }
     /// "Claude · Fable 5.1" for a T3 model selection.
     func agentName(for selection: JSONValue) -> String {
@@ -754,28 +986,25 @@ final class SquircleModel {
         return name.hasPrefix(maker) || maker.isEmpty ? name : name.isEmpty ? maker : maker + " · " + name
     }
     func chooseModel(_ selection: JSONValue) {
-        guard !isRunning, !submitting.contains(open), isValidModel(selection) else { return }
-        modelSelection = selection
+        guard let open, !isRunning, sends[open] == nil, isValidModel(selection) else { return }
+        choices[open, default: LocalChoice()].model = selection
         if selection["instanceId"].string != Self.agentInstance, let data = try? JSONEncoder().encode(selection) {
-            preferences.set(data, forKey: Self.preferredModelKey)
+            preferences.set(data, forKey: Self.preferredModelKey); preferredModel = selection
         }
-        if let id = selectedSessionID { pendingModelSelections[id] = selection }
     }
     func chooseRuntimeMode(_ mode: T3RuntimeMode) {
-        runtimeMode = mode
-        if let id = selectedSessionID { pendingRuntimeModes[id] = mode }
+        guard let open else { return }
+        choices[open, default: LocalChoice()].mode = mode
     }
     func setRuntimeMode(_ mode: T3RuntimeMode) async {
-        let previous = runtimeMode
+        guard let open else { return }
+        let previous = choices[open]?.mode
         chooseRuntimeMode(mode)
-        guard let id = selectedSessionID else { return }
+        guard let id = open.threadID else { return }
         do {
             try await dispatch(["type":"thread.runtime-mode.set","threadId":id,"runtimeMode":mode.rawValue])
         } catch {
-            if pendingRuntimeModes[id] == mode {
-                pendingRuntimeModes.removeValue(forKey:id)
-                if selectedSessionID == id { runtimeMode = previous }
-            }
+            if choices[open]?.mode == mode { choices[open]?.mode = previous }
             self.error = error.localizedDescription
         }
     }
@@ -794,17 +1023,17 @@ final class SquircleModel {
             Task { [disk, diskGeneration] in await disk.saveHome(home, generation: diskGeneration) }
         }
     }
+    /// Keeps the open thread for a quick return: in memory its rows with the
+    /// exact state they came from, on disk the newest state.
     private func saveCurrentThread() {
         guard let id = selectedSessionID, state.sequence >= 0 else { return }
-        threadCache.set(CachedThread(state: state, messages: messages), for: id)
+        if transcript.state.sequence >= 0 { threadCache.set(transcript, for: id) }
         cacheWrite?.cancel(); cacheWrite = nil
         writeToDisk(id, state)
     }
     /// Keeps the on-disk copy current without writing on every event.
     private func scheduleCacheWrite() {
-        guard let id = selectedSessionID else { return }
-        threadCache.set(CachedThread(state: state, messages: messages), for: id)
-        guard cacheWrite == nil else { return }
+        guard let id = selectedSessionID, cacheWrite == nil else { return }
         cacheWrite = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
             guard let self, !Task.isCancelled else { return }
@@ -815,13 +1044,25 @@ final class SquircleModel {
     private func writeToDisk(_ id: String, _ state: T3ThreadState) {
         guard configuration != nil else { return }
         diskGeneration += 1
-        Task { [disk, diskGeneration] in await disk.saveThread(id, state, generation: diskGeneration) }
+        Task { [disk, diskGeneration, state = state.restored] in await disk.saveThread(id, state, generation: diskGeneration) }
     }
 
     // MARK: Thread
 
-    /// Derives `messages` from the open thread off the main actor, one pass
-    /// at a time; changes during a pass ask for one more.
+    /// A thread's rows and the state they were made from, as one value: the
+    /// only way to pair them is to render that state.
+    private struct Transcript {
+        let state: T3ThreadState
+        let rows: [ChatMessage]
+        private init(state: T3ThreadState, rows: [ChatMessage]) { self.state = state; self.rows = rows }
+        static let empty = Transcript(state: T3ThreadState(), rows: [])
+        nonisolated static func render(_ state: T3ThreadState) async -> Transcript {
+            Transcript(state: state, rows: await SquircleModel.conversation(state))
+        }
+    }
+    /// Renders the open thread off the main actor, one pass at a time;
+    /// changes during a pass ask for one more. A render made for a thread no
+    /// longer open is dropped.
     private func rebuildConversation() {
         conversationDirty = true
         guard conversationBuild == nil else { return }
@@ -829,24 +1070,33 @@ final class SquircleModel {
             while let model = self, model.conversationDirty, !Task.isCancelled {
                 model.conversationDirty = false
                 let id = model.selectedSessionID, snapshot = model.state
-                let rows = await Self.conversation(snapshot)
+                let rendered = await Transcript.render(snapshot)
                 guard !Task.isCancelled else { return }
                 if model.selectedSessionID == id {
-                    model.messages = rows
-                    if ConnectionTrace.enabled { model.traceRows(rows.count) }
-                    if let id, model.threadCache.peek(id) != nil {
-                        model.threadCache.set(CachedThread(state: model.state, messages: rows), for: id)
-                    }
+                    model.transcript = rendered
+                    if ConnectionTrace.enabled { model.traceRows(rendered.rows.count) }
+                    if let id, rendered.state.sequence >= 0 { model.threadCache.set(rendered, for: id) }
                 }
             }
             self?.conversationBuild = nil
         }
     }
+    /// Requests and changes follow the open thread's state.
+    private func deriveFromState() {
+        observedRequests = state.pendingRequests
+        if !responding.isEmpty {
+            let open = Set(observedRequests.compactMap { $0["payload"]["requestId"].string })
+            let still = responding.filter { open.contains($0.key) }
+            if still.count != responding.count { responding = still }
+        }
+        let turnChanges = state.changes
+        if turnChanges != changes { changes = turnChanges }
+    }
 
     private var tracedRows = false
     private var tracedEventAt: String?
     private func traceRows(_ count: Int) {
-        if !tracedRows, state.sequence >= 0, !state.fromCache {
+        if !tracedRows, state.isLive {
             tracedRows = true; ConnectionTrace.mark("thread.rows", "rows=\(count) seq=\(state.sequence)")
         }
         if let at = tracedEventAt {
@@ -855,7 +1105,11 @@ final class SquircleModel {
         }
     }
     func consumeThread(_ item: JSONValue) {
-        if item["kind"].string == "synchronized" { ConnectionTrace.mark("thread.synchronized"); tracedRows = true; return }
+        if item["kind"].string == "synchronized" {
+            ConnectionTrace.mark("thread.synchronized"); tracedRows = true
+            threadSynced = selectedSessionID
+            return
+        }
         if ConnectionTrace.enabled {
             switch item["kind"].string {
             case "snapshot": ConnectionTrace.mark("thread.snapshot", "seq=\(item["snapshot"]["snapshotSequence"].int ?? -1)")
@@ -863,31 +1117,28 @@ final class SquircleModel {
             }
         }
         let held = state.sequence
-        state.consume(item); rebuildConversation(); requests = state.pendingRequests
+        state.consume(item); rebuildConversation(); deriveFromState()
         // A revert rewrote history the phone can't replay: start from a snapshot.
         if held >= 0, state.sequence < 0, let id = selectedSessionID { resubscribeFresh(id) }
         scheduleCacheWrite()
-        let turnChanges = state.changes
-        if turnChanges != changes { changes = turnChanges }
         if state.activityCount != stepDetailsCount { stepDetailsCount = state.activityCount; scheduleStepDetails() }
-        isRunning = state.isRunning
-        let saved = state.thread["modelSelection"]
-        if let id = selectedSessionID, let pending = pendingModelSelections[id] {
-            // Live activity still carries the previous server selection until T3
-            // accepts a turn with this choice. Preserve the composer's draft.
-            if saved == pending { pendingModelSelections.removeValue(forKey:id) }
-            modelSelection = pending
-        } else if saved != .null { modelSelection = saved }
-        let savedMode = state.thread["runtimeMode"].string.flatMap(T3RuntimeMode.init(rawValue:))
-        if let id = selectedSessionID, let pending = pendingRuntimeModes[id] {
-            if savedMode == pending { pendingRuntimeModes.removeValue(forKey:id) }
-            runtimeMode = pending
-        } else { runtimeMode = savedMode ?? .auto }
-        status = isRunning ? "Working" : "Connected"
+        guard let open else { return }
+        // T3 has the message: nothing is pending for it any more.
+        if let send = sends[open], state.hasMessage(send.messageID) { sends[open] = nil }
+        // Choices T3 now reports are T3's again.
+        if var choice = choices[open] {
+            if let model = choice.model, state.thread["modelSelection"] == model { choice.model = nil }
+            if let mode = choice.mode, state.thread["runtimeMode"].string == mode.rawValue { choice.mode = nil }
+            choices[open] = choice.model == nil && choice.mode == nil ? nil : choice
+        }
         if let last = state.thread["session"]["lastError"].string { error = last }
     }
-    private func dispatch(_ command: [String:Any]) async throws {
-        var c = command; c["commandId"] = UUID().uuidString.lowercased()
+    /// The open thread is working, or a message T3 just took is about to.
+    var isRunning: Bool {
+        state.isRunning || open.flatMap { sends[$0] }?.phase == .accepted
+    }
+    private func dispatch(_ command: [String:Any], commandID: String = UUID().uuidString.lowercased()) async throws {
+        var c = command; c["commandId"] = commandID
         c["createdAt"] = ISO8601DateFormatter().string(from:.now)
         let result: JSONValue
         if let commandDispatch { result = try await commandDispatch(.from(c)) }
@@ -895,133 +1146,264 @@ final class SquircleModel {
         else { throw ClientError.configuration }
         if result["status"].string == "rejected" { throw ClientError.backend("T3",0,result.formatted) }
     }
+    /// T3 answered and refused: it didn't take the command. Anything else
+    /// (a dropped socket, no answer in time) leaves it unknown.
+    nonisolated static func isRefusal(_ error: Error) -> Bool {
+        switch error {
+        case ClientError.backend("T3", 0, _), ClientError.configuration: true
+        default: false
+        }
+    }
+
+    // MARK: Message field
+
     /// Adds a picture to the open conversation's field; one with the same
     /// `id` is replaced.
     func attach(_ attachment: ImageAttachment) {
+        guard let open else { return }
         var field = drafts[open] ?? []
         if let index = field.firstIndex(where: { $0.id == attachment.id }) { field[index] = attachment }
         else { field.append(attachment) }
         drafts[open] = field
         // A recording starts its way to the Mac at once; sending waits for it.
-        if let capture = attachment.capture, let client {
-            captureUploads[attachment.id]?.cancel()
-            captureUploads[attachment.id] = Task { try await client.uploadCapture(capture.file, kind: capture.kind.rawValue) }
-        }
+        if attachment.capture != nil { startUpload(attachment) }
     }
     func removeAttachment(_ id: String) {
+        guard let open else { return }
         drafts[open]?.removeAll { $0.id == id }
-        captureUploads.removeValue(forKey: id)?.cancel()
+        if case .uploading(_, let upload)? = captureTransfers.removeValue(forKey: id) { upload.cancel() }
     }
-    /// Uploads of the field's recordings, by attachment ID, to their paths on the Mac.
-    private var captureUploads: [String: Task<String, Error>] = [:]
-    /// The message block for `captures`, once each is on the Mac.
+    /// A recording in a field on its way to the Mac: under way, there (its
+    /// path on the Mac), or failed (sending starts it again). One without an
+    /// entry is still only on the phone.
+    private enum CaptureTransfer {
+        case uploading(generation: Int, Task<String, Error>)
+        case uploaded(path: String)
+        case failed(String)
+    }
+    private var captureTransfers: [String: CaptureTransfer] = [:]
+    private var uploadGeneration = 0
+    private var uploader: ((URL, String) async throws -> String)? {
+        if let upload { return upload }
+        guard let client else { return nil }
+        return { try await client.uploadCapture($0, kind: $1) }
+    }
+    @discardableResult
+    private func startUpload(_ attachment: ImageAttachment) -> Task<String, Error>? {
+        guard let capture = attachment.capture, let uploader else { return nil }
+        if case .uploading(_, let old)? = captureTransfers[attachment.id] { old.cancel() }
+        uploadGeneration += 1
+        let generation = uploadGeneration, id = attachment.id
+        let task = Task { try await uploader(capture.file, capture.kind.rawValue) }
+        captureTransfers[id] = .uploading(generation: generation, task)
+        Task { [weak self] in
+            let result = await task.result
+            // Only this upload's own entry: a newer one replaced it otherwise.
+            guard let self, case .uploading(let current, _)? = captureTransfers[id], current == generation else { return }
+            switch result {
+            case .success(let path): captureTransfers[id] = .uploaded(path: path)
+            case .failure(let error): captureTransfers[id] = .failed(error.localizedDescription)
+            }
+        }
+        return task
+    }
+    /// The message block for `captures`, once each is on the Mac. A failed
+    /// upload is tried again; one that made it is not.
     private func captureBlock(_ captures: [ImageAttachment]) async throws -> String {
         var sent: [(label: String, path: String, video: Bool)] = []
         for attachment in captures {
             guard let capture = attachment.capture else { continue }
-            let upload = captureUploads[attachment.id] ?? Task { [client] in
-                guard let client else { throw ClientError.configuration }
-                return try await client.uploadCapture(capture.file, kind: capture.kind.rawValue)
+            let path: String
+            switch captureTransfers[attachment.id] {
+            case .uploaded(let done)?: path = done
+            case .uploading(let generation, let upload)?:
+                do { path = try await upload.value } catch {
+                    if case .uploading(generation, _)? = captureTransfers[attachment.id] {
+                        captureTransfers[attachment.id] = .failed(error.localizedDescription)
+                    }
+                    throw error
+                }
+            case .failed?, nil:
+                guard let upload = startUpload(attachment) else { throw ClientError.configuration }
+                path = try await upload.value
             }
-            captureUploads[attachment.id] = upload
-            let path = try await upload.value
             let video = capture.kind == .video
             // Your own recording plays from the phone's copy.
             if video { StepVideos.set(capture.file, for: "file:" + path) }
             sent.append(((video ? "Screen recording · " : "Performance recording · ") + capture.label, path, video))
         }
-        for attachment in captures { captureUploads[attachment.id] = nil }
         return SentCapture.block(sent)
     }
-    /// Everything a send needs, fixed when it starts: where it goes, with
-    /// which model, mode and pictures, and what the thread already had. A
-    /// later navigation changes none of it.
-    private struct SendContext {
-        let origin: Conversation
+    /// Pictures back into a field, ahead of any added since.
+    private func restoreField(_ field: [ImageAttachment], to owner: ConversationID) {
+        guard !field.isEmpty else { return }
+        let now = drafts[owner] ?? []
+        drafts[owner] = field + now.filter { a in !field.contains { $0.id == a.id } }
+    }
+
+    // MARK: Sending
+
+    /// One message on its way: everything fixed when it started (where, with
+    /// which model, mode and pictures, what the thread already had), its
+    /// stable IDs, and how far it got. A later navigation changes none of it.
+    private struct SendOperation {
+        let messageID: String
+        let commandID: String
+        let spoken: String
+        let field: [ImageAttachment]
         let project: AppProject
         let selection: JSONValue
         let mode: T3RuntimeMode
-        let field: [ImageAttachment]
         /// The thread is the app's agent (its instructions come from the Mac).
         let agentThread: Bool
         let firstMessage: Bool
         let hasInstructions: Bool
-    }
-    /// Sends `text` with the field's pictures to `threadID`, or from the open
-    /// draft when nil (`agent`: the app's agent draft). Pictures leave the
-    /// field at once and go back into that conversation's field if T3 does
-    /// not take the message. Selection changes only when the draft that
-    /// sent is still open: its new thread takes its place.
-    func send(_ spoken: String, in project: AppProject, to threadID: String?, agent: Bool) async -> SendOutcome {
-        let origin: Conversation
-        if let threadID { origin = .thread(threadID) }
-        else if case .draft(_, let projectID, let isAgent) = open, projectID == nil || projectID == project.id, isAgent == agent { origin = open }
-        else { return .failed("This draft is no longer open.") }
-        guard origin == open else { return .failed("This conversation is no longer open.") }
-        guard !submitting.contains(origin) else { return .failed("Still sending the last message.") }
-        let field = drafts[origin] ?? []
-        guard !spoken.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !field.isEmpty else { return .failed("Nothing to send.") }
-        guard isValidModel(modelSelection) else { error = "Choose an available model."; return .failed("Choose an available model.") }
-        let messages = threadID == nil ? [] : state.thread["messages"].array
-        let context = SendContext(
-            origin: origin, project: project, selection: modelSelection, mode: runtimeMode, field: field,
-            agentThread: agent || threadID.map { agents[project.id] == $0 } == true
-                || (threadID != nil && state.thread["modelSelection"]["instanceId"].string == Self.agentInstance),
-            firstMessage: messages.isEmpty,
-            hasInstructions: messages.contains { ($0["text"].string ?? "").contains("sim start --thread") })
-        submitting.insert(origin); drafts[origin] = nil; error = nil
-        defer { submitting.remove(origin) }
-        var created: String?
-        let outcome = await deliver(spoken, context, created: &created)
-        if case .failed(let reason) = outcome {
-            // Back into the field it came from (the new thread's, if one was made).
-            let home: Conversation = created.map(Conversation.thread) ?? origin
-            let now = drafts[home] ?? []
-            drafts[home] = field + now.filter { a in !field.contains { $0.id == a.id } }
-            if open == origin || open == home { error = reason }
+        /// The thread a plain draft makes, named before T3 is asked.
+        let newThread: String
+        let createCommandID: String
+        /// The message with its recordings, once they're on the Mac.
+        var text: String?
+        var phase: PendingSend.Phase
+        var pending: PendingSend {
+            PendingSend(messageID: messageID, text: spoken, images: field.filter { $0.capture == nil }.count, phase: phase)
         }
-        return outcome
     }
-    /// `created`: the thread this send made, if it got that far.
-    private func deliver(_ spoken: String, _ context: SendContext, created: inout String?) async -> SendOutcome {
-        let images = context.field.filter { $0.capture == nil }, captures = context.field.filter { $0.capture != nil }
-        let text: String
-        do { text = try await spoken + captureBlock(captures) }
-        catch { return .failed("Couldn't send the recording to your Mac: " + error.localizedDescription) }
-        let project = context.project
-        let id: String
-        switch context.origin {
-        case .thread(let thread): id = thread
-        case .draft(_, _, agent: true):
-            // The Mac creates the agent (its worktree and thread) in the chosen
-            // mode, with this message unless it carries pictures, which go to
-            // T3 from here.
-            guard let client else { return .failed(ClientError.configuration.localizedDescription) }
-            do {
-                let model = context.selection["instanceId"].string == Self.agentInstance ? context.selection["model"].string : nil
-                id = try await client.startAgent(projectID: project.id, message: images.isEmpty ? text : "", model: model, mode: context.mode)
-            } catch { return .failed(error.localizedDescription) }
-            agents[project.id] = id; sessionProjects[id] = project.id; created = id
-            if open == context.origin { await selectSession(id) }
-            if images.isEmpty {
-                if selectedSessionID == id { isRunning = true; status = "Working" }
-                return .sent(threadID: id)
+    func pendingSend(for id: ConversationID) -> PendingSend? { sends[id]?.pending }
+
+    /// Starts sending `text` with the open field's pictures from `id`, which
+    /// must be open. The pending message exists, and the field is empty,
+    /// when this returns. Pictures go back into the field if T3 refuses.
+    func startSend(_ spoken: String, in project: AppProject, from id: ConversationID) -> SendStart {
+        guard open == id else { return .refused("This conversation is no longer open.") }
+        guard sends[id] == nil else { return .refused("Still sending the last message.") }
+        let field = drafts[id] ?? []
+        guard !spoken.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !field.isEmpty else { return .refused("Nothing to send.") }
+        let selection = modelSelection
+        guard isValidModel(selection) else {
+            let reason: String
+            switch catalog {
+            case .absent, .loading: reason = "Models are still loading."
+            case .failed(_, let failure, _): reason = "Couldn’t load the models: " + failure
+            case .ready: reason = "Choose an available model."
             }
-        case .draft:
-            id = UUID().uuidString.lowercased()
-            do {
-                try await dispatch(["type":"thread.create","threadId":id,"projectId":project.id,"title":"New thread",
-                    "modelSelection":context.selection.foundation,"runtimeMode":context.mode.rawValue,"interactionMode":"default",
-                    "branch":NSNull(),"worktreePath":NSNull()])
-            } catch { return .failed(error.localizedDescription) }
-            pendingRuntimeModes[id] = context.mode; sessionProjects[id] = project.id; created = id
-            if open == context.origin { await selectSession(id) }
+            loadProvidersIfDue(force: true)
+            error = reason
+            return .refused(reason)
         }
+        let messages = id.threadID == nil ? [] : state.thread["messages"].array
+        let operation = SendOperation(
+            messageID: UUID().uuidString.lowercased(), commandID: UUID().uuidString.lowercased(),
+            spoken: spoken, field: field, project: project, selection: selection, mode: runtimeMode,
+            agentThread: id.isAgentDraft || id.threadID.map { agents[project.id] == $0 } == true
+                || (id.threadID != nil && state.thread["modelSelection"]["instanceId"].string == Self.agentInstance),
+            firstMessage: messages.isEmpty,
+            hasInstructions: messages.contains { ($0["text"].string ?? "").contains("sim start --thread") },
+            newThread: UUID().uuidString.lowercased(), createCommandID: UUID().uuidString.lowercased(),
+            text: nil, phase: .preparing)
+        drafts[id] = nil; error = nil
+        sends[id] = operation
+        return .started(messageID: operation.messageID, outcome: Task { await deliver(from: id) })
+    }
+    func send(_ spoken: String, in project: AppProject, from id: ConversationID) async -> SendOutcome? {
+        guard case .started(_, let outcome) = startSend(spoken, in: project, from: id) else { return nil }
+        return await outcome.value
+    }
+    /// Sends a message whose answer was lost again, as the same message.
+    /// If T3 already shows it, it was taken and nothing is sent.
+    func startRetry(_ id: ConversationID) -> SendStart {
+        guard var operation = sends[id], case .outcomeUnknown = operation.phase else { return .refused("Nothing to send again.") }
+        if let thread = id.threadID, open == id {
+            guard threadSynced == thread else { return .refused("Still checking with T3; try again in a moment.") }
+            if state.hasMessage(operation.messageID) {
+                sends[id] = nil
+                return .started(messageID: operation.messageID,
+                                outcome: Task { .accepted(messageID: operation.messageID, conversation: id) })
+            }
+        }
+        operation.phase = id.threadID == nil ? .creating : .awaitingAcceptance
+        sends[id] = operation; error = nil
+        return .started(messageID: operation.messageID, outcome: Task { await deliver(from: id) })
+    }
+    func retry(_ id: ConversationID) async -> SendOutcome? {
+        guard case .started(_, let outcome) = startRetry(id) else { return nil }
+        return await outcome.value
+    }
+    /// Gives up on a message whose answer was lost: its pictures go back in
+    /// the field; returns its text for the composer.
+    func discard(_ id: ConversationID) -> String? {
+        guard let operation = sends[id], case .outcomeUnknown = operation.phase else { return nil }
+        sends[id] = nil
+        restoreField(operation.field, to: id)
+        return operation.spoken
+    }
+    /// Takes the send under `origin` as far as it goes: recordings, the
+    /// draft's thread, the turn. Each step is skipped when an earlier
+    /// attempt finished it, and every attempt uses the same IDs.
+    private func deliver(from origin: ConversationID) async -> SendOutcome {
+        guard var operation = sends[origin] else {
+            return .rejected(messageID: "", reason: "Nothing to send.", conversation: origin)
+        }
+        var owner = origin
+        let messageID = operation.messageID
+        func record(_ phase: PendingSend.Phase) {
+            guard sends[owner] != nil else { return }
+            operation.phase = phase; sends[owner] = operation
+        }
+        func reject(_ reason: String) -> SendOutcome {
+            sends[owner] = nil
+            restoreField(operation.field, to: owner)
+            if open == owner || open == origin { error = reason }
+            return .rejected(messageID: messageID, reason: reason, conversation: owner)
+        }
+        func unknown(_ reason: String) -> SendOutcome {
+            // T3 showed it meanwhile: it was taken.
+            guard sends[owner] != nil else { return .accepted(messageID: messageID, conversation: owner) }
+            record(.outcomeUnknown(reason))
+            if open == owner || open == origin { error = reason }
+            return .unknown(messageID: messageID, reason: reason, conversation: owner)
+        }
+        let images = operation.field.filter { $0.capture == nil }, captures = operation.field.filter { $0.capture != nil }
+        let text: String
+        if let ready = operation.text { text = ready } else {
+            do { text = try await operation.spoken + captureBlock(captures) }
+            catch { return reject("Couldn't send the recording to your Mac: " + error.localizedDescription) }
+            operation.text = text; record(.preparing)
+        }
+        let project = operation.project
+        let threadID: String
+        switch owner {
+        case .thread(let id, _): threadID = id
+        case .draft(_, _, agent: true):
+            // The Mac creates the agent (its worktree and thread) in the
+            // chosen mode, or finds the one it made; the message goes to T3
+            // from here, under this send's own ID.
+            record(.creating)
+            guard let client else { return reject(ClientError.configuration.localizedDescription) }
+            do {
+                let model = operation.selection["instanceId"].string == Self.agentInstance ? operation.selection["model"].string : nil
+                threadID = try await client.startAgent(projectID: project.id, message: "", model: model, mode: operation.mode)
+            } catch { return reject(error.localizedDescription) }
+            agents[project.id] = threadID
+            owner = adopt(draft: origin, becomes: threadID)
+        case .draft:
+            record(.creating)
+            threadID = operation.newThread
+            if !shell["threads"].array.contains(where: { $0["id"].string == threadID }) {
+                do {
+                    try await dispatch(["type":"thread.create","threadId":threadID,"projectId":project.id,"title":"New thread",
+                        "modelSelection":operation.selection.foundation,"runtimeMode":operation.mode.rawValue,"interactionMode":"default",
+                        "branch":NSNull(),"worktreePath":NSNull()], commandID: operation.createCommandID)
+                } catch where Self.isRefusal(error) { return reject(error.localizedDescription) }
+                catch { return unknown(error.localizedDescription) }
+            }
+            owner = adopt(draft: origin, becomes: threadID)
+        }
+        record(.awaitingAcceptance)
         var message = text
-        let instructions = squircleInstructions(for: project, threadID: id)
-        if !context.agentThread, context.firstMessage {
+        let instructions = squircleInstructions(for: project, threadID: threadID)
+        if !operation.agentThread, operation.firstMessage {
             message += "\n\n" + project.agentContext + "\nFor signed builds/install links use \(cliCommand). Run help workflow for the documented commands. This app is a native client of T3; T3 manages this thread.\n" + instructions
-        } else if !context.agentThread, !context.hasInstructions {
+        } else if !operation.agentThread, !operation.hasInstructions {
             // Threads started before these instructions existed get them once.
             message += AppProject.contextMarker + project.name + ".\n" + instructions
         }
@@ -1031,15 +1413,32 @@ final class SquircleModel {
             ["type":"image","name":"image-\(index + 1).jpg","mimeType":"image/jpeg","sizeBytes":image.data.count,
              "dataUrl":"data:image/jpeg;base64," + image.data.base64EncodedString()]
         }
-        let seed = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seed = operation.spoken.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            try await dispatch(["type":"thread.turn.start","threadId":id,
-                "message":["messageId":UUID().uuidString.lowercased(),"role":"user","text":message,"attachments":uploads],
-                "modelSelection":context.selection.foundation,"runtimeMode":context.mode.rawValue,
-                "interactionMode":"default","titleSeed":String((seed.isEmpty ? (captures.isEmpty ? "Image" : "Recording") : seed).prefix(120))])
-        } catch { return .failed(error.localizedDescription) }
-        if selectedSessionID == id { isRunning = true; status = "Working" }
-        return .sent(threadID: id)
+            try await dispatch(["type":"thread.turn.start","threadId":threadID,
+                "message":["messageId":messageID,"role":"user","text":message,"attachments":uploads],
+                "modelSelection":operation.selection.foundation,"runtimeMode":operation.mode.rawValue,
+                "interactionMode":"default","titleSeed":String((seed.isEmpty ? (captures.isEmpty ? "Image" : "Recording") : seed).prefix(120))],
+                commandID: operation.commandID)
+        } catch where Self.isRefusal(error) { return reject(error.localizedDescription) }
+        catch { return unknown(error.localizedDescription) }
+        for attachment in captures { captureTransfers[attachment.id] = nil }
+        // Pending until the thread shows it, while anyone may look; a
+        // thread T3 already shows it in needs nothing more.
+        let watched = open == owner || open == origin
+        if watched, !(open == owner && state.hasMessage(messageID)) { record(.accepted) } else { sends[owner] = nil }
+        return .accepted(messageID: messageID, conversation: owner)
+    }
+    /// T3 made `thread` for the draft `draft`: the send, its pictures and
+    /// choices belong to the thread from now on.
+    private func adopt(draft: ConversationID, becomes thread: String) -> ConversationID {
+        let id = ConversationID.thread(thread, appID: draft.appID)
+        sessionProjects[thread] = draft.appID
+        successors[draft] = id
+        if let operation = sends.removeValue(forKey: draft) { sends[id] = operation }
+        if let field = drafts.removeValue(forKey: draft) { drafts[id] = field }
+        if let choice = choices.removeValue(forKey: draft) { choices[id] = choice }
+        return id
     }
     /// T3 streams tool calls without their inputs or screenshots; the Mac
     /// fills those in shortly after each new activity. A failed fetch tries
@@ -1161,24 +1560,20 @@ final class SquircleModel {
     }
     /// Recordings made before Squircle took posters.
     private(set) var posterless = Set<String>()
+    /// A recording or clip as a file to play, downloaded once into the
+    /// media cache, streamed to disk off the main actor.
     func loadVideo(_ stepID: String) async -> URL? {
         if let url = StepVideos.url(for: stepID) { return url }
         if stepID.hasPrefix("file:") {
             let path = String(stepID.dropFirst("file:".count))
-            guard let data = await mediaFileData(path) else { return nil }
-            let url = StepVideos.directory
-                .appendingPathComponent(UUID().uuidString).appendingPathExtension((path as NSString).pathExtension)
-            guard (try? data.write(to: url)) != nil else { return nil }
-            StepVideos.set(url, for: stepID)
-            return url
+            guard let gateway, let url = await mediaFileURL(path)?.url else { return nil }
+            return await StepVideos.file(for: stepID) { await gateway.http.authorizedDownload(url, to: $0) }
         }
         let id = String(stepID.dropFirst("media:".count))
-        guard let client, let thread = selectedSessionID,
-              let data = try? await client.mediaFile(threadID: thread, id: id) else { return nil }
-        let url = StepVideos.directory.appendingPathComponent(id + ".mp4")
-        guard (try? data.write(to: url)) != nil else { return nil }
-        StepVideos.set(url, for: stepID)
-        return url
+        guard let client, let thread = selectedSessionID else { return nil }
+        return await StepVideos.file(for: stepID) { destination in
+            (try? await client.downloadMedia(threadID: thread, id: id, to: destination)) != nil
+        }
     }
     func loadStepImage(_ stepID: String, index: Int, attachment: String? = nil) async -> Data? {
         if let data = StepImages.data(for: stepID, index: index) { return data }
@@ -1279,14 +1674,21 @@ final class SquircleModel {
         guard let id = selectedSessionID else { return }
         do { try await dispatch(["type":"thread.turn.interrupt","threadId":id]) } catch { self.error = error.localizedDescription }
     }
+    /// Answers a request. It leaves `requests` while the answer is on its
+    /// way and for good once T3 reports it resolved; back if T3 refuses.
     func respond(to request: JSONValue, decision: String? = nil, answers: [String:Any]? = nil) async {
-        guard let id = selectedSessionID, let requestID = request["payload"]["requestId"].string else { return }
+        guard let id = selectedSessionID, let requestID = request["payload"]["requestId"].string, responding[requestID] == nil else { return }
+        let commandID = UUID().uuidString.lowercased()
+        responding[requestID] = commandID
         do {
             var c: [String:Any] = ["threadId":id,"requestId":requestID]
             if let answers { c["type"] = "thread.user-input.respond"; c["answers"] = answers }
             else { c["type"] = "thread.approval.respond"; c["decision"] = decision ?? "decline" }
-            try await dispatch(c); requests.removeAll { $0["id"] == request["id"] }
-        } catch { self.error = error.localizedDescription }
+            try await dispatch(c, commandID: commandID)
+        } catch {
+            if responding[requestID] == commandID { responding[requestID] = nil }
+            self.error = error.localizedDescription
+        }
     }
     /// Tells the agent it is being watched in Squircle and how to show its
     /// work there: the simulator, screenshots and recordings.
@@ -1375,11 +1777,30 @@ final class SquircleModel {
         }
     }
     func stopMetadataUpdates() { ConnectionTrace.mark("metadata.stop"); monitor?.cancel(); monitor = nil }
-    /// Everything the phone keeps from the Mac's service, fetched at once:
-    /// one round trip per poll, and an unchanged reply is an empty 304.
-    /// A refresh already under way is joined; `fresh` waits for it and then
-    /// asks again, for callers that just changed something. Returns why the
-    /// builds or apps couldn't be fetched, if they couldn't.
+    /// Keeps `need` fresh until the lease ends; fetched at once too.
+    func keepFresh(_ need: RefreshNeed) -> RefreshLease {
+        let id = UUID()
+        leases[id] = need
+        Task { [weak self] in await self?.refresh(need) }
+        return RefreshLease { [weak self] in self?.leases[id] = nil }
+    }
+    private func refresh(_ need: RefreshNeed) async {
+        guard let client else { return }
+        switch need {
+        case .tasks(let app):
+            if let list = try? await client.tasks(projectID: app) { adoptTasks(list, for: app) }
+        case .conversation(let conversation):
+            guard let thread = conversation.threadID, thread == selectedSessionID,
+                  let media = try? await client.threadMedia(threadID: thread) else { return }
+            adoptMedia(media, for: thread)
+        }
+    }
+    /// Everything the phone keeps from the Mac's service, in one pass: the
+    /// catalog Home shows, simulator sessions, and only what a screen holds
+    /// a lease on (an app's tasks, the open thread's media). An unchanged
+    /// reply is an empty 304. A pass already under way is joined; `fresh`
+    /// waits for it and then asks again, for callers that just changed
+    /// something. Returns why the builds or apps couldn't be fetched.
     @discardableResult
     func refreshMetadata(fresh: Bool = false) async -> Error? {
         if let running = metadataRefresh {
@@ -1398,10 +1819,20 @@ final class SquircleModel {
         let pollStart = ContinuousClock.now
         defer { ConnectionTrace.mark("poll", "\(pollStart.duration(to: .now))") }
         noteStability()
-        let project = selectedProjectID, thread = selectedSessionID
+        loadProvidersIfDue()
+        let needs = Set(leases.values)
+        let apps = needs.compactMap { if case .tasks(let app) = $0 { return app }; return nil }
+        let thread = selectedSessionID.flatMap { id in
+            needs.contains { if case .conversation(let c) = $0 { return c.threadID == id }; return false } ? id : nil
+        }
         async let b = client.builds(); async let m = client.fetchAppMetadata(); async let a = try? client.agents()
         async let sims = try? client.simulatorSessions()
-        async let list: AppTasks? = { guard let project else { return nil }; return try? await client.tasks(projectID: project) }()
+        async let lists: [(String, AppTasks)] = withTaskGroup(of: (String, AppTasks)?.self) { group in
+            for app in apps { group.addTask { (try? await client.tasks(projectID: app)).map { (app, $0) } } }
+            var lists: [(String, AppTasks)] = []
+            for await list in group { if let list { lists.append(list) } }
+            return lists
+        }
         async let published: [JSONValue]? = { guard let thread else { return nil }; return try? await client.threadMedia(threadID: thread) }()
         let failure: Error?
         do {
@@ -1413,29 +1844,75 @@ final class SquircleModel {
         } catch { failure = error }  // T3 chat remains usable if the build service is temporarily offline.
         if let known = await a { adopt(known) }
         if let active = await sims { adoptSimulators(active) }
-        if let project, let tasks = await list { self.tasks[project] = tasks }
+        for (app, list) in await lists { adoptTasks(list, for: app) }
         if let thread, let media = await published { adoptMedia(media, for: thread) }
         return failure
     }
-    func tasks(for project: AppProject) -> AppTasks { tasks[project.id] ?? AppTasks() }
+
+    // MARK: Tasks
+
+    /// An app's tasks: what the Mac last sent, older History pages loaded
+    /// so far, and your edits it hasn't confirmed yet laid over them.
+    func tasks(for project: AppProject) -> AppTasks { tasks(app: project.id) }
+    private func tasks(app: String) -> AppTasks {
+        guard var list = observedTasks[app] else { return AppTasks() }
+        if let older = olderHistory[app] {
+            let seen = Set(list.tasks.map(\.id) + list.history.map(\.id))
+            list.history += older.tasks.filter { !seen.contains($0.id) }
+            list.historyNext = older.next
+        }
+        for (id, edit) in taskEdits { list = Self.apply(edit, to: id, in: list) }
+        return list
+    }
+    /// Pull to refresh: the newest tasks, and History from its first page.
     func refreshTasks() async {
-        guard let client, let id = selectedProjectID, let list = try? await client.tasks(projectID: id) else { return }
-        tasks[id] = taskEdits.reduce(list) { list, edit in Self.apply(edit.value, to: edit.key, in: list) }
+        guard let client, let app = selectedProjectID, let list = try? await client.tasks(projectID: app) else { return }
+        olderHistory[app] = nil
+        adoptTasks(list, for: app)
     }
-    func addTask(_ ask: String, in project: AppProject) async {
-        guard let client else { return }
-        do { try await client.addTask(projectID: project.id, ask: ask) } catch { self.error = error.localizedDescription }
-        await refreshTasks()
+    /// The next older page of History, after what's loaded.
+    func loadMoreHistory(appID app: String) async {
+        guard let client, !historyLoads.contains(app) else { return }
+        let cursor: String?
+        if let older = olderHistory[app] { cursor = older.next } else { cursor = observedTasks[app]?.historyNext }
+        guard let cursor else { return }
+        historyLoads.insert(app); defer { historyLoads.remove(app) }
+        do {
+            let page = try await client.tasks(projectID: app, historyBefore: cursor)
+            // A refresh started over meanwhile: this page follows nothing.
+            let now = olderHistory[app]?.next ?? observedTasks[app]?.historyNext
+            guard now == cursor || olderHistory[app]?.next == cursor else { return }
+            var older = olderHistory[app] ?? OlderHistory()
+            older.tasks += page.history; older.next = page.historyNext
+            olderHistory[app] = older
+        } catch { self.error = error.localizedDescription }
     }
-    /// Swiped status and Top changes the Mac hasn't confirmed yet. A refresh
-    /// already on its way would otherwise put the row back for a moment.
-    private var taskEdits: [String: (status: AppTask.Status?, toTop: Bool)] = [:]
+    private func adoptTasks(_ list: AppTasks, for app: String) {
+        observedTasks[app] = list
+        // An edit the Mac has applied is the Mac's now.
+        let all = list.tasks + list.history
+        for (id, edit) in taskEdits {
+            guard let receipt = edit.receipt, let task = all.first(where: { $0.id == id }), (task.revision ?? 0) >= receipt else { continue }
+            taskEdits[id] = nil
+        }
+    }
+    /// A status or Top change made here: shown at once, sent once, and laid
+    /// over the Mac's tasks until a reply holds it (the revision in its
+    /// receipt), so a refresh already on its way can't put the row back.
+    private struct PendingTaskEdit {
+        let generation: Int
+        let status: AppTask.Status?
+        let toTop: Bool
+        var receipt: UInt64?
+    }
+    private var taskEdits: [String: PendingTaskEdit] = [:] { didSet { changed() } }
+    private var taskEditGeneration = 0
     /// Moves the row at once, before the Mac answers.
     func markTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) {
-        taskEdits[task.id] = (status, toTop)
-        for (project, list) in tasks { tasks[project] = Self.apply((status, toTop), to: task.id, in: list) }
+        taskEditGeneration += 1
+        taskEdits[task.id] = PendingTaskEdit(generation: taskEditGeneration, status: status, toTop: toTop)
     }
-    private static func apply(_ edit: (status: AppTask.Status?, toTop: Bool), to id: String, in list: AppTasks) -> AppTasks {
+    private static func apply(_ edit: PendingTaskEdit, to id: String, in list: AppTasks) -> AppTasks {
         var list = list
         guard let index = list.tasks.firstIndex(where: { $0.id == id }) else { return list }
         if let status = edit.status { list.tasks[index].status = status }
@@ -1444,25 +1921,36 @@ final class SquircleModel {
     }
     func updateTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) async {
         guard let client else { return }
-        markTask(task, status: status, toTop: toTop)
-        do { try await client.updateTask(id: task.id, status: status, toTop: toTop) } catch { self.error = error.localizedDescription }
-        taskEdits[task.id] = nil
-        await refreshTasks()
+        if let edit = taskEdits[task.id], edit.receipt == nil, edit.status == status, edit.toTop == toTop {} else {
+            markTask(task, status: status, toTop: toTop)
+        }
+        guard let generation = taskEdits[task.id]?.generation else { return }
+        do {
+            let revision = try await client.updateTask(id: task.id, status: status, toTop: toTop)
+            // A later edit of the same task owns the row now.
+            guard taskEdits[task.id]?.generation == generation else { return }
+            if let revision { taskEdits[task.id]?.receipt = revision } else { taskEdits[task.id] = nil }
+        } catch {
+            if taskEdits[task.id]?.generation == generation { taskEdits[task.id] = nil }
+            self.error = error.localizedDescription
+        }
+        let app = observedTasks.first { _, list in (list.tasks + list.history).contains { $0.id == task.id } }?.key ?? selectedProjectID
+        if let app, let list = try? await client.tasks(projectID: app) { adoptTasks(list, for: app) }
     }
     private var taskMedia = BoundedCache<String, Data>(budget: 16 << 20, cost: \.count)
-    /// A picture or clip attached to a task, downloaded once.
+    /// A picture attached to a task, downloaded once.
     func taskMediaData(task: String, media: String) async -> Data? {
         if let data = taskMedia.value(for: media) { return data }
         guard let client, let data = try? await client.taskMediaFile(taskID: task, id: media) else { return nil }
         taskMedia.set(data, for: media)
         return data
     }
-    /// A clip attached to a task as a file to play.
+    /// A clip attached to a task as a file to play, through the media cache.
     func taskVideo(task: String, media: String) async -> URL? {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("task-\(media).mp4")
-        if FileManager.default.fileExists(atPath: url.path) { return url }
-        guard let data = await taskMediaData(task: task, media: media), (try? data.write(to: url)) != nil else { return nil }
-        return url
+        guard let client else { return nil }
+        return await StepVideos.file(for: "task:" + media + ".mp4") { destination in
+            (try? await client.downloadTaskMedia(taskID: task, id: media, to: destination)) != nil
+        }
     }
     func previewData(for metadata: AppMetadata) async throws -> Data {
         guard let client else { throw ClientError.configuration }; let version = metadata.preview?.id ?? ""
@@ -1487,35 +1975,48 @@ final class SquircleModel {
         do { let build = try await client.startBuild(request.freshSubmission()); await refreshMetadata(fresh: true); return build }
         catch { self.error = error.localizedDescription; return nil }
     }
-    /// Opens iOS's install prompt. For a build of this very app, watches the
-    /// download: once the Mac has sent every byte, iOS is about to replace
+    /// Opens iOS's install prompt. For a build of this very app, follows
+    /// the attempt: once the Mac has sent every byte, iOS is about to replace
     /// Squircle, and `updatingTo` says so. A download that only started, or
     /// failed, never does. Gives up if the person doesn't confirm within
     /// three minutes, or the transfer doesn't finish within fifteen.
     @discardableResult
     func install(_ build: AppBuild) async -> Bool {
         guard let client else { error = ClientError.configuration.localizedDescription; return false }
+        let own = build.bundleID != nil && build.bundleID == Bundle.main.bundleIdentifier
+        if own { installWatch?.cancel(); installWatch = nil; installAttempt = .requestingLink(build) }
+        func fail(_ reason: String) -> Bool {
+            if own, installAttempt == .requestingLink(build) { installAttempt = .ended(reason) }
+            error = reason; return false
+        }
         let url: URL
-        do { url = try await client.installURL(buildID: build.id) } catch { self.error = error.localizedDescription; return false }
-        guard await UIApplication.shared.open(url) else { error = "Couldn’t open the installer."; return false }
-        guard build.bundleID != nil, build.bundleID == Bundle.main.bundleIdentifier else { return true }
-        installWatch?.cancel()
+        do { url = try await client.installURL(buildID: build.id) } catch { return fail(error.localizedDescription) }
+        guard await UIApplication.shared.open(url) else { return fail("Couldn’t open the installer.") }
+        // Not this app, or the attempt was cancelled meanwhile.
+        guard own, installAttempt == .requestingLink(build) else { return true }
+        installAttempt = .prompting(build, link: url, deadline: .now + .seconds(180))
         installWatch = Task { [weak self] in
-            let started = ContinuousClock.now
-            var confirmed = false
-            while !Task.isCancelled, started.duration(to: .now) < (confirmed ? .seconds(900) : .seconds(180)) {
+            while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled, let self else { return }
+                let deadline: ContinuousClock.Instant
+                switch installAttempt {
+                case .prompting(let b, _, let d) where b.id == build.id: deadline = d
+                case .watching(let b, _, let d) where b.id == build.id: deadline = d
+                default: return
+                }
+                guard ContinuousClock.now < deadline else { installAttempt = .ended("The installation didn’t finish."); return }
                 switch try? await client.installProgress(link: url) {
-                case .transferred?: updatingTo = build; return
-                case .downloading?: confirmed = true
+                case .transferred?: installAttempt = .transferred(build); return
+                case .downloading?:
+                    if case .prompting = installAttempt { installAttempt = .watching(build, link: url, deadline: .now + .seconds(900)) }
                 default: break
                 }
             }
         }
         return true
     }
-    func cancelUpdate() { installWatch?.cancel(); installWatch = nil; updatingTo = nil }
+    func cancelUpdate() { installWatch?.cancel(); installWatch = nil; installAttempt = .ended(nil) }
     func buildDetail(id: String) async throws -> (AppBuild, BuildFailure?) {
         guard let client else { throw ClientError.configuration }; return try await client.build(id: id)
     }
@@ -1567,6 +2068,41 @@ final class SquircleModel {
             try await ensureOwnProject(record)
         } catch { self.error = error.localizedDescription }
     }
+    // MARK: Legacy controller API
+    // The chat controller's previous calls, until it addresses conversations
+    // itself (W7 deletes this block then).
+
+    enum LegacySendOutcome: Equatable {
+        case sent(threadID: String)
+        case failed(String)
+    }
+    private func appID(of thread: String) -> String { sessionProjects[thread] ?? selectedProjectID ?? "" }
+    func prepareSession(_ id: String) { show(.thread(id, appID: appID(of: id))) }
+    func selectSession(_ id: String) async { await open(.thread(id, appID: appID(of: id))) }
+    func beginDraft(agent: Bool = false) async { await open(.draft(UUID(), appID: selectedProjectID ?? "", agent: agent)) }
+    /// Sends from `threadID`, or the open draft when nil. Text the old
+    /// controller put back and sends again after a lost answer goes as the
+    /// same message.
+    func send(_ spoken: String, in project: AppProject, to threadID: String?, agent: Bool) async -> LegacySendOutcome {
+        let origin: ConversationID
+        if let threadID { origin = .thread(threadID, appID: project.id) }
+        else if let open, case .draft(_, _, let isAgent) = open, isAgent == agent { origin = open }
+        else { return .failed("This draft is no longer open.") }
+        let start: SendStart
+        if let pending = sends[origin], case .outcomeUnknown = pending.phase, pending.spoken == spoken { start = startRetry(origin) }
+        else { start = startSend(spoken, in: project, from: origin) }
+        guard case .started(_, let task) = start else {
+            if case .refused(let reason) = start { return .failed(reason) }
+            return .failed("Couldn’t send.")
+        }
+        let outcome = await task.value
+        // The old controller expects the model to follow a draft's new thread.
+        if open == origin, let next = successors[origin] { await open(next) }
+        switch outcome {
+        case .accepted(_, let conversation): return .sent(threadID: conversation.threadID ?? "")
+        case .rejected(_, let reason, _), .unknown(_, let reason, _): return .failed(reason)
+        }
+    }
 }
 
 /// Squircle's copies of Home and of threads on disk, read and written off
@@ -1585,7 +2121,8 @@ actor DiskCache {
     }
     func loadHome() -> Home? { read(homeURL) }
     func saveHome(_ home: Home, generation: UInt64) { write(home, to: homeURL, generation: generation) }
-    func loadThread(_ id: String) -> T3ThreadState? { read(threadURL(id)) }
+    /// A copy on disk is never live: T3 confirms or replaces it.
+    func loadThread(_ id: String) -> T3ThreadState? { (read(threadURL(id)) as T3ThreadState?)?.restored }
     func saveThread(_ id: String, _ state: T3ThreadState, generation: UInt64) { write(state, to: threadURL(id), generation: generation) }
     private func read<T: Decodable>(_ url: URL?) -> T? {
         guard let url, let data = try? Data(contentsOf: url) else { return nil }
