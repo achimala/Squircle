@@ -1,4 +1,4 @@
-use crate::{agents::Agents, apps, push::Push, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::Store, xcode};
+use crate::{agents::Agents, apps, push::Push, simpool::Pool, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::Store, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -46,6 +46,7 @@ pub struct AppState {
     recovery_jobs: Arc<Mutex<HashMap<String, Job>>>,
     agents: Option<Arc<Agents>>,
     sims: Option<Arc<Sims>>,
+    pool: Option<Arc<Pool>>,
     push: Option<Arc<Push>>,
     tasks: Option<Arc<Tasks>>,
 }
@@ -65,6 +66,7 @@ impl AppState {
             recovery_jobs: Arc::default(),
             agents: None,
             sims: None,
+            pool: None,
             push: None,
             tasks: None,
         }
@@ -232,6 +234,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sims", get(list_sims).post(start_sim))
         .route("/v1/sims/stop", post(stop_sim))
         .route("/v1/sims/devices", get(sim_devices))
+        .route("/v1/sims/cleanup", post(cleanup_sims))
         .route("/v1/agents", get(list_agents).post(ensure_agent))
         .route("/v1/agents/context", get(agent_context))
         .route("/v1/t3/providers", get(t3_providers))
@@ -322,10 +325,13 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?), tasks.clone())?;
     let push = Push::open(&store.root)?;
     agents.attach_push(push.clone());
-    let sims = Sims::open(&store.root, agents.clone())?;
+    let pool = Pool::open(&store.root, agents.clone())?;
+    let sims = Sims::open(&store.root, agents.clone(), pool.clone())?;
+    pool.remember_leased(sims.used());
     let mut state = AppState::new(store, public_url);
     state.agents = Some(agents.clone());
     state.sims = Some(sims.clone());
+    state.pool = Some(pool.clone());
     state.push = Some(push.clone());
     state.tasks = Some(tasks.clone());
     // Service loops, stopped explicitly once requests have drained.
@@ -350,6 +356,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     background.push(tokio::spawn(agents.clone().run()));
     background.push(tokio::spawn(push.clone().run()));
     background.push(tokio::spawn(sims.clone().run()));
+    background.push(tokio::spawn(pool.clone().run(sims.clone())));
     let shutdown = state.clone();
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
@@ -1909,6 +1916,9 @@ fn sim_error(error: anyhow::Error) -> ApiError {
 #[derive(Deserialize)]
 struct SimQuery {
     thread: Option<String>,
+    /// Also every booted simulator and its owner (the CLI; the phone polls without it).
+    #[serde(default)]
+    simulators: bool,
 }
 
 async fn list_sims(
@@ -1916,7 +1926,29 @@ async fn list_sims(
     query: std::result::Result<Query<SimQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
-    Ok(Json(success(sims(&state)?.list(query.thread.as_deref()))))
+    let sims = sims(&state)?;
+    let mut list = sims.list(query.thread.as_deref());
+    // Every booted simulator and who holds it; without T3 the sessions still show.
+    if let Some(pool) = state.pool.as_ref().filter(|_| query.simulators) {
+        list["simulators"] = pool.status(&sims.leases()).await.unwrap_or_else(|e| json!({"error": format!("{e:#}")}));
+    }
+    Ok(Json(success(list)))
+}
+
+#[derive(Deserialize)]
+struct CleanupSims {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn cleanup_sims(
+    State(state): State<AppState>,
+    payload: std::result::Result<Json<CleanupSims>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let request = body(payload)?;
+    let sims = sims(&state)?;
+    let pool = state.pool.clone().ok_or_else(|| sim_error(anyhow::anyhow!("The simulator pool is not running in this service")))?;
+    Ok(Json(success(pool.cleanup(&sims.leases(), request.dry_run).await.map_err(sim_error)?)))
 }
 
 #[derive(Deserialize)]

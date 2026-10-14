@@ -355,7 +355,7 @@ enum TaskCommand {
 #[derive(Subcommand)]
 enum SimCommand {
     /// Open, boot and start recording a simulator for your thread; returns the agent-device command to drive it.
-    #[command(after_help = "Idempotent: starting again on the same simulator returns the running session. Without --device: the simulator this thread used last, else a booted one no other agent is using, else any free one.")]
+    #[command(after_help = "Idempotent: starting again on the same simulator returns the running session. Without --device: the simulator this thread used last, else a booted one of Squircle's that nothing holds, else a shut-down one (never a simulator the user or another agent has booted). At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once; past that start fails until one stops. Stopping (or the turn ending) shuts the simulator down. Use this for every simulator: don't boot or create simulators with simctl or xcodebuild.")]
     Start {
         #[arg(long, help = "Your T3 thread ID")]
         thread: String,
@@ -369,13 +369,19 @@ enum SimCommand {
         #[arg(long, help = "A session ID instead of a thread")]
         id: Option<String>,
     },
-    /// Running sessions and recent recordings, optionally for one thread.
+    /// Every booted simulator with its owner (a session's thread, a T3 device session, or unowned), running sessions and recent recordings.
     Status {
         #[arg(long)]
         thread: Option<String>,
     },
     /// This Mac's iOS simulators and which thread is recording each.
     Devices,
+    /// Shut down simulators Squircle or its agents booted that nothing holds, and delete agent-created ones unused for a day.
+    #[command(after_help = "Only simulators Squircle leased (sim start) or an agent's own simctl/xcodebuild command created or booted are touched; never one the user booted, one open in T3's device tools for the user or a working thread, the preview simulator (SQUIRCLE_SIMULATOR_ID), or one in a session. The service applies the same policy every minute, shutting a free simulator down after SQUIRCLE_SIM_IDLE_MINUTES (default 10); cleanup skips that wait. At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once.")]
+    Cleanup {
+        #[arg(long, help = "Report what would be shut down or deleted; change nothing")]
+        dry_run: bool,
+    },
 }
 #[derive(Subcommand)]
 enum PerfCommand {
@@ -741,7 +747,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"},
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","sim.cleanup","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"},
                 "invocation":squircle::agents::cli_invocation(&std::path::absolute(root(cli)?)?, &cli.server)}),
         ),
         Commands::App { command } => match command {
@@ -1063,10 +1069,12 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 post(cli, "/v1/sims/stop", json!({"thread_id":thread,"id":id})).await?
             }
             SimCommand::Status { thread } => {
-                let query = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(thread.as_ref().map(|t| ("thread", t))).finish();
+                let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("simulators", "true")
+                    .extend_pairs(thread.as_ref().map(|t| ("thread", t))).finish();
                 get(cli, &format!("/v1/sims?{query}")).await?
             }
             SimCommand::Devices => get(cli, "/v1/sims/devices").await?,
+            SimCommand::Cleanup { dry_run } => post(cli, "/v1/sims/cleanup", json!({"dry_run": dry_run})).await?,
         },
         Commands::T3 { command } => match command {
             T3Command::Connect { url } => {
