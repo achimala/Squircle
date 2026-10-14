@@ -204,11 +204,19 @@ enum ThreadCommand {
     Read { id: String },
     /// Answer every question in a thread's pending request with this text.
     Answer { id: String, text: String },
-    /// Archive a worker after its branch is merged; removes its worktree, keeps the branch.
+    /// Archive a worker once its branch is merged: removes its worktree and deletes its branch.
+    #[command(after_help = "Refuses while the branch has commits not in its base, the worktree has uncommitted changes, or the worker is still working.")]
     Archive {
         id: String,
-        #[arg(long, help = "Remove the worktree even with uncommitted changes")]
-        force: bool,
+        #[arg(long, alias = "force", help = "Archive anyway, dropping unmerged commits and uncommitted changes")]
+        discard: bool,
+    },
+    /// Archive your finished workers whose work is merged, delete their branches and worktrees, and list what is left and why.
+    Cleanup {
+        #[arg(long, help = "Your (the app agent's) thread ID")]
+        coordinator: String,
+        #[arg(long, help = "Only report what would be removed")]
+        dry_run: bool,
     },
 }
 #[derive(Subcommand)]
@@ -571,7 +579,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -920,7 +928,9 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             }
             ThreadCommand::Read { id } => get(cli, &format!("/v1/workers/{}", thread_id(id)?)).await?,
             ThreadCommand::Answer { id, text } => post(cli, &format!("/v1/workers/{}/answer", thread_id(id)?), json!({"text":text})).await?,
-            ThreadCommand::Archive { id, force } => post(cli, &format!("/v1/workers/{}/archive", thread_id(id)?), json!({"force":force})).await?,
+            ThreadCommand::Archive { id, discard } => post(cli, &format!("/v1/workers/{}/archive", thread_id(id)?), json!({"discard":discard})).await?,
+            ThreadCommand::Cleanup { coordinator, dry_run } => post(cli, "/v1/workers/cleanup",
+                json!({"coordinator":thread_id(coordinator)?,"dry_run":dry_run})).await?,
         },
         Commands::Diagnostics {
             command: DiagnosticCommand::Send { file },
