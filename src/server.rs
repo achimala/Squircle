@@ -400,20 +400,25 @@ async fn status(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let recovered = state.recovery_jobs.lock().unwrap().get(&id).cloned();
-    let (job, launches, log) = {
-        let store = state.store.lock().unwrap();
-        let job = match recovered {
-            Some(job) => job,
-            None => store.load_job(&id).map_err(ApiError::missing)?,
-        };
-        let launches = store
-            .diagnostics(&id, 0, 1, Some(DiagnosticKind::Launch))
-            .map_err(ApiError::internal)?;
-        (job, launches, store.job_dir(&id).ok().map(|dir| dir.join("build.log")))
+    let job = match recovered {
+        Some(job) => job,
+        // job.json is replaced atomically, so reading it needs no record lock.
+        None => state.files.load_job(&id).map_err(ApiError::missing)?,
     };
+    let launches = {
+        let (files, lock, id) = (state.files.clone(), state.diagnostics.clone(), id.clone());
+        tokio::task::spawn_blocking(move || {
+            let _serial = lock.lock().unwrap();
+            files.diagnostics(&id, 0, 1, Some(DiagnosticKind::Launch))
+        })
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?
+    };
+    let log = state.files.job_dir(&id).ok().map(|dir| dir.join("build.log"));
     let failure = match (&job.state, log) {
         (BuildState::Failed | BuildState::Interrupted, Some(log)) => {
-            let text = tokio::fs::read(&log).await.unwrap_or_default();
+            let text = log_tail(&log, FAILURE_LOG_TAIL_BYTES).await;
             let root = job.request.as_ref().and_then(|r| r.project.parent()).map(|p| p.to_string_lossy().into_owned());
             let mut failure = crate::buildlog::failure(&String::from_utf8_lossy(&text), root.as_deref());
             failure.message = job.error.as_deref().map(|error| {
@@ -427,6 +432,31 @@ async fn status(
         json!({"job":job,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty()),"failure":failure}),
     )))
 }
+/// Failure summaries come from the end of a build log; logs can be very large.
+const FAILURE_LOG_TAIL_BYTES: u64 = 1024 * 1024;
+
+async fn log_tail(path: &std::path::Path, max: u64) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let Ok(mut file) = tokio::fs::File::open(path).await else {
+        return Vec::new();
+    };
+    let Ok(size) = file.metadata().await.map(|m| m.len()) else {
+        return Vec::new();
+    };
+    let start = size.saturating_sub(max);
+    if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return Vec::new();
+    }
+    let mut bytes = Vec::new();
+    let _ = file.take(max).read_to_end(&mut bytes).await;
+    if start > 0 {
+        // Start at a whole line, not mid-way through one.
+        let first = bytes.iter().position(|b| *b == b'\n').map_or(0, |i| i + 1);
+        bytes.drain(..first);
+    }
+    bytes
+}
+
 async fn start(
     State(state): State<AppState>,
     request: std::result::Result<Json<BuildRequest>, JsonRejection>,
@@ -927,6 +957,7 @@ async fn app_preview(
     Path(id): Path<String>,
     query: std::result::Result<Query<PreviewVersion>, QueryRejection>,
 ) -> ApiResult<Response> {
+    let query = parse_query(query)?;
     let (file, preview_id) = {
         let store = state.store.lock().unwrap();
         let app = apps::get(&store, &id).map_err(ApiError::missing)?;
@@ -1369,12 +1400,15 @@ async fn diagnostics(
     Path(id): Path<String>,
     page: std::result::Result<Query<Page>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    let data = state
-        .store
-        .lock()
-        .unwrap()
-        .diagnostics(&id, page.since, page.limit.unwrap_or(100), page.kind)
-        .map_err(ApiError::bad)?;
+    let page = parse_query(page)?;
+    let (files, lock) = (state.files.clone(), state.diagnostics.clone());
+    let data = tokio::task::spawn_blocking(move || {
+        let _serial = lock.lock().unwrap();
+        files.diagnostics(&id, page.since, page.limit.unwrap_or(100), page.kind)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::bad)?;
     Ok(Json(success(data)))
 }
 #[derive(Deserialize)]
@@ -1383,18 +1417,74 @@ struct CaptureQuery {
 }
 
 /// A screen or performance recording from the phone; the message that sends
-/// it links the returned path.
+/// it links the returned path. Authentication runs before this handler, the
+/// body streams into a private staging file (never memory), one upload at a
+/// time, and the staged file is removed on any failure or cancellation.
 async fn upload_capture(
     State(state): State<AppState>,
     query: std::result::Result<Query<CaptureQuery>, QueryRejection>,
-    bytes: axum::body::Bytes,
+    request: Request,
 ) -> ApiResult<Json<Value>> {
-    let root = state.store.lock().unwrap().root.clone();
-    let path = tokio::task::spawn_blocking(move || crate::perf::store(&root, &query.kind, &bytes))
-        .await
-        .map_err(ApiError::internal)?
-        .map_err(ApiError::bad)?;
+    let query = parse_query(query)?;
+    let max = crate::perf::MAX_UPLOAD_BYTES as u64;
+    let declared = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|length| length > max) {
+        return Err(ApiError::too_large("A capture must be at most 300 MB"));
+    }
+    let _permit = state.uploads.clone().try_acquire_owned().map_err(|_| ApiError {
+        retryable: true,
+        ..ApiError::new(StatusCode::TOO_MANY_REQUESTS, "upload_busy", "Another capture is uploading", "Wait for it to finish, then retry.")
+    })?;
+    let root = state.files.root.clone();
+    let staged = crate::perf::staging_path(&root).map_err(ApiError::internal)?;
+    let file = crate::media::create_private(&staged).map_err(ApiError::internal)?;
+    // Removes the staged file unless it was published; also on cancellation.
+    let guard = StagedFile(Some(staged.clone()));
+    write_bounded(request.into_body(), tokio::fs::File::from_std(file), max).await?;
+    let kind = query.kind;
+    let path = tokio::task::spawn_blocking(move || {
+        let result = crate::perf::store_file(&root, &kind, &staged);
+        if result.is_ok() {
+            let mut guard = guard;
+            guard.0 = None;
+        }
+        result
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::bad)?;
     Ok(Json(success(json!({"path": path}))))
+}
+
+struct StagedFile(Option<PathBuf>);
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Copies a request body into `file`, refusing more than `max` bytes.
+async fn write_bounded(body: Body, mut file: tokio::fs::File, max: u64) -> ApiResult<()> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let mut stream = body.into_data_stream();
+    let mut written = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ApiError::bad(format!("Upload interrupted: {e}")))?;
+        written += chunk.len() as u64;
+        if written > max {
+            return Err(ApiError::too_large("A capture must be at most 300 MB"));
+        }
+        file.write_all(&chunk).await.map_err(ApiError::internal)?;
+    }
+    file.sync_all().await.map_err(ApiError::internal)?;
+    Ok(())
 }
 
 async fn ingest(
@@ -1412,12 +1502,14 @@ async fn ingest(
         .map_err(|_| ApiError::bad("build_id must be a valid UUID"))?
         .hyphenated()
         .to_string();
-    let inserted = state
-        .store
-        .lock()
-        .unwrap()
-        .append_diagnostic(&event)
-        .map_err(ApiError::bad)?;
+    let (files, lock, stored) = (state.files.clone(), state.diagnostics.clone(), event.clone());
+    let inserted = tokio::task::spawn_blocking(move || {
+        let _serial = lock.lock().unwrap();
+        files.append_diagnostic(&stored)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::bad)?;
     Ok(Json(success(
         json!({"event_id":event.event_id,"stored":inserted,"duplicate":!inserted}),
     )))
@@ -1433,11 +1525,9 @@ async fn build_log(
     Path(id): Path<String>,
     page: std::result::Result<Query<LogPage>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    let path = {
-        let store = state.store.lock().unwrap();
-        store.load_job(&id).map_err(ApiError::missing)?;
-        store.job_dir(&id).map_err(ApiError::bad)?.join("build.log")
-    };
+    let page = parse_query(page)?;
+    state.files.load_job(&id).map_err(ApiError::missing)?;
+    let path = state.files.job_dir(&id).map_err(ApiError::bad)?.join("build.log");
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
