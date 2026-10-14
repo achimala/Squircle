@@ -187,6 +187,22 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         func value(_ key: String) -> CGFloat? { environment[key].flatMap(Double.init).map { CGFloat($0) } }
         if let slow = value("SQUIRCLE_SLOW") { SpringDriver.debugSlowMotion = Double(slow) }
         if environment["SQUIRCLE_NO_DOCK"] == "1" { dock.isHidden = true }
+        // `SQUIRCLE_PERF_APP`: once connected, open this app (traced).
+        if let name = environment["SQUIRCLE_PERF_APP"] {
+            // A headless simulator never makes the scene active; the phone does.
+            model.startMetadataUpdates()
+            Task { [weak self] in
+                while let self, !(model.connected && projects.contains { $0.name == name }) { try? await Task.sleep(for: .milliseconds(100)) }
+                try? await Task.sleep(for: .seconds(value("SQUIRCLE_PERF_WAIT").map(Double.init) ?? 3))
+                guard let self, let project = projects.first(where: { $0.name == name }) else { return }
+                ConnectionTrace.mark("tap.app", name)
+                openApp(project.id); appSpring.set(1)
+                guard let thread = environment["SQUIRCLE_PERF_THREAD"] else { return }
+                try? await Task.sleep(for: .seconds(3))
+                ConnectionTrace.mark("tap.thread", thread)
+                openThread(thread)
+            }
+        }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard let self else { return }
@@ -735,9 +751,19 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             guard let cell = cells[project.id] else { continue }
             let pose = gridPose(index), key = portraitKey(project.id, pose)
             guard cell.portraitKey != key else { continue }
+            // Apps busy at once trade places as each moves on; a portrait
+            // already drawn for this column comes back without a render.
+            if let drawn = cell.drawn.first(where: { $0.key == key }) {
+                cell.portraitKey = key
+                cell.portrait.image = drawn.image
+                continue
+            }
             guard let image = stage.portrait(for: project.id, pose: pose, scale: displayScale) else { return false }
             cell.portraitKey = key
             cell.portrait.image = image
+            cell.drawn.removeAll { !$0.key.hasPrefix(key.prefix { $0 != ":" } + ":") }
+            cell.drawn.insert((key, image), at: 0)
+            if cell.drawn.count > 3 { cell.drawn.removeLast() }
             return true
         }
         return false
@@ -888,6 +914,8 @@ final class GridCell: UIControl {
     let id: String
     let portrait = UIImageView()
     var portraitKey = ""
+    /// Recent portraits by key, newest first, for the current screen.
+    var drawn: [(key: String, image: UIImage)] = []
     var phoneHeight: CGFloat = 0 { didSet { setNeedsLayout() } }
     var captionAlpha: CGFloat = 1 {
         didSet { if captionAlpha != oldValue { name.alpha = captionAlpha; dot.alpha = captionAlpha } }

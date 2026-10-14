@@ -15,14 +15,39 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
     /// exists waits for it.
     var onOpen: ((PushTarget) -> Void)? { didSet { if let pendingOpen, let onOpen { self.pendingOpen = nil; onOpen(pendingOpen) } } }
     private var pendingOpen: PushTarget?
+
+    /// What the phone shows, as the Mac should know it: the scene's state
+    /// and, while it is active, the conversation navigation reports.
+    enum Presence: Equatable {
+        case background
+        case foreground(thread: String?)
+    }
     /// The conversation on screen, if any, as StudioViewController reports it.
-    private(set) var visibleThread: String?
-    private var foreground = false
-    private var deviceToken: String?
-    private var startToken: String?
+    private var visibleThread: String? { didSet { if visibleThread != oldValue { presenceChanged() } } }
+    private var sceneActive = false { didSet { if sceneActive != oldValue { presenceChanged() } } }
+    var presence: Presence { sceneActive ? .foreground(thread: visibleThread) : .background }
+    /// Reports go out one at a time, newest last, so an older one never lands
+    /// after a newer one.
+    private let presenceReports = AsyncStream.makeStream(of: Presence.self, bufferingPolicy: .bufferingNewest(1))
+    /// Repeats the report while in the foreground: the Mac forgets one after
+    /// five minutes, so a phone that died with Squircle open doesn't silence
+    /// that thread forever.
+    private var presenceLease: Task<Void, Never>?
+
+    private struct Tokens: Equatable {
+        var device: String?
+        var start: String?
+    }
+    /// This phone's push tokens and whether the Mac has them.
+    private enum Registration {
+        case unsent
+        case sending(Tokens)
+        case acknowledged(Tokens)
+    }
+    private var tokens = Tokens()
+    private var registration = Registration.unsent
     private var watched = Set<String>()
     private var started = false
-    private var presenceLoop: Task<Void, Never>?
     private let deviceID = UIDevice.current.identifierForVendor?.uuidString ?? "unknown-device"
 
     /// Before launch finishes, so a tap that launched the app is delivered.
@@ -43,9 +68,12 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
             _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
             UIApplication.shared.registerForRemoteNotifications()
         } }
+        Task { [weak self, reports = presenceReports.stream] in
+            for await presence in reports { await self?.send(presence) }
+        }
         Task { [weak self] in
             for await data in Agent.pushToStartTokenUpdates {
-                self?.startToken = data.hex
+                self?.tokens.start = data.hex
                 await self?.register()
             }
         }
@@ -55,26 +83,38 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
             }
         }
         for activity in Agent.activities { watch(activity, fresh: false) }
+        presenceReports.continuation.yield(presence)
     }
 
     func registered(deviceToken data: Data) {
-        deviceToken = data.hex
+        tokens.device = data.hex
         Task { await register() }
     }
 
-    /// The Mac learns this phone's tokens again whenever Squircle comes back,
-    /// in case it was unreachable or restarted with a new data directory.
-    private func register() async {
-        guard let service = model?.service else { return }
+    /// Sends tokens the Mac doesn't have yet; `again` sends them anyway, as
+    /// whenever Squircle comes back, in case the Mac was unreachable or
+    /// restarted with a new data directory.
+    private func register(again: Bool = false) async {
+        guard let service = model?.service, tokens != Tokens() else { return }
+        let tokens = tokens
+        switch registration {
+        case .sending(let sent) where sent == tokens: return
+        case .acknowledged(let sent) where sent == tokens && !again: return
+        default: break
+        }
         var body: [String: Any] = ["device_id": deviceID, "bundle_id": Bundle.main.bundleIdentifier ?? "",
                                    "environment": Self.environment]
-        if let deviceToken { body["token"] = deviceToken }
-        if let startToken { body["start_token"] = startToken }
-        guard deviceToken != nil || startToken != nil else { return }
+        if let token = tokens.device { body["token"] = token }
+        if let token = tokens.start { body["start_token"] = token }
+        registration = .sending(tokens)
         do {
             try await service.push("devices", body)
+            if case .sending(let sent) = registration, sent == tokens { registration = .acknowledged(tokens) }
             for activity in Agent.activities { if let token = activity.pushToken { await report(activity, token: token.hex) } }
-        } catch { log("register failed: \(error.localizedDescription)") }
+        } catch {
+            if case .sending(let sent) = registration, sent == tokens { registration = .unsent }
+            log("register failed: \(error.localizedDescription)")
+        }
     }
 
     private func watch(_ activity: Agent, fresh: Bool) {
@@ -109,39 +149,42 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
     // MARK: What the phone shows
 
     func viewing(_ thread: String?) {
-        guard thread != visibleThread else { return }
         visibleThread = thread
-        reportPresence()
     }
 
     func becameActive() {
-        foreground = true
-        reportPresence()
-        Task { await register() }
-        presenceLoop?.cancel()
-        // The Mac forgets a report after five minutes, so a phone that died
-        // with Squircle open doesn't silence that thread forever.
-        presenceLoop = Task { [weak self] in
-            while !Task.isCancelled {
+        sceneActive = true
+        Task { await register(again: true) }
+    }
+
+    func resignedActive() {
+        sceneActive = false
+        startActivitiesForWork()
+    }
+
+    private func presenceChanged() {
+        presenceReports.continuation.yield(presence)
+        presenceLease?.cancel()
+        presenceLease = nil
+        guard case .foreground = presence else { return }
+        presenceLease = Task { [weak self] in
+            while true {
                 try? await Task.sleep(for: .seconds(240))
-                guard !Task.isCancelled else { return }
-                self?.reportPresence()
+                guard !Task.isCancelled, let self else { return }
+                presenceReports.continuation.yield(presence)
             }
         }
     }
 
-    func resignedActive() {
-        foreground = false
-        presenceLoop?.cancel(); presenceLoop = nil
-        reportPresence()
-        startActivitiesForWork()
-    }
-
-    private func reportPresence() {
+    private func send(_ presence: Presence) async {
         guard let service = model?.service else { return }
-        var body: [String: Any] = ["device_id": deviceID, "foreground": foreground]
-        if foreground, let visibleThread { body["thread_id"] = visibleThread }
-        Task { try? await service.push("presence", body) }
+        var body: [String: Any] = ["device_id": deviceID, "foreground": false]
+        if case .foreground(let thread) = presence {
+            body["foreground"] = true
+            if let thread { body["thread_id"] = thread }
+        }
+        do { try await service.push("presence", body) }
+        catch { log("presence report failed: \(error.localizedDescription)") }
     }
 
     /// Leaving with an agent at work: its Live Activity starts now (still
@@ -171,7 +214,7 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         let thread = (notification.request.content.userInfo["squircle"] as? [String: Any])?["thread"] as? String
-        let shown = await MainActor.run { thread != nil && thread == visibleThread }
+        let shown = await MainActor.run { thread != nil && presence == .foreground(thread: thread) }
         return shown ? [] : [.banner, .list, .sound]
     }
 

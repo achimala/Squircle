@@ -1786,6 +1786,43 @@ working, needs you, done. Not yet checked with a real key or on the phone.
    --key-id XXXXXXXXXX --team-id 2F26US4NAU`, then delete the download.
 5. Install the new Squircle build, open it, Allow notifications, then
    `squircle push test --live-activity`.
+## 2026-10-15 simulator leases and cleanup
+
+The user reported simulators leaking and wrecking the Mac's CPU. Observed:
+7 booted simulators, each with a Squircle build at 50–90% CPU; ending a
+session closed T3's device session but never shut the simulator down, and
+workers booted and created their own with `simctl`/`xcodebuild`.
+
+**Decision (user-requested).** A session is the simulator's lease, tied to
+the thread. When it ends (stop, the turn idle 8 s, archive, the 30-minute
+limit, service shutdown or restart recovery; `release_pending` in the
+ledger), the simulator is shut down unless another session holds it or the
+policy below keeps it. `src/simpool.rs` decides the rest from plain facts
+(`plan`): a booted simulator is Squircle's when a session used it or an
+agent's own command created, booted, installed on or built for it (T3's
+activity log, read-only); it is kept while a session holds it, while a T3
+device session of a working thread or of a thread Squircle didn't start (the
+user's Device panel) is on it, while the agent that booted it outside a
+session is still working (within 3 h of that command), or when it is the
+preview simulator; otherwise it is shut down after `SQUIRCLE_SIM_IDLE_MINUTES`
+(default 10) free. Simulators the user booted are never touched. Devices an
+agent created are deleted after a day unused. `sim start` without
+`--device` takes the thread's last simulator, a free booted one of
+Squircle's, then a shut-down one (never someone else's booted one) and
+refuses past `SQUIRCLE_MAX_SIMULATORS` (default 3) with the holders named.
+`sim status` lists every booted simulator with its owner and its apps'
+CPU; `sim cleanup [--dry-run]` applies the policy without the idle wait.
+Agents are told to use `sim start/stop` for every simulator and not to boot
+or create them directly. The pool reads T3's cached `subscribeDeviceState`,
+not `device.list`.
+
+**Measured (this Mac, 2026-10-15, 6 booted, 4 sessions):** `simctl io
+recordVideo` ~0% CPU; SimRenderServer 15–28% in total; the simulators' apps
+30–160%; T3's device hub (`expo-device-hub`, up 8.6 h) 600–670%, its samples
+almost all in CoreSimulator's ROCK forwarding proxy enumerating a weak map
+table. That is T3's process; not changed here. The apps' spikes sampled in
+`ThreadViewController.render()`, which the render-performance work owns.
+
 ## 2026-10-14 simulator deck
 
 User, after trying several simulators on the phone: "we need to stack em
@@ -1942,8 +1979,8 @@ fix.
 
 Ours: pictures were shown "display immediately" when the main actor got to
 them, so all of that jitter, plus the main actor's own stalls (87% busy in a
-sample while six agents streamed, much of it making a new ISO-8601 formatter
-for every date read), reached the screen. A picture handed between the PiP
+sample while six agents streamed, before the date-parsing fix), reached the
+screen. A picture handed between the PiP
 and its turn block, or a reused cell, stopped the stream and reconnected
 from scratch.
 
@@ -1951,7 +1988,7 @@ Now `SimulatorPacer` schedules each picture on a steady clock (the previous
 one's time plus the recent frame interval, pulled toward a delay covering
 the measured jitter and recent stalls, 33–150 ms), the decoding queue enqueues it
 straight into each visible screen's renderer on a host-clock timebase, an
-unused stream lingers 3 s before stopping, and dates share one formatter.
+unused stream lingers 3 s before stopping.
 
 Results. Simulator app watching a simulator while it scrolls, 25 s, screen
 recording sampled at 60 Hz: pictures shown 704 → 1030, holds of 3+ frames

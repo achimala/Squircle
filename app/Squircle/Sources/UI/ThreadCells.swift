@@ -341,13 +341,20 @@ final class GalleryCell: TimelineCell {
         accessibilityIdentifier = "thread.gallery"
     }
 
-    static func image(for shot: Shot) -> UIImage? {
-        let key = "\(shot.step):\(shot.index)" as NSString
-        if let cached = cache.object(forKey: key) { return cached }
-        guard let data = StepImages.data(for: shot.step, index: shot.index), let image = UIImage(data: data) else { return nil }
-        let scale = 2 * height / max(1, image.size.height)
-        let thumbnail = image.preparingThumbnail(of: CGSize(width: image.size.width * scale, height: image.size.height * scale)) ?? image
-        cache.setObject(thumbnail, forKey: key)
+    /// The decoded thumbnail, once `prepare` has made it.
+    static func image(for shot: Shot) -> UIImage? { cache.object(forKey: "\(shot.step):\(shot.index)" as NSString) }
+
+    /// Decodes a loaded screenshot off the main thread, at the size it shows.
+    static func prepare(_ shot: Shot) async -> UIImage? {
+        if let cached = image(for: shot) { return cached }
+        guard let data = StepImages.data(for: shot.step, index: shot.index) else { return nil }
+        let height = Self.height
+        let thumbnail = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            guard let image = UIImage(data: data) else { return nil }
+            let scale = 2 * height / max(1, image.size.height)
+            return image.preparingThumbnail(of: CGSize(width: image.size.width * scale, height: image.size.height * scale)) ?? image
+        }.value
+        if let thumbnail { cache.setObject(thumbnail, forKey: "\(shot.step):\(shot.index)" as NSString) }
         return thumbnail
     }
 
@@ -592,14 +599,20 @@ final class FigureCell: TimelineCell {
         (layout(shots, width: width - 40).map(\.maxY).max() ?? 0) + 16
     }
 
-    /// Decoded once at the size it shows, not the file's full resolution.
-    static func image(for shot: Shot) -> UIImage? {
-        let key = shot.step as NSString
-        if let cached = cache.object(forKey: key) { return cached }
-        guard let data = StepImages.data(for: shot.step, index: shot.index), let image = UIImage(data: data) else { return nil }
-        let fit = min(1, 1200 / max(1, max(image.size.width, image.size.height)))
-        let picture = image.preparingThumbnail(of: CGSize(width: image.size.width * fit, height: image.size.height * fit)) ?? image
-        cache.setObject(picture, forKey: key)
+    /// The decoded picture, once `prepare` has made it.
+    static func image(for shot: Shot) -> UIImage? { cache.object(forKey: shot.step as NSString) }
+
+    /// Decoded once off the main thread at the size it shows, not the
+    /// file's full resolution.
+    static func prepare(_ shot: Shot) async -> UIImage? {
+        if let cached = image(for: shot) { return cached }
+        guard let data = StepImages.data(for: shot.step, index: shot.index) else { return nil }
+        let picture = await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            guard let image = UIImage(data: data) else { return nil }
+            let fit = min(1, 1200 / max(1, max(image.size.width, image.size.height)))
+            return image.preparingThumbnail(of: CGSize(width: image.size.width * fit, height: image.size.height * fit)) ?? image
+        }.value
+        if let picture { cache.setObject(picture, forKey: shot.step as NSString) }
         return picture
     }
     private static let cache = NSCache<NSString, UIImage>()

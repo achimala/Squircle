@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 use squircle::{
-    model::{BuildMode, BuildRequest, BuildState, Job},
+    model::{BuildState, Job},
     store::Store,
 };
 use std::{path::Path, process::Stdio, time::Duration};
@@ -104,37 +104,35 @@ impl Service {
 }
 
 fn fixture_job(root: &Path, state: BuildState) -> Job {
-    Job {
-        id: uuid::Uuid::new_v4().to_string(),
-        created_at: 1,
-        updated_at: 2,
-        request: Some(BuildRequest {
+    let terminal_error = matches!(state, BuildState::Failed | BuildState::Cancelled | BuildState::Interrupted);
+    let output = (state == BuildState::Succeeded).then(|| serde_json::json!({
+        "archive_path": null, "ipa_path": null, "app_path": "/retained/App.app", "dsym_paths": [],
+        "bundle_id": "test.app", "version": "1", "build_number": "1", "title": "App"
+    }));
+    serde_json::from_value(serde_json::json!({
+        "id": uuid::Uuid::new_v4().to_string(),
+        "created_at": 1,
+        "updated_at": 2,
+        "request": {
             // Deliberately nonexistent: even an accidental retry must fail
             // validation before starting an actual Xcode process.
-            project: root.join("NoSuchProject.xcodeproj"),
-            scheme: "LifecycleFixture".into(),
-            configuration: "Debug".into(),
-            mode: BuildMode::Simulator,
-            export_options: None,
-            allow_provisioning_updates: false,
-            capture_preview: false,
-            request_id: None,
-            no_overlay: false,
-        }),
-        output: None,
-        error: if matches!(
-            state,
-            BuildState::Failed | BuildState::Cancelled | BuildState::Interrupted
-        ) {
-            Some("original fixture outcome".into())
-        } else {
-            None
+            "project": root.join("NoSuchProject.xcodeproj"),
+            "scheme": "LifecycleFixture",
+            "configuration": "Debug",
+            "mode": "simulator",
+            "export_options": null,
+            "allow_provisioning_updates": false,
+            "capture_preview": false,
+            "request_id": null
         },
-        state,
-        source: "xcodebuild".into(),
-        source_revision: Some("a".repeat(40)),
-        source_dirty: Some(true),
-    }
+        "output": output,
+        "error": terminal_error.then_some("original fixture outcome"),
+        "state": state,
+        "source": "xcodebuild",
+        "source_revision": "a".repeat(40),
+        "source_dirty": true
+    }))
+    .unwrap()
 }
 
 #[tokio::test]
@@ -174,7 +172,12 @@ async fn restart_interrupts_unfinished_jobs_without_retrying_or_rewriting_termin
     for original in &jobs {
         let observed = service.get(&format!("/v1/builds/{}", original.id)).await;
         let mut expected = serde_json::to_value(original).unwrap();
-        if !original.state.terminal() {
+        let observed_job = {
+            let mut job = observed["data"]["job"].clone();
+            assert!(job.as_object_mut().unwrap().remove("revision").is_some());
+            job
+        };
+        if !original.state().terminal() {
             assert_eq!(observed["data"]["job"]["state"], "interrupted");
             let error = observed["data"]["job"]["error"].as_str().unwrap();
             assert!(error.contains("no automatic retry"), "{error}");
@@ -183,7 +186,7 @@ async fn restart_interrupts_unfinished_jobs_without_retrying_or_rewriting_termin
             expected["error"] = observed["data"]["job"]["error"].clone();
             expected["updated_at"] = observed["data"]["job"]["updated_at"].clone();
         }
-        assert_eq!(observed["data"]["job"], expected);
+        assert_eq!(observed_job, expected);
         let persisted = serde_json::to_value(store.load_job(&original.id).unwrap()).unwrap();
         assert_eq!(persisted, expected, "recovery was not durably persisted");
         recovered_records.push(persisted);
@@ -201,10 +204,9 @@ async fn restart_interrupts_unfinished_jobs_without_retrying_or_rewriting_termin
     let restarted = Service::start(directory.path()).await;
     for expected in recovered_records {
         let id = expected["id"].as_str().unwrap();
-        assert_eq!(
-            restarted.get(&format!("/v1/builds/{id}")).await["data"]["job"],
-            expected
-        );
+        let mut observed = restarted.get(&format!("/v1/builds/{id}")).await["data"]["job"].take();
+        observed.as_object_mut().unwrap().remove("revision");
+        assert_eq!(observed, expected);
     }
     assert_eq!(
         serde_json::to_value(Store::open(directory.path().to_owned()).unwrap().settings).unwrap(),
@@ -248,12 +250,14 @@ async fn only_one_service_owns_a_store_and_shutdown_releases_ownership() {
 async fn restart_fails_unfinished_preview_without_invalidating_signed_build() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().to_owned()).unwrap();
-    let mut job = fixture_job(directory.path(), BuildState::Succeeded);
-    job.output = Some(serde_json::from_value(serde_json::json!({
+    let mut record = serde_json::to_value(fixture_job(directory.path(), BuildState::Succeeded)).unwrap();
+    record["request"]["mode"] = "archive".into();
+    record["output"] = serde_json::json!({
         "archive_path":null,"ipa_path":"/retained/app.ipa","app_path":null,"dsym_paths":[],
         "bundle_id":"test.app","version":"1","build_number":"2","title":"App",
         "preview_state":"running","preview_path":"/retained/preview.png","preview_captured_at":10
-    })).unwrap());
+    });
+    let job: Job = serde_json::from_value(record).unwrap();
     store.save_job(&job).unwrap();
     let service = Service::start(directory.path()).await;
     let observed = service.get(&format!("/v1/builds/{}", job.id)).await;
@@ -271,14 +275,8 @@ async fn restart_fails_unfinished_preview_without_invalidating_signed_build() {
             .contains("no automatic retry")
     );
     assert_eq!(
-        store
-            .load_job(&job.id)
-            .unwrap()
-            .output
-            .unwrap()
-            .preview_state
-            .as_deref(),
-        Some("failed")
+        serde_json::to_value(store.load_job(&job.id).unwrap()).unwrap()["output"]["preview_state"],
+        "failed"
     );
     assert!(!store.job_dir(&job.id).unwrap().join("build.log").exists());
     service.stop().await;

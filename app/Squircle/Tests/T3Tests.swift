@@ -56,6 +56,25 @@ final class T3Tests: XCTestCase {
         model.consumeThread(snapshot(codex,sequence:6))
         XCTAssertEqual(model.modelSelection,codex)
     }
+    func testISODateMatchesFoundation() {
+        let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        for text in ["2026-10-15T09:41:07.123Z", "2024-02-29T23:59:59.999999Z", "1999-12-31T00:00:00Z",
+                     "2026-03-01T12:00:00+05:30", "2026-01-01T00:00:00.5-08:00", "1970-01-01T00:00:00Z"] {
+            let expected = fractional.date(from: text) ?? plain.date(from: text)
+            XCTAssertEqual(ISODate.parse(text)!.timeIntervalSince1970, expected!.timeIntervalSince1970, accuracy: 0.001, text)
+        }
+        for text in ["", "2026-13-01T00:00:00Z", "2026-10-15", "2026-10-15T09:41:07", "2026-10-15T09:41:07.Z", "nope"] {
+            XCTAssertNil(ISODate.parse(text), text)
+        }
+    }
+
+    func testUUIDScanFindsBuildIDsInText() {
+        let text = "Build 3A396BB0-a97f-478f-ab18-9be4a83c744c done; café x3a396bb0-a97f-478f-ab18-9be4a83c744 and 101c1dc8-0000-4000-8000-000000000001."
+        XCTAssertEqual(ThreadItem.uuids(in: text), ["3a396bb0-a97f-478f-ab18-9be4a83c744c", "101c1dc8-0000-4000-8000-000000000001"])
+        XCTAssertEqual(ThreadItem.uuids(in: "3a396bb0-a97f-478f-ab18"), [])
+    }
+
     func testAVCCHandlesFragmentedAndCoalescedHTTPBytes() throws {
         let packets = Data([0,0,0,4,1,11,12,13, 0,0,0,3,2,21,22, 0,0,0,2,3,31])
         for split in 0...packets.count {

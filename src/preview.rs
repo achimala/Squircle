@@ -1,6 +1,6 @@
 //! Real simulator pixels only. Captures run in the same single-worker lane as builds.
 use crate::{
-    model::{BuildMode, Job, now},
+    model::{BuildMode, Job, PreviewSource, now},
     xcode,
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -16,7 +16,7 @@ use tokio::{process::Command, sync::watch, time::Instant};
 pub struct Capture {
     pub path: PathBuf,
     pub captured_at: u64,
-    pub source: String,
+    pub source: PreviewSource,
 }
 
 pub fn simulator_id(explicit: Option<&str>) -> Result<String> {
@@ -36,10 +36,9 @@ pub async fn capture(
 ) -> Result<Capture> {
     let simulator = simulator_id(Some(simulator))?;
     let request = job
-        .request
-        .as_ref()
+        .request()
         .context("Imported IPAs have no simulator build recipe; submit a project build first")?;
-    let output = job.output.as_ref().context("Build has no product")?;
+    let output = job.output().context("Build has no product")?;
     ensure!(!*cancel.borrow(), "Preview cancelled");
     let log = job_dir.join("build.log");
     let deadline = Instant::now() + Duration::from_secs(180);
@@ -92,7 +91,7 @@ pub async fn capture(
                 .app_path
                 .clone()
                 .context("Simulator build has no app path")?,
-            "built_simulator_product",
+            PreviewSource::BuiltSimulatorProduct,
         )
     } else {
         let mut simulator_request = request.clone();
@@ -107,17 +106,12 @@ pub async fn capture(
             .join(uuid::Uuid::new_v4().to_string())
             .join(&job.id);
         fs::create_dir_all(&directory)?;
-        let built = xcode::run(&simulator_request, &directory, cancel.clone()).await?;
+        let built = xcode::build(&simulator_request, &directory, cancel.clone()).await?;
         ensure!(
-            built.bundle_id == output.bundle_id,
+            built.metadata().bundle_id == output.bundle_id,
             "Preview simulator bundle ID differs from the archived app"
         );
-        (
-            built
-                .app_path
-                .context("Preview build has no simulator app")?,
-            "current_working_tree",
-        )
+        (built.app().to_path_buf(), PreviewSource::CurrentWorkingTree)
     };
     let info =
         plist::Value::from_file(app.join("Info.plist")).context("Cannot inspect preview app")?;
@@ -199,25 +193,8 @@ pub async fn capture(
     Ok(Capture {
         path,
         captured_at: now(),
-        source: source.into(),
+        source,
     })
-}
-
-pub fn apply_result(output: &mut crate::model::BuildOutput, result: Result<Capture>) {
-    match result {
-        Ok(capture) => {
-            output.preview_path = Some(capture.path);
-            output.preview_captured_at = Some(capture.captured_at);
-            output.preview_source = Some(capture.source);
-            output.preview_state = Some("succeeded".into());
-            output.preview_error = None;
-        }
-        Err(error) => {
-            // Keep a previous valid screenshot and its provenance if recapture fails.
-            output.preview_state = Some("failed".into());
-            output.preview_error = Some(format!("{error:#}"));
-        }
-    }
 }
 
 fn launch_pid(bytes: &[u8], bundle: &str) -> Result<u32> {
@@ -316,14 +293,7 @@ mod tests {
         ));
     }
     #[test]
-    fn failed_capture_keeps_installable_artifacts_and_prior_image() {
-        let mut output: crate::model::BuildOutput = serde_json::from_value(serde_json::json!({"archive_path":"/archive","ipa_path":"/app.ipa","app_path":null,"dsym_paths":[],"bundle_id":"test.app","version":"1","build_number":"1","title":"App","preview_path":"/preview.png","preview_captured_at":12})).unwrap();
-        apply_result(&mut output, Err(anyhow::anyhow!("app crashed")));
-        assert_eq!(output.ipa_path.unwrap(), PathBuf::from("/app.ipa"));
-        assert_eq!(output.preview_path.unwrap(), PathBuf::from("/preview.png"));
-        assert_eq!(output.preview_captured_at, Some(12));
-        assert_eq!(output.preview_state.as_deref(), Some("failed"));
-        assert_eq!(output.preview_error.as_deref(), Some("app crashed"));
+    fn invalid_png_is_rejected() {
         assert!(validate_png(b"not a screenshot").is_err());
     }
 }

@@ -26,6 +26,13 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     private var showsHistory = false
     private var query = ""
     private var installing: String?
+    /// What each row shows. A row is drawn again only when this changes:
+    /// the tasks also carry times and orders that tick without showing.
+    private var rows: [String: TaskRow] = [:]
+    /// A row's swipe actions are open. The list holds still under the
+    /// finger and catches up when they close.
+    private var swiping = false
+    private var behind = false
     private var observation: Task<Void, Never>?
 
     /// Sections top to bottom; done and dropped tasks stay a day before History.
@@ -65,6 +72,9 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        #if DEBUG
+        ScrollSweep.start(table)
+        #endif
         if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
         tabs.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.renderTab() }, for: .valueChanged)
@@ -89,25 +99,18 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
                 return cell
             }
             let cell = table.dequeueReusableCell(withIdentifier: "task", for: path) as! TaskCell
-            guard let task = task(id) else { return cell }
-            let linked = task.builds.last(where: { $0.state == "succeeded" && $0.installable == true })
-                .flatMap { b in self.model.builds.first { $0.id == b.id } }
-            // Only the app's newest build installs from here: an older one
-            // would take the app back. The others are named instead.
-            let newest = linked.flatMap { build in
-                self.model.builds.filter { $0.bundleID == build.bundleID && $0.canInstall }.max { $0.date < $1.date }
-            }
-            let build = linked?.id == newest?.id ? linked : nil
-            let shipped = linked.map { "In \($0.title) \($0.version)" }
-            cell.configure(task, faded: task.archivedAt != nil, shipped: build == nil ? shipped : nil,
-                           install: build.map { _ in self.installing == task.id ? "Opening…" : "Install" })
+            guard let row = rows[id] else { return cell }
+            cell.configure(row)
             cell.onThread = { [weak self] thread in self?.onOpen?(thread) }
-            cell.onMedia = { [weak self] media in self?.openMedia(media, of: task) }
-            cell.onInstall = { [weak self] in if let build { self?.install(build, for: task) } }
+            cell.onMedia = { [weak self] media in self?.task(id).map { self?.openMedia(media, of: $0) } }
+            cell.onInstall = { [weak self] in
+                guard let self, let task = task(id), let build = installable(task).build else { return }
+                install(build, for: task)
+            }
             cell.loadThumbnail = { [weak self] media in
                 guard let self else { return nil }
-                guard media.kind == "video" else { return await model.taskMediaData(task: task.id, media: media.id).flatMap(UIImage.init) }
-                guard let url = await model.taskVideo(task: task.id, media: media.id) else { return nil }
+                guard media.kind == "video" else { return await model.taskMediaData(task: id, media: media.id).flatMap(UIImage.init) }
+                guard let url = await model.taskVideo(task: id, media: media.id) else { return nil }
                 return await SquircleModel.poster(of: url).flatMap(UIImage.init)
             }
             return cell
@@ -210,9 +213,32 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         list.tasks.first { $0.id == id } ?? list.history.first { $0.id == id }
     }
 
-    private func render() {
+    /// The build a task's row offers. Only the app's newest build installs
+    /// from here: an older one would take the app back. The others are named.
+    private func installable(_ task: AppTask) -> (build: AppBuild?, shipped: String?) {
+        let linked = task.builds.last(where: { $0.state == "succeeded" && $0.installable == true })
+            .flatMap { b in model.builds.first { $0.id == b.id } }
+        let newest = linked.flatMap { build in
+            model.builds.filter { $0.bundleID == build.bundleID && $0.canInstall }.max { $0.date < $1.date }
+        }
+        let build = linked?.id == newest?.id ? linked : nil
+        return (build, build == nil ? linked.map { "In \($0.title) \($0.version)" } : nil)
+    }
+
+    private func row(_ task: AppTask) -> TaskRow {
+        let (build, shipped) = installable(task)
+        return TaskRow(ask: task.ask, status: task.status, faded: task.archivedAt != nil, note: task.note, shipped: shipped,
+                       install: build.map { _ in installing == task.id ? "Opening…" : "Install" },
+                       // Archived threads can't be opened any more.
+                       threads: task.threads.filter { $0.state != "missing" }, media: task.media)
+    }
+
+    /// `now` is for the swipe actions themselves, which move their row
+    /// while UIKit closes the swipe.
+    private func render(now: Bool = false) {
+        guard now || !swiping else { behind = true; return }
+        behind = false
         if let current = model.projects.first(where: { $0.id == project.id }) { project = current }
-        let previous = list
         list = model.tasks(for: project)
         var snapshot = NSDiffableDataSourceSnapshot<Group, String>()
         let groups: [Group] = [.status(.needsYou), .status(.inProgress), .status(.readyToTry), .status(.queued), .finished]
@@ -238,21 +264,20 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
                 snapshot.appendItems([Self.searchRow] + found.map(\.id), toSection: .history)
             }
         }
-        // Rows whose task changed are drawn again; the rest keep their place.
-        let changed = (list.tasks + list.history).filter { task in
-            let old = previous.tasks.first { $0.id == task.id } ?? previous.history.first { $0.id == task.id }
-            return old != nil && old != task
-        }.map(\.id).filter { snapshot.itemIdentifiers.contains($0) }
-        // The model changes every few seconds for unrelated reasons. Applying
-        // an unchanged list anyway resets an open swipe, and its Done and Drop
-        // then ignore taps.
+        // Rows whose look changed are drawn again; the rest keep their place.
+        // The model changes every few seconds for unrelated reasons, and
+        // applying an unchanged list anyway resets an open swipe.
+        let previous = rows
+        rows = Dictionary((list.tasks + list.history).map { ($0.id, row($0)) }, uniquingKeysWith: { first, _ in first })
+        let changed = snapshot.itemIdentifiers.filter { previous[$0] != nil && previous[$0] != rows[$0] }
         let current = dataSource.snapshot()
-        let same = current.sectionIdentifiers == snapshot.sectionIdentifiers && snapshot.sectionIdentifiers.allSatisfy {
-            current.itemIdentifiers(inSection: $0) == snapshot.itemIdentifiers(inSection: $0)
+        let moved = current.sectionIdentifiers != snapshot.sectionIdentifiers || snapshot.sectionIdentifiers.contains {
+            current.itemIdentifiers(inSection: $0) != snapshot.itemIdentifiers(inSection: $0)
         }
-        if !same || !changed.isEmpty {
+        if moved || !changed.isEmpty {
             snapshot.reconfigureItems(changed)
-            dataSource.apply(snapshot, animatingDifferences: previous != AppTasks() && view.window != nil)
+            // Only moves animate; a row whose text changed is just redrawn.
+            dataSource.apply(snapshot, animatingDifferences: moved && !previous.isEmpty && view.window != nil)
         }
         // Group headers aren't reloaded with their rows; their counts are kept here.
         for (index, group) in snapshot.sectionIdentifiers.enumerated() {
@@ -266,26 +291,21 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     private func set(_ task: AppTask, _ status: AppTask.Status? = nil, toTop: Bool = false) {
         Theme.selectionHaptic()
+        model.markTask(task, status: status, toTop: toTop)
+        render(now: true)
         Task { await model.updateTask(task, status: status, toTop: toTop) }
     }
 
     private func install(_ build: AppBuild, for task: AppTask) {
         guard installing == nil else { return }
         installing = task.id
-        reconfigure(task.id)
+        render()
         Task { [weak self] in
             guard let self else { return }
             await model.install(build)
             installing = nil
-            reconfigure(task.id)
+            render()
         }
-    }
-
-    private func reconfigure(_ id: String) {
-        var snapshot = dataSource.snapshot()
-        guard snapshot.itemIdentifiers.contains(id) else { return }
-        snapshot.reconfigureItems([id])
-        dataSource.apply(snapshot, animatingDifferences: false)
     }
 
     private func openMedia(_ media: AppTask.Media, of task: AppTask) {
@@ -350,6 +370,13 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
         dataSource.itemIdentifier(for: indexPath).flatMap { self.task($0) }.flatMap { self.mainThread(of: $0) } != nil
+    }
+
+    func tableView(_ tableView: UITableView, willBeginEditingRowAt indexPath: IndexPath) { swiping = true }
+
+    func tableView(_ tableView: UITableView, didEndEditingRowAt indexPath: IndexPath?) {
+        swiping = false
+        if behind { render() }
     }
 
     func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
@@ -453,6 +480,18 @@ private final class TaskSearchCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError() }
 }
 
+/// What a task's row shows.
+private struct TaskRow: Equatable {
+    let ask: String
+    let status: AppTask.Status
+    let faded: Bool
+    let note: String
+    let shipped: String?
+    let install: String?
+    let threads: [AppTask.Thread]
+    let media: [AppTask.Media]
+}
+
 /// One task: your words, a short note, its threads, its pictures and clips,
 /// and Install when a build of it is ready.
 private final class TaskCell: UITableViewCell {
@@ -469,6 +508,7 @@ private final class TaskCell: UITableViewCell {
     private let install = UIButton(configuration: .filled())
     private let rule = UIView()
     private var loads: [Task<Void, Never>] = []
+    private var shown: TaskRow?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -540,31 +580,38 @@ private final class TaskCell: UITableViewCell {
         super.prepareForReuse()
         loads.forEach { $0.cancel() }
         loads = []
+        shown = nil
     }
 
-    func configure(_ task: AppTask, faded: Bool, shipped: String?, install title: String?) {
-        ask.text = task.ask
-        ask.textColor = faded || !task.status.open ? .secondaryLabel : .label
-        let detail = [faded ? Self.statusName(task.status) : nil, task.note.isEmpty ? nil : task.note, shipped].compactMap { $0 }
+    func configure(_ row: TaskRow) {
+        ask.text = row.ask
+        ask.textColor = row.faded || !row.status.open ? .secondaryLabel : .label
+        let detail = [row.faded ? Self.statusName(row.status) : nil, row.note.isEmpty ? nil : row.note, row.shipped].compactMap { $0 }
         note.text = detail.joined(separator: " · ")
         note.isHidden = detail.isEmpty
-        install.isHidden = title == nil
-        install.configuration?.title = title
+        install.isHidden = row.install == nil
+        install.configuration?.title = row.install
 
-        chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        // Archived threads can't be opened any more.
-        let threads = task.threads.filter { $0.state != "missing" }
-        for thread in threads {
-            chips.addArrangedSubview(chip(thread))
+        // Chips and pictures are rebuilt only when they change, so a
+        // redrawn row keeps its loaded thumbnails.
+        if row.threads != shown?.threads {
+            chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            for thread in row.threads {
+                chips.addArrangedSubview(chip(thread))
+            }
+            chipScroll.isHidden = row.threads.isEmpty
         }
-        chipScroll.isHidden = threads.isEmpty
-
-        thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        for media in task.media {
-            thumbs.addArrangedSubview(thumbnail(media))
+        if row.media != shown?.media {
+            loads.forEach { $0.cancel() }
+            loads = []
+            thumbs.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            for media in row.media {
+                thumbs.addArrangedSubview(thumbnail(media))
+            }
+            thumbScroll.isHidden = row.media.isEmpty
         }
-        thumbScroll.isHidden = task.media.isEmpty
-        accessibilityLabel = [task.ask, note.text].compactMap { $0 }.joined(separator: ", ")
+        shown = row
+        accessibilityLabel = [row.ask, note.text].compactMap { $0 }.joined(separator: ", ")
     }
 
     private static func statusName(_ status: AppTask.Status) -> String {

@@ -7,12 +7,96 @@ extension JSONValue {
               let json = try? JSONDecoder().decode(Self.self, from: data) else { return .null }
         return json
     }
-    /// One formatter: making one per read was most of the main actor's time
-    /// while agents stream. ISO8601DateFormatter is thread-safe.
-    nonisolated(unsafe) private static let dates: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
+    var date: Date { string.flatMap(ISODate.parse) ?? .distantPast }
+}
+
+/// T3's timestamps ("2026-10-15T09:41:07.123Z", or with an offset), parsed
+/// by hand: every shell update dates every thread, and a date formatter
+/// per call cost the phone tens of milliseconds a frame.
+enum ISODate {
+    static func parse(_ text: String) -> Date? {
+        var text = text
+        return text.withUTF8 { parse(utf8: $0) } ?? fallback.date(from: text)
+    }
+
+    private static func parse(utf8 b: UnsafeBufferPointer<UInt8>) -> Date? {
+        func digits(_ at: Int, _ count: Int) -> Int? {
+            guard at + count <= b.count else { return nil }
+            var value = 0
+            for i in at..<at + count {
+                let d = Int(b[i]) - 48
+                guard (0...9).contains(d) else { return nil }
+                value = value * 10 + d
+            }
+            return value
+        }
+        func byte(_ at: Int) -> UInt8 { at < b.count ? b[at] : 0 }
+        guard let year = digits(0, 4), byte(4) == 45, let month = digits(5, 2), byte(7) == 45, let day = digits(8, 2),
+              byte(10) == 84 || byte(10) == 116 || byte(10) == 32,
+              let hour = digits(11, 2), byte(13) == 58, let minute = digits(14, 2), byte(16) == 58, let second = digits(17, 2),
+              (1...12).contains(month), (1...31).contains(day), hour < 24, minute < 60, second < 61 else { return nil }
+        var i = 19
+        var fraction = 0.0
+        if byte(i) == 46 || byte(i) == 44 {
+            i += 1
+            var scale = 0.1
+            let start = i
+            while i < b.count, (48...57).contains(b[i]) { fraction += Double(b[i] - 48) * scale; scale /= 10; i += 1 }
+            guard i > start else { return nil }
+        }
+        var offset = 0
+        switch byte(i) {
+        case 90, 122: i += 1
+        case 43, 45:
+            let sign = byte(i) == 45 ? -1 : 1
+            guard let h = digits(i + 1, 2) else { return nil }
+            var m = 0
+            if byte(i + 3) == 58, let mm = digits(i + 4, 2) { m = mm; i += 6 }
+            else if let mm = digits(i + 3, 2) { m = mm; i += 5 }
+            else { i += 3 }
+            offset = sign * (h * 3600 + m * 60)
+        default: return nil
+        }
+        guard i == b.count else { return nil }
+        // Days since 1970-01-01 in the proleptic Gregorian calendar.
+        let y = month <= 2 ? year - 1 : year
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let days = era * 146_097 + doe - 719_468
+        let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset
+        return Date(timeIntervalSince1970: Double(seconds) + fraction)
+    }
+
+    private nonisolated(unsafe) static let fallback = ISO8601DateFormatter()
+}
+
+/// Verification only (DEBUG, `SQUIRCLE_PERF=1`): timed connection marks
+/// appended to Documents/connection-trace.log, to measure the real path on a
+/// simulator. A no-op otherwise.
+@MainActor
+enum ConnectionTrace {
+    #if DEBUG
+    static let enabled = ProcessInfo.processInfo.environment["SQUIRCLE_PERF"] == "1"
+    private static let start = ContinuousClock.now
+    private static let file: FileHandle? = {
+        guard enabled, let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("connection-trace.log") else { return nil }
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        return try? FileHandle(forWritingTo: url)
     }()
-    var date: Date { string.flatMap { Self.dates.date(from: $0) } ?? .distantPast }
+    static func mark(_ event: String, _ detail: @autoclosure () -> String = "") {
+        guard enabled, let file else { return }
+        let ms = start.duration(to: .now).components
+        let line = String(format: "%.3f %d %@ %@\n", Date().timeIntervalSince1970,
+                          Int(ms.seconds * 1000 + ms.attoseconds / 1_000_000_000_000_000), event, detail())
+        file.write(Data(line.utf8))
+    }
+    #else
+    static let enabled = false
+    @inline(__always) static func mark(_ event: String, _ detail: @autoclosure () -> String = "") {}
+    #endif
 }
 
 /// Refuses every redirect. A session's delegate is this, not the session's
@@ -57,6 +141,15 @@ final class T3HTTP {
         guard let h = response as? HTTPURLResponse else { throw ClientError.response("T3") }
         guard (200..<300).contains(h.statusCode) else { throw ClientError.http("T3", h.statusCode) }
         return try JSONDecoder().decode(JSONValue.self, from: data)
+    }
+    /// T3's RPC socket accepts the session's bearer on the upgrade, like any
+    /// HTTPS request: no ticket round trip (a second TLS connection on a
+    /// cold start) before the socket can open.
+    func bearerSocketRequest(_ path: String) throws -> URLRequest {
+        var r = try request(path)
+        var c = URLComponents(url: r.url!, resolvingAgainstBaseURL: false)!
+        c.scheme = "wss"; r.url = c.url
+        return r
     }
     func socketRequest(_ path: String, query: [URLQueryItem] = []) async throws -> URLRequest {
         let ticket = try await json("/api/auth/websocket-ticket", body: .object([:]))
@@ -117,18 +210,26 @@ final class T3Gateway {
     func close() { onDisconnect = nil; disconnect(notify: false); http.invalidate() }
     func connect() async throws {
         disconnect(notify: false)
-        let ws = http.session.webSocketTask(with: try await http.socketRequest("/ws"))
+        ConnectionTrace.mark("socket.start")
+        let ws = http.session.webSocketTask(with: try http.bearerSocketRequest("/ws"))
         disconnect(notify: false); rejection = nil
         socket = ws; ws.maximumMessageSize = 32 * 1024 * 1024; ws.resume(); lastFrame = .now
         receiver = Task { [weak self] in
+            var first = true
             do {
                 while !Task.isCancelled {
                     let message = try await ws.receive()
                     self?.lastFrame = .now
                     let data: Data
                     switch message { case .data(let d): data = d; case .string(let s): data = Data(s.utf8); @unknown default: continue }
+                    if ConnectionTrace.enabled, first { ConnectionTrace.mark("socket.firstFrame"); first = false }
+                    let decodeStart = ContinuousClock.now
                     let frame = try JSONDecoder().decode(JSONValue.self, from: data)
+                    let decoded = ContinuousClock.now
                     for item in frame.array.isEmpty ? [frame] : frame.array { self?.receive(item) }
+                    if ConnectionTrace.enabled, data.count > 8192 {
+                        ConnectionTrace.mark("frame", "\(data.count)B decode=\(decodeStart.duration(to: decoded)) apply=\(decoded.duration(to: .now))")
+                    }
                 }
             } catch {
                 // A refused upgrade is not a network blip: say why.

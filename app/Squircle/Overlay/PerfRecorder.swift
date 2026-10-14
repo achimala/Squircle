@@ -32,6 +32,9 @@ final class PerfRecorder: CaptureProducer {
         frames.reserveCapacity(8_000)
         sampler.start()
         let link = CADisplayLink(target: Ticker { [weak self] link in self?.tick(link) }, selector: #selector(Ticker.tick(_:)))
+        // At the display's full rate: a default link runs at 60 Hz on
+        // ProMotion and would miss every other frame of a 120 Hz scroll.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         self.link = link
         touches.attach(to: overlay.windowScene?.windows.filter { $0 !== overlay } ?? [])

@@ -1,4 +1,4 @@
-use crate::{agents::Agents, apps, push::Push, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::Store, xcode};
+use crate::{agents::Agents, apps, push::Push, simpool::Pool, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::{AdmitError, Jobs, MAX_OPERATIONS, Store}, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -7,7 +7,7 @@ use axum::{
         DefaultBodyLimit, Path, Query, Request, State,
         rejection::{JsonRejection, QueryRejection},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -16,7 +16,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
     fs::OpenOptions,
     net::SocketAddr,
     path::PathBuf,
@@ -25,7 +24,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::Semaphore;
 use tokio_util::io::ReaderStream;
 
 #[derive(Clone)]
@@ -37,37 +36,40 @@ pub struct AppState {
     files: Arc<Store>,
     /// Serializes per-build diagnostic appends and reads (append-only files).
     diagnostics: Arc<Mutex<()>>,
-    cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    /// Build jobs: records, unpersisted results and live operations.
+    jobs: Arc<Jobs>,
     slots: Arc<Semaphore>,
     inspection_slots: Arc<Semaphore>,
     uploads: Arc<Semaphore>,
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
-    recovery_jobs: Arc<Mutex<HashMap<String, Job>>>,
     agents: Option<Arc<Agents>>,
     sims: Option<Arc<Sims>>,
+    pool: Option<Arc<Pool>>,
     push: Option<Arc<Push>>,
     tasks: Option<Arc<Tasks>>,
 }
 
 impl AppState {
-    pub fn new(store: Store, public_url: Option<String>) -> Self {
-        Self {
+    /// Loads the job index; work a previous service left unfinished is
+    /// recorded as interrupted.
+    pub fn new(store: Store, public_url: Option<String>) -> Result<Self> {
+        Ok(Self {
+            jobs: Arc::new(Jobs::open(&store)?),
             files: Arc::new(store.clone()),
             store: Arc::new(Mutex::new(store)),
             diagnostics: Arc::default(),
-            cancellations: Arc::default(),
             slots: Arc::new(Semaphore::new(1)),
             inspection_slots: Arc::new(Semaphore::new(2)),
             uploads: Arc::new(Semaphore::new(1)),
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
-            recovery_jobs: Arc::default(),
             agents: None,
             sims: None,
+            pool: None,
             push: None,
             tasks: None,
-        }
+        })
     }
 }
 
@@ -208,6 +210,54 @@ async fn envelope_errors(response: Response) -> Response {
     ApiError::rejection(status, text).into_response()
 }
 
+/// GET replies in JSON carry an ETag: a poll that already holds that exact
+/// body gets an empty 304, and a client that accepts gzip gets the body
+/// compressed. The phone polls several of these every few seconds, often
+/// over cellular (the build list alone is over 100 KB of JSON).
+async fn compact_json(request: Request, next: Next) -> Response {
+    let get = request.method() == Method::GET;
+    let known = request.headers().get(header::IF_NONE_MATCH).cloned();
+    let gzip = request
+        .headers()
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|e| e.split(';').next().is_some_and(|e| e.trim() == "gzip")));
+    let response = next.run(request).await;
+    let json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if !get || response.status() != StatusCode::OK || !json || response.headers().contains_key(header::CONTENT_ENCODING) {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 << 20).await else {
+        return ApiError::rejection(StatusCode::INTERNAL_SERVER_ERROR, "Reply too large".into()).into_response();
+    };
+    let digest = Sha256::digest(&bytes);
+    let tag: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
+    let etag = HeaderValue::from_str(&format!("\"{tag}\"")).expect("hex ETag");
+    parts.headers.insert(header::ETAG, etag.clone());
+    parts.headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    if known.as_ref().is_some_and(|k| k.as_bytes().split(|&c| c == b',').any(|t| t.trim_ascii() == etag.as_bytes())) {
+        parts.status = StatusCode::NOT_MODIFIED;
+        parts.headers.remove(header::CONTENT_TYPE);
+        parts.headers.remove(header::CONTENT_LENGTH);
+        return Response::from_parts(parts, Body::empty());
+    }
+    if gzip && bytes.len() >= 1024 {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::with_capacity(bytes.len() / 4), flate2::Compression::fast());
+        if encoder.write_all(&bytes).is_ok() && let Ok(compressed) = encoder.finish() {
+            parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+            parts.headers.remove(header::CONTENT_LENGTH);
+            return Response::from_parts(parts, Body::from(compressed));
+        }
+    }
+    Response::from_parts(parts, Body::from(bytes))
+}
+
 pub fn router(state: AppState) -> Router {
     // Everything here requires the control token, checked before extraction.
     let control = Router::new()
@@ -232,6 +282,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sims", get(list_sims).post(start_sim))
         .route("/v1/sims/stop", post(stop_sim))
         .route("/v1/sims/devices", get(sim_devices))
+        .route("/v1/sims/cleanup", post(cleanup_sims))
         .route("/v1/agents", get(list_agents).post(ensure_agent))
         .route("/v1/agents/context", get(agent_context))
         .route("/v1/t3/providers", get(t3_providers))
@@ -256,6 +307,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/import", post(import))
         .route("/v1/captures", post(upload_capture))
         .route("/v1/install-links/{token}", get(link_status))
+        .route_layer(middleware::from_fn(compact_json))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_control));
     let diagnostics = Router::new()
         .route("/v1/diagnostics", post(ingest))
@@ -297,35 +349,17 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         .map(artifact::validate_public_url)
         .transpose()?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
-    for mut job in store.list_jobs()? {
-        let mut changed = false;
-        if let Some(output) = job.output.as_mut()
-            && matches!(output.preview_state.as_deref(), Some("pending" | "running"))
-        {
-            output.preview_state = Some("failed".into());
-            output.preview_error =
-                Some("Service stopped during preview capture; no automatic retry was made".into());
-            changed = true;
-        }
-        if !job.state.terminal() {
-            job.state = BuildState::Interrupted;
-            job.updated_at = now();
-            job.error = Some("Service stopped during this job. Inspect artifacts/processes before submitting new work; no automatic retry was made.".into());
-            changed = true;
-        }
-        if changed {
-            job.updated_at = now();
-            store.save_job(&job)?;
-        }
-    }
     let tasks = Arc::new(Tasks::open(&store.root)?);
     let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?), tasks.clone())?;
     let push = Push::open(&store.root)?;
     agents.attach_push(push.clone());
-    let sims = Sims::open(&store.root, agents.clone())?;
-    let mut state = AppState::new(store, public_url);
+    let pool = Pool::open(&store.root, agents.clone())?;
+    let sims = Sims::open(&store.root, agents.clone(), pool.clone())?;
+    pool.remember_leased(sims.used());
+    let mut state = tokio::task::spawn_blocking(move || AppState::new(store, public_url)).await??;
     state.agents = Some(agents.clone());
     state.sims = Some(sims.clone());
+    state.pool = Some(pool.clone());
     state.push = Some(push.clone());
     state.tasks = Some(tasks.clone());
     // Service loops, stopped explicitly once requests have drained.
@@ -350,6 +384,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     background.push(tokio::spawn(agents.clone().run()));
     background.push(tokio::spawn(push.clone().run()));
     background.push(tokio::spawn(sims.clone().run()));
+    background.push(tokio::spawn(pool.clone().run(sims.clone())));
     let shutdown = state.clone();
     axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {
@@ -369,12 +404,10 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
                 let _store = shutdown.store.lock().unwrap();
                 shutdown.draining.store(true, Ordering::Release);
             }
-            for sender in shutdown.cancellations.lock().unwrap().values() {
-                let _ = sender.send(true);
-            }
+            shutdown.jobs.cancel_all();
             // Let cancelled runners reap their children and persist terminal state.
             for _ in 0..100 {
-                if shutdown.cancellations.lock().unwrap().is_empty() {
+                if shutdown.jobs.operations() == 0 {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -398,28 +431,14 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
 }
 
 async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let mut jobs = state
-        .store
-        .lock()
-        .unwrap()
-        .list_jobs()
-        .map_err(ApiError::internal)?;
-    for recovered in state.recovery_jobs.lock().unwrap().values() {
-        jobs.retain(|job| job.id != recovered.id);
-        jobs.push(recovered.clone());
-    }
-    Ok(Json(success(jobs)))
+    Ok(Json(success(state.jobs.list())))
 }
 async fn status(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let recovered = state.recovery_jobs.lock().unwrap().get(&id).cloned();
-    let job = match recovered {
-        Some(job) => job,
-        // job.json is replaced atomically, so reading it needs no record lock.
-        None => state.files.load_job(&id).map_err(ApiError::missing)?,
-    };
+    let view = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
+    let job = &view.job;
     let launches = {
         let (files, lock, id) = (state.files.clone(), state.diagnostics.clone(), id.clone());
         tokio::task::spawn_blocking(move || {
@@ -431,12 +450,12 @@ async fn status(
         .map_err(ApiError::internal)?
     };
     let log = state.files.job_dir(&id).ok().map(|dir| dir.join("build.log"));
-    let failure = match (&job.state, log) {
+    let failure = match (job.state(), log) {
         (BuildState::Failed | BuildState::Interrupted, Some(log)) => {
             let text = log_tail(&log, FAILURE_LOG_TAIL_BYTES).await;
-            let root = job.request.as_ref().and_then(|r| r.project.parent()).map(|p| p.to_string_lossy().into_owned());
+            let root = job.request().and_then(|r| r.project.parent()).map(|p| p.to_string_lossy().into_owned());
             let mut failure = crate::buildlog::failure(&String::from_utf8_lossy(&text), root.as_deref());
-            failure.message = job.error.as_deref().map(|error| {
+            failure.message = job.error().map(|error| {
                 error.rsplit_once("; see /").map_or(error, |(message, _)| message).to_string()
             });
             Some(failure)
@@ -444,7 +463,7 @@ async fn status(
         _ => None,
     };
     Ok(Json(success(
-        json!({"job":job,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty()),"failure":failure}),
+        json!({"job":view,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty()),"failure":failure}),
     )))
 }
 /// Failure summaries come from the end of a build log; logs can be very large.
@@ -507,128 +526,103 @@ async fn start(
             "Request ID must contain 1–128 letters, digits, underscores or hyphens",
         ));
     }
-    let (source_revision, source_dirty) = source_provenance(&request.project).await;
-    let (sender, receiver) = watch::channel(false);
-    let (job, dir) = {
+    let (revision, dirty) = source_provenance(&request.project).await;
+    let (job, lease, dir) = {
         let store = state.store.lock().unwrap();
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
-        let jobs = store.list_jobs().map_err(ApiError::internal)?;
         if let Some(key) = &request.request_id
-            && let Some(prior) = jobs
-                .iter()
-                .find(|j| j.request.as_ref().and_then(|r| r.request_id.as_ref()) == Some(key))
+            && let Some(prior) = state.jobs.with_request_id(key)
         {
-            if prior.request.as_ref() != Some(&request) {
+            if prior.job.request() != Some(&request) {
                 return Err(ApiError::new(StatusCode::CONFLICT, "request_id_conflict", "Request ID already belongs to different build arguments", "Use a new request ID for different work."));
             }
             return Ok(Json(success(json!({"job":prior,"replayed":true}))));
-        }
-        if state.cancellations.lock().unwrap().len() >= 16 {
-            return Err(ApiError::bad(
-                "Build/preview queue is full (16 jobs); wait or cancel a job",
-            ));
         }
         let job = Job {
             id: uuid::Uuid::new_v4().to_string(),
             created_at: now(),
             updated_at: now(),
-            state: BuildState::Queued,
-            request: Some(request.clone()),
-            output: None,
-            error: None,
-            source: "xcodebuild".into(),
-            source_revision,
-            source_dirty,
+            origin: BuildOrigin::Project { request: request.clone(), provenance: Provenance { revision, dirty } },
+            phase: JobPhase::Queued,
         };
         let dir = store.job_dir(&job.id).map_err(ApiError::internal)?;
-        store.save_job(&job).map_err(ApiError::internal)?;
-        state
-            .cancellations
-            .lock()
-            .unwrap()
-            .insert(job.id.clone(), sender);
-        (job, dir)
+        let lease = state.jobs.admit(job.clone()).map_err(admit_error)?;
+        (job, lease, dir)
     };
-    let response = job.clone();
+    let response = state.jobs.get(&job.id);
     tokio::spawn(async move {
         let mut job = job;
-        let mut receiver = receiver;
+        let mut receiver = lease.cancelled.clone();
         let permit = tokio::select! {
             result = state.slots.clone().acquire_owned() => result.ok(),
             _ = receiver.changed() => None,
         };
         if permit.is_none() || *receiver.borrow() {
-            job.state = BuildState::Cancelled;
+            job.phase = JobPhase::Cancelled { message: None };
         } else {
-            job.state = BuildState::Running;
+            job.phase = JobPhase::Running;
             job.updated_at = now();
-            let persisted = state.store.lock().unwrap().save_job(&job);
-            let result = match persisted {
+            let result = match state.jobs.commit(&lease, &job) {
                 Ok(()) => xcode::run(&request, &dir, receiver.clone()).await,
                 Err(error) => {
                     state.draining.store(true, Ordering::Release);
                     Err(error.context("Could not persist Running state; Xcode was not started"))
                 }
             };
-            match result {
-                Ok(output) => {
-                    job.state = BuildState::Succeeded;
-                    job.output = Some(output);
-                    if request.capture_preview {
-                        job.output.as_mut().unwrap().preview_state = Some("running".into());
-                        job.updated_at = now();
-                        let persisted = state.store.lock().unwrap().save_job(&job);
-                        let capture = match persisted {
-                            Ok(()) => match preview::simulator_id(None) {
-                                Ok(simulator) => {
-                                    preview::capture(&job, &dir, &simulator, receiver.clone()).await
-                                }
-                                Err(error) => Err(error),
-                            },
-                            Err(error) => {
-                                state.draining.store(true, Ordering::Release);
-                                Err(error.context("Could not persist preview state"))
-                            }
-                        };
-                        preview::apply_result(job.output.as_mut().unwrap(), capture);
+            job.phase = match result {
+                Ok(output) => JobPhase::Succeeded { output, preview: PreviewState::Absent },
+                Err(error) if *receiver.borrow() => JobPhase::Cancelled { message: Some(format!("{error:#}")) },
+                Err(error) => JobPhase::Failed { message: format!("{error:#}") },
+            };
+            if request.capture_preview && job.set_preview(PreviewState::Absent.capturing()) {
+                job.updated_at = now();
+                let capture = match state.jobs.commit(&lease, &job) {
+                    Ok(()) => match preview::simulator_id(None) {
+                        Ok(simulator) => preview::capture(&job, &dir, &simulator, receiver.clone()).await,
+                        Err(error) => Err(error),
+                    },
+                    Err(error) => {
+                        state.draining.store(true, Ordering::Release);
+                        Err(error.context("Could not persist preview state"))
                     }
-                }
-                Err(error) => {
-                    job.state = if *receiver.borrow() {
-                        BuildState::Cancelled
-                    } else {
-                        BuildState::Failed
-                    };
-                    job.error = Some(format!("{error:#}"));
-                }
+                };
+                finish_preview(&mut job, capture);
             }
         }
         job.updated_at = now();
-        let persisted = state.store.lock().unwrap().save_job(&job);
-        if let Err(error) = persisted {
-            eprintln!("Cannot persist job {}: {error}", job.id);
+        if let Err(error) = state.jobs.finish(lease, &job) {
+            eprintln!("Cannot persist job {}: {error:#}. Service paused; the result is served from memory until shutdown.", job.id);
             state.draining.store(true, Ordering::Release);
-            job.error = Some(format!(
-                "{}; terminal result could not be persisted: {error}. Service paused; this result is retained in memory until shutdown.",
-                job.error.as_deref().unwrap_or("Build finished")
-            ));
-            state
-                .recovery_jobs
-                .lock()
-                .unwrap()
-                .insert(job.id.clone(), job.clone());
-        } else if job.state == BuildState::Succeeded {
-            sync_job_app(&state, &job).await;
         }
+        let app = build_app(&state, &job).await;
         if let Some(push) = &state.push {
-            push.build_finished(&job);
+            push.build_finished(&job, app.as_ref());
         }
-        state.cancellations.lock().unwrap().remove(&job.id);
         drop(permit);
     });
     Ok(Json(success(json!({"job":response,"replayed":false}))))
+}
+
+fn admit_error(error: AdmitError) -> ApiError {
+    match error {
+        AdmitError::Full => ApiError::bad(format!("Build/preview queue is full ({MAX_OPERATIONS} jobs); wait or cancel a job")),
+        AdmitError::Busy => ApiError::new(StatusCode::CONFLICT, "preview_in_progress", "This build already has work in progress", "Poll build status before recapturing."),
+        AdmitError::Refused(message) => ApiError::bad(message),
+        AdmitError::Persist(error) => ApiError::internal(format!("{error:#}")),
+    }
+}
+
+/// A capture's result on the job; a failed capture keeps the prior image.
+fn finish_preview(job: &mut Job, capture: Result<preview::Capture>) {
+    let Some(current) = job.preview() else { return };
+    let next = current.finish(capture.map(|c| PreviewArtifact {
+        path: c.path,
+        captured_at: c.captured_at,
+        source: Some(c.source),
+    }));
+    job.set_preview(next);
 }
 
 #[derive(Deserialize)]
@@ -644,36 +638,21 @@ async fn capture_preview(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let input = body(input)?;
     let simulator = preview::simulator_id(input.simulator.as_deref()).map_err(ApiError::bad)?;
-    let (sender, mut receiver) = watch::channel(false);
-    let (mut job, directory) = {
+    let (mut job, lease, directory) = {
         let store = state.store.lock().unwrap();
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
-        let mut job = store.load_job(&id).map_err(ApiError::missing)?;
-        if job.state != BuildState::Succeeded || job.request.is_none() || job.output.is_none() {
-            return Err(ApiError::bad(
-                "Preview requires a succeeded project build with a simulator build recipe",
-            ));
+        if state.jobs.get(&id).is_none() {
+            return Err(ApiError::missing(format!("No build {id}")));
         }
-        let mut cancellations = state.cancellations.lock().unwrap();
-        if cancellations.contains_key(&id) {
-            return Err(ApiError::new(StatusCode::CONFLICT, "preview_in_progress", "This build already has work in progress", "Poll build status before recapturing."));
-        }
-        if cancellations.len() >= 16 {
-            return Err(ApiError::bad("Build/preview queue is full (16 jobs)"));
-        }
-        let output = job.output.as_mut().unwrap();
-        output.preview_state = Some("pending".into());
-        output.preview_error = None;
-        job.updated_at = now();
-        store.save_job(&job).map_err(ApiError::internal)?;
-        cancellations.insert(id.clone(), sender);
+        let (job, lease) = state.jobs.begin_preview(&id).map_err(admit_error)?;
         let directory = store.job_dir(&id).map_err(ApiError::internal)?;
-        (job, directory)
+        (job, lease, directory)
     };
-    let response = job.clone();
+    let response = state.jobs.get(&id);
     tokio::spawn(async move {
+        let mut receiver = lease.cancelled.clone();
         let permit = tokio::select! {
             result = state.slots.clone().acquire_owned() => result.ok(),
             _ = receiver.changed() => None,
@@ -681,10 +660,10 @@ async fn capture_preview(
         let result = if permit.is_none() || *receiver.borrow() {
             Err(anyhow::anyhow!("Preview cancelled before capture"))
         } else {
-            job.output.as_mut().unwrap().preview_state = Some("running".into());
+            let capturing = job.preview().map(PreviewState::capturing).unwrap_or_default();
+            job.set_preview(capturing);
             job.updated_at = now();
-            let persisted = state.store.lock().unwrap().save_job(&job);
-            match persisted {
+            match state.jobs.commit(&lease, &job) {
                 Ok(()) => preview::capture(&job, &directory, &simulator, receiver).await,
                 Err(error) => {
                     state.draining.store(true, Ordering::Release);
@@ -692,33 +671,43 @@ async fn capture_preview(
                 }
             }
         };
-        preview::apply_result(job.output.as_mut().unwrap(), result);
+        finish_preview(&mut job, result);
         job.updated_at = now();
-        let persisted = state.store.lock().unwrap().save_job(&job);
-        if let Err(error) = persisted {
+        if let Err(error) = state.jobs.finish(lease, &job) {
+            eprintln!("Cannot persist preview of {id}: {error:#}. Service paused.");
             state.draining.store(true, Ordering::Release);
-            job.output.as_mut().unwrap().preview_error =
-                Some(format!("Preview result could not be persisted: {error}"));
-            state.recovery_jobs.lock().unwrap().insert(id.clone(), job);
         } else {
-            sync_job_app(&state, &job).await;
+            build_app(&state, &job).await;
         }
-        state.cancellations.lock().unwrap().remove(&id);
         drop(permit);
     });
     Ok((StatusCode::ACCEPTED, Json(success(json!({"job":response})))))
 }
 
-async fn sync_job_app(state: &AppState, job: &Job) {
+/// The catalog app a finished build belongs to. A succeeded build registers
+/// its app and publishes a newer preview; any other build is matched to an
+/// app already registered for its project and scheme (or bundle, for an
+/// import), so its notification can still open the app.
+async fn build_app(state: &AppState, job: &Job) -> Option<apps::AppRecord> {
     let (state, job) = (state.clone(), job.clone());
     // Copies the preview under the record lock; keep it off the async workers.
     let result = tokio::task::spawn_blocking(move || {
-        apps::sync_build_preview(&state.store.lock().unwrap(), &job).map_err(|e| (job.id.clone(), e))
+        let store = state.store.lock().unwrap();
+        if job.output().is_some() && job.request().is_some() {
+            apps::sync_build_preview(&store, &job).map(Some).map_err(|e| (job.id.clone(), e))
+        } else {
+            Ok(apps::list(&store).ok().and_then(|apps| apps::owner_of(&apps, &job).cloned()))
+        }
     })
     .await;
-    if let Ok(Err((id, error))) = result {
-        // Catalog publication is ancillary: never invalidate an exported IPA.
-        eprintln!("Could not sync app metadata for build {id}: {error:#}");
+    match result {
+        Ok(Ok(app)) => app,
+        Ok(Err((id, error))) => {
+            // Catalog publication is ancillary: never invalidate an exported IPA.
+            eprintln!("Could not sync app metadata for build {id}: {error:#}");
+            None
+        }
+        Err(_) => None,
     }
 }
 
@@ -818,19 +807,27 @@ async fn import_app(
     Ok(Json(success(public_app(app))))
 }
 
+// App records are replaced atomically, so reads need no record lock; the
+// catalog scan and preview checks are file I/O, kept off the async workers.
 async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    let apps = apps::list(&state.store.lock().unwrap()).map_err(ApiError::internal)?;
-    Ok(Json(success(
-        apps.into_iter().map(public_app).collect::<Vec<_>>(),
-    )))
+    let apps = tokio::task::spawn_blocking(move || {
+        apps::list(&state.files).map(|apps| apps.into_iter().map(public_app).collect::<Vec<_>>())
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    Ok(Json(success(apps)))
 }
 
 async fn get_app(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let app = apps::get(&state.store.lock().unwrap(), &id).map_err(ApiError::missing)?;
-    Ok(Json(success(public_app(app))))
+    let app = tokio::task::spawn_blocking(move || apps::get(&state.files, &id).map(public_app))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::missing)?;
+    Ok(Json(success(app)))
 }
 
 async fn register_app(
@@ -1052,13 +1049,14 @@ async fn download_preview(
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     let path = {
-        let store = state.store.lock().unwrap();
-        let job = store.load_job(&id).map_err(ApiError::missing)?;
+        let job = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?.job;
         let path = job
-            .output
-            .and_then(|output| output.preview_path)
+            .preview()
+            .and_then(|preview| preview.artifact())
+            .map(|artifact| artifact.path.clone())
             .ok_or_else(|| ApiError::missing("This build has no captured preview"))?;
-        let expected = store
+        let expected = state
+            .files
             .job_dir(&id)
             .map_err(ApiError::missing)?
             .join("preview.png");
@@ -1183,19 +1181,9 @@ async fn cancel(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let job = state
-        .store
-        .lock()
-        .unwrap()
-        .load_job(&id)
-        .map_err(ApiError::missing)?;
-    let requested = if let Some(sender) = state.cancellations.lock().unwrap().get(&id) {
-        sender.send(true).is_ok()
-    } else {
-        false
-    };
+    let (job_state, operation) = state.jobs.cancel(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     Ok(Json(success(
-        json!({"build_id":id,"cancel_requested":requested,"state":job.state}),
+        json!({"build_id":id,"cancel_requested":operation.is_some(),"state":job_state}),
     )))
 }
 
@@ -1270,17 +1258,12 @@ fn import_ipa(
         id,
         created_at: now(),
         updated_at: now(),
-        state: BuildState::Succeeded,
-        request: None,
-        output: Some(output),
-        error: None,
-        source: "imported_ipa_signature_not_verified".into(),
-        source_revision: None,
-        source_dirty: None,
+        origin: BuildOrigin::Imported,
+        phase: JobPhase::Succeeded { output, preview: PreviewState::Absent },
     };
     // Work admitted before shutdown may finish. Publication occurs only after
     // the copied IPA has been synced and its metadata validated.
-    state.store.lock().unwrap().save_job(&job)?;
+    state.jobs.insert(job.clone())?;
     Ok(job)
 }
 
@@ -1308,15 +1291,8 @@ async fn create_link(
             "Start serve with --public-url https://YOUR-MAC-HOSTNAME to create install links",
         )
     })?;
-    let store = state.store.lock().unwrap();
-    let job = store.load_job(&id).map_err(ApiError::missing)?;
-    if job.state != BuildState::Succeeded
-        || job
-            .output
-            .as_ref()
-            .and_then(|o| o.ipa_path.as_ref())
-            .is_none()
-    {
+    let job = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?.job;
+    if job.ipa().is_none() {
         return Err(ApiError::bad(
             "Build has no exported IPA; simulator products cannot be installed this way",
         ));
@@ -1326,36 +1302,30 @@ async fn create_link(
         build_id: id.clone(),
         expires_at: now() + input.ttl_seconds,
         base_url: base.clone(),
-        download_started_at: None,
-        downloaded_at: None,
+        transfer: TransferEvidence::NotStarted,
     };
-    store.save_ticket(&ticket).map_err(ApiError::internal)?;
+    state.store.lock().unwrap().save_ticket(&ticket).map_err(ApiError::internal)?;
     let page = format!("{base}/install/{}", ticket.token);
     Ok(Json(success(
         json!({"build_id":id,"page_url":page,"manifest_url":format!("{page}/manifest.plist"),"install_url":artifact::install_url(&format!("{page}/manifest.plist")),"expires_at":ticket.expires_at,"installation_confirmed":false}),
     )))
 }
-fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, Job)> {
-    let store = state.store.lock().unwrap();
-    let ticket = store
+/// A ticket's build, which has an IPA: only that can be installed.
+fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, String, BuildOutput)> {
+    let ticket = state
+        .store
+        .lock()
+        .unwrap()
         .load_ticket(token)
         .map_err(|_| ApiError::missing("Invalid install link"))?;
     if ticket.expires_at <= now() {
         return Err(ApiError::new(StatusCode::GONE, "link_expired", "Install link expired", "Request a new install link for the same build."));
     }
-    let job = store
-        .load_job(&ticket.build_id)
-        .map_err(ApiError::missing)?;
-    if job.state != BuildState::Succeeded
-        || job
-            .output
-            .as_ref()
-            .and_then(|o| o.ipa_path.as_ref())
-            .is_none()
-    {
-        return Err(ApiError::missing("No IPA for this build"));
+    let job = state.jobs.get(&ticket.build_id).ok_or_else(|| ApiError::missing("No IPA for this build"))?.job;
+    match job.output() {
+        Some(output) if output.ipa_path.is_some() => Ok((ticket, job.id.clone(), output.clone())),
+        _ => Err(ApiError::missing("No IPA for this build")),
     }
-    Ok((ticket, job))
 }
 /// Whether iOS has started (`download_started_at`) and finished (`downloaded_at`)
 /// downloading a link's IPA; it fetches it only after the person confirms the
@@ -1370,9 +1340,12 @@ async fn link_status(
         .unwrap()
         .load_ticket(&token)
         .map_err(|_| ApiError::missing("Unknown install link"))?;
-    Ok(Json(success(
-        json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,"download_started_at":ticket.download_started_at,"downloaded_at":ticket.downloaded_at}),
-    )))
+    let mut view = json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,
+        "download_started_at":null,"downloaded_at":null});
+    if let (Some(view), Value::Object(transfer)) = (view.as_object_mut(), json!(ticket.transfer)) {
+        view.extend(transfer);
+    }
+    Ok(Json(success(view)))
 }
 fn private_headers() -> [(header::HeaderName, &'static str); 3] {
     [
@@ -1385,8 +1358,7 @@ async fn install_page(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, job) = ticket_job(&state, &token)?;
-    let output = job.output.unwrap();
+    let (ticket, build_id, output) = ticket_job(&state, &token)?;
     let link = artifact::install_url(&format!(
         "{}/install/{}/manifest.plist",
         ticket.base_url, token
@@ -1397,7 +1369,7 @@ async fn install_page(
         artifact::escape_html(&output.version),
         artifact::escape_html(&output.build_number),
         artifact::escape_html(&link),
-        job.id
+        build_id
     );
     Ok((private_headers(), Html(html)).into_response())
 }
@@ -1405,9 +1377,9 @@ async fn download_manifest(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, job) = ticket_job(&state, &token)?;
+    let (ticket, _, output) = ticket_job(&state, &token)?;
     let bytes = artifact::manifest(
-        &job.output.unwrap(),
+        &output,
         &format!("{}/install/{}/app.ipa", ticket.base_url, token),
     )
     .map_err(ApiError::internal)?;
@@ -1422,8 +1394,8 @@ async fn download_ipa(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, job) = ticket_job(&state, &token)?;
-    let path = job.output.unwrap().ipa_path.unwrap();
+    let (ticket, _, output) = ticket_job(&state, &token)?;
+    let path = output.ipa_path.expect("ticket_job checks the IPA");
     let file = tokio::fs::File::open(path)
         .await
         .map_err(ApiError::missing)?;
@@ -1431,8 +1403,8 @@ async fn download_ipa(
     // Evidence only, recorded as it happens: the IPA was opened for a request,
     // then every byte was handed to the connection. Neither blocks the
     // download, and neither proves installation or launch.
-    if ticket.download_started_at.is_none() {
-        let _ = mark_ticket(&state, &token, |t| t.download_started_at.get_or_insert(now()));
+    if ticket.transfer == TransferEvidence::NotStarted {
+        let _ = mark_ticket(&state, &token, |t| t.opened(now()));
     }
     // Hyper stops polling a body once Content-Length bytes are out, so the
     // finish is recorded when it drops the body, not by a trailing chunk.
@@ -1470,16 +1442,21 @@ impl Drop for Delivered {
         }
         // One small record write, like `download_started_at` above.
         if let Some((state, token)) = self.ticket.take() {
-            let _ = mark_ticket(&state, &token, |t| t.downloaded_at.get_or_insert(now()));
+            let _ = mark_ticket(&state, &token, |t| t.completed(now()));
         }
     }
 }
 
-/// Sets a ticket's evidence field once, under the record lock.
-fn mark_ticket(state: &AppState, token: &str, mark: impl FnOnce(&mut Ticket) -> &mut u64) -> Result<()> {
+/// Advances a ticket's transfer evidence under the record lock. Evidence
+/// only moves forward; a repeated mark keeps the first times.
+fn mark_ticket(state: &AppState, token: &str, mark: impl FnOnce(TransferEvidence) -> TransferEvidence) -> Result<()> {
     let store = state.store.lock().unwrap();
     let mut ticket = store.load_ticket(token)?;
-    mark(&mut ticket);
+    let next = mark(ticket.transfer);
+    if next == ticket.transfer {
+        return Ok(());
+    }
+    ticket.transfer = next;
     store.save_ticket(&ticket)
 }
 
@@ -1621,7 +1598,7 @@ async fn build_log(
     page: std::result::Result<Query<LogPage>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let page = parse_query(page)?;
-    state.files.load_job(&id).map_err(ApiError::missing)?;
+    state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     let path = state.files.job_dir(&id).map_err(ApiError::bad)?.join("build.log");
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut file = match tokio::fs::File::open(path).await {
@@ -1651,6 +1628,60 @@ async fn build_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn polled_json_revalidates_and_compresses() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route("/big", get(|| async { Json(json!({"rows": vec!["build"; 2000]})) }))
+            .route_layer(middleware::from_fn(compact_json));
+        let call = |headers: &[(header::HeaderName, &str)]| {
+            let mut request = axum::http::Request::get("/big");
+            for (name, value) in headers { request = request.header(name, *value); }
+            app.clone().oneshot(request.body(Body::empty()).unwrap())
+        };
+        let plain = call(&[]).await.unwrap();
+        assert_eq!(plain.status(), StatusCode::OK);
+        assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
+        let etag = plain.headers()[header::ETAG].to_str().unwrap().to_string();
+        let body = axum::body::to_bytes(plain.into_body(), usize::MAX).await.unwrap();
+
+        let same = call(&[(header::IF_NONE_MATCH, &etag)]).await.unwrap();
+        assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
+        assert!(axum::body::to_bytes(same.into_body(), usize::MAX).await.unwrap().is_empty());
+        let stale = call(&[(header::IF_NONE_MATCH, "\"other\"")]).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::OK);
+
+        let zipped = call(&[(header::ACCEPT_ENCODING, "br, gzip;q=0.9")]).await.unwrap();
+        assert_eq!(zipped.headers()[header::CONTENT_ENCODING], "gzip");
+        let bytes = axum::body::to_bytes(zipped.into_body(), usize::MAX).await.unwrap();
+        assert!(bytes.len() < body.len() / 10);
+        let mut unzipped = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut unzipped).unwrap();
+        assert_eq!(unzipped, body);
+    }
+
+    #[test]
+    fn history_pages_are_stable_and_complete() {
+        let at = |t: &(&'static str, u64)| HistoryCursor { archived_at: t.1, id: t.0.into() };
+        let history = || vec![("a", 5), ("b", 9), ("c", 5), ("d", 1), ("e", 7)];
+        let mut seen = vec![];
+        let mut cursor = None;
+        loop {
+            let (page, next) = history_page(history(), at, cursor.as_ref(), 2);
+            seen.extend(page.into_iter().map(|t| t.0));
+            match next {
+                Some(next) => cursor = Some(HistoryCursor::parse(&next.to_string()).unwrap()),
+                None => break,
+            }
+        }
+        assert_eq!(seen, ["b", "e", "c", "a", "d"]);
+        // A task leaving History doesn't shift the next page.
+        let first = history_page(history(), at, None, 2).1.unwrap();
+        let fewer: Vec<_> = history().into_iter().filter(|t| t.0 != "b").collect();
+        assert_eq!(history_page(fewer, at, Some(&first), 2).0.iter().map(|t| t.0).collect::<Vec<_>>(), ["c", "a"]);
+        assert!(HistoryCursor::parse("x").is_err());
+    }
 
     #[tokio::test]
     async fn non_repository_source_has_no_invented_provenance() {
@@ -1707,7 +1738,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
-        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
         let authorization = headers(&state);
         let job = import_ipa(&state, &source, |source, destination| {
             // A nonblocking acquisition makes a regression fail immediately,
@@ -1724,12 +1755,12 @@ mod tests {
             Ok(output)
         })?;
         let stored = state.store.lock().unwrap().load_job(&job.id)?;
-        assert_eq!(stored.state, BuildState::Succeeded);
-        assert_eq!(stored.source, "imported_ipa_signature_not_verified");
-        let output = stored.output.unwrap();
+        assert_eq!(stored.state(), BuildState::Succeeded);
+        assert_eq!(stored.origin, BuildOrigin::Imported);
+        let output = stored.output().unwrap();
         assert_eq!(output.bundle_id, "dev.example.probe");
         assert_eq!(
-            std::fs::read(output.ipa_path.unwrap())?,
+            std::fs::read(output.ipa_path.as_ref().unwrap())?,
             std::fs::read(source)?
         );
         Ok(())
@@ -1741,7 +1772,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
-        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
         let job = import_ipa(&state, &source, copy_and_inspect_ipa)?;
         let diagnostic_token = state
             .store
@@ -1803,7 +1834,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
-        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
         use tower::ServiceExt;
         let response = router(state.clone())
             .oneshot(
@@ -1826,7 +1857,7 @@ mod tests {
     #[tokio::test]
     async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_deduplicate() {
         let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None);
+        let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
         let _active = state.slots.clone().acquire_owned().await.unwrap();
         let request = request(dir.path());
         let Json(first) = start(
@@ -1858,7 +1889,7 @@ mod tests {
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if state.store.lock().unwrap().load_job(&id).unwrap().state == BuildState::Cancelled
+                if state.store.lock().unwrap().load_job(&id).unwrap().state() == BuildState::Cancelled
                 {
                     break;
                 }
@@ -1881,7 +1912,7 @@ mod tests {
     #[tokio::test]
     async fn draining_refuses_new_side_effects() {
         let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None);
+        let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
         state.draining.store(true, Ordering::Release);
         let error = start(
             State(state.clone()),
@@ -1909,6 +1940,9 @@ fn sim_error(error: anyhow::Error) -> ApiError {
 #[derive(Deserialize)]
 struct SimQuery {
     thread: Option<String>,
+    /// Also every booted simulator and its owner (the CLI; the phone polls without it).
+    #[serde(default)]
+    simulators: bool,
 }
 
 async fn list_sims(
@@ -1916,7 +1950,29 @@ async fn list_sims(
     query: std::result::Result<Query<SimQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
-    Ok(Json(success(sims(&state)?.list(query.thread.as_deref()))))
+    let sims = sims(&state)?;
+    let mut list = sims.list(query.thread.as_deref());
+    // Every booted simulator and who holds it; without T3 the sessions still show.
+    if let Some(pool) = state.pool.as_ref().filter(|_| query.simulators) {
+        list["simulators"] = pool.status(&sims.leases()).await.unwrap_or_else(|e| json!({"error": format!("{e:#}")}));
+    }
+    Ok(Json(success(list)))
+}
+
+#[derive(Deserialize)]
+struct CleanupSims {
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn cleanup_sims(
+    State(state): State<AppState>,
+    payload: std::result::Result<Json<CleanupSims>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let request = body(payload)?;
+    let sims = sims(&state)?;
+    let pool = state.pool.clone().ok_or_else(|| sim_error(anyhow::anyhow!("The simulator pool is not running in this service")))?;
+    Ok(Json(success(pool.cleanup(&sims.leases(), request.dry_run).await.map_err(sim_error)?)))
 }
 
 #[derive(Deserialize)]
@@ -1945,7 +2001,12 @@ async fn stop_sim(
     payload: std::result::Result<Json<StopSim>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
-    let session = sims(&state)?.stop(request.thread_id.as_deref(), request.id.as_deref()).await.map_err(sim_error)?;
+    let sims = sims(&state)?;
+    // Filing a long recording takes minutes. A caller that gives up first
+    // must not cancel it halfway: the session would stay "filing" until the
+    // service restarts.
+    let stop = tokio::spawn(async move { sims.stop(request.thread_id.as_deref(), request.id.as_deref()).await });
+    let session = stop.await.map_err(|e| sim_error(anyhow::anyhow!(e)))?.map_err(sim_error)?;
     let next = if session.media_id.is_some() { "The recording now shows in this turn on the phone." } else { "No recording was saved; see error." };
     Ok(Json(success(json!({"session": session, "next": next}))))
 }
@@ -2211,23 +2272,36 @@ fn tasks_of(state: &AppState) -> ApiResult<Arc<Tasks>> {
     state.tasks.clone().ok_or_else(|| task_error(anyhow::anyhow!("Tasks are not running in this service")))
 }
 
-/// A task's linked workers' and builds' states, and the status they imply.
-fn task_signals(state: &AppState, task: &tasks::Task) -> (String, Option<tasks::Status>) {
-    let threads: Vec<&str> = task.threads.iter().map(|id| {
-        state.agents.as_ref().and_then(|a| a.thread_row(id)).map_or("missing", |row| crate::agents::worker_state(&row))
+/// What a task's linked workers and builds are doing, from memory only (the
+/// shell's observations and the job index), so every tick can cover History
+/// too. A thread T3 hasn't sent, or a shell that isn't current, is no fact
+/// (`Missing`), never news.
+fn task_signals(state: &AppState, task: &tasks::Task) -> tasks::Signals {
+    use tasks::{BuildPhase, WorkerPhase};
+    use crate::agents::Phase;
+    let workers = task.threads.iter().map(|id| {
+        // Only a current shell fact moves a task; stale or unknown is no fact.
+        let observed = state.agents.as_ref().and_then(|a| a.observe(id).current().flatten());
+        let phase = match observed.as_ref().map(|o| o.phase()) {
+            Some(Phase::NeedsYou) => WorkerPhase::NeedsYou,
+            Some(Phase::Working) => WorkerPhase::Working,
+            Some(Phase::Error) => WorkerPhase::Error,
+            Some(Phase::Done) => WorkerPhase::Done,
+            None => WorkerPhase::Missing,
+        };
+        tasks::WorkerSignal { thread: id.clone(), turn: observed.and_then(|o| o.turn), phase }
     }).collect();
-    // Job records are replaced atomically; reading them needs no record lock.
-    let store = &state.files;
-    let builds: Vec<&str> = task.builds.iter().map(|id| match store.load_job(id).map(|j| j.state) {
-        Ok(BuildState::Queued) => "queued",
-        Ok(BuildState::Running) => "running",
-        Ok(BuildState::Succeeded) => "succeeded",
-        Ok(_) => "failed",
-        Err(_) => "missing",
+    let builds = task.builds.iter().map(|id| {
+        let phase = match state.jobs.state(id) {
+            Some(BuildState::Queued) => BuildPhase::Queued,
+            Some(BuildState::Running) => BuildPhase::Running,
+            Some(BuildState::Succeeded) => BuildPhase::Succeeded,
+            Some(BuildState::Failed | BuildState::Cancelled | BuildState::Interrupted) => BuildPhase::Failed,
+            None => BuildPhase::Missing,
+        };
+        tasks::BuildSignal { build: id.clone(), phase }
     }).collect();
-    let signature = task.threads.iter().zip(&threads).chain(task.builds.iter().zip(&builds))
-        .map(|(id, state)| format!("{id}:{state}")).collect::<Vec<_>>().join(" ");
-    (signature, tasks::derive(&threads, &builds))
+    tasks::Signals { revision: Some(task.revision), workers, builds }
 }
 
 /// A task as the phone and the agent see it: linked threads and builds
@@ -2240,13 +2314,14 @@ fn task_view(state: &AppState, task: &tasks::Task) -> Value {
         json!({"id": id, "title": title,
                "state": row.as_ref().map_or("missing", crate::agents::worker_state)})
     }).collect();
-    // Job records are replaced atomically; reading them needs no record lock.
-    let store = &state.files;
-    let builds: Vec<Value> = task.builds.iter().map(|id| match store.load_job(id) {
-        Ok(job) => json!({"id": id, "state": job.state, "title": job.output.as_ref().map(|o| o.title.clone()),
-            "version": job.output.as_ref().map(|o| o.version.clone()), "build_number": job.output.as_ref().map(|o| o.build_number.clone()),
-            "installable": job.output.as_ref().is_some_and(|o| o.ipa_path.is_some())}),
-        Err(_) => json!({"id": id, "state": "missing"}),
+    let builds: Vec<Value> = task.builds.iter().map(|id| match state.jobs.get(id) {
+        Some(view) => {
+            let output = view.job.output();
+            json!({"id": id, "state": view.job.state(), "title": output.map(|o| o.title.clone()),
+                "version": output.map(|o| o.version.clone()), "build_number": output.map(|o| o.build_number.clone()),
+                "installable": view.job.ipa().is_some()})
+        }
+        None => json!({"id": id, "state": "missing"}),
     }).collect();
     let media: Vec<Value> = state.tasks.as_ref().map(|t| t.media(&task.id)).unwrap_or_default().into_iter()
         .map(|m| json!({"id": m.id, "kind": m.kind, "caption": m.caption, "content_type": m.content_type, "created_at": m.created_at}))
@@ -2255,7 +2330,6 @@ fn task_view(state: &AppState, task: &tasks::Task) -> Value {
     value["threads"] = json!(threads);
     value["builds"] = json!(builds);
     value["media"] = json!(media);
-    if let Some(object) = value.as_object_mut() { object.remove("seen"); }
     value
 }
 
@@ -2270,24 +2344,92 @@ fn task_project(state: &AppState, project: Option<String>, thread: Option<&str>)
 struct TaskQuery {
     project: Option<String>,
     thread: Option<String>,
+    /// History entries per page (1–100, default 20).
+    history_limit: Option<usize>,
+    /// The `history_next` cursor of the previous page.
+    history_before: Option<String>,
 }
 
+const HISTORY_PAGE: usize = 20;
+
+/// Active tasks, and one page of History, newest first. Only the returned
+/// tasks are expanded (linked work, media), so a long History costs a poll
+/// nothing beyond its first page.
 async fn list_tasks(
     State(state): State<AppState>,
     query: std::result::Result<Query<TaskQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
+    let limit = query.history_limit.unwrap_or(HISTORY_PAGE);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad("history_limit must be between 1 and 100"));
+    }
+    let before = query.history_before.as_deref().map(HistoryCursor::parse).transpose().map_err(ApiError::bad)?;
     let project = task_project(&state, query.project, query.thread.as_deref())?;
-    let mut all = tasks_of(&state)?.list(&project);
-    all.sort_by(|a, b| a.order.total_cmp(&b.order));
-    let (history, active): (Vec<_>, Vec<_>) = all.iter().partition(|t| t.archived_at.is_some());
-    let mut history = history;
-    history.sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
-    Ok(Json(success(json!({
-        "project_id": project,
-        "tasks": active.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
-        "history": history.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
-    }))))
+    let tasks = tasks_of(&state)?;
+    let view = tokio::task::spawn_blocking(move || {
+        let mut all = tasks.list(&project);
+        all.sort_by(|a, b| a.order.total_cmp(&b.order));
+        let (history, active): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.archived_at.is_some());
+        let (page, next) = history_page(history, HistoryCursor::of, before.as_ref(), limit);
+        json!({
+            "project_id": project,
+            "tasks": active.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
+            "history": page.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
+            "history_next": next.map(|c| c.to_string()),
+        })
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(success(view)))
+}
+
+/// A position in History: entries strictly older than (archived_at, id).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HistoryCursor {
+    archived_at: u64,
+    id: String,
+}
+
+impl HistoryCursor {
+    fn of(task: &tasks::Task) -> Self {
+        Self { archived_at: task.archived_at.unwrap_or_default(), id: task.id.clone() }
+    }
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        let invalid = || format!("Invalid history cursor {value:?}");
+        let (at, id) = value.split_once('.').ok_or_else(invalid)?;
+        Ok(Self { archived_at: at.parse().map_err(|_| invalid())?, id: id.to_owned() })
+    }
+    /// Newest first: later archive time, then higher ID.
+    fn key(&self) -> (std::cmp::Reverse<u64>, std::cmp::Reverse<&str>) {
+        (std::cmp::Reverse(self.archived_at), std::cmp::Reverse(self.id.as_str()))
+    }
+}
+
+impl std::fmt::Display for HistoryCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.archived_at, self.id)
+    }
+}
+
+/// One page of History after `before`, newest first, and the cursor for the
+/// next page if there is more. Stable while tasks enter History or leave it.
+fn history_page<T>(
+    history: Vec<T>,
+    position: impl Fn(&T) -> HistoryCursor,
+    before: Option<&HistoryCursor>,
+    limit: usize,
+) -> (Vec<T>, Option<HistoryCursor>) {
+    let mut history: Vec<(HistoryCursor, T)> = history.into_iter().map(|t| (position(&t), t)).collect();
+    history.sort_by(|a, b| a.0.key().cmp(&b.0.key()));
+    let mut page: Vec<(HistoryCursor, T)> = history.into_iter()
+        .filter(|(at, _)| before.is_none_or(|b| at.key() > b.key()))
+        .take(limit + 1)
+        .collect();
+    let more = page.len() > limit;
+    page.truncate(limit);
+    let next = if more { page.last().map(|(at, _)| at.clone()) } else { None };
+    (page.into_iter().map(|(_, t)| t).collect(), next)
 }
 
 #[derive(Deserialize)]
@@ -2340,9 +2482,9 @@ async fn update_task(
     let r = body(payload)?;
     let tasks = tasks_of(&state)?;
     let current = tasks.get(&id).map_err(ApiError::missing)?;
-    let signature = task_signals(&state, &current).0;
+    let observed = task_signals(&state, &current);
     let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
-    let task = tasks.update(&id, r.update, by, Some(signature)).map_err(task_error)?;
+    let task = tasks.update(&id, r.update, by, Some(observed)).map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
 }
 

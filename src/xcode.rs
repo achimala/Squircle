@@ -19,13 +19,93 @@ use crate::{
 
 const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-/// Build into an existing, unique job directory. Dropping this future terminates
-/// the current xcodebuild process group, including on server task shutdown.
+/// The app's own identity, read from the built product.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppMetadata {
+    pub bundle_id: String,
+    pub version: String,
+    pub build_number: String,
+    pub title: String,
+}
+
+/// What a successful build produced. An archive always has its signed IPA, a
+/// simulator build its app bundle.
+#[derive(Clone, Debug)]
+pub enum BuildArtifacts {
+    Archive {
+        archive: PathBuf,
+        ipa: PathBuf,
+        app: PathBuf,
+        dsyms: Vec<PathBuf>,
+        metadata: AppMetadata,
+    },
+    Simulator {
+        app: PathBuf,
+        dsyms: Vec<PathBuf>,
+        metadata: AppMetadata,
+    },
+}
+
+impl BuildArtifacts {
+    pub fn app(&self) -> &Path {
+        match self {
+            Self::Archive { app, .. } | Self::Simulator { app, .. } => app,
+        }
+    }
+
+    pub fn metadata(&self) -> &AppMetadata {
+        match self {
+            Self::Archive { metadata, .. } | Self::Simulator { metadata, .. } => metadata,
+        }
+    }
+}
+
+/// The persisted job record's shape, until it holds `BuildArtifacts` itself.
+impl From<BuildArtifacts> for BuildOutput {
+    fn from(artifacts: BuildArtifacts) -> Self {
+        let (archive, ipa, app, dsyms, metadata) = match artifacts {
+            BuildArtifacts::Archive {
+                archive,
+                ipa,
+                app,
+                dsyms,
+                metadata,
+            } => (Some(archive), Some(ipa), app, dsyms, metadata),
+            BuildArtifacts::Simulator {
+                app,
+                dsyms,
+                metadata,
+            } => (None, None, app, dsyms, metadata),
+        };
+        BuildOutput {
+            archive_path: archive,
+            ipa_path: ipa,
+            app_path: Some(app),
+            dsym_paths: dsyms,
+            bundle_id: metadata.bundle_id,
+            version: metadata.version,
+            build_number: metadata.build_number,
+            title: metadata.title,
+        }
+    }
+}
+
+/// `build`, in the job record's shape.
 pub async fn run(
     request: &BuildRequest,
     job_dir: &Path,
     cancel: watch::Receiver<bool>,
 ) -> Result<BuildOutput> {
+    build(request, job_dir, cancel).await.map(BuildOutput::from)
+}
+
+/// Build into an existing, unique job directory. Dropping this future terminates
+/// the current xcodebuild process group, including on server task shutdown.
+pub async fn build(
+    request: &BuildRequest,
+    job_dir: &Path,
+    cancel: watch::Receiver<bool>,
+) -> Result<BuildArtifacts> {
     validate_request(request)?;
     ensure!(!*cancel.borrow(), "build cancelled before starting");
     let project = request
@@ -96,12 +176,13 @@ pub async fn run(
                 children_with_extension(&archive.join("Products/Applications"), "app", true)?,
                 "archived application",
             )?;
-            let mut output = read_app_metadata(&app, &request.scheme)?;
-            output.dsym_paths = children_with_extension(&archive.join("dSYMs"), "dSYM", true)?;
-            output.archive_path = Some(archive);
-            output.ipa_path = Some(ipa);
-            output.app_path = Some(app);
-            Ok(output)
+            Ok(BuildArtifacts::Archive {
+                metadata: read_app_metadata(&app, &request.scheme)?,
+                dsyms: children_with_extension(&archive.join("dSYMs"), "dSYM", true)?,
+                archive,
+                ipa,
+                app,
+            })
         }
         BuildMode::Simulator => {
             let args = build_args(request, &project, &job_dir)?;
@@ -125,18 +206,18 @@ pub async fn run(
                 serde_json::from_reader(File::open(&settings_path)?)
                     .context("xcodebuild did not return valid build settings JSON")?;
             let app = simulator_app(&settings)?;
-            let mut output = read_app_metadata(&app, &request.scheme)?;
+            let metadata = read_app_metadata(&app, &request.scheme)?;
             let dsym = app.with_file_name(format!(
                 "{}.dSYM",
                 app.file_name()
                     .context("app has no name")?
                     .to_string_lossy()
             ));
-            if dsym.is_dir() {
-                output.dsym_paths.push(dsym);
-            }
-            output.app_path = Some(app);
-            Ok(output)
+            Ok(BuildArtifacts::Simulator {
+                dsyms: if dsym.is_dir() { vec![dsym] } else { Vec::new() },
+                app,
+                metadata,
+            })
         }
     }
 }
@@ -307,16 +388,89 @@ fn is_cancelled(cancel: &watch::Receiver<bool>) -> bool {
     *cancel.borrow() || cancel.has_changed().is_err()
 }
 
-struct ProcessGroup(libc::pid_t);
+/// Whether a helper's leader has exited, without reaping it. Until it is
+/// reaped, even as a zombie, its pid stays reserved, and with it the id of the
+/// group it leads.
+pub(crate) fn leader_exited(pid: libc::pid_t) -> bool {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let found = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    // An error means no such child to wait for; nothing is left to watch.
+    found != 0 || unsafe { info.si_pid() } == pid
+}
 
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        if self.0 > 0 {
-            // The child creates its own group before exec. A negative pid only
-            // addresses that group, never the server's process group.
-            unsafe {
-                libc::kill(-self.0, libc::SIGKILL);
+/// Kills every process left in a group whose leader is not yet reaped. The
+/// child creates its own group before exec, and a negative pid only addresses
+/// that group, never the server's.
+pub(crate) fn kill_group(leader: libc::pid_t) {
+    if leader > 0 {
+        unsafe {
+            libc::kill(-leader, libc::SIGKILL);
+        }
+    }
+}
+
+/// A helper and the process group it leads. The leader is held unreaped while
+/// the group is owned, so signalling the group can never reach a reused id;
+/// `reap` kills the group before it reaps the leader. Leader exit is not group
+/// completion: whatever the leader left running dies with the group, also when
+/// this is dropped.
+struct OwnedGroup {
+    pid: libc::pid_t,
+    leader: Option<tokio::process::Child>,
+}
+
+impl OwnedGroup {
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        command.kill_on_drop(true);
+        command.as_std_mut().process_group(0);
+        let leader = command.spawn()?;
+        let pid = leader
+            .id()
+            .ok_or_else(|| std::io::Error::other("helper has no process id"))?;
+        Ok(Self {
+            pid: pid as libc::pid_t,
+            leader: Some(leader),
+        })
+    }
+
+    /// Resolves once the leader has exited; it stays unreaped. `sigchld` was
+    /// registered before the spawn, so no exit is missed between checks.
+    async fn leader_exit(&self, sigchld: &mut Option<tokio::signal::unix::Signal>) {
+        while !leader_exited(self.pid) {
+            match sigchld {
+                Some(signal) => {
+                    let _ = tokio::time::timeout(Duration::from_secs(1), signal.recv()).await;
+                }
+                None => tokio::time::sleep(Duration::from_millis(20)).await,
             }
+        }
+    }
+
+    fn kill(&self) {
+        kill_group(self.pid);
+    }
+
+    async fn reap(mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.kill();
+        let mut leader = self.leader.take().expect("an owned group holds its leader");
+        match tokio::time::timeout(Duration::from_secs(5), leader.wait()).await {
+            Ok(status) => status,
+            Err(_) => Err(std::io::Error::other("helper did not exit after SIGKILL")),
+        }
+    }
+}
+
+impl Drop for OwnedGroup {
+    fn drop(&mut self) {
+        if self.leader.is_some() {
+            self.kill();
         }
     }
 }
@@ -399,34 +553,31 @@ pub(crate) async fn run_bounded(
     let failed = |error: std::io::Error| RunError::Failed(error.into());
     let (out, out_limit) = stdout.stdio().map_err(failed)?;
     let (err, err_limit) = stderr.stdio().map_err(failed)?;
-    command
-        .stdin(Stdio::null())
-        .stdout(out)
-        .stderr(err)
-        .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
-    let mut child = command.spawn().map_err(|error| {
+    command.stdin(Stdio::null()).stdout(out).stderr(err);
+    // Registered before the spawn so the leader's exit cannot be missed.
+    let mut sigchld =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
+    let mut group = OwnedGroup::spawn(&mut command).map_err(|error| {
         RunError::Failed(
             anyhow::Error::new(error)
                 .context(format!("cannot start {}", Path::new(&program).display())),
         )
     })?;
-    let Some(pid) = child.id() else {
-        return Err(RunError::Failed(anyhow::anyhow!(
-            "helper has no process id"
-        )));
-    };
-    let mut group = ProcessGroup(pid as libc::pid_t);
-    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let leader = group.leader.as_mut().expect("a spawned group holds its leader");
+    let (out, err) = (leader.stdout.take(), leader.stderr.take());
     let work = async {
-        let (stdout, stderr) =
-            tokio::try_join!(read_limited(out, out_limit), read_limited(err, err_limit))?;
-        let status = child.wait().await?;
-        Ok::<_, anyhow::Error>(Finished {
-            status,
-            stdout,
-            stderr,
-        })
+        let ended = async {
+            group.leader_exit(&mut sigchld).await;
+            // Descendants still holding the pipes would otherwise outlive it.
+            group.kill();
+            Ok(())
+        };
+        let (stdout, stderr, ()) = tokio::try_join!(
+            read_limited(out, out_limit),
+            read_limited(err, err_limit),
+            ended
+        )?;
+        Ok::<_, anyhow::Error>((stdout, stderr))
     };
     let result = tokio::select! {
         biased;
@@ -434,16 +585,13 @@ pub(crate) async fn run_bounded(
         _ = tokio::time::sleep_until(deadline) => Err(RunError::TimedOut),
         result = work => result.map_err(RunError::Failed),
     };
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        // The leader is reaped. Disarm to avoid ever signalling a reused
-        // process id.
-        group.0 = 0;
-    } else {
-        drop(group);
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-    }
-    result
+    let status = group.reap().await;
+    let (stdout, stderr) = result?;
+    Ok(Finished {
+        status: status.map_err(failed)?,
+        stdout,
+        stderr,
+    })
 }
 
 pub(crate) async fn run_command(
@@ -558,7 +706,7 @@ fn exactly_one(mut paths: Vec<PathBuf>, description: &str) -> Result<PathBuf> {
     Ok(paths.remove(0))
 }
 
-fn read_app_metadata(app: &Path, fallback_title: &str) -> Result<BuildOutput> {
+fn read_app_metadata(app: &Path, fallback_title: &str) -> Result<AppMetadata> {
     let info = app.join("Info.plist");
     let value = plist::Value::from_file(&info)
         .with_context(|| format!("cannot read {}", info.display()))?;
@@ -583,16 +731,7 @@ fn read_app_metadata(app: &Path, fallback_title: &str) -> Result<BuildOutput> {
         })
         .unwrap_or(fallback_title)
         .to_owned();
-    Ok(BuildOutput {
-        preview_path: None,
-        preview_state: None,
-        preview_error: None,
-        preview_captured_at: None,
-        preview_source: None,
-        archive_path: None,
-        ipa_path: None,
-        app_path: None,
-        dsym_paths: Vec::new(),
+    Ok(AppMetadata {
         bundle_id: required("CFBundleIdentifier")?,
         version: required("CFBundleShortVersionString")?,
         build_number: required("CFBundleVersion")?,
@@ -721,7 +860,6 @@ mod tests {
         assert_eq!(result.bundle_id, "com.example.App");
         assert_eq!(result.build_number, "42");
         assert_eq!(result.title, "Example App");
-        assert!(result.ipa_path.is_none());
     }
 
     #[test]
@@ -836,19 +974,84 @@ mod tests {
         assert_eq!(finished.stderr, b"err\n");
     }
 
+    fn gone(pid: libc::pid_t) -> bool {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(3) {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
     #[tokio::test]
-    async fn dropping_process_group_terminates_its_child() {
-        use std::os::unix::process::ExitStatusExt;
-        let mut command = Command::new("/bin/sleep");
-        command.arg("30").kill_on_drop(true);
-        command.as_std_mut().process_group(0);
-        let mut child = command.spawn().unwrap();
-        let group = ProcessGroup(child.id().unwrap() as libc::pid_t);
-        drop(group);
-        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-            .await
+    async fn leader_exit_kills_what_it_left_running() {
+        // The background sleep keeps stdout open after the shell exits.
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & echo $!"]);
+        let started = Instant::now();
+        let finished = run_bounded(
+            command,
+            Sink::Capture(1024),
+            Sink::Discard,
+            started + Duration::from_secs(10),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(finished.status.success());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let left: libc::pid_t = String::from_utf8(finished.stdout)
             .unwrap()
+            .trim()
+            .parse()
             .unwrap();
-        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        assert!(gone(left));
+
+        // Also when nothing holds a pipe, and when the deadline ends it first.
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $! > \"$0\"; sleep 30"])
+            .arg(marker.path());
+        let result = run_bounded(
+            command,
+            Sink::Discard,
+            Sink::Discard,
+            Instant::now() + Duration::from_millis(500),
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(RunError::TimedOut)));
+        let left: libc::pid_t = fs::read_to_string(marker.path())
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(gone(left));
+    }
+
+    #[tokio::test]
+    async fn dropping_a_run_kills_its_group() {
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & echo $! > \"$0\"; wait"])
+            .arg(marker.path());
+        let run = run_bounded(
+            command,
+            Sink::Discard,
+            Sink::Discard,
+            Instant::now() + Duration::from_secs(30),
+            None,
+        );
+        let _ = tokio::time::timeout(Duration::from_millis(300), run).await;
+        let left: libc::pid_t = fs::read_to_string(marker.path())
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(gone(left));
     }
 }

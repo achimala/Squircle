@@ -65,3 +65,29 @@ final class MotionAudit: NSObject {
     }
 }
 #endif
+
+#if DEBUG
+import UIKit
+
+/// Verification only: `SQUIRCLE_SCROLL_SWEEP=1` pages a scroll view up and
+/// back down a few seconds after it appears, so a performance recording
+/// covers scrolling without anyone touching the simulator.
+@MainActor
+enum ScrollSweep {
+    static func start(_ scroll: UIScrollView) {
+        guard ProcessInfo.processInfo.environment["SQUIRCLE_SCROLL_SWEEP"] == "1" else { return }
+        Task { [weak scroll] in
+            try? await Task.sleep(for: .seconds(5.5))
+            for step in [-1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1] as [CGFloat] {
+                guard let scroll, scroll.window != nil else { return }
+                let page = scroll.bounds.height * 0.8
+                let top = -scroll.adjustedContentInset.top
+                let bottom = max(top, scroll.contentSize.height + scroll.adjustedContentInset.bottom - scroll.bounds.height)
+                let y = min(bottom, max(top, scroll.contentOffset.y + step * page))
+                scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: y), animated: true)
+                try? await Task.sleep(for: .milliseconds(450))
+            }
+        }
+    }
+}
+#endif
