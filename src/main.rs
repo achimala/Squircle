@@ -175,7 +175,7 @@ enum AgentCommand {
         target: AgentTarget,
     },
     /// Replace the agent with a new thread seeded by a short handoff; the old conversation stays readable and its workers move to the new agent.
-    #[command(after_help = "The handoff has the app, recent commits, open workers, the user's recent messages and your --handoff note. Happens now if the agent is between turns, otherwise when its current turn ends.")]
+    #[command(after_help = "The handoff has the app, recent commits, open workers, the user's recent messages, your last reply and your --handoff note. Happens now if the agent is between turns, otherwise when its current turn ends.")]
     Fresh {
         #[command(flatten)]
         target: AgentTarget,

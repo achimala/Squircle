@@ -599,8 +599,8 @@ impl Agents {
     }
 
     /// What a new agent needs from the old one, gathered without a model:
-    /// the app, recent commits, open workers, what the user said lately and
-    /// the old agent's own note.
+    /// the app, recent commits, open workers, what the user said lately, the
+    /// old agent's last reply and its own note.
     async fn handoff(&self, client: &T3, agent: &Agent, note: Option<&str>) -> Result<String> {
         let project = self.shell.lock().unwrap().projects.get(&agent.project_id).cloned().context("The app's T3 project is gone")?;
         let app = project["title"].as_str().unwrap_or("this app");
@@ -630,6 +630,12 @@ impl Agents {
             commits = if commits.is_empty() { "none".into() } else { commits },
             said = if said.is_empty() { "\nnothing".into() } else { said },
         );
+        let last = old["messages"].as_array().into_iter().flatten().rev()
+            .find(|m| m["role"] == "assistant").and_then(|m| m["text"].as_str()).unwrap_or("").trim();
+        if !last.is_empty() {
+            let last = if last.chars().count() > 1500 { format!("{}…", last.chars().take(1500).collect::<String>()) } else { last.to_string() };
+            text += &format!("\n\nThe previous agent's last reply:\n{last}");
+        }
         if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
             text += &format!("\n\nThe previous agent's note:\n{note}");
         }
