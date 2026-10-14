@@ -358,12 +358,17 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        // Bounds and centre: the overlay's handle may be shifting them.
         let x = overlayLayout?.inset ?? 16, y = safeArea.top + (overlayLayout?.inset ?? 4)
-        back.frame = CGRect(x: x, y: y, width: 44, height: 44)
-        threads.frame = CGRect(x: x + 54, y: y, width: 44, height: 44)
-        builds.frame = CGRect(x: x + 108, y: y, width: 44, height: 44)
-        more.frame = CGRect(x: view.bounds.width - x - 44, y: y, width: 44, height: 44)
+        back.place(in: CGRect(x: x, y: y, width: 44, height: 44))
+        threads.place(in: CGRect(x: x + 54, y: y, width: 44, height: 44))
+        builds.place(in: CGRect(x: x + 108, y: y, width: 44, height: 44))
+        more.place(in: CGRect(x: view.bounds.width - x - 44, y: y, width: 44, height: 44))
         layoutConversation()
+    }
+
+    /// The bottom of the top controls, without the overlay's shift.
+    private var controlsBottom: CGFloat { safeArea.top + (overlayLayout?.inset ?? 4) + 44
     }
 
     /// The conversation runs the full height beneath the floating controls.
@@ -371,29 +376,59 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard isViewLoaded, view.bounds.width > 0 else { return }
         let width = view.bounds.width, height = view.bounds.height
         clip.frame = view.bounds
-        // Taller or shorter (the overlay's handle), the newest message stays
-        // where it was: the conversation grows and shrinks at its top.
+        // Taller or shorter (the overlay's handle), what shows at the bottom
+        // stays where it was: the conversation grows and shrinks at its top.
+        // Rows coming into view are measured, which can change the content's
+        // height, so the offset is settled against the content's end.
         let previous = table.bounds.height
+        let gap = table.contentSize.height + table.contentInset.bottom - (table.contentOffset.y + previous)
         table.frame = view.bounds
-        if previous > 0, abs(previous - height) > 0.5, !table.isTracking {
-            table.contentOffset.y = max(-table.contentInset.top, table.contentOffset.y - (height - previous))
+        if previous > 0, abs(previous - height) > 0.5, pinToBottom {
+            scrollToBottom()
+        } else if previous > 0, abs(previous - height) > 0.5, !table.isTracking {
+            for _ in 0..<3 {
+                let y = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - height - gap)
+                if abs(table.contentOffset.y - y) < 0.5 { break }
+                table.contentOffset.y = y
+                table.layoutIfNeeded()
+            }
         }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        fade.frame = clip.bounds
-        let faded = overlayLayout == nil ? safeArea.top + 20 : back.frame.maxY
-        fade.endPoint = CGPoint(x: 0.5, y: min(1, faded / max(1, height)))
-        CATransaction.commit()
+        placeFade()
         // The jump button floats over the conversation; it takes no row.
         let floor = request.isHidden ? (notice.isHidden ? composer.frame.minY : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
-        let insets = UIEdgeInsets(top: back.frame.maxY + 6, left: 0, bottom: height - floor + 10, right: 0)
+        let insets = UIEdgeInsets(top: controlsBottom + 6, left: 0, bottom: height - floor + 10, right: 0)
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
             if pinned { scrollToBottom() }
         }
     }
+
+    /// The conversation fades out under the top controls, from the top of
+    /// what shows.
+    private func placeFade() {
+        let height = max(1, view.bounds.height)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fade.frame = clip.bounds
+        let faded = overlayLayout == nil ? safeArea.top + 20 : controlsBottom
+        fade.startPoint = CGPoint(x: 0.5, y: min(1, visibleTop / height))
+        fade.endPoint = CGPoint(x: 0.5, y: min(1, (visibleTop + faded) / height))
+        CATransaction.commit()
+    }
+
+    /// The debug overlay's handle reveals this view from the bottom without
+    /// laying it out again: the top `y` points are hidden above its glass.
+    /// The top controls and the fade ride the visible top edge.
+    func setVisibleTop(_ y: CGFloat) {
+        guard y != visibleTop else { return }
+        visibleTop = y
+        let shift = CGAffineTransform(translationX: 0, y: y)
+        for control in [back, threads, builds, more] { control.transform = shift }
+        placeFade()
+    }
+    private var visibleTop: CGFloat = 0
 
     /// Floating controls fade as the thread leaves, so they never cross
     /// Home's own controls coming the other way.
@@ -450,7 +485,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         shownAttachments = attached
         renderSend()
         renderRequest()
-        let error = model.error ?? (model.connected ? nil : "Reconnecting…")
+        // A brief reconnect is silent; the model reports one that keeps failing.
+        let error = model.error
         if notice.text != error || notice.isHidden != (error == nil) {
             notice.text = error
             notice.isHidden = error == nil

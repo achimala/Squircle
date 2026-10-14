@@ -31,6 +31,14 @@ final class OverlayHost {
         observers.append(center.addObserver(forName: UIScene.willDeactivateNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { OverlayHost.shared.model?.stopMetadataUpdates() }
         })
+        // The host app's lifecycle is the overlay's: hold T3's socket in the
+        // background, reconnect on return.
+        observers.append(center.addObserver(forName: UIScene.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { OverlayHost.shared.model?.enteredBackground() }
+        })
+        observers.append(center.addObserver(forName: UIScene.willEnterForegroundNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { OverlayHost.shared.model?.enteringForeground() }
+        })
         activate(nil)
     }
 
@@ -112,17 +120,20 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// A picture of the content at its previous size, stretched with the
     /// glass and blurring out while the content at the new size blurs in.
     private var outgoing: (view: UIView, size: CGSize)?
-    private var edgeEffectsHidden = false
     /// The panel's grab handle: drag it to resize the panel, up to full
     /// screen or down into the bubble.
     private let handle = UIView()
     private var handlePan: UIPanGestureRecognizer!
     /// The docked panel's height, once the handle has set it.
     private var miniHeight: CGFloat?
-    /// The handle is moving the panel: its content is laid out at the
-    /// glass's own size every frame (text reflows, nothing stretches) until
-    /// the spring rests.
-    private var liveResize = false
+    /// While the handle resizes the docked panel (and until it rests): the
+    /// conversation is laid out once at this size and pinned to the glass's
+    /// bottom edge, which reveals it. Nothing re-lays out per frame.
+    private var clipLayout: CGSize?
+    /// Where along the handle's path the finger is.
+    private enum DragZone { case docked, full, collapse }
+    private var dragZone: DragZone?
+    private var dragSlop: CGFloat = 0
 
     private typealias Mounted = (controller: ThreadViewController, host: UIView)
     /// Mounted once the app is known and kept, so opening shows it at once.
@@ -210,11 +221,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         flash.backgroundColor = .white
         flash.alpha = 0
         flash.isUserInteractionEnabled = false
-        // Soft and unhurried (about 0.65 s), so it reads as the picture
-        // going into the field; the flash is its own quick fade.
-        flight.parameters = SpringDriver.Parameters(response: 0.78, damping: 0.92)
-        flashFade.parameters = SpringDriver.Parameters(response: 0.32, damping: 1)
-        flashFade.onChange = { [weak self] value in self?.flash.alpha = 0.85 * value.clamped() }
+        // Springy: quick out of the screen, a little overshoot into the
+        // slot, no slow crawl at the end. The flash is a soft, short fade.
+        flight.parameters = SpringDriver.Parameters(response: 0.5, damping: 0.72)
+        flashFade.parameters = SpringDriver.Parameters(response: 0.2, damping: 1)
+        flashFade.onChange = { [weak self] value in self?.flash.alpha = 0.4 * value.clamped() }
         flashFade.onRest = { [weak self] _ in self?.flash.removeFromSuperview() }
         flight.onChange = { [weak self] _ in self?.applyFlight() }
         flight.onRest = { [weak self] _ in self?.landed() }
@@ -341,7 +352,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Sends the glass toward wherever the route and anchor now put it.
     private func retarget(velocity: CGPoint? = nil, sizeVelocity: CGSize = .zero) {
         guard view.bounds.width > 0 else { return }
-        if !liveResize, route.open || panelSize == .zero { layOutPanel(at: route.open && route.full ? view.bounds.size : miniFrame.size) }
+        // A finger on the handle sets the content up itself.
+        if clipLayout == nil, dragZone == nil, route.open || panelSize == .zero { layOutPanel(at: route.open && route.full ? view.bounds.size : miniFrame.size) }
         guard !frame.isHeld else { return }
         let target = targetFrame
         if frame.target != target || velocity != nil { frame.animate(to: target, velocity: velocity, sizeVelocity: sizeVelocity) }
@@ -354,30 +366,21 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                             bottom: max(0, rect.maxY - (bounds.maxY - safe.bottom)), right: max(0, rect.maxX - (bounds.maxX - safe.right)))
     }
 
-    /// Lays the panel's content out at a new resting size. If it shows, a
-    /// picture of how it was blurs out as the glass stretches. `live`: the
-    /// glass's current frame while the handle moves it, laid out directly.
-    private func layOutPanel(at size: CGSize, live: CGRect? = nil) {
+    /// Lays the panel's content out at a new resting size. If it shows (and
+    /// `crossBlur`), a picture of how it was blurs out as the glass stretches.
+    private func layOutPanel(at size: CGSize, crossBlur: Bool = true) {
         guard size != panelSize, size.width > 0 else { return }
         outgoing?.view.removeFromSuperview()
         outgoing = nil
-        let showing = live == nil && panelSize != .zero && page.alpha > 0.02 && !page.isHidden && view.window != nil
-        if showing { setEdgeEffectsHidden(true) }
-        if showing, let picture = body.snapshotView(afterScreenUpdates: true) {
-            let stage = UIView()
-            stage.isUserInteractionEnabled = false
-            stage.backgroundColor = page.backgroundColor
-            stage.bounds = CGRect(origin: .zero, size: panelSize)
-            picture.frame = stage.bounds
-            stage.addSubview(picture)
-            glass.contentView.insertSubview(stage, belowSubview: page)
-            outgoing = (stage, panelSize)
-        }
+        let showing = crossBlur && panelSize != .zero && page.alpha > 0.02 && !page.isHidden && view.window != nil
+        // Cells laid out this moment haven't laid their own contents out
+        // yet (labels with no width); finish that before drawing.
+        if showing { keepPicture() }
         panelSize = size
         page.transform = .identity
         page.bounds = CGRect(origin: .zero, size: size)
         body.frame = page.bounds
-        let safe = live.map(safeArea(in:)) ?? (size == view.bounds.size ? view.safeAreaInsets : .zero)
+        let safe = size == view.bounds.size ? view.safeAreaInsets : .zero
         // At the top centre, level with the ⋯ button; the strip it grabs runs
         // from the panel's edge to below the buttons.
         handle.frame = CGRect(x: size.width / 2 - 60, y: safe.top, width: 120, height: Self.inset + 44)
@@ -387,6 +390,24 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             place(mounted, offset: 0)
             mounted.controller.view.layoutIfNeeded()
         }
+    }
+
+    /// Keeps a picture of the panel as it shows now, for the morph to blur
+    /// out. It copies the glass as drawn on screen: inside the glass, gray
+    /// labels and fills are vibrant, which only the render server draws, so
+    /// any picture of the content alone loses them.
+    private func keepPicture() {
+        guard let picture = glass.snapshotView(afterScreenUpdates: false) else { return }
+        let size = glass.bounds.size
+        let stage = UIView()
+        stage.isUserInteractionEnabled = false
+        stage.clipsToBounds = true
+        stage.backgroundColor = page.backgroundColor
+        stage.bounds = CGRect(origin: .zero, size: size)
+        picture.frame = stage.bounds
+        stage.addSubview(picture)
+        glass.contentView.insertSubview(stage, belowSubview: page)
+        outgoing = (stage, size)
     }
 
     /// How far a size has come from `from` toward `to` (1 there, beyond 1
@@ -409,10 +430,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let bounds = view.bounds, bubbleSize = self.bubbleSize
         let local = CGRect(origin: .zero, size: rect.size)
         // 0 at bubble size, 1 at the panel's size; 0…1 mini → full.
-        let opened = Self.progress(rect.size, from: bubbleSize, to: panelSize).clamped()
+        let opened = clipLayout != nil ? 1 : Self.progress(rect.size, from: bubbleSize, to: panelSize).clamped()
         let fullness = ((rect.height - miniFrame.height) / max(1, bounds.height - miniFrame.height)).clamped()
         glass.frame = rect
-        if liveResize, route.open { layOutPanel(at: rect.size, live: rect) }
         let radius = min(rect.height / 2, rect.width / 2, .lerp(Self.panelRadius, 0, fullness))
         Theme.setGlassCorner(glass, radius: radius)
         glass.contentView.layer.cornerRadius = radius
@@ -424,17 +444,30 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         stretch(bubbleStage, from: CGSize(width: lineWidth, height: bubbleSize.height), into: local)
         if bubble.frame.size != bubbleStage.bounds.size { bubble.frame = bubbleStage.bounds }
         crossBlur(bubbleStage, visibility: 1 - opened, sharpAt: 0.6)
-        stretch(page, from: panelSize, into: local)
+        if let clip = clipLayout {
+            // Revealed from the bottom by the glass, at its laid-out size.
+            page.transform = .identity
+            if page.bounds.size != clip { page.bounds = CGRect(origin: .zero, size: clip) }
+            page.center = CGPoint(x: local.midX, y: local.maxY - clip.height / 2)
+            revealTop(max(0, clip.height - rect.height))
+        } else {
+            stretch(page, from: panelSize, into: local)
+            revealTop(0)
+        }
         // Mini ↔ full: the content at its old size blurs out as the new one comes in.
-        var shown = opened
+        var shown = opened, blur: CGFloat = 24
         if let outgoing {
             let arrived = Self.progress(rect.size, from: outgoing.size, to: panelSize).clamped()
             shown *= arrived
+            // Blur as much as the sizes differ, enough to hide the two
+            // layouts' lines crossing.
+            let change = max(abs(outgoing.size.width - panelSize.width), abs(outgoing.size.height - panelSize.height))
+            blur = 10 + 14 * (change / 500).clamped()
             stretch(outgoing.view, from: outgoing.size, into: local)
-            crossBlur(outgoing.view, visibility: Self.progress(rect.size, from: bubbleSize, to: outgoing.size).clamped() * (1 - arrived))
+            crossBlur(outgoing.view, visibility: Self.progress(rect.size, from: bubbleSize, to: outgoing.size).clamped() * (1 - arrived),
+                      sharpAt: 0.5, blur: blur)
         }
-        crossBlur(page, visibility: shown)
-        setEdgeEffectsHidden(outgoing != nil || page.layer.filters != nil || !page.transform.isIdentity)
+        crossBlur(page, visibility: shown, sharpAt: outgoing == nil ? 0.85 : 0.5, blur: blur)
         page.isHidden = page.alpha == 0 && !route.open
         // Paper under the conversation, so it reads over any app. It is the
         // blurred layer's own background: the blur renders clear areas black.
@@ -471,11 +504,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubble.accessibilityElementsHidden = route.open
     }
 
-    private func setEdgeEffectsHidden(_ hidden: Bool) {
-        guard hidden != edgeEffectsHidden else { return }
-        edgeEffectsHidden = hidden
-        agent?.controller.setEdgeEffectsHidden(hidden)
-        thread?.controller.setEdgeEffectsHidden(hidden)
+    /// The top `y` points of the panel's content are above the glass: the
+    /// handle and the conversations' top controls ride the visible edge.
+    private func revealTop(_ y: CGFloat) {
+        handle.frame.origin.y = y + (panelSize == view.bounds.size ? view.safeAreaInsets.top : 0)
+        agent?.controller.setVisibleTop(y)
+        thread?.controller.setVisibleTop(y)
     }
 
     /// Lays a view out at `size` and scales it to fill `rect`.
@@ -488,11 +522,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         view.transform = CGAffineTransform(scaleX: rect.width / max(1, size.width), y: rect.height / max(1, size.height))
     }
 
-    /// Sharp and opaque from `sharpAt` up; below it blurs and fades, gone at 0.
-    private func crossBlur(_ view: UIView, visibility: CGFloat, sharpAt: CGFloat = 0.85) {
+    /// Sharp and opaque from `sharpAt` up; below it blurs (up to `blur`
+    /// points) and fades, gone at 0.
+    private func crossBlur(_ view: UIView, visibility: CGFloat, sharpAt: CGFloat = 0.85, blur: CGFloat = 24) {
         let v = (visibility / sharpAt).clamped()
         view.alpha = (v * v * (3 - 2 * v))
-        Self.blur(view.layer, radius: (1 - v) * 24)
+        Self.blur(view.layer, radius: (1 - v) * blur)
     }
 
     /// Core Animation's Gaussian blur on a layer, by radius. Private, as
@@ -524,7 +559,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     }
 
     private func rested() {
-        if !frame.isAnimating, !frame.isHeld { liveResize = false }
+        if !frame.isAnimating, !frame.isHeld, clipLayout != nil {
+            // At rest: laid out at its own size once. The conversation keeps
+            // its newest line where it was, so nothing moves.
+            clipLayout = nil
+            layOutPanel(at: frame.value.size, crossBlur: false)
+            applyScene()
+        }
         if !frame.isAnimating, let stage = outgoing?.view {
             outgoing = nil
             stage.removeFromSuperview()
@@ -709,7 +750,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         controller.didMove(toParent: self)
         let mounted = (controller, host)
         controller.setOverlayLayout(inset: Self.inset, safe: panelSize == view.bounds.size ? view.safeAreaInsets : .zero)
-        controller.setEdgeEffectsHidden(edgeEffectsHidden)
+        // The system's scroll-edge blur can't draw inside the blurred,
+        // stretched layers of the morph, so it would pop in at rest; the
+        // overlay always fades the conversation under its controls instead.
+        controller.setEdgeEffectsHidden(true)
         host.frame = body.bounds
         controller.view.frame = host.bounds
         controller.setTransitionProgress(1)
@@ -791,59 +835,124 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     @objc private func handleTapped() { toggleFull() }
 
-    /// The panel's top edge follows the finger, its content laid out at
-    /// every size. Above the docked panel it grows toward full screen. Let
-    /// go, it springs on with the finger's speed: to full screen near the
-    /// top, into the bubble when short, else docked at that height.
+    /// The finger moves the panel's top edge along one path. Docked, only
+    /// the top moves, revealing the conversation from the bottom. Above the
+    /// tallest docked panel it morphs (stretch and cross blur, as the spring
+    /// does) toward full screen; shorter than `minimumHeight` it morphs
+    /// toward the bubble. Let go, the spring carries on from there with the
+    /// finger's speed, or back.
     @objc private func handleDragged(_ gesture: UIPanGestureRecognizer) {
-        let dy = gesture.translation(in: view).y
+        // From where the pan is recognized: its first translation includes
+        // the system's slop, which would make the edge skip.
+        let dy = gesture.translation(in: view).y - dragSlop
         switch gesture.state {
         case .began:
+            dragSlop = gesture.translation(in: view).y
             dragStart = frame.value
-            liveResize = true
             frame.hold(dragStart)
+            dragZone = nil
+            follow(top: dragStart.minY)
+            return
         case .changed:
-            frame.hold(resizedFrame(top: dragStart.minY + dy))
+            follow(top: dragStart.minY + dy)
         case .ended, .cancelled, .failed:
             let vy = gesture.velocity(in: view).y
-            let current = frame.value, docked = dockedFrame
-            let top = current.minY + vy * 0.15
+            let top = dragStart.minY + dy + vy * 0.15
+            let tall = tallestDocked
             frame.release()
-            if top < safeBounds.minY + 20 {
+            if top < tall.minY - 0.4 * (tall.minY - view.bounds.minY) {
+                enter(.full)
                 route.full = true
-            } else if current.maxY - top < Self.minimumHeight {
-                // Folds back into the bubble: content stretches from here.
-                liveResize = false
+            } else if top > collapseTop + 0.4 * (Self.minimumHeight - bubbleSize.height) {
+                enter(.collapse)
                 route.full = false
                 close()
-                frame.animate(to: targetFrame, velocity: CGPoint(x: 0, y: vy), sizeVelocity: CGSize(width: 0, height: -vy))
-                return
+            } else if top < tall.minY {
+                // Most of the way back from full: the tallest docked panel.
+                enter(.full)
+                route.full = false
+                miniHeight = tall.height
+            } else if top > collapseTop {
+                enter(.collapse)
+                route.full = false
             } else {
                 route.full = false
-                let height = docked.maxY - max(top, safeBounds.minY)
-                miniHeight = height
+                miniHeight = tall.maxY - top
                 // Docked under the bubble, the panel's top is the bubble's.
-                if !lower { anchor = (anchor?.right ?? true, docked.maxY - height + bubbleSize.height / 2) }
+                if !lower { anchor = (anchor?.right ?? true, top + bubbleSize.height / 2) }
             }
-            // The text reflows live only while its width holds; a new width
-            // (docked ↔ full) cross-blurs with the glass instead.
-            liveResize = abs(targetFrame.width - current.width) < 0.5
+            // The spring takes over: content follows the route again.
+            dragZone = nil
             setNeedsUpdateOfSupportedInterfaceOrientations()
             retarget(velocity: CGPoint(x: 0, y: vy), sizeVelocity: CGSize(width: 0, height: -vy))
         default: break
         }
     }
 
-    /// Where the docked panel's bottom and sides are, at its current height.
-    private var dockedFrame: CGRect { miniFrame }
+    /// The tallest docked panel: the docked panel's sides and bottom, its top
+    /// just under the safe area.
+    private var tallestDocked: CGRect {
+        let docked = miniFrame, top = safeBounds.minY
+        return CGRect(x: docked.minX, y: top, width: docked.width, height: docked.maxY - top)
+    }
 
-    /// The panel as the finger holds it: only its top edge moves. Its sides
-    /// and bottom stay where the drag began, so the field holds still and no
-    /// line re-wraps; letting go decides any change of width.
-    private func resizedFrame(top: CGFloat) -> CGRect {
-        let start = dragStart
-        let top = top.clamped(min(start.minY, safeBounds.minY), start.maxY - bubbleSize.height)
-        return CGRect(x: start.minX, y: top, width: start.width, height: start.maxY - top)
+    /// Shorter than here, the panel heads for the bubble.
+    private var collapseTop: CGFloat { tallestDocked.maxY - Self.minimumHeight }
+
+    /// Holds the glass where the finger's top edge puts it on the path.
+    private func follow(top: CGFloat) {
+        let tall = tallestDocked, full = view.bounds
+        let zone: DragZone = top < tall.minY ? .full : top > collapseTop ? .collapse : .docked
+        enter(zone)
+        let rect: CGRect
+        switch zone {
+        case .full:
+            rect = .lerp(tall, full, ((tall.minY - top) / max(1, tall.minY - full.minY)).clamped())
+        case .docked:
+            rect = CGRect(x: tall.minX, y: top, width: tall.width, height: tall.maxY - top)
+        case .collapse:
+            let start = CGRect(x: tall.minX, y: collapseTop, width: tall.width, height: Self.minimumHeight)
+            rect = .lerp(start, bubbleFrame, ((top - collapseTop) / max(1, Self.minimumHeight - bubbleSize.height)).clamped())
+        }
+        frame.hold(rect)
+    }
+
+    /// Sets the content up for a part of the path; once per crossing.
+    private func enter(_ zone: DragZone) {
+        guard zone != dragZone else { return }
+        dragZone = zone
+        let tall = tallestDocked
+        switch zone {
+        case .docked:
+            // Laid out once, a little taller than the tallest docked panel
+            // so the spring's overshoot never shows its edge.
+            let size = CGSize(width: tall.width, height: tall.height + 40)
+            layOutPanel(at: size, crossBlur: false)
+            clipLayout = size
+        case .full:
+            // Between the tallest docked panel and the full screen, one
+            // layout blurs into the other: what shows now is pictured, the
+            // other end is laid out.
+            if clipLayout != nil {
+                clipLayout = nil
+                outgoing?.view.removeFromSuperview()
+                outgoing = nil
+                keepPicture()
+                let picture = outgoing
+                outgoing = nil
+                layOutPanel(at: view.bounds.size, crossBlur: false)
+                outgoing = picture
+            } else if panelSize == view.bounds.size {
+                layOutPanel(at: tall.size)
+            } else {
+                layOutPanel(at: view.bounds.size)
+            }
+        case .collapse:
+            // The shortest panel, which stretches into the bubble.
+            clipLayout = nil
+            layOutPanel(at: CGSize(width: tall.width, height: Self.minimumHeight), crossBlur: false)
+        }
+        applyScene()
     }
 
     /// The glass and everything in it follow the finger; on release they
@@ -1037,6 +1146,12 @@ final class FrameSpring {
             value = CGRect(x: current[0], y: current[1], width: max(1, current[2]), height: max(1, current[3]))
             onChange?()
         }
+    }
+}
+private extension CGRect {
+    static func lerp(_ a: CGRect, _ b: CGRect, _ t: CGFloat) -> CGRect {
+        CGRect(x: .lerp(a.minX, b.minX, t), y: .lerp(a.minY, b.minY, t),
+               width: .lerp(a.width, b.width, t), height: .lerp(a.height, b.height, t))
     }
 }
 #endif

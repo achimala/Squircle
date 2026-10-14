@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import Network
 import UIKit
 
 @MainActor
@@ -76,7 +77,13 @@ final class SquircleModel {
     private var threadSubscription: String?
     private var refreshing = false
     private var monitor: Task<Void,Never>?
-    private var reconnect: Task<Void,Never>?
+    private var connector: Task<Void,Never>?
+    /// The wait before the connector's next attempt; cancelling it retries now.
+    private var nap: Task<Void,Never>?
+    private var failingSince: ContinuousClock.Instant?
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// Background time ran out and the socket was closed; reconnect on return.
+    private var suspended = false
     private var previewCache: [String:Data] = [:]
     private var launchReported = false
     private var sessionProjects: [String:String] = [:]
@@ -208,31 +215,35 @@ final class SquircleModel {
             shell = home.shell; appMetadata = home.metadata; shellChanged()
         }
         gateway?.onDisconnect = { [weak self] in
-            guard let self else { return }; connected = false; status = "Reconnecting"; reconnect?.cancel()
-            reconnect = Task { [weak self] in
-                var delay = 1
-                while !Task.isCancelled, let self, !self.connected {
-                    try? await Task.sleep(for: .seconds(delay)); if Task.isCancelled { return }
-                    await self.refresh(); delay = min(delay * 2, 15)
+            guard let self else { return }
+            connected = false; status = "Reconnecting"; threadSubscription = nil
+            log("T3 socket dropped; reconnecting")
+            keepConnected()
+        }
+        if gateway != nil { watchNetwork() }
+        #if DEBUG
+        // Verification only: T3's socket fails every N seconds.
+        if let every = ProcessInfo.processInfo.environment["SQUIRCLE_DROP_T3_EVERY"].flatMap(Double.init), every > 0 {
+            Task { [weak self] in
+                while true {
+                    try? await Task.sleep(for: .seconds(every))
+                    guard let self else { return }
+                    gateway?.dropForTesting()
                 }
             }
         }
+        #endif
     }
     func refresh() async {
-        guard !refreshing else { return }; refreshing = true; isLoading = true
-        defer { refreshing = false; isLoading = false }
-        guard let gateway, let client else { error = ClientError.configuration.localizedDescription; return }
+        guard gateway != nil, client != nil else { error = ClientError.configuration.localizedDescription; return }
+        guard connected else { failingSince = nil; keepConnected(); nap?.cancel(); return }
+        await refreshServices()
+    }
+    /// Builds, app metadata and agents come from the Squircle service, not T3.
+    private func refreshServices() async {
+        guard !refreshing, let client else { return }; refreshing = true
+        defer { refreshing = false }
         do {
-            if !connected {
-                try await gateway.connect()
-                let config = try await gateway.call("server.getConfig")
-                consumeConfig(config)
-                devices = try await gateway.call("device.list")
-                try await gateway.subscribe("orchestration.subscribeShell") { [weak self] in self?.consumeShell($0) }
-                try await gateway.subscribe("subscribeDeviceState") { [weak self] in self?.devices = $0 }
-                connected = true; status = "Connected"; error = nil
-                if let id = selectedSessionID { await selectSession(id) }
-            }
             async let listed = client.builds()
             async let metadata = client.fetchAppMetadata()
             builds = try await listed; appMetadata = try await metadata; reconcileProjects(); scheduleHomeWrite()
@@ -241,7 +252,125 @@ final class SquircleModel {
             if !launchReported, let id = Bundle.main.object(forInfoDictionaryKey:"SquircleBuildID") as? String, UUID(uuidString:id) != nil {
                 try await client.reportLaunch(buildID:id,eventID:UUID().uuidString,timestamp:Int(Date.now.timeIntervalSince1970)); launchReported = true
             }
+        } catch where Self.isTransient(error) {
+            // Coming back from the background the network may not be up yet;
+            // the metadata loop tries again in a few seconds.
         } catch { self.error = error.localizedDescription }
+    }
+    nonisolated static func isTransient(_ error: Error) -> Bool {
+        if case ClientError.connection = error { return true }
+        guard let error = error as? URLError else { return false }
+        return [.notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotConnectToHost, .cannotFindHost,
+                .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed, .secureConnectionFailed, .cancelled].contains(error.code)
+    }
+
+    // MARK: Connection
+
+    /// How long T3 may stay unreachable before Squircle says so. Shorter
+    /// outages (an app switch, a network handover) reconnect silently.
+    static let reconnectGrace: Duration = .seconds(8)
+    /// Keeps T3's socket up while Squircle is in use: the first attempt is
+    /// immediate, then 0.5 s doubling to 15 s. One connector at a time;
+    /// `nap?.cancel()` makes it try again now.
+    private func keepConnected() {
+        guard gateway != nil, connector == nil, !connected, !suspended else { return }
+        isLoading = true
+        connector = Task { [weak self] in
+            var delay: Duration = .zero
+            while let self, !connected, !suspended {
+                if delay > .zero {
+                    let nap = Task { [delay] in _ = try? await Task.sleep(for: delay) }
+                    self.nap = nap; await nap.value; self.nap = nil
+                    if suspended { break }
+                }
+                do { try await openConnection() }
+                catch {
+                    log("T3 connect failed: \(error.localizedDescription)")
+                    let since = failingSince ?? .now; failingSince = since
+                    if since.duration(to: .now) >= Self.reconnectGrace {
+                        // Truly unreachable: say so, and stop looking busy.
+                        self.error = error.localizedDescription; status = "Offline"; isLoading = false
+                    }
+                    delay = delay == .zero ? .milliseconds(500) : min(delay * 2, .seconds(15))
+                }
+            }
+            guard let self else { return }
+            connector = nil; isLoading = false
+            if connected { await refreshServices() }
+        }
+    }
+    /// One connection attempt: socket, config, live subscriptions, and the
+    /// open thread resubscribed. Its transcript stays on screen meanwhile;
+    /// T3's snapshot then brings it up to date.
+    private func openConnection() async throws {
+        guard let gateway else { throw ClientError.configuration }
+        try await gateway.connect()
+        do {
+            consumeConfig(try await gateway.call("server.getConfig"))
+            devices = try await gateway.call("device.list")
+            try await gateway.subscribe("orchestration.subscribeShell") { [weak self] in self?.consumeShell($0) }
+            try await gateway.subscribe("subscribeDeviceState") { [weak self] in self?.devices = $0 }
+            threadSubscription = nil
+            if let id = selectedSessionID { try await subscribeThread(id) }
+            // The socket may have failed while subscribing; then try again.
+            guard gateway.isOpen, !suspended else { throw ClientError.connection("T3") }
+        } catch { gateway.disconnect(notify: false); throw error }
+        connected = true; status = isRunning ? "Working" : "Connected"; failingSince = nil; error = nil
+        log("T3 connected")
+        // A thread opened while this attempt was under way.
+        if let id = selectedSessionID, threadSubscription == nil { await selectSession(id) }
+    }
+    /// Squircle went to the background: hold the socket for as long as iOS
+    /// gives (about 30 s), so a quick app switch never drops it.
+    func enteredBackground() {
+        guard gateway != nil, backgroundTask == .invalid else { return }
+        saveCurrentThread()
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "T3 connection") { [weak self] in
+            MainActor.assumeIsolated { self?.backgroundExpired() }
+        }
+    }
+    private func backgroundExpired() {
+        log("T3 background time ran out; closing")
+        suspended = true; nap?.cancel()
+        // Close cleanly rather than leave a socket that dies while suspended.
+        gateway?.disconnect(notify: false); connected = false; threadSubscription = nil; status = "Connecting"
+        endBackgroundTask()
+    }
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask); backgroundTask = .invalid
+    }
+    private func log(_ message: String) {
+        #if DEBUG
+        NSLog("SQUIRCLE-CONN %@", message)
+        #endif
+    }
+    /// Back in the foreground: reconnect at once if the socket was closed,
+    /// otherwise check that it still answers.
+    func enteringForeground() {
+        endBackgroundTask(); suspended = false
+        guard let gateway else { return }
+        if connected {
+            // A dead socket reports itself through `onDisconnect`.
+            Task { _ = await gateway.probe() }
+        } else { failingSince = nil; keepConnected(); nap?.cancel() }
+    }
+    /// The network changed (Wi-Fi to cellular, back online): a socket on the
+    /// old path is likely dead, and a waiting reconnect should try now.
+    private func watchNetwork() {
+        Task { [weak self] in
+            var previous: NWPath?
+            for await path in NWPathMonitor() {
+                guard let self else { return }
+                defer { previous = path }
+                guard let before = previous, path.status == .satisfied, !suspended else { continue }
+                if connected {
+                    if before.status != .satisfied || before.availableInterfaces.map(\.name) != path.availableInterfaces.map(\.name) {
+                        _ = await gateway?.probe()
+                    }
+                } else { failingSince = nil; keepConnected(); nap?.cancel() }
+            }
+        }
     }
     private func consumeShell(_ item: JSONValue) {
         if item["kind"].string == "snapshot" { shell = item["snapshot"] }
@@ -309,15 +438,20 @@ final class SquircleModel {
         let previousSubscription = threadSubscription; threadSubscription = nil
         await gateway.unsubscribe(previousSubscription)
         guard selectedSessionID == id else { return }
-        do {
-            let subscription = try await gateway.subscribe("orchestration.subscribeThread", .from(["threadId":id])) { [weak self] item in
-                guard let self, selectedSessionID == id else { return }
-                consumeThread(item)
-            }
-            guard selectedSessionID == id else { await gateway.unsubscribe(subscription); return }
-            threadSubscription = subscription
-            error = nil
-        } catch { self.error = error.localizedDescription }
+        // While reconnecting, the new connection subscribes the open thread.
+        guard connected else { return }
+        do { try await subscribeThread(id); error = nil }
+        catch where Self.isTransient(error) {}
+        catch { self.error = error.localizedDescription }
+    }
+    private func subscribeThread(_ id: String) async throws {
+        guard let gateway else { return }
+        let subscription = try await gateway.subscribe("orchestration.subscribeThread", .from(["threadId":id])) { [weak self] item in
+            guard let self, selectedSessionID == id else { return }
+            consumeThread(item)
+        }
+        guard selectedSessionID == id else { await gateway.unsubscribe(subscription); return }
+        threadSubscription = subscription
     }
     /// A new conversation that T3 has not been told about yet. The thread is
     /// created by its first message, so abandoned drafts leave nothing behind.

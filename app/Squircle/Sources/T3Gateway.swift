@@ -74,39 +74,77 @@ final class T3Gateway {
     private var heartbeat: Task<Void, Never>?
     private var pending: [String: CheckedContinuation<JSONValue, Error>] = [:]
     private var subscriptions: [String: (JSONValue) -> Void] = [:]
+    /// When T3 last sent anything; T3 answers every Ping, so silence means a dead socket.
+    private var lastFrame = ContinuousClock.now
     var onDisconnect: (() -> Void)?
+    var isOpen: Bool { socket != nil }
     init(configuration: AppConfiguration) { http = T3HTTP(configuration: configuration) }
     func connect() async throws {
         disconnect(notify: false)
         let ws = http.session.webSocketTask(with: try await http.socketRequest("/ws"))
-        socket = ws; ws.maximumMessageSize = 32 * 1024 * 1024; ws.resume()
+        disconnect(notify: false)
+        socket = ws; ws.maximumMessageSize = 32 * 1024 * 1024; ws.resume(); lastFrame = .now
         receiver = Task { [weak self] in
             do {
                 while !Task.isCancelled {
                     let message = try await ws.receive()
+                    self?.lastFrame = .now
                     let data: Data
                     switch message { case .data(let d): data = d; case .string(let s): data = Data(s.utf8); @unknown default: continue }
                     let frame = try JSONDecoder().decode(JSONValue.self, from: data)
                     for item in frame.array.isEmpty ? [frame] : frame.array { self?.receive(item) }
                 }
-            } catch { if self?.socket === ws { self?.disconnect(notify: true) } }
+            } catch { self?.drop(ws) }
         }
         heartbeat = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(20))
-                if Task.isCancelled { return }
-                do { try await self?.write(.from(["_tag":"Ping"])) }
-                catch { self?.disconnect(notify: true); return }
+                try? await Task.sleep(for: .seconds(15))
+                guard !Task.isCancelled, let self else { return }
+                // A half-open socket (a network change, a suspended app) never
+                // errors on its own; no reply to two pings means it's gone.
+                if lastFrame.duration(to: .now) > .seconds(40) { drop(ws); return }
+                do { try await write(.from(["_tag":"Ping"])) } catch { drop(ws); return }
             }
         }
     }
+    /// Whether T3 still answers on this socket, within `timeout`.
+    func probe(timeout: Duration = .seconds(4)) async -> Bool {
+        guard let ws = socket else { return false }
+        let asked = ContinuousClock.now
+        Task { try? await write(.from(["_tag":"Ping"])) }
+        while asked.duration(to: .now) < timeout {
+            if lastFrame > asked { return true }
+            guard socket === ws else { return false }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        drop(ws)
+        return false
+    }
+    private func drop(_ ws: URLSessionWebSocketTask) {
+        if socket === ws { disconnect(notify: true) }
+    }
     func disconnect(notify: Bool = false) {
         receiver?.cancel(); heartbeat?.cancel(); socket?.cancel(with: .goingAway, reason: nil); socket = nil
+        receiver = nil; heartbeat = nil
         let waiting = pending; pending.removeAll(); subscriptions.removeAll()
         for p in waiting.values { p.resume(throwing: ClientError.connection("T3")) }
         if notify { onDisconnect?() }
     }
+    #if DEBUG
+    /// Verification only: the socket fails as if the network dropped it.
+    func dropForTesting() { socket?.cancel(with: .abnormalClosure, reason: nil) }
+    #endif
+    /// Requests made while the socket is being replaced wait for the new one
+    /// instead of failing; nothing was sent, so nothing can run twice.
+    private func open() async throws {
+        let start = ContinuousClock.now
+        while socket == nil {
+            guard start.duration(to: .now) < .seconds(15), !Task.isCancelled else { throw ClientError.connection("T3") }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
     func call(_ method: String, _ payload: JSONValue = .object([:])) async throws -> JSONValue {
+        try await open()
         let id = UUID().uuidString
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
