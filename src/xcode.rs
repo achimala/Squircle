@@ -77,8 +77,9 @@ pub async fn run(
                     .parent()
                     .and_then(Path::parent)
                     .context("job directory is not inside a Squircle data directory")?;
-                let framework = overlay::framework(data_root, &log, deadline, cancel.clone()).await?;
-                overlay::inject(&archived, &framework, &log).await?;
+                let framework =
+                    overlay::framework(data_root, &log, deadline, cancel.clone()).await?;
+                overlay::inject(&archived, &framework, &log, deadline, cancel.clone()).await?;
             }
             let args = export_args(
                 &archive,
@@ -285,7 +286,12 @@ fn validate_export_options(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn cancelled(mut cancel: watch::Receiver<bool>) {
+/// Resolves when the build is cancelled or its supervisor is gone; never
+/// without a receiver.
+pub(crate) async fn cancelled(cancel: Option<watch::Receiver<bool>>) {
+    let Some(mut cancel) = cancel else {
+        return std::future::pending().await;
+    };
     loop {
         if *cancel.borrow_and_update() {
             return;
@@ -295,6 +301,10 @@ async fn cancelled(mut cancel: watch::Receiver<bool>) {
             return;
         }
     }
+}
+
+fn is_cancelled(cancel: &watch::Receiver<bool>) -> bool {
+    *cancel.borrow() || cancel.has_changed().is_err()
 }
 
 struct ProcessGroup(libc::pid_t);
@@ -311,6 +321,131 @@ impl Drop for ProcessGroup {
     }
 }
 
+/// Where a helper's output stream goes.
+pub(crate) enum Sink {
+    Discard,
+    File(File),
+    /// Collected in memory; more than this many bytes is an error.
+    Capture(usize),
+}
+
+impl Sink {
+    fn stdio(&self) -> std::io::Result<(Stdio, Option<usize>)> {
+        Ok(match self {
+            Sink::Discard => (Stdio::null(), None),
+            Sink::File(file) => (file.try_clone()?.into(), None),
+            Sink::Capture(limit) => (Stdio::piped(), Some(*limit)),
+        })
+    }
+}
+
+pub(crate) struct Finished {
+    pub status: std::process::ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Why a helper produced no exit status. Callers word their own messages.
+#[derive(Debug)]
+pub(crate) enum RunError {
+    Cancelled,
+    TimedOut,
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunError::Cancelled => write!(f, "cancelled"),
+            RunError::TimedOut => write!(f, "exceeded its deadline"),
+            RunError::Failed(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for RunError {}
+
+async fn read_limited(
+    pipe: Option<impl tokio::io::AsyncRead + Unpin>,
+    limit: Option<usize>,
+) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let (Some(pipe), Some(limit)) = (pipe, limit) else {
+        return Ok(Vec::new());
+    };
+    let mut bytes = Vec::new();
+    pipe.take(limit as u64 + 1).read_to_end(&mut bytes).await?;
+    ensure!(bytes.len() <= limit, "output exceeds {limit} bytes");
+    Ok(bytes)
+}
+
+/// Runs one helper in its own process group, bounded by `deadline`, `cancel`
+/// and output limits. Whatever stops it early, including dropping this future,
+/// kills the whole group. A nonzero exit is returned, not an error.
+pub(crate) async fn run_bounded(
+    mut command: Command,
+    stdout: Sink,
+    stderr: Sink,
+    deadline: Instant,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<Finished, RunError> {
+    if cancel.as_ref().is_some_and(is_cancelled) {
+        return Err(RunError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(RunError::TimedOut);
+    }
+    let program = command.as_std().get_program().to_owned();
+    let failed = |error: std::io::Error| RunError::Failed(error.into());
+    let (out, out_limit) = stdout.stdio().map_err(failed)?;
+    let (err, err_limit) = stderr.stdio().map_err(failed)?;
+    command
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .kill_on_drop(true);
+    command.as_std_mut().process_group(0);
+    let mut child = command.spawn().map_err(|error| {
+        RunError::Failed(
+            anyhow::Error::new(error)
+                .context(format!("cannot start {}", Path::new(&program).display())),
+        )
+    })?;
+    let Some(pid) = child.id() else {
+        return Err(RunError::Failed(anyhow::anyhow!(
+            "helper has no process id"
+        )));
+    };
+    let mut group = ProcessGroup(pid as libc::pid_t);
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let work = async {
+        let (stdout, stderr) =
+            tokio::try_join!(read_limited(out, out_limit), read_limited(err, err_limit))?;
+        let status = child.wait().await?;
+        Ok::<_, anyhow::Error>(Finished {
+            status,
+            stdout,
+            stderr,
+        })
+    };
+    let result = tokio::select! {
+        biased;
+        _ = cancelled(cancel) => Err(RunError::Cancelled),
+        _ = tokio::time::sleep_until(deadline) => Err(RunError::TimedOut),
+        result = work => result.map_err(RunError::Failed),
+    };
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        // The leader is reaped. Disarm to avoid ever signalling a reused
+        // process id.
+        group.0 = 0;
+    } else {
+        drop(group);
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    }
+    result
+}
+
 pub(crate) async fn run_command(
     args: &[OsString],
     log_path: &Path,
@@ -318,14 +453,6 @@ pub(crate) async fn run_command(
     deadline: Instant,
     cancel: watch::Receiver<bool>,
 ) -> Result<()> {
-    ensure!(
-        !*cancel.borrow() && cancel.has_changed().is_ok(),
-        "build cancelled before starting xcodebuild"
-    );
-    ensure!(
-        Instant::now() < deadline,
-        "build exceeded the 30-minute timeout"
-    );
     let mut log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -336,59 +463,37 @@ pub(crate) async fn run_command(
         None => log.try_clone()?,
     };
     let mut command = Command::new("/usr/bin/xcodebuild");
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(log.try_clone()?)
-        .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
-    let mut child = command
-        .spawn()
-        .context("cannot start /usr/bin/xcodebuild; check Xcode installation")?;
-    let mut group =
-        ProcessGroup(child.id().context("xcodebuild has no process id")? as libc::pid_t);
-    enum Completion {
-        Exited(std::io::Result<std::process::ExitStatus>),
-        Cancelled,
-        TimedOut,
-    }
-    let completion = tokio::select! {
-        biased;
-        _ = cancelled(cancel) => Completion::Cancelled,
-        _ = tokio::time::sleep_until(deadline) => Completion::TimedOut,
-        status = child.wait() => Completion::Exited(status),
-    };
-    match completion {
-        Completion::Exited(status) => {
-            let status = status.context("cannot wait for xcodebuild")?;
-            // Normal completion has reaped the group leader. Disarm to avoid
-            // ever signalling a reused process id after processing its output.
-            group.0 = 0;
+    command.args(args);
+    let result = run_bounded(
+        command,
+        Sink::File(stdout),
+        Sink::File(log.try_clone()?),
+        deadline,
+        Some(cancel),
+    )
+    .await;
+    let reason = match result {
+        Ok(finished) => {
             if let Some(path) = stdout_path {
                 std::io::copy(&mut File::open(path)?, &mut log)?;
             }
+            let status = finished.status;
             writeln!(log, "\nxcodebuild exited: {status}")?;
             ensure!(
                 status.success(),
                 "xcodebuild failed ({status}); see {}",
                 log_path.display()
             );
-            Ok(())
+            return Ok(());
         }
-        Completion::Cancelled | Completion::TimedOut => {
-            drop(group);
-            let _ = child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-            let reason = if matches!(completion, Completion::Cancelled) {
-                "build cancelled"
-            } else {
-                "build exceeded the 30-minute timeout"
-            };
-            let _ = writeln!(log, "\n{reason}; terminated xcodebuild process group");
-            bail!("{reason}; see {}", log_path.display())
+        Err(RunError::Failed(error)) => {
+            return Err(error.context("cannot run /usr/bin/xcodebuild; check Xcode installation"));
         }
-    }
+        Err(RunError::Cancelled) => "build cancelled",
+        Err(RunError::TimedOut) => "build exceeded the 30-minute timeout",
+    };
+    let _ = writeln!(log, "\n{reason}; terminated xcodebuild process group");
+    bail!("{reason}; see {}", log_path.display())
 }
 
 #[derive(Deserialize)]
@@ -592,7 +697,7 @@ mod tests {
     async fn cancellation_wakes_when_supervisor_closes() {
         let (sender, receiver) = watch::channel(false);
         drop(sender);
-        tokio::time::timeout(Duration::from_secs(1), cancelled(receiver))
+        tokio::time::timeout(Duration::from_secs(1), cancelled(Some(receiver)))
             .await
             .unwrap();
     }
@@ -679,6 +784,56 @@ mod tests {
             saved.as_dictionary().unwrap()["destination"].as_string(),
             Some("export")
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_helpers_stop_on_cancellation_and_output_limits() {
+        let (sender, cancel) = watch::channel(false);
+        let started = Instant::now();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let run = tokio::spawn(run_bounded(
+            command,
+            Sink::Capture(1024),
+            Sink::Discard,
+            started + Duration::from_secs(30),
+            Some(cancel),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        sender.send(true).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(RunError::Cancelled)));
+        assert!(started.elapsed() < Duration::from_secs(5));
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "yes | head -c 4096"]);
+        let result = run_bounded(
+            command,
+            Sink::Capture(1024),
+            Sink::Discard,
+            Instant::now() + Duration::from_secs(10),
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(RunError::Failed(_))));
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let finished = run_bounded(
+            command,
+            Sink::Capture(1024),
+            Sink::Capture(1024),
+            Instant::now() + Duration::from_secs(10),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(finished.status.code(), Some(3));
+        assert_eq!(finished.stdout, b"out\n");
+        assert_eq!(finished.stderr, b"err\n");
     }
 
     #[tokio::test]

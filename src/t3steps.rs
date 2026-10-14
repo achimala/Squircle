@@ -230,20 +230,26 @@ pub async fn image(thread: &str, call: &str, index: usize) -> Result<Option<Valu
          from projection_thread_activities, json_each({CONTENT})
          where thread_id='{thread}' and json_extract(payload_json,'$.toolCallId')='{call}'
            and {IS_IMAGE}
-         order by created_at desc"
+         order by created_at desc, activity_id, json_each.key"
     ))
     .await?;
-    let mut seen = std::collections::HashSet::new();
-    let distinct: Vec<Value> = rows
-        .into_iter()
-        .filter(|row| row["data"].as_str().is_some_and(|d| seen.insert(d.len().to_string() + &d[..d.len().min(64)])))
-        .collect();
-    Ok(distinct.into_iter().nth(index).map(|row| {
+    Ok(distinct(rows).into_iter().nth(index).map(|row| {
         json!({
             "media_type": row["media_type"].as_str().unwrap_or("image/png"),
             "data": row["data"],
         })
     }))
+}
+
+/// Rows whose image data differs, first occurrence kept: one image can recur
+/// across a call's activities. Identity is a hash of the whole encoded image,
+/// not its header.
+fn distinct(rows: Vec<Value>) -> Vec<Value> {
+    use sha2::{Digest, Sha256};
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|row| row["data"].as_str().is_some_and(|d| seen.insert(Sha256::digest(d.as_bytes()))))
+        .collect()
 }
 
 /// Pixel size from an image's header: PNG's IHDR or a JPEG start-of-frame.
@@ -273,14 +279,14 @@ fn dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
-/// A single portrait phone screen, not a contact sheet or a desktop window.
-fn phone_shaped((w, h): (u32, u32)) -> bool {
-    w > 0 && (1.8..=2.4).contains(&(h as f64 / w as f64))
+/// T3's own simulator capture. An image an agent read (a mockup, a reference,
+/// a browser snapshot) is not one, whatever its shape.
+fn simulator_capture(tool: &str) -> bool {
+    tool == "mcp__t3-code__device_screenshot"
 }
 
-/// The newest real screenshot an agent captured in any of a T3 project's
-/// threads: a device or preview capture, or an image it read that has a
-/// phone screen's shape. Stands in on Home for apps with no published preview.
+/// The newest simulator screenshot T3 captured in any of a T3 project's
+/// threads. Stands in on Home for apps with no published preview.
 pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
     use base64::Engine;
     if !valid(project, &[]) {
@@ -296,18 +302,20 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
          join projection_thread_activities a on a.thread_id=t.thread_id,
               json_each({CONTENT}) j
          where t.project_id='{project}' and t.deleted_at is null and a.kind='tool.completed'
+           and json_extract(a.payload_json,'$.data.toolName')='mcp__t3-code__device_screenshot'
            and (case when j.type='object' then json_extract(j.value,'$.type') end)='image'
          order by a.created_at desc limit 40"
     ))
     .await?;
     let engine = base64::engine::general_purpose::STANDARD;
     for row in rows {
-        let tool = row["tool"].as_str().unwrap_or_default();
-        let capture = tool.ends_with("device_screenshot") || tool.ends_with("preview_snapshot");
+        if !simulator_capture(row["tool"].as_str().unwrap_or_default()) {
+            continue;
+        }
         let Some(head) = row["head"].as_str() else { continue };
         let head = &head[..head.len() / 4 * 4];
         let Some(size) = engine.decode(head).ok().as_deref().and_then(dimensions) else { continue };
-        if !(capture && size.0 > 0 && size.1 > 0) && !phone_shaped(size) {
+        if size.0 == 0 || size.1 == 0 {
             continue;
         }
         let (Some(activity), Some(index)) = (row["activity"].as_str(), row["idx"].as_u64()) else { continue };
@@ -341,10 +349,25 @@ mod tests {
         let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
         png.extend_from_slice(&[0, 0, 1, 230, 0, 0, 4, 32]);
         assert_eq!(dimensions(&png), Some((486, 1056)));
-        assert!(phone_shaped((486, 1056)));
         let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 0, 0, 0xFF, 0xC0, 0, 17, 8, 5, 0x70, 2, 0x80, 0, 0];
         assert_eq!(dimensions(&jpeg), Some((640, 1392)));
-        assert!(!phone_shaped((1600, 1392)), "A contact sheet is not a screen.");
+    }
+
+    #[test]
+    fn distinct_images_compare_whole_payloads() {
+        let header = "iVBORw0KGgo".repeat(8);
+        let a = json!({"data": format!("{header}AAAA")});
+        let b = json!({"data": format!("{header}BBBB")});
+        let rows = vec![a.clone(), b.clone(), a.clone()];
+        assert_eq!(distinct(rows), vec![a, b], "Same header and length are still different images.");
+    }
+
+    #[test]
+    fn only_simulator_captures_stand_in_for_home() {
+        assert!(simulator_capture("mcp__t3-code__device_screenshot"));
+        for tool in ["Read", "mcp__t3-code__preview_snapshot", "mcp__evil__device_screenshot"] {
+            assert!(!simulator_capture(tool), "{tool}");
+        }
     }
 
     #[test]
