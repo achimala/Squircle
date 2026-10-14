@@ -59,6 +59,14 @@ impl Fixture {
         archive
             .write_all(b"test fixture: not a signed app")
             .unwrap();
+        // Stored, so the IPA spans several response chunks.
+        archive
+            .start_file(
+                "Payload/Probe.app/padding",
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        archive.write_all(&[7u8; 64 * 1024]).unwrap();
         archive.finish().unwrap();
         let ipa_bytes = fs::read(&ipa).unwrap();
         let state = AppState::new(store, Some("https://mac.test".into()));
@@ -929,6 +937,40 @@ async fn install_evidence_requires_a_complete_transfer() {
     let (started, finished) = evidence(aborted).await;
     assert!(started.as_u64().is_some());
     assert!(finished.is_null());
+
+    // Complete over a real HTTP/1.1 connection, as iOS fetches it: Hyper
+    // stops polling the body at Content-Length, which in-process calls hide.
+    let complete = token_of(&fixture.install_link(&id).await);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(axum::serve(listener, fixture.app.clone()).into_future());
+    let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    socket
+        .write_all(format!("GET /install/{complete}/app.ipa HTTP/1.1\r\nHost: mac.test\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut received = Vec::new();
+    let mut buffer = [0u8; 16 * 1024];
+    let head_end = loop {
+        let read = socket.read(&mut buffer).await.unwrap();
+        assert!(read > 0, "connection closed early");
+        received.extend_from_slice(&buffer[..read]);
+        if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+            if received.len() >= end + 4 + fixture.ipa_bytes.len() {
+                break end + 4;
+            }
+        }
+    };
+    assert_eq!(&received[head_end..], fixture.ipa_bytes.as_slice());
+    // The connection stays open (keep-alive); the finish is already on record.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while evidence(complete.clone()).await.1.is_null() {
+        assert!(tokio::time::Instant::now() < deadline, "downloaded_at never recorded");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    drop(socket);
+    server.abort();
 
     // A missing IPA records nothing at all.
     let missing = token_of(&fixture.install_link(&id).await);

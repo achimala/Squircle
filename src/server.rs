@@ -1434,25 +1434,16 @@ async fn download_ipa(
     if ticket.download_started_at.is_none() {
         let _ = mark_ticket(&state, &token, |t| t.download_started_at.get_or_insert(now()));
     }
-    let sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let counter = sent.clone();
-    let finished = futures_util::stream::once(async move {
-        if counter.load(Ordering::Acquire) == size {
-            let _ = tokio::task::spawn_blocking(move || {
-                mark_ticket(&state, &token, |t| t.downloaded_at.get_or_insert(now()))
-            })
-            .await;
-        }
-        Ok::<_, std::io::Error>(axum::body::Bytes::new())
-    });
+    // Hyper stops polling a body once Content-Length bytes are out, so the
+    // finish is recorded when it drops the body, not by a trailing chunk.
+    let sent = Delivered { sent: 0, size, ticket: Some((state, token)) };
     use futures_util::StreamExt;
-    let stream = ReaderStream::new(file)
-        .inspect(move |chunk| {
-            if let Ok(chunk) = chunk {
-                sent.fetch_add(chunk.len() as u64, Ordering::AcqRel);
-            }
-        })
-        .chain(finished);
+    let stream = ReaderStream::new(file).scan(sent, |sent, chunk| {
+        if let Ok(chunk) = &chunk {
+            sent.sent += chunk.len() as u64;
+        }
+        std::future::ready(Some(chunk))
+    });
     let mut response = (
         private_headers(),
         [(header::CONTENT_TYPE, "application/octet-stream")],
@@ -1463,6 +1454,25 @@ async fn download_ipa(
         .headers_mut()
         .insert(header::CONTENT_LENGTH, size.to_string().parse().unwrap());
     Ok(response)
+}
+
+/// Bytes of an IPA response handed to the connection; records the ticket's
+/// `downloaded_at` when the response is dropped with all of them sent.
+struct Delivered {
+    sent: u64,
+    size: u64,
+    ticket: Option<(AppState, String)>,
+}
+impl Drop for Delivered {
+    fn drop(&mut self) {
+        if self.sent != self.size {
+            return;
+        }
+        // One small record write, like `download_started_at` above.
+        if let Some((state, token)) = self.ticket.take() {
+            let _ = mark_ticket(&state, &token, |t| t.downloaded_at.get_or_insert(now()));
+        }
+    }
 }
 
 /// Sets a ticket's evidence field once, under the record lock.
