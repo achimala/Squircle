@@ -105,6 +105,12 @@ enum Commands {
         #[arg(long, help = "Retained .dSYM bundle; Xcode matches its binary UUID")]
         dsym: PathBuf,
     },
+    /// Performance recordings made in the app on the phone: summary with symbolicated hitches, plus the raw file.
+    #[command(after_help = "The user records performance from the debug overlay's + menu (Record Performance) while using the app; the message links a .perf.json capture on this Mac.\n  squircle perf show PATH_OR_ID           worst hitches with main-thread stacks (app frames from the build's dSYM), heaviest functions, per-second timeline, log\n  squircle --json perf show PATH_OR_ID    the same as structured JSON\n  squircle perf list                      recent captures\nScreen recordings from the same menu are .mp4 files in the same folder; look at their frames (e.g. ffmpeg -i FILE -vf fps=2 /tmp/f%03d.png).")]
+    Perf {
+        #[command(subcommand)]
+        command: PerfCommand,
+    },
     /// Publish a recording or image into a T3 thread so Squircle shows it inline.
     Media {
         #[command(subcommand)]
@@ -243,6 +249,18 @@ enum SimCommand {
     },
     /// This Mac's iOS simulators and which thread is recording each.
     Devices,
+}
+#[derive(Subcommand)]
+enum PerfCommand {
+    /// Summarize a capture: hitches with symbolicated main-thread stacks, heaviest functions, timeline. Text unless --json.
+    Show {
+        #[arg(help = "Capture path (from the message) or ID (perf list)")]
+        capture: String,
+        #[arg(long, help = "A .dSYM bundle or binary for the app, when Squircle's builds and Spotlight don't have it")]
+        dsym: Vec<PathBuf>,
+    },
+    /// Recent performance captures and screen recordings uploaded from the phone.
+    List,
 }
 #[derive(Subcommand)]
 enum MediaCommand {
@@ -579,7 +597,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -847,6 +865,20 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             success(
                 json!({"report":output,"frames_verified":false,"note":"Tool completed; inspect application frames to confirm resolution and matching symbols."}),
             )
+        }
+        Commands::Perf { command } => {
+            let root = root(cli)?;
+            match command {
+                PerfCommand::Show { capture, dsym } => {
+                    let (text, data) = squircle::perf::show(&root, capture, dsym)?;
+                    if !cli.json {
+                        print!("{text}");
+                        return Ok(None);
+                    }
+                    success(data)
+                }
+                PerfCommand::List => success(json!({"captures": squircle::perf::list(&root)?})),
+            }
         }
         Commands::Media { command } => {
             let root = root(cli)?;

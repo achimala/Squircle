@@ -5,6 +5,7 @@ pub mod buildlog;
 pub mod media;
 pub mod model;
 pub mod overlay;
+pub mod perf;
 pub mod preview;
 pub mod projects;
 pub mod server;

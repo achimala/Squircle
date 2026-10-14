@@ -87,7 +87,7 @@ final class PerfRecorder {
         let header: [String: Any] = [
             "format": "squircle-perf", "version": 1,
             "app": app,
-            "device": ["model": Self.machine(), "system": device.systemName + " " + device.systemVersion,
+            "device": ["model": Self.machine(), "system": device.systemName + " " + device.systemVersion, "os_build": Self.osBuild(),
                        "simulator": ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil],
             "started_at": startDate.timeIntervalSince1970,
             "duration": duration,
@@ -132,6 +132,15 @@ final class PerfRecorder {
             else { break }
         }
         return String(describing: type(of: top))
+    }
+
+    /// The OS build, e.g. 24A435: which of Xcode's device symbols match.
+    private static func osBuild() -> String {
+        var size = 0
+        sysctlbyname("kern.osversion", nil, &size, nil, 0)
+        var bytes = [CChar](repeating: 0, count: max(1, size))
+        sysctlbyname("kern.osversion", &bytes, &size, nil, 0)
+        return String(cString: bytes)
     }
 
     private static func machine() -> String {
@@ -300,7 +309,8 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
                 var sample: [String: Any] = ["t": now, "memory_mb": Self.footprint() / 1_048_576,
                                              "thermal": Self.thermal(ProcessInfo.processInfo.thermalState)]
                 if let last = lastCPU, now > last.wall {
-                    sample["cpu"] = ((cpu.all - last.all) / (now - last.wall) * 100).rounded()
+                    // A thread that exits takes its time with it: never below zero.
+                    sample["cpu"] = max(0, ((cpu.all - last.all) / (now - last.wall) * 100).rounded())
                     sample["main_cpu"] = ((cpu.main - last.main) / (now - last.wall) * 100).rounded()
                 }
                 lastCPU = (now, cpu.main, cpu.all)

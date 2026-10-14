@@ -64,11 +64,13 @@ final class CaptureSession {
         return String(format: "%d:%02d", whole / 60, whole % 60)
     }
 
-    /// The first frame with a small play badge and its length.
+    /// The screen's top, wide enough for the field's tray to show, with a
+    /// play badge and the recording's length.
     private static func badge(_ poster: UIImage, text: String, symbol: String) -> UIImage {
-        let size = CGSize(width: 160, height: 160 * poster.size.height / max(1, poster.size.width))
+        let size = CGSize(width: 200, height: 160)
         return UIGraphicsImageRenderer(size: size).image { _ in
-            poster.draw(in: CGRect(origin: .zero, size: size))
+            let height = size.width * poster.size.height / max(1, poster.size.width)
+            poster.draw(in: CGRect(x: 0, y: -height * 0.06, width: size.width, height: height))
             let font = UIFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
             let label = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: UIColor.white])
             let icon = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(font: font))?
@@ -104,12 +106,12 @@ final class CaptureSession {
                 UIBezierPath(roundedRect: CGRect(x: plot.minX + CGFloat(column) * 2, y: plot.maxY - height, width: 1.5, height: height),
                              cornerRadius: 0.75).fill()
             }
-            let title = NSAttributedString(string: hitches, attributes: [
+            // Top left, clear of the field's remove button at the top right.
+            let title = NSMutableAttributedString(string: hitches, attributes: [
                 .font: Theme.font(.subheadline, 15, .semibold), .foregroundColor: UIColor.label])
+            title.append(NSAttributedString(string: "  " + clock(duration), attributes: [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium), .foregroundColor: UIColor.secondaryLabel]))
             title.draw(at: CGPoint(x: 10, y: 10))
-            let length = NSAttributedString(string: clock(duration), attributes: [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium), .foregroundColor: UIColor.secondaryLabel])
-            length.draw(at: CGPoint(x: size.width - 10 - length.size().width, y: 12))
         }
     }
 }
