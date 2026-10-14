@@ -226,7 +226,7 @@ enum ThreadItem: Equatable {
         return shots.isEmpty ? [] : [.gallery(id: id, shots: shots)]
     }
 
-    /// Builds whose job IDs appear in what the agent ran or wrote this turn,
+    /// Builds of any app whose job IDs appear in what the agent ran or wrote this turn,
     /// in the order first mentioned.
     static func mentionedBuilds(in messages: [ChatMessage], builds: [AppBuild]) -> [AppBuild] {
         guard !builds.isEmpty else { return [] }

@@ -396,17 +396,20 @@ impl Agents {
         self.registry.lock().unwrap().agents.values().find(|a| a.thread_id == thread_id).cloned()
     }
 
-    /// Facts at the start of each agent turn: its thread ID (needed to spawn
-    /// workers) and its workers right now.
+    /// The note at the start of each agent turn and after compaction: its
+    /// role and reply style in brief (the system prompt has the rest), its
+    /// thread ID (needed to spawn workers) and its workers right now.
     pub fn context(&self, cwd: &Path) -> String {
         let agents = self.list();
         let shell = self.shell.lock().unwrap();
-        let agent = agents.into_iter().find(|a| {
-            shell.projects.get(&a.project_id).and_then(|p| p["workspaceRoot"].as_str())
-                .is_some_and(|root| same_path(Path::new(root), cwd) || cwd.starts_with(root))
+        let found = agents.into_iter().find_map(|a| {
+            let project = shell.projects.get(&a.project_id)?;
+            let root = project["workspaceRoot"].as_str()?;
+            (same_path(Path::new(root), cwd) || cwd.starts_with(root))
+                .then(|| (a, project["title"].as_str().unwrap_or("this app").to_string()))
         });
         drop(shell);
-        let Some(agent) = agent else {
+        let Some((agent, app)) = found else {
             return "[squircle] No app agent works in this folder.".into();
         };
         let workers = self.workers(Some(&agent.thread_id));
@@ -416,7 +419,14 @@ impl Agents {
             workers.iter().map(|w| format!("\n- {} [{}] {} ({})", w["title"].as_str().unwrap_or(""), w["branch"].as_str().unwrap_or(""),
                 w["state"].as_str().unwrap_or(""), w["id"].as_str().unwrap_or(""))).collect()
         };
-        format!("[squircle] Your thread id: {}. Your workers: {board}", agent.thread_id)
+        format!(
+            "[squircle] You are {app}'s app agent: you coordinate, and worker threads do the implementation \
+             (`{cli} thread --help`), unless the user says otherwise. Your thread id: {id}. Your workers: {board}\n\
+             Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
+             copied out of /tmp into ~/.t3/userdata/attachments; a build you start or check this turn shows as an Install card. \
+             No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.",
+            cli = self.cli, id = agent.thread_id,
+        )
     }
 
     // MARK: Workers
@@ -456,7 +466,9 @@ impl Agents {
         let text = format!(
             "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. \
              To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Drive it with the agent-device command it returns; run {cli} sim stop --thread {id} when done. Don't run agent-device record or device_open. \
-             For signed builds: {cli} build start --help.",
+             For signed builds: {cli} build start --help. \
+             The user also reads your replies on their phone: keep them short and plain, show pictures as ![..](/absolute/path) and clips as [..](/absolute/path) \
+             (copied out of /tmp into ~/.t3/userdata/attachments), and don't present bare paths or IDs as information.",
             cli = self.cli
         );
         let now = crate::t3::iso_now();

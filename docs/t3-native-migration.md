@@ -1553,3 +1553,36 @@ agent (the send animation, never sent to T3). Checked in the simulator: Home,
 agent conversation, Builds and the overlay (full) in light and dark.
 Squircle build `715bcac7-ecac-4db7-ae31-a7c97b272ee4` (0.3.0 44, main at
 `dcda2df`); not yet on the phone.
+
+## 2026-10-14 the agent's role every turn
+
+User: the app agent "forgets its role and starts just doing everything
+manually". Evidence: the role was already the system prompt (`--agent
+squircle:app-agent` on every launch and `--resume`; a scratch `claude -p`
+quoted it). Neither long agent transcript (LanguageApp 12 MB, RemoteAppDev)
+had compacted, yet the LanguageApp agent spent 128 tool calls profiling,
+editing and committing itself and never spawned a worker. The prompt invited
+that ("besides doing work yourself, you can run worker threads"), and the
+per-turn note carried only the thread ID and workers.
+
+- **System prompt** (`plugin/squircle/agents/app-agent.md`): the agent
+  coordinates and workers implement, unless the user says otherwise; how to
+  reply for a phone: short, pictures `![..](/abs/path)` and clips
+  `[..](/abs/path)` copied out of /tmp into `~/.t3/userdata/attachments`
+  (T3 signs any absolute media path), builds as the Install card, no bare
+  paths, IDs, branches, hashes or Squircle internals unless asked.
+- **Per-turn note** (`squircle agent context`, `UserPromptSubmit` and
+  `SessionStart:compact`): the same role and reply style in three
+  sentences, with the CLI, the thread ID and the workers.
+- **Workers:** the footer of their first prompt carries the reply style
+  (their threads are opened on the phone too).
+- **Phone:** a build of any app mentioned in a turn renders as an Install
+  card under its app's name (it used to need the thread's own app, so the
+  agent's test builds of other apps showed as a UUID).
+
+Verified: a scratch session with the new plugin, `/compact` forced, still
+answered that it coordinates and would `thread spawn` a worker, and saw the
+note re-injected after compaction.
+
+Squircle build `5f52e109-f73e-42c1-8946-ae7ca8675cf2` (0.3.0 45, main at
+`076d35e`); the Install card for another app's build is not yet checked on screen.
