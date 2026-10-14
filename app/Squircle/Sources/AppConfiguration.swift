@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import os
 
 struct AppConfiguration: Decodable {
     let t3URL: URL
@@ -24,7 +25,8 @@ struct AppConfiguration: Decodable {
         guard let url = bundle.url(forResource: "client", withExtension: "json") else { throw ClientError.configuration }
         let data = try Data(contentsOf: url)
         let configuration = try JSONDecoder().decode(Self.self, from: data)
-        Shared.store(data)
+        let stored = Shared.store(data)
+        Shared.lastStore.withLock { $0 = stored }
         return configuration
     }
 
@@ -48,12 +50,34 @@ struct AppConfiguration: Decodable {
                           kSecAttrAccount as String: "client.json",
                           kSecAttrAccessGroup as String: "\($0).ai.dreamslate.squircle.shared"] }
         }
-        static func store(_ data: Data) {
-            guard let query else { return }
-            var item = query
-            item[kSecValueData as String] = data
-            item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            SecItemDelete(query as CFDictionary); SecItemAdd(item as CFDictionary, nil)
+        enum StoreResult: Equatable {
+            case stored
+            /// No team ID (an App Store or simulator build): nothing is shared.
+            case noSharingGroup
+            /// The Keychain refused; whatever was stored before is untouched.
+            case failed(OSStatus)
+        }
+        /// How the last `load()` left the shared copy, for the app to report.
+        static let lastStore = OSAllocatedUnfairLock<StoreResult?>(initialState: nil)
+        @discardableResult
+        static func store(_ data: Data) -> StoreResult {
+            guard let query else { return .noSharingGroup }
+            return replace(data: data, update: { SecItemUpdate(query as CFDictionary, $0 as CFDictionary) },
+                           add: { attributes in
+                               var item = query; item.merge(attributes) { _, new in new }
+                               return SecItemAdd(item as CFDictionary, nil)
+                           })
+        }
+        /// Updates the item in place and adds it only where there is none, so
+        /// a failure never leaves the overlay without the previous copy.
+        static func replace(data: Data, update: ([String: Any]) -> OSStatus, add: ([String: Any]) -> OSStatus) -> StoreResult {
+            let attributes: [String: Any] = [kSecValueData as String: data,
+                                             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
+            let updated = update(attributes)
+            if updated == errSecSuccess { return .stored }
+            guard updated == errSecItemNotFound else { return .failed(updated) }
+            let added = add(attributes)
+            return added == errSecSuccess ? .stored : .failed(added)
         }
         static func load() throws -> AppConfiguration {
             guard var query else { throw ClientError.configuration }

@@ -178,27 +178,112 @@ struct StepDiff: Equatable {
     let new: String
 }
 
-/// Screenshot pixels steps returned, fetched from the Mac on demand and kept
-/// outside message values so comparing conversations stays cheap.
-/// Downloaded recordings, kept as local files for AVFoundation.
-enum StepVideos {
-    nonisolated(unsafe) private static var files: [String: URL] = [:]
-    static func url(for id: String) -> URL? { files[id] }
-    static func set(_ url: URL, for id: String) { files[id] = url }
+/// A least-recently-used store with a total cost budget. Entries over the
+/// budget are evicted oldest first; `evicted` hears about each one.
+struct BoundedCache<Key: Hashable, Value> {
+    let budget: Int
+    private let cost: (Value) -> Int
+    private var entries: [Key: (value: Value, cost: Int, used: UInt64)] = [:]
+    private var clock: UInt64 = 0
+    private(set) var total = 0
+    init(budget: Int, cost: @escaping (Value) -> Int = { _ in 1 }) { self.budget = budget; self.cost = cost }
+    var count: Int { entries.count }
+    mutating func value(for key: Key) -> Value? {
+        guard let entry = entries[key] else { return nil }
+        clock += 1; entries[key]?.used = clock
+        return entry.value
+    }
+    /// Without counting as a use.
+    func peek(_ key: Key) -> Value? { entries[key]?.value }
+    /// Stores `value`; returns the values that no longer fit, the replaced
+    /// one included.
+    @discardableResult
+    mutating func set(_ value: Value, for key: Key) -> [Value] {
+        var dropped: [Value] = []
+        if let old = removeValue(for: key) { dropped.append(old) }
+        clock += 1
+        let c = max(0, cost(value))
+        entries[key] = (value, c, clock); total += c
+        while total > budget, entries.count > 1,
+              let oldest = entries.filter({ $0.key != key }).min(by: { $0.value.used < $1.value.used })?.key,
+              let value = removeValue(for: oldest) { dropped.append(value) }
+        return dropped
+    }
+    @discardableResult
+    mutating func removeValue(for key: Key) -> Value? {
+        guard let entry = entries.removeValue(forKey: key) else { return nil }
+        total -= entry.cost
+        return entry.value
+    }
+    /// Empties the cache; returns what it held.
+    @discardableResult
+    mutating func removeAll() -> [Value] {
+        let values = entries.values.map(\.value)
+        entries.removeAll(); total = 0
+        return values
+    }
 }
 
+/// Downloaded recordings, kept as local files for AVFoundation. Files
+/// Squircle downloaded are deleted when they leave the cache; a file it was
+/// handed (your own recording) never is.
+@MainActor
+enum StepVideos {
+    private struct File { let url: URL; let owned: Bool }
+    private static var files = BoundedCache<String, File>(budget: 24)
+    /// Where downloads go; anything in it is Squircle's to delete.
+    static let directory: URL = {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("squircle-videos", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }()
+    static func url(for id: String) -> URL? { files.value(for: id)?.url }
+    /// `url` is in `directory` when Squircle downloaded it.
+    static func set(_ url: URL, for id: String) {
+        let owned = url.deletingLastPathComponent().standardizedFileURL == directory.standardizedFileURL
+        delete(files.set(File(url: url, owned: owned), for: id).filter { $0.url != url })
+    }
+    static func removeAll() { delete(files.removeAll()) }
+    private static func delete(_ dropped: [File]) {
+        for file in dropped where file.owned { try? FileManager.default.removeItem(at: file.url) }
+    }
+}
+
+/// Screenshot pixels steps returned, fetched from the Mac on demand and kept
+/// outside message values so comparing conversations stays cheap. Bounded by
+/// bytes; an evicted picture is fetched again when it next shows.
+@MainActor
 enum StepImages {
-    nonisolated(unsafe) private static var store: [String: Data] = [:]
-    static func data(for id: String, index: Int) -> Data? { store["\(id)#\(index)"] }
-    static func set(_ data: Data, for id: String, index: Int) { store["\(id)#\(index)"] = data }
+    private static var store = BoundedCache<String, Data>(budget: 64 << 20, cost: \.count)
+    static func data(for id: String, index: Int) -> Data? { store.value(for: "\(id)#\(index)") }
+    static func set(_ data: Data, for id: String, index: Int) { store.set(data, for: "\(id)#\(index)") }
+    static func removeAll() { store.removeAll() }
 }
 
 /// Pictures and clips agents embed in their Markdown by path, keyed by
 /// their step ID (`file:` and the path).
+@MainActor
 enum MediaFiles {
-    nonisolated(unsafe) static var sizes: [String: CGSize] = [:]
-    nonisolated(unsafe) static var urls: [String: (url: URL, expires: Date)] = [:]
-    static func isVideo(_ stepID: String) -> Bool {
+    /// Pixel sizes, so a picture's place is reserved before its bytes arrive.
+    static var sizes = SizeTable()
+    /// Short-lived URLs T3 signed, by path.
+    static var urls = SignedURLs()
+    nonisolated static func isVideo(_ stepID: String) -> Bool {
         ["mp4", "mov", "m4v"].contains((stepID as NSString).pathExtension.lowercased())
+    }
+    struct SizeTable {
+        private var cache = BoundedCache<String, CGSize>(budget: 4_000)
+        subscript(id: String) -> CGSize? {
+            get { cache.peek(id) }
+            set { if let newValue { cache.set(newValue, for: id) } else { cache.removeValue(for: id) } }
+        }
+    }
+    struct SignedURLs {
+        private var cache = BoundedCache<String, (url: URL, expires: Date)>(budget: 500)
+        subscript(path: String) -> (url: URL, expires: Date)? {
+            get { cache.peek(path) }
+            set { if let newValue { cache.set(newValue, for: path) } else { cache.removeValue(for: path) } }
+        }
+        mutating func removeAll() { cache.removeAll() }
     }
 }

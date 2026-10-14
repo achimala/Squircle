@@ -13,29 +13,33 @@ extension JSONValue {
     }
 }
 
-/// The paired session is isolated from cookies and stored in the device Keychain.
-final class T3HTTP: NSObject, URLSessionTaskDelegate {
+/// Refuses every redirect. A session's delegate is this, not the session's
+/// owner, so the session never keeps its owner alive.
+final class RefuseRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}
+
+/// The paired session is isolated from cookies; its credential comes from
+/// the build's configuration.
+final class T3HTTP {
     let configuration: AppConfiguration
     let token: String
-    lazy var session: URLSession = {
+    let session: URLSession
+    init(configuration: AppConfiguration) {
+        self.configuration = configuration
+        token = configuration.t3Token
         let c = URLSessionConfiguration.ephemeral
         c.httpShouldSetCookies = false; c.urlCredentialStorage = nil; c.urlCache = nil
         c.timeoutIntervalForRequest = 45
-        return URLSession(configuration: c, delegate: self, delegateQueue: nil)
-    }()
-    init(configuration: AppConfiguration) {
-        self.configuration = configuration
-        let account = configuration.t3URL.absoluteString
-        let key: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "ai.dreamslate.Squircle.T3", kSecAttrAccount as String: account]
-        // A newly paired personal build deliberately replaces an expired session.
-        var item = key
-        item[kSecValueData as String] = Data(configuration.t3Token.utf8)
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemDelete(key as CFDictionary); SecItemAdd(item as CFDictionary, nil)
-        token = configuration.t3Token
-        super.init()
+        session = URLSession(configuration: c, delegate: RefuseRedirects(), delegateQueue: nil)
+        // Earlier builds kept a copy of the T3 credential that nothing reads.
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
+                       kSecAttrService as String: "ai.dreamslate.Squircle.T3"] as CFDictionary)
     }
+    deinit { session.invalidateAndCancel() }
+    /// Cancels everything under way; the session can't be used again.
+    func invalidate() { session.invalidateAndCancel() }
     func request(_ path: String, query: [URLQueryItem] = []) throws -> URLRequest {
         guard path.hasPrefix("/"), !path.contains(".."), !path.contains("?") else { throw ClientError.configuration }
         var parts = URLComponents(url: configuration.t3URL, resolvingAgainstBaseURL: false)!
@@ -61,8 +65,31 @@ final class T3HTTP: NSObject, URLSessionTaskDelegate {
         r.setValue(nil, forHTTPHeaderField: "Authorization")
         return r
     }
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+    /// The URL for an asset path T3 returned, only if it is a plain path on
+    /// T3's own origin: the bearer goes nowhere else.
+    static func assetURL(_ relative: String, base: URL) -> URL? {
+        guard relative.hasPrefix("/"), !relative.hasPrefix("//"), !relative.contains("\\"),
+              let url = URL(string: relative, relativeTo: base)?.absoluteURL, sameOrigin(url, base) else { return nil }
+        return url
+    }
+    /// Same HTTPS scheme, host and effective port, and no user info.
+    static func sameOrigin(_ url: URL, _ base: URL) -> Bool {
+        guard let a = URLComponents(url: url, resolvingAgainstBaseURL: true),
+              let b = URLComponents(url: base, resolvingAgainstBaseURL: true),
+              a.scheme?.lowercased() == "https", b.scheme?.lowercased() == "https",
+              a.user == nil, a.password == nil,
+              let host = a.host?.lowercased(), host == b.host?.lowercased() else { return false }
+        return (a.port ?? 443) == (b.port ?? 443)
+    }
+    /// Bytes at a T3 URL, with the bearer, only on T3's origin.
+    func authorizedData(_ url: URL) async -> Data? {
+        guard Self.sameOrigin(url, configuration.t3URL) else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return data
+    }
 }
 
 /// Effect RPC JSON framing, pinned to the installed T3 0.0.45 contract.
@@ -73,7 +100,9 @@ final class T3Gateway {
     private var receiver: Task<Void, Never>?
     private var heartbeat: Task<Void, Never>?
     private var pending: [String: CheckedContinuation<JSONValue, Error>] = [:]
-    private var subscriptions: [String: (JSONValue) -> Void] = [:]
+    /// Live subscriptions: their values, and how they end if T3 ends them.
+    /// A dropped socket ends none of them; `onDisconnect` covers that.
+    private var subscriptions: [String: (receive: (JSONValue) -> Void, ended: (Error?) -> Void)] = [:]
     /// When T3 last sent anything; T3 answers every Ping, so silence means a dead socket.
     private var lastFrame = ContinuousClock.now
     /// Requests whose reply is large (T3's config is about 1 MB). URLSession
@@ -87,6 +116,8 @@ final class T3Gateway {
     private(set) var rejection: Error?
     var isOpen: Bool { socket != nil }
     init(configuration: AppConfiguration) { http = T3HTTP(configuration: configuration) }
+    /// Closes the socket and the HTTP session for good.
+    func close() { onDisconnect = nil; disconnect(notify: false); http.invalidate() }
     func connect() async throws {
         disconnect(notify: false)
         let ws = http.session.webSocketTask(with: try await http.socketRequest("/ws"))
@@ -178,13 +209,20 @@ final class T3Gateway {
             }
         } onCancel: { Task { @MainActor in self.pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) } }
     }
+    /// `ended` runs if T3 finishes or rejects the subscription while the
+    /// socket stays up: nil for an (unexpected) success, else why.
     @discardableResult
-    func subscribe(_ method: String, _ payload: JSONValue = .object([:]), receive: @escaping (JSONValue) -> Void) async throws -> String {
-        let id = UUID().uuidString; subscriptions[id] = receive
+    func subscribe(_ method: String, _ payload: JSONValue = .object([:]), receive: @escaping (JSONValue) -> Void,
+                   ended: @escaping (Error?) -> Void) async throws -> String {
+        let id = UUID().uuidString; track(id, receive: receive, ended: ended)
         do { try await write(.from(["_tag":"Request","id":id,"tag":method,"payload":payload.foundation,"headers":[]])) }
         catch { subscriptions.removeValue(forKey: id); throw error }
         return id
     }
+    func track(_ id: String, receive: @escaping (JSONValue) -> Void, ended: @escaping (Error?) -> Void) {
+        subscriptions[id] = (receive, ended)
+    }
+    var subscriptionCount: Int { subscriptions.count }
     func unsubscribe(_ id: String?) async {
         guard let id else { return }; subscriptions.removeValue(forKey: id)
         try? await write(.from(["_tag":"Interrupt","requestId":id]))
@@ -197,13 +235,15 @@ final class T3Gateway {
         let id = frame["requestId"].identifier ?? ""
         switch frame["_tag"].string {
         case "Chunk":
-            for value in frame["values"].array { subscriptions[id]?(value) }
+            for value in frame["values"].array { subscriptions[id]?.receive(value) }
             Task { try? await write(.from(["_tag":"Ack","requestId":id])) }
         case "Exit":
             let exit = frame["exit"]
-            if exit["_tag"].string == "Success" { pending.removeValue(forKey:id)?.resume(returning:exit["value"]) }
-            else { pending.removeValue(forKey:id)?.resume(throwing: ClientError.backend("T3",0,"T3 rejected the request: \(exit["cause"].formatted.prefix(700))")) }
-            subscriptions.removeValue(forKey:id)
+            let failure = exit["_tag"].string == "Success" ? nil
+                : ClientError.backend("T3",0,"T3 rejected the request: \(exit["cause"].formatted.prefix(700))")
+            if let failure { pending.removeValue(forKey:id)?.resume(throwing: failure) }
+            else { pending.removeValue(forKey:id)?.resume(returning:exit["value"]) }
+            subscriptions.removeValue(forKey:id)?.ended(failure)
         case "Ping": Task { try? await write(.from(["_tag":"Pong"])) }
         default: break
         }

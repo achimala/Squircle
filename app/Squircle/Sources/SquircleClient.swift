@@ -1,20 +1,22 @@
 import Foundation
 
-final class SquircleClient: NSObject, URLSessionTaskDelegate {
+final class SquircleClient {
     let configuration: AppConfiguration
-    private var session: URLSession!
+    private let session: URLSession
 
     init(configuration: AppConfiguration, sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.configuration = configuration
-        super.init()
         sessionConfiguration.httpShouldSetCookies = false
         sessionConfiguration.httpCookieStorage = nil
         sessionConfiguration.urlCredentialStorage = nil
         sessionConfiguration.urlCache = nil
         sessionConfiguration.timeoutIntervalForRequest = 45
         sessionConfiguration.timeoutIntervalForResource = 3_600
-        session = URLSession(configuration: sessionConfiguration, delegate: self, delegateQueue: nil)
+        session = URLSession(configuration: sessionConfiguration, delegate: RefuseRedirects(), delegateQueue: nil)
     }
+    deinit { session.invalidateAndCancel() }
+    /// Cancels everything under way; the client can't be used again.
+    func invalidate() { session.invalidateAndCancel() }
 
     func builds() async throws -> [AppBuild] {
         struct Reply: Decodable { let ok: Bool; let data: [AppBuild] }
@@ -89,16 +91,12 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return reply.data
     }
 
-    /// Each app's agent thread on the Mac, keyed by T3 project ID.
-    func agents() async throws -> [String: String] {
-        struct Agent: Decodable { let project_id: String; let thread_id: String }
-        struct Reply: Decodable { struct Data: Decodable { let agents: [Agent] }; let ok: Bool; let data: Data }
+    /// Each app's agent thread on the Mac, and how to run its CLI.
+    func agents() async throws -> AgentDirectory {
         do {
-            let reply: Reply = try await get(["v1", "agents"])
-            guard reply.ok else { throw ClientError.response("Squircle") }
-            return Dictionary(reply.data.agents.map { ($0.project_id, $0.thread_id) }, uniquingKeysWith: { _, b in b })
+            return try AgentDirectory.decode(try await get(["v1", "agents"]) as JSONValue)
         } catch let error as ClientError where error.isMissing {
-            return [:] // An older Squircle service has no app agents.
+            return AgentDirectory() // An older Squircle service has no app agents.
         }
     }
 
@@ -115,10 +113,11 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
 
     /// Starts (or finds) an app's agent on the Mac and gives it a message.
     /// Returns its T3 thread ID.
-    func startAgent(projectID: String, message: String, model: String?) async throws -> String {
+    /// A new agent starts in `mode`; an existing one keeps its own.
+    func startAgent(projectID: String, message: String, model: String?, mode: T3RuntimeMode) async throws -> String {
         struct Agent: Decodable { let thread_id: String }
         struct Reply: Decodable { struct Data: Decodable { let agent: Agent }; let ok: Bool; let data: Data }
-        var body = ["project_id": projectID, "message": message]
+        var body = ["project_id": projectID, "message": message, "runtime_mode": mode.rawValue]
         if let model { body["model"] = model }
         var request = try request(["v1", "agents"])
         request.httpMethod = "POST"
@@ -159,15 +158,17 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         return url
     }
 
-    /// True once iOS has started downloading the link's IPA, which happens
-    /// only after the person taps Install in the system prompt.
-    func installStarted(link: URL) async throws -> Bool {
-        struct Reply: Decodable { struct Status: Decodable { let downloaded_at: Double? }; let ok: Bool; let data: Status }
+    /// How far iOS has fetched the link's IPA. It starts only after the
+    /// person taps Install in the system prompt; neither step proves the
+    /// installation itself.
+    func installProgress(link: URL) async throws -> InstallProgress {
+        struct Reply: Decodable { struct Status: Decodable { let download_started_at: Double?; let downloaded_at: Double? }; let ok: Bool; let data: Status }
         guard let manifest = URLComponents(url: link, resolvingAgainstBaseURL: false)?.queryItems?
                 .first(where: { $0.name == "url" })?.value.flatMap(URL.init(string:)) else { throw ClientError.response("Squircle") }
         let token = manifest.deletingLastPathComponent().lastPathComponent
         let reply: Reply = try await get(["v1", "install-links", token])
-        return reply.ok && reply.data.downloaded_at != nil
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data.downloaded_at != nil ? .transferred : reply.data.download_started_at != nil ? .downloading : .waiting
     }
 
     /// Tool-call inputs and screenshot counts T3 leaves out of its stream.
@@ -365,6 +366,31 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         guard let response = response as? HTTPURLResponse else { throw ClientError.response(service) }
         guard (200..<300).contains(response.statusCode) else { throw ClientError.http(service, response.statusCode) }
     }
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}
+
+enum InstallProgress: Equatable {
+    /// The person hasn't confirmed the system prompt yet.
+    case waiting
+    /// iOS asked for the IPA.
+    case downloading
+    /// The Mac sent every byte of it.
+    case transferred
+}
+
+/// `GET /v1/agents`: each app's agent thread by T3 project ID, and the exact
+/// command that runs this service's CLI (nil from an older service).
+struct AgentDirectory: Equatable {
+    var agents: [String: String] = [:]
+    var cli: String?
+    static func decode(_ reply: JSONValue) throws -> Self {
+        guard reply["ok"].bool else { throw ClientError.response("Squircle") }
+        let data = reply["data"]
+        var agents: [String: String] = [:]
+        for agent in data["agents"].array {
+            guard let project = agent["project_id"].string, let thread = agent["thread_id"].string else { continue }
+            agents[project] = thread
+        }
+        let cli = data["cli"].string?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self(agents: agents, cli: cli?.isEmpty == false ? cli : nil)
+    }
 }
