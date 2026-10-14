@@ -211,6 +211,8 @@ enum AgentCommand {
         #[arg(long, help = "Worktree directory; default: current directory")]
         cwd: Option<PathBuf>,
     },
+    /// PreToolUse hook: denies the app agent running models outside T3 (codex/claude CLIs, subagents, workflows), pointing to `thread spawn`.
+    Guard,
 }
 #[derive(clap::Args)]
 #[group(required = true, multiple = false)]
@@ -1116,6 +1118,16 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                     println!("{}", json!({"hookSpecificOutput":{"hookEventName":name,"additionalContext":context}}));
                     return Ok(None);
                 }
+            }
+            AgentCommand::Guard => {
+                let mut input = String::new();
+                let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+                let event: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+                let cli_text = root(cli).map(|r| squircle::agents::cli_invocation(&r, &cli.server)).unwrap_or_else(|_| "squircle".into());
+                if let Some(reason) = squircle::guard::check(&event, &cli_text) {
+                    println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}));
+                }
+                return Ok(None);
             }
         },
         Commands::Task { command } => match command {

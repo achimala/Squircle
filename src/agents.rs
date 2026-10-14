@@ -1217,7 +1217,9 @@ impl Agents {
         };
         format!(
             "[squircle] You are {app}'s app agent: you coordinate, and worker threads do the implementation \
-             (`{cli} thread --help`), unless the user says otherwise; archive a worker once its work is merged or abandoned, \
+             (`{cli} thread --help`), unless the user says otherwise. Every piece of delegated work, reviews and research included, \
+             runs as a T3 worker via `thread spawn` (`--provider codex --model <slug> --effort <level>` for Codex), never by running the codex \
+             or claude CLIs yourself or through subagents or workflows, so the user can see it. Archive a worker once its work is merged or abandoned, \
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
              Your tasks, the user's open asks (`{cli} task --help`):{tasks}\n\
              Add a task for each new ask, in the user's words; link its workers (`thread spawn --task`) and builds (`build start --task`), \
