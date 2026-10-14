@@ -152,7 +152,7 @@ pub async fn simulator_commands(since: &str) -> Result<Vec<crate::simpool::Activ
            and (payload_json like '%simctl %' or payload_json like '%xcodebuild%')
          order by created_at limit 5000",
         text("$.data.command"), text("$.data.input.command"), text("$.data.rawOutput.content"),
-    )).await?;
+    ), DETAIL_READ).await?;
     Ok(rows.into_iter().filter_map(|row| Some(crate::simpool::Activity {
         thread: row["thread"].as_str()?.to_string(),
         created_at: row["created_at"].as_str()?.to_string(),
