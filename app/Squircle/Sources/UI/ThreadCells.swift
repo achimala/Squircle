@@ -992,7 +992,9 @@ final class LiveCell: TimelineCell {
 /// instead of being clipped mid-glyph. A task shows for at least `dwell`
 /// before the next replaces it; changes in between collapse into the latest.
 final class LiveCapsule: UIView {
-    enum Tone: Equatable { case idle, working, needsYou, done }
+    /// `recording`: a screen or performance recording runs; the mark is a
+    /// pulsing crimson dot and the time shows.
+    enum Tone: Equatable { case idle, working, needsYou, done, recording }
     /// Clips the sliding lines to the capsule.
     private let track = LayoutView()
     /// Fades the track's trailing edge.
@@ -1101,9 +1103,15 @@ final class LiveCapsule: UIView {
         let toneChanged = tone != self.tone
         if toneChanged {
             self.tone = tone
-            mark.backgroundColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success : Theme.accent
+            mark.backgroundColor = switch tone {
+            case .needsYou: Theme.warning
+            case .done: Theme.success
+            case .recording: Theme.failure
+            default: Theme.accent
+            }
+            mark.layer.cornerRadius = tone == .recording ? markSide / 2 : 4.5
             line.isShimmering = tone == .working
-            line.textColor = tone == .needsYou ? Theme.warning : .secondaryLabel
+            line.textColor = tone == .needsYou ? Theme.warning : tone == .recording ? .label : .secondaryLabel
             animateMark()
         }
         if next == headline {
@@ -1203,6 +1211,14 @@ final class LiveCapsule: UIView {
     /// The app's mark turning between circle and squircle while work runs.
     private func animateMark() {
         mark.layer.removeAllAnimations()
+        if window != nil, tone == .recording {
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1; pulse.toValue = 0.3; pulse.duration = 0.8
+            pulse.autoreverses = true; pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            mark.layer.add(pulse, forKey: "recording")
+            return
+        }
         guard window != nil, tone == .working else { return }
         if Motion.reduced {
             let fade = CABasicAnimation(keyPath: "opacity")

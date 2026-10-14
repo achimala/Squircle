@@ -63,6 +63,7 @@ struct T3ThreadState: Codable {
                 content: Self.spoken(m["text"].string ?? ""), isStreaming: m["streaming"].bool, createdAt: m["createdAt"].string ?? "",
                 turnID: m["turnId"].string)
             message.attachments = m["attachments"].array.compactMap { $0["type"].string == "image" ? $0["id"].string : nil }
+            if message.role == "user" { message.captures = SentCapture.parse(m["text"].string ?? "") }
             if let update = Self.workerUpdate(m) {
                 message.content = update; message.isUpdate = true
                 message.threadIDs = m["context"]["records"].array.flatMap { $0["payload"]["workers"].array.compactMap { $0["id"].string } }
@@ -135,8 +136,9 @@ struct T3ThreadState: Codable {
     }
     /// What the person typed, without the app context Squircle sends after it.
     static func spoken(_ text: String) -> String {
-        guard let range = text.range(of: AppProject.contextMarker) else { return text }
-        return String(text[..<range.lowerBound])
+        let end = [text.range(of: SentCapture.marker), text.range(of: AppProject.contextMarker)].compactMap { $0?.lowerBound }.min()
+        guard let end else { return text }
+        return String(text[..<end])
     }
     /// Each finished turn's changed files, from its ready checkpoint.
     var changes: [TurnChanges] {

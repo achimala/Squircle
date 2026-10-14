@@ -608,21 +608,54 @@ final class SquircleModel {
     func attach(_ attachment: ImageAttachment) {
         if let index = attachments.firstIndex(where: { $0.id == attachment.id }) { attachments[index] = attachment }
         else { attachments.append(attachment) }
+        // A recording starts its way to the Mac at once; sending waits for it.
+        if let capture = attachment.capture, let client {
+            captureUploads[attachment.id]?.cancel()
+            captureUploads[attachment.id] = Task { try await client.uploadCapture(capture.file, kind: capture.kind.rawValue) }
+        }
     }
-    func removeAttachment(_ id: String) { attachments.removeAll { $0.id == id } }
+    func removeAttachment(_ id: String) {
+        attachments.removeAll { $0.id == id }
+        captureUploads.removeValue(forKey: id)?.cancel()
+    }
+    /// Uploads of the field's recordings, by attachment ID, to their paths on the Mac.
+    private var captureUploads: [String: Task<String, Error>] = [:]
+    /// The message block for `captures`, once each is on the Mac.
+    private func captureBlock(_ captures: [ImageAttachment]) async throws -> String {
+        var sent: [(label: String, path: String, video: Bool)] = []
+        for attachment in captures {
+            guard let capture = attachment.capture else { continue }
+            let upload = captureUploads[attachment.id] ?? Task { [client] in
+                guard let client else { throw ClientError.configuration }
+                return try await client.uploadCapture(capture.file, kind: capture.kind.rawValue)
+            }
+            captureUploads[attachment.id] = upload
+            let path = try await upload.value
+            let video = capture.kind == .video
+            // Your own recording plays from the phone's copy.
+            if video { StepVideos.set(capture.file, for: "file:" + path) }
+            sent.append(((video ? "Screen recording · " : "Performance recording · ") + capture.label, path, video))
+        }
+        for attachment in captures { captureUploads[attachment.id] = nil }
+        return SentCapture.block(sent)
+    }
     /// Sends `text` with the field's pictures. Pictures leave the field at
     /// once and come back if T3 does not take the message.
-    func send(_ text: String, in project: AppProject) async {
-        let images = attachments
-        guard !submitting, !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !images.isEmpty else { return }
+    func send(_ spoken: String, in project: AppProject) async {
+        let field = attachments
+        let images = field.filter { $0.capture == nil }, captures = field.filter { $0.capture != nil }
+        guard !submitting, !spoken.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !field.isEmpty else { return }
         guard isValidModel(modelSelection) else { error = "Choose an available model."; return }
         submitting = true
         attachments = []
         defer {
             submitting = false
-            if error != nil { attachments = images + attachments.filter { a in !images.contains { $0.id == a.id } } }
+            if error != nil { attachments = field + attachments.filter { a in !field.contains { $0.id == a.id } } }
         }
         error = nil
+        let text: String
+        do { text = try await spoken + captureBlock(captures) }
+        catch { self.error = "Couldn't send the recording to your Mac: " + error.localizedDescription; return }
         if selectedSessionID == nil, draftIsAgent {
             // The Mac creates the agent (its worktree and thread), with this
             // message unless it carries pictures, which go to T3 from here.
@@ -654,11 +687,11 @@ final class SquircleModel {
                 ["type":"image","name":"image-\(index + 1).jpg","mimeType":"image/jpeg","sizeBytes":image.data.count,
                  "dataUrl":"data:image/jpeg;base64," + image.data.base64EncodedString()]
             }
-            let seed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let seed = spoken.trimmingCharacters(in: .whitespacesAndNewlines)
             try await dispatch(["type":"thread.turn.start","threadId":id,
                 "message":["messageId":UUID().uuidString.lowercased(),"role":"user","text":message,"attachments":uploads],
                 "modelSelection":modelSelection.foundation,"runtimeMode":runtimeMode.rawValue,
-                "interactionMode":"default","titleSeed":String((seed.isEmpty ? "Image" : seed).prefix(120))])
+                "interactionMode":"default","titleSeed":String((seed.isEmpty ? (captures.isEmpty ? "Image" : "Recording") : seed).prefix(120))])
             isRunning = true; status = "Working"
         } catch { self.error = error.localizedDescription }
     }
