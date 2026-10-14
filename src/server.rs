@@ -2268,21 +2268,23 @@ fn tasks_of(state: &AppState) -> ApiResult<Arc<Tasks>> {
 }
 
 /// What a task's linked workers and builds are doing, from memory only (the
-/// shell's thread rows and the job index), so every tick can cover History
-/// too. A row T3 hasn't sent is no fact (`Missing`), never news.
+/// shell's observations and the job index), so every tick can cover History
+/// too. A thread T3 hasn't sent, or a shell that isn't current, is no fact
+/// (`Missing`), never news.
 fn task_signals(state: &AppState, task: &tasks::Task) -> tasks::Signals {
     use tasks::{BuildPhase, WorkerPhase};
+    use crate::agents::Phase;
     let workers = task.threads.iter().map(|id| {
-        let row = state.agents.as_ref().and_then(|a| a.thread_row(id));
-        let phase = match row.as_ref().map(crate::agents::worker_state) {
-            Some("needs-you") => WorkerPhase::NeedsYou,
-            Some("working") => WorkerPhase::Working,
-            Some("error") => WorkerPhase::Error,
-            Some("done") => WorkerPhase::Done,
-            _ => WorkerPhase::Missing,
+        // Only a current shell fact moves a task; stale or unknown is no fact.
+        let observed = state.agents.as_ref().and_then(|a| a.observe(id).current().flatten());
+        let phase = match observed.as_ref().map(|o| o.phase()) {
+            Some(Phase::NeedsYou) => WorkerPhase::NeedsYou,
+            Some(Phase::Working) => WorkerPhase::Working,
+            Some(Phase::Error) => WorkerPhase::Error,
+            Some(Phase::Done) => WorkerPhase::Done,
+            None => WorkerPhase::Missing,
         };
-        let turn = row.as_ref().and_then(|r| r["latestTurn"]["turnId"].as_str()).map(str::to_owned);
-        tasks::WorkerSignal { thread: id.clone(), turn, phase }
+        tasks::WorkerSignal { thread: id.clone(), turn: observed.and_then(|o| o.turn), phase }
     }).collect();
     let builds = task.builds.iter().map(|id| {
         let phase = match state.jobs.state(id) {
