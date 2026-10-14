@@ -795,12 +795,52 @@ mod tests {
         let copied_path = saved.preview.as_ref().unwrap().path.clone();
         fs::remove_file(&copied_path)?;
         symlink(&source, &copied_path)?;
-        assert!(get(&store, &app.id).is_err());
+        // The record stays readable; its substituted artifact is never served.
+        assert!(open_preview(&get(&store, &app.id)?).is_err());
         fs::remove_file(&copied_path)?;
         fs::write(&copied_path, PNG)?;
         saved.preview.as_mut().unwrap().path = source;
         save(&store, &saved)?;
         assert!(get(&store, &app.id).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_preview_leaves_the_catalog_listable_and_is_repaired_by_republishing() -> Result<()> {
+        let (temp, store, registration) = setup()?;
+        let damaged = register(&store, registration.clone())?;
+        let other_project = temp.path().join("Other.xcodeproj");
+        fs::create_dir(&other_project)?;
+        let other = register(&store, AppRegistration { project: other_project, ..registration })?;
+        let source = temp.path().join("capture.png");
+        fs::write(&source, PNG)?;
+        let published = publish_preview(&store, &damaged.id, publication(source.clone()))?;
+        publish_preview(&store, &other.id, publication(source.clone()))?;
+        fs::remove_file(&published.preview.as_ref().unwrap().path)?;
+
+        let listed = list(&store)?;
+        assert_eq!(listed.len(), 2);
+        let broken = listed.iter().find(|app| app.id == damaged.id).unwrap();
+        assert!(open_preview(broken).is_err());
+        assert!(open_preview(listed.iter().find(|app| app.id == other.id).unwrap()).is_ok());
+
+        let repaired = publish_preview(&store, &damaged.id, publication(source))?;
+        assert_ne!(repaired.preview.as_ref().unwrap().id, published.preview.unwrap().id);
+        assert!(open_preview(&get(&store, &damaged.id)?).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn a_rejected_publication_leaves_no_staged_file() -> Result<()> {
+        let (temp, store, registration) = setup()?;
+        let app = register(&store, registration)?;
+        let source = temp.path().join("capture.png");
+        fs::write(&source, PNG)?;
+        let mut request = publication(source);
+        request.source = Some("forged".into());
+        assert!(publish_preview(&store, &app.id, request).is_err());
+        let previews = app_dir(&store, &app.id)?.join("previews");
+        assert_eq!(fs::read_dir(previews)?.count(), 0);
         Ok(())
     }
 }

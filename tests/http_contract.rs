@@ -827,3 +827,115 @@ async fn diagnostics_acknowledge_retries_reject_conflicts_and_observe_only_launc
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["data"]["events"], json!([original, launch]));
 }
+
+/// A body that records whether anything polled it.
+fn watched_body(polled: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Body {
+    Body::from_stream(futures_util::stream::poll_fn(move |_| {
+        polled.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::task::Poll::Ready(None::<Result<Vec<u8>, std::io::Error>>)
+    }))
+}
+
+#[tokio::test]
+async fn capture_uploads_authenticate_and_check_size_before_reading_the_body() {
+    let fixture = Fixture::new();
+    let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for bearer in [None, Some(fixture.diagnostic.as_str())] {
+        let mut request = Request::post("/v1/captures?kind=video");
+        if let Some(bearer) = bearer {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+        }
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request.body(watched_body(polled.clone())).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let oversized = Request::post("/v1/captures?kind=video")
+        .header(header::AUTHORIZATION, format!("Bearer {}", fixture.control))
+        .header(header::CONTENT_LENGTH, (400u64 * 1024 * 1024).to_string())
+        .body(watched_body(polled.clone()))
+        .unwrap();
+    let response = fixture.app.clone().oneshot(oversized).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+
+    // An accepted upload lands as a private file; nothing is left staged.
+    let mut video = vec![0, 0, 0, 24];
+    video.extend_from_slice(b"ftypmp42");
+    video.extend_from_slice(&[0; 16]);
+    let accepted = Request::post("/v1/captures?kind=video")
+        .header(header::AUTHORIZATION, format!("Bearer {}", fixture.control))
+        .body(Body::from(video.clone()))
+        .unwrap();
+    let response = fixture.app.clone().oneshot(accepted).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let path = PathBuf::from(value["data"]["path"].as_str().unwrap());
+    assert_eq!(fs::read(&path).unwrap(), video);
+    let leftovers = fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".partial"))
+        .count();
+    assert_eq!(leftovers, 0);
+}
+
+#[tokio::test]
+async fn extractor_and_routing_rejections_use_the_json_error_envelope() {
+    let fixture = Fixture::new();
+    let control = Some(fixture.control.as_str());
+    // Missing query field, bad path parameter, malformed JSON, wrong method.
+    for (method, path, payload, status) in [
+        ("POST", "/v1/captures", None, StatusCode::BAD_REQUEST),
+        ("GET", "/v1/t3/threads/t/steps/c/images/not-a-number", None, StatusCode::BAD_REQUEST),
+        ("POST", "/v1/agents", Some(json!({"message": "no project"})), StatusCode::UNPROCESSABLE_ENTITY),
+        ("DELETE", "/v1/builds", None, StatusCode::METHOD_NOT_ALLOWED),
+    ] {
+        let (code, value) = fixture.json(method, path, control, payload).await;
+        assert_eq!(code, status, "{method} {path}: {value}");
+        assert_eq!(value["ok"], false);
+        assert!(value["error"]["code"].is_string() && value["error"]["message"].is_string());
+        assert_eq!(value["error"]["retryable"], false);
+    }
+}
+
+#[tokio::test]
+async fn install_evidence_requires_a_complete_transfer() {
+    let fixture = Fixture::new();
+    let id = fixture.import().await;
+    let evidence = |token: String| {
+        let fixture = &fixture;
+        async move {
+            let (_, value) = fixture
+                .json("GET", &format!("/v1/install-links/{token}"), Some(&fixture.control), None)
+                .await;
+            (value["data"]["download_started_at"].clone(), value["data"]["downloaded_at"].clone())
+        }
+    };
+    let token_of = |link: &Value| {
+        link["page_url"].as_str().unwrap().rsplit('/').next().unwrap().to_owned()
+    };
+
+    // Aborted after the first chunk: started, never finished.
+    let aborted = token_of(&fixture.install_link(&id).await);
+    let response = fixture.request("GET", &format!("/install/{aborted}/app.ipa"), None, None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    body.frame().await.unwrap().unwrap();
+    drop(body);
+    let (started, finished) = evidence(aborted).await;
+    assert!(started.as_u64().is_some());
+    assert!(finished.is_null());
+
+    // A missing IPA records nothing at all.
+    let missing = token_of(&fixture.install_link(&id).await);
+    let ipa = fixture.status(&id).await["job"]["output"]["ipa_path"].as_str().unwrap().to_owned();
+    fs::remove_file(ipa).unwrap();
+    let response = fixture.request("GET", &format!("/install/{missing}/app.ipa"), None, None).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let (started, finished) = evidence(missing).await;
+    assert!(started.is_null() && finished.is_null());
+}

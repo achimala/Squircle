@@ -1755,7 +1755,6 @@ mod tests {
         };
         let Json(first) = ingest(
             State(state.clone()),
-            authorization.clone(),
             Ok(Json(event.clone())),
         )
         .await
@@ -1766,7 +1765,6 @@ mod tests {
         event.build_id = job.id.clone();
         let Json(retry) = ingest(
             State(state.clone()),
-            authorization.clone(),
             Ok(Json(event.clone())),
         )
         .await
@@ -1782,7 +1780,7 @@ mod tests {
         assert_eq!(stored["events"][0]["build_id"], job.id);
 
         event.build_id = "../outside".into();
-        let error = ingest(State(state), authorization, Ok(Json(event)))
+        let error = ingest(State(state), Ok(Json(event)))
             .await
             .unwrap_err();
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
@@ -1795,16 +1793,15 @@ mod tests {
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
         let state = AppState::new(Store::open(dir.path().join("state"))?, None);
-        let error = import(
-            State(state.clone()),
-            HeaderMap::new(),
-            Ok(Json(ImportRequest {
-                ipa: source.clone(),
-            })),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        use tower::ServiceExt;
+        let response = router(state.clone())
+            .oneshot(
+                axum::http::Request::post("/v1/import")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({"ipa": source}).to_string()))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let jobs_directory = state.store.lock().unwrap().root.join("jobs");
         assert_eq!(std::fs::read_dir(&jobs_directory)?.count(), 0);
 
@@ -1823,7 +1820,6 @@ mod tests {
         let request = request(dir.path());
         let Json(first) = start(
             State(state.clone()),
-            headers(&state),
             Ok(Json(request.clone())),
         )
         .await
@@ -1831,7 +1827,6 @@ mod tests {
         let id = first["data"]["job"]["id"].as_str().unwrap().to_owned();
         let Json(retry) = start(
             State(state.clone()),
-            headers(&state),
             Ok(Json(request.clone())),
         )
         .await
@@ -1841,13 +1836,13 @@ mod tests {
         let mut changed = request;
         changed.configuration = "Debug".into();
         assert_eq!(
-            start(State(state.clone()), headers(&state), Ok(Json(changed)))
+            start(State(state.clone()), Ok(Json(changed)))
                 .await
                 .unwrap_err()
                 .status,
             StatusCode::CONFLICT
         );
-        let _ = cancel(State(state.clone()), headers(&state), Path(id.clone()))
+        let _ = cancel(State(state.clone()), Path(id.clone()))
             .await
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1879,12 +1874,13 @@ mod tests {
         state.draining.store(true, Ordering::Release);
         let error = start(
             State(state.clone()),
-            headers(&state),
             Ok(Json(request(dir.path()))),
         )
         .await
         .unwrap_err();
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        // Refused before any side effect, so clients may send it again.
+        assert!(error.retryable);
         assert!(state.store.lock().unwrap().list_jobs().unwrap().is_empty());
     }
 }
@@ -2201,7 +2197,8 @@ fn task_signals(state: &AppState, task: &tasks::Task) -> (String, Option<tasks::
     let threads: Vec<&str> = task.threads.iter().map(|id| {
         state.agents.as_ref().and_then(|a| a.thread_row(id)).map_or("missing", |row| crate::agents::worker_state(&row))
     }).collect();
-    let store = state.store.lock().unwrap();
+    // Job records are replaced atomically; reading them needs no record lock.
+    let store = &state.files;
     let builds: Vec<&str> = task.builds.iter().map(|id| match store.load_job(id).map(|j| j.state) {
         Ok(BuildState::Queued) => "queued",
         Ok(BuildState::Running) => "running",
@@ -2209,7 +2206,6 @@ fn task_signals(state: &AppState, task: &tasks::Task) -> (String, Option<tasks::
         Ok(_) => "failed",
         Err(_) => "missing",
     }).collect();
-    drop(store);
     let signature = task.threads.iter().zip(&threads).chain(task.builds.iter().zip(&builds))
         .map(|(id, state)| format!("{id}:{state}")).collect::<Vec<_>>().join(" ");
     (signature, tasks::derive(&threads, &builds))
@@ -2225,14 +2221,14 @@ fn task_view(state: &AppState, task: &tasks::Task) -> Value {
         json!({"id": id, "title": title,
                "state": row.as_ref().map_or("missing", crate::agents::worker_state)})
     }).collect();
-    let store = state.store.lock().unwrap();
+    // Job records are replaced atomically; reading them needs no record lock.
+    let store = &state.files;
     let builds: Vec<Value> = task.builds.iter().map(|id| match store.load_job(id) {
         Ok(job) => json!({"id": id, "state": job.state, "title": job.output.as_ref().map(|o| o.title.clone()),
             "version": job.output.as_ref().map(|o| o.version.clone()), "build_number": job.output.as_ref().map(|o| o.build_number.clone()),
             "installable": job.output.as_ref().is_some_and(|o| o.ipa_path.is_some())}),
         Err(_) => json!({"id": id, "state": "missing"}),
     }).collect();
-    drop(store);
     let media: Vec<Value> = state.tasks.as_ref().map(|t| t.media(&task.id)).unwrap_or_default().into_iter()
         .map(|m| json!({"id": m.id, "kind": m.kind, "caption": m.caption, "content_type": m.content_type, "created_at": m.created_at}))
         .collect();
