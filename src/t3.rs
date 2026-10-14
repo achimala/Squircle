@@ -5,7 +5,7 @@
 
 use crate::store::{atomic_json, read_json};
 use anyhow::{Context, Result, bail};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -16,6 +16,7 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 /// `<data dir>/t3.json`: where T3 is and the service's paired session.
 #[derive(Clone, Serialize, Deserialize)]
@@ -105,17 +106,78 @@ pub fn iso_now() -> String {
     )
 }
 
-type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value>>>>>;
-type Subscriptions = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>>;
+type Waiter = oneshot::Sender<Result<Value>>;
 
-/// One live socket. When it drops, every waiting call fails and every
-/// subscription ends; the owner reconnects with a fresh client.
+/// How long the connection may take or stay quiet before it counts as dead.
+#[derive(Clone, Copy)]
+struct Timing {
+    /// A Ping goes out this often.
+    heartbeat: Duration,
+    /// Nothing heard from T3 for this long (not even a Pong) closes the socket.
+    silence: Duration,
+    /// One frame that cannot be written within this closes the socket.
+    write: Duration,
+}
+
+const TIMING: Timing = Timing {
+    heartbeat: Duration::from_secs(20),
+    silence: Duration::from_secs(45),
+    write: Duration::from_secs(10),
+};
+const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+/// Frames waiting for the socket. A full queue means the writer is stuck, so
+/// the connection is closed rather than allowed to grow without bound.
+const OUTBOX: usize = 1024;
+const ERROR_DETAIL: usize = 700;
+
+/// What the connection task and its client share.
+struct Link {
+    out: mpsc::Sender<Message>,
+    pending: Mutex<HashMap<String, Waiter>>,
+    subscriptions: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
+    stop: CancellationToken,
+}
+
+impl Link {
+    fn send(&self, message: Message) -> Result<()> {
+        match self.out.try_send(message) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.stop.cancel();
+                bail!("T3 connection stopped draining")
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => bail!("T3 connection closed"),
+        }
+    }
+}
+
+/// One live socket, owned by a single task that reads, writes and sends
+/// heartbeats. When the socket fails, goes quiet or the last `Arc<T3>` drops,
+/// that task ends: every waiting call fails and every subscription ends; the
+/// owner reconnects with a fresh client.
 pub struct T3 {
     pub config: T3Config,
-    out: mpsc::UnboundedSender<Message>,
-    pending: Pending,
-    subscriptions: Subscriptions,
+    link: Arc<Link>,
     closed: watch::Receiver<bool>,
+}
+
+impl Drop for T3 {
+    fn drop(&mut self) {
+        self.link.stop.cancel();
+    }
+}
+
+/// Removes a call's waiter however the call ends (answer, timeout, or the
+/// caller dropping the future).
+struct PendingGuard<'a> {
+    link: &'a Link,
+    id: &'a str,
+}
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.link.pending.lock().unwrap().remove(self.id);
+    }
 }
 
 impl T3 {
@@ -137,99 +199,67 @@ impl T3 {
         ws.set_scheme(if ws.scheme() == "https" { "wss" } else { "ws" }).ok();
         ws.set_path("/ws");
         ws.query_pairs_mut().append_pair("wsTicket", ticket);
-        let (socket, _) = tokio_tungstenite::connect_async(ws.as_str())
+        let (socket, _) = tokio::time::timeout(OPEN_TIMEOUT, tokio_tungstenite::connect_async(ws.as_str()))
             .await
+            .context("T3's WebSocket did not open within 15 seconds")?
             .context("Cannot open T3's WebSocket")?;
-        let (mut sink, mut stream) = socket.split();
-        let (out, mut outgoing) = mpsc::unbounded_channel::<Message>();
-        let pending: Pending = Arc::default();
-        let subscriptions: Subscriptions = Arc::default();
-        let (closed_tx, closed) = watch::channel(false);
+        let (sink, stream) = socket.split();
+        Ok(Self::start(config, sink, stream, TIMING))
+    }
 
-        tokio::spawn(async move {
-            while let Some(message) = outgoing.recv().await {
-                if sink.send(message).await.is_err() {
-                    break;
-                }
-            }
+    fn start<W, R, E>(config: T3Config, sink: W, stream: R, timing: Timing) -> Arc<Self>
+    where
+        W: Sink<Message> + Unpin + Send + 'static,
+        W::Error: Send,
+        R: Stream<Item = Result<Message, E>> + Unpin + Send + 'static,
+        E: Send + 'static,
+    {
+        let (out, outgoing) = mpsc::channel(OUTBOX);
+        let link = Arc::new(Link {
+            out,
+            pending: Mutex::default(),
+            subscriptions: Mutex::default(),
+            stop: CancellationToken::new(),
         });
-        let heartbeat = out.clone();
-        let mut heartbeat_closed = closed.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(20)) => {}
-                    _ = heartbeat_closed.changed() => return,
-                }
-                if heartbeat.send(Message::text(json!({"_tag":"Ping"}).to_string())).is_err() {
-                    return;
-                }
-            }
-        });
-        let (reader_out, reader_pending, reader_subs) = (out.clone(), pending.clone(), subscriptions.clone());
-        tokio::spawn(async move {
-            while let Some(Ok(message)) = stream.next().await {
-                let text = match message {
-                    Message::Text(text) => text.to_string(),
-                    Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                    Message::Close(_) => break,
-                    _ => continue,
-                };
-                let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
-                let frames = match frame {
-                    Value::Array(items) => items,
-                    other => vec![other],
-                };
-                for frame in frames {
-                    receive(&frame, &reader_out, &reader_pending, &reader_subs);
-                }
-            }
-            let _ = closed_tx.send(true);
-            for (_, waiter) in reader_pending.lock().unwrap().drain() {
-                let _ = waiter.send(Err(anyhow::anyhow!("T3 connection closed")));
-            }
-            reader_subs.lock().unwrap().clear();
-        });
-        Ok(Arc::new(Self { config, out, pending, subscriptions, closed }))
+        let (closed_tx, closed) = watch::channel(false);
+        tokio::spawn(run(link.clone(), sink, stream, outgoing, closed_tx, timing));
+        Arc::new(Self { config, link, closed })
     }
 
     fn request(&self, id: &str, tag: &str, payload: Value) -> Result<()> {
         let frame = json!({"_tag":"Request","id":id,"tag":tag,"payload":payload,"headers":[]});
-        self.out
-            .send(Message::text(frame.to_string()))
-            .map_err(|_| anyhow::anyhow!("T3 connection closed"))
+        self.link.send(Message::text(frame.to_string()))
     }
 
     pub async fn call(&self, tag: &str, payload: Value) -> Result<Value> {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id.clone(), tx);
-        if let Err(error) = self.request(&id, tag, payload) {
-            self.pending.lock().unwrap().remove(&id);
-            return Err(error);
-        }
+        self.link.pending.lock().unwrap().insert(id.clone(), tx);
+        let _guard = PendingGuard { link: &self.link, id: &id };
+        self.request(&id, tag, payload)?;
         match tokio::time::timeout(Duration::from_secs(45), rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => bail!("T3 connection closed"),
-            Err(_) => {
-                self.pending.lock().unwrap().remove(&id);
-                bail!("T3 did not answer {tag} within 45 seconds")
-            }
+            Err(_) => bail!("T3 did not answer {tag} within 45 seconds"),
         }
     }
 
-    /// Chunks of a streaming RPC, in order, until the socket closes.
+    /// Chunks of a streaming RPC, in order, until the socket closes. Dropping
+    /// the receiver interrupts the stream at its next chunk.
     pub fn subscribe(&self, tag: &str, payload: Value) -> Result<(String, mpsc::UnboundedReceiver<Value>)> {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = mpsc::unbounded_channel();
-        self.subscriptions.lock().unwrap().insert(id.clone(), tx);
-        self.request(&id, tag, payload)?;
+        self.link.subscriptions.lock().unwrap().insert(id.clone(), tx);
+        if let Err(error) = self.request(&id, tag, payload) {
+            self.link.subscriptions.lock().unwrap().remove(&id);
+            return Err(error);
+        }
         Ok((id, rx))
     }
 
     pub fn unsubscribe(&self, id: &str) {
-        self.subscriptions.lock().unwrap().remove(id);
-        let _ = self.out.send(Message::text(json!({"_tag":"Interrupt","requestId":id}).to_string()));
+        self.link.subscriptions.lock().unwrap().remove(id);
+        let _ = self.link.send(interrupt(id));
     }
 
     /// The first chunk of a subscription (T3 sends a snapshot first).
@@ -265,7 +295,88 @@ impl T3 {
     }
 }
 
-fn receive(frame: &Value, out: &mpsc::UnboundedSender<Message>, pending: &Pending, subscriptions: &Subscriptions) {
+fn interrupt(id: &str) -> Message {
+    Message::text(json!({"_tag":"Interrupt","requestId":id}).to_string())
+}
+
+/// The connection's whole lifetime: reads, writes and heartbeats in one task,
+/// so a failure of either half, silence or cancellation ends all of it.
+async fn run<W, R, E>(
+    link: Arc<Link>,
+    mut sink: W,
+    mut stream: R,
+    mut outgoing: mpsc::Receiver<Message>,
+    closed: watch::Sender<bool>,
+    timing: Timing,
+) where
+    W: Sink<Message> + Unpin,
+    R: Stream<Item = Result<Message, E>> + Unpin,
+{
+    let start = tokio::time::Instant::now();
+    let mut heartbeat = tokio::time::interval_at(start + timing.heartbeat, timing.heartbeat);
+    let mut heard = start;
+    loop {
+        tokio::select! {
+            _ = link.stop.cancelled() => {
+                let _ = tokio::time::timeout(timing.write, sink.send(Message::Close(None))).await;
+                break;
+            }
+            Some(message) = outgoing.recv() => {
+                if !matches!(tokio::time::timeout(timing.write, sink.send(message)).await, Ok(Ok(()))) {
+                    break;
+                }
+            }
+            _ = heartbeat.tick() => {
+                if heard.elapsed() >= timing.silence {
+                    break;
+                }
+                let ping = Message::text(json!({"_tag":"Ping"}).to_string());
+                if !matches!(tokio::time::timeout(timing.write, sink.send(ping)).await, Ok(Ok(()))) {
+                    break;
+                }
+            }
+            incoming = stream.next() => {
+                let Some(Ok(message)) = incoming else { break };
+                heard = tokio::time::Instant::now();
+                let text = match message {
+                    Message::Text(text) => text.to_string(),
+                    Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
+                let frames = match frame {
+                    Value::Array(items) => items,
+                    other => vec![other],
+                };
+                for frame in frames {
+                    receive(&frame, &link);
+                }
+            }
+        }
+    }
+    link.stop.cancel();
+    // Close the queue first: a call that registers after the drain below
+    // then fails to send instead of waiting for an answer that cannot come.
+    drop(outgoing);
+    let _ = closed.send(true);
+    let waiters: Vec<Waiter> = link.pending.lock().unwrap().drain().map(|(_, waiter)| waiter).collect();
+    for waiter in waiters {
+        let _ = waiter.send(Err(anyhow::anyhow!("T3 connection closed")));
+    }
+    link.subscriptions.lock().unwrap().clear();
+}
+
+/// The longest prefix of `text` within `max` bytes that ends on a character.
+fn clip(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn receive(frame: &Value, link: &Link) {
     let id = match &frame["requestId"] {
         Value::String(id) => id.clone(),
         Value::Number(n) => n.to_string(),
@@ -273,28 +384,133 @@ fn receive(frame: &Value, out: &mpsc::UnboundedSender<Message>, pending: &Pendin
     };
     match frame["_tag"].as_str() {
         Some("Chunk") => {
-            if let Some(sender) = subscriptions.lock().unwrap().get(&id) {
-                for value in frame["values"].as_array().into_iter().flatten() {
-                    let _ = sender.send(value.clone());
+            let sender = link.subscriptions.lock().unwrap().get(&id).cloned();
+            if let Some(sender) = sender {
+                let gone = frame["values"].as_array().into_iter().flatten().any(|value| sender.send(value.clone()).is_err());
+                if gone {
+                    link.subscriptions.lock().unwrap().remove(&id);
+                    let _ = link.send(interrupt(&id));
+                    return;
                 }
             }
-            let _ = out.send(Message::text(json!({"_tag":"Ack","requestId":id}).to_string()));
+            let _ = link.send(Message::text(json!({"_tag":"Ack","requestId":id}).to_string()));
         }
         Some("Exit") => {
-            subscriptions.lock().unwrap().remove(&id);
-            if let Some(waiter) = pending.lock().unwrap().remove(&id) {
+            link.subscriptions.lock().unwrap().remove(&id);
+            let waiter = link.pending.lock().unwrap().remove(&id);
+            if let Some(waiter) = waiter {
                 let exit = &frame["exit"];
                 let _ = waiter.send(if exit["_tag"] == "Success" {
                     Ok(exit["value"].clone())
                 } else {
                     let cause = exit["cause"].to_string();
-                    Err(anyhow::anyhow!("T3 rejected the request: {}", &cause[..cause.len().min(700)]))
+                    Err(anyhow::anyhow!("T3 rejected the request: {}", clip(&cause, ERROR_DETAIL)))
                 });
             }
         }
         Some("Ping") => {
-            let _ = out.send(Message::text(json!({"_tag":"Pong"}).to_string()));
+            let _ = link.send(Message::text(json!({"_tag":"Pong"}).to_string()));
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::DuplexStream;
+    use tokio_tungstenite::WebSocketStream;
+
+    const FAST: Timing = Timing {
+        heartbeat: Duration::from_millis(40),
+        silence: Duration::from_millis(100),
+        write: Duration::from_millis(100),
+    };
+
+    fn config() -> T3Config {
+        T3Config { url: "http://t3.test".into(), token: String::new(), expires_at: None }
+    }
+
+    /// A client wired to an in-memory WebSocket peer the test controls.
+    async fn peer(timing: Timing) -> (Arc<T3>, WebSocketStream<DuplexStream>) {
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (client, server) = tokio::join!(
+            tokio_tungstenite::client_async("ws://t3.test/ws", client_io),
+            tokio_tungstenite::accept_async(server_io),
+        );
+        let (sink, stream) = client.unwrap().0.split();
+        (T3::start(config(), sink, stream, timing), server.unwrap())
+    }
+
+    async fn next_request(server: &mut WebSocketStream<DuplexStream>) -> Value {
+        loop {
+            let Message::Text(text) = server.next().await.unwrap().unwrap() else { continue };
+            let frame: Value = serde_json::from_str(&text).unwrap();
+            if frame["_tag"] == "Request" {
+                return frame;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn multibyte_error_past_the_limit_fails_one_call_only() {
+        let (client, mut server) = peer(TIMING).await;
+        let answers = tokio::spawn(async move {
+            let first = next_request(&mut server).await;
+            let cause = json!({"_tag":"Die","message":"é".repeat(400)});
+            let exit = json!({"_tag":"Exit","requestId":first["id"],"exit":{"_tag":"Failure","cause":cause}});
+            server.send(Message::text(exit.to_string())).await.unwrap();
+            let second = next_request(&mut server).await;
+            let exit = json!({"_tag":"Exit","requestId":second["id"],"exit":{"_tag":"Success","value":7}});
+            server.send(Message::text(exit.to_string())).await.unwrap();
+            server
+        });
+        let error = client.call("a", json!({})).await.unwrap_err().to_string();
+        assert!(error.starts_with("T3 rejected the request"), "{error}");
+        assert_eq!(client.call("b", json!({})).await.unwrap(), json!(7));
+        drop(answers.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn silent_peer_closes_the_connection_and_fails_calls() {
+        let (client, server) = peer(FAST).await;
+        let error = tokio::time::timeout(Duration::from_secs(2), client.call("a", json!({}))).await.unwrap();
+        assert_eq!(error.unwrap_err().to_string(), "T3 connection closed");
+        tokio::time::timeout(Duration::from_secs(1), client.closed()).await.unwrap();
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn write_failure_closes_the_connection() {
+        let sink = Box::pin(futures_util::sink::unfold((), |_, _: Message| async {
+            Err::<(), _>(std::io::Error::other("broken pipe"))
+        }));
+        let stream = futures_util::stream::pending::<Result<Message, std::io::Error>>();
+        let client = T3::start(config(), sink, stream, TIMING);
+        let result = tokio::time::timeout(Duration::from_secs(1), client.call("a", json!({}))).await.unwrap();
+        assert!(result.is_err());
+        tokio::time::timeout(Duration::from_secs(1), client.closed()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_the_client_closes_the_socket() {
+        let (client, mut server) = peer(TIMING).await;
+        drop(client);
+        let ended = tokio::time::timeout(Duration::from_secs(1), async {
+            while let Some(Ok(message)) = server.next().await {
+                if message.is_close() {
+                    break;
+                }
+            }
+        });
+        ended.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn abandoned_call_forgets_its_waiter() {
+        let (client, server) = peer(TIMING).await;
+        assert!(tokio::time::timeout(Duration::from_millis(20), client.call("a", json!({}))).await.is_err());
+        assert!(client.link.pending.lock().unwrap().is_empty());
+        drop(server);
     }
 }
