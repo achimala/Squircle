@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import Squircle
 
 final class T3Tests: XCTestCase {
@@ -150,5 +151,183 @@ final class T3Tests: XCTestCase {
             .media(MediaReference(path: "/tmp/clip.mp4", video: true)),
             .text("[docs](https://example.com/x.png) and [notes](/tmp/notes.md)\n```\n![code](/tmp/code.png)\n```")
         ])
+    }
+}
+
+// MARK: Native state, transport and caches (W5)
+
+/// A command dispatch that holds each command until the test releases it.
+@MainActor
+private final class GatedDispatch {
+    private(set) var commands: [JSONValue] = []
+    private var waiting: [CheckedContinuation<Void, Error>] = []
+    var dispatch: (JSONValue) async throws -> JSONValue {
+        { [unowned self] command in
+            commands.append(command)
+            try await withCheckedThrowingContinuation { waiting.append($0) }
+            return .object([:])
+        }
+    }
+    func release(failing: Bool = false) {
+        let next = waiting.removeFirst()
+        if failing { next.resume(throwing: ClientError.backend("T3", 0, "refused")) } else { next.resume() }
+    }
+    func until(_ count: Int) async { while commands.count < count { await Task.yield() } }
+}
+
+final class NativeStateTests: XCTestCase {
+    private let config = JSONValue.from(["providers":[["instanceId":"codex","displayName":"Codex","enabled":true,"status":"ready",
+                                                        "models":[["slug":"sol","name":"Sol","isDefault":true]]]]])
+    private let project = AppProject(id: "app", name: "App", subtitle: "", bundleID: nil, canBuild: false, updatedAt: .now)
+
+    @MainActor
+    private func draftWithPicture(_ gate: GatedDispatch) async -> SquircleModel {
+        let model = SquircleModel(configuration: nil, preferences: UserDefaults(suiteName: UUID().uuidString)!, commandDispatch: gate.dispatch)
+        model.consumeConfig(config)
+        model.selectProject(project)
+        await model.beginDraft()
+        model.attach(ImageAttachment(UIImage(systemName: "star")!, id: "picture")!)
+        return model
+    }
+
+    /// Navigating away while a draft's thread is being created: the message
+    /// still goes to the thread that draft created, and selection stays put.
+    @MainActor
+    func testDraftSendStaysWithItsThreadAcrossNavigation() async throws {
+        let gate = GatedDispatch()
+        let model = await draftWithPicture(gate)
+        let sending = Task { await model.send("hello", in: project, to: nil, agent: false) }
+        await gate.until(1)
+        let created = try XCTUnwrap(gate.commands[0]["threadId"].string)
+        await model.selectSession("other")
+        gate.release()
+        await gate.until(2)
+        XCTAssertEqual(gate.commands[1]["type"].string, "thread.turn.start")
+        XCTAssertEqual(gate.commands[1]["threadId"].string, created)
+        gate.release()
+        let outcome = await sending.value
+        XCTAssertEqual(outcome, .sent(threadID: created))
+        XCTAssertEqual(model.selectedSessionID, "other")
+        XCTAssertTrue(model.attachments.isEmpty)
+    }
+
+    /// A failed send puts its pictures back in the conversation that sent
+    /// them, not the one open now.
+    @MainActor
+    func testFailedSendRestoresPicturesToItsOwnConversation() async throws {
+        let gate = GatedDispatch()
+        let model = await draftWithPicture(gate)
+        let sending = Task { await model.send("hello", in: project, to: nil, agent: false) }
+        await gate.until(1)
+        await model.selectSession("other")
+        gate.release(failing: true)
+        guard case .failed = await sending.value else { return XCTFail("Expected failure") }
+        XCTAssertTrue(model.attachments.isEmpty, "The open thread's field stays empty")
+        XCTAssertNil(model.error, "The error belongs to the conversation that sent")
+    }
+
+    @MainActor
+    func testSubscriptionEndingWithSocketUpIsReported() throws {
+        let gateway = T3Gateway(configuration: try Self.configuration())
+        var ends: [String: Error?] = [:]
+        var values = 0
+        gateway.track("shell", receive: { _ in values += 1 }, ended: { ends["shell"] = $0 })
+        gateway.track("thread", receive: { _ in }, ended: { ends["thread"] = $0 })
+        gateway.receive(.from(["_tag":"Chunk","requestId":"shell","values":[["kind":"snapshot"]]]))
+        gateway.receive(.from(["_tag":"Exit","requestId":"shell","exit":["_tag":"Failure","cause":"nope"]]))
+        gateway.receive(.from(["_tag":"Exit","requestId":"thread","exit":["_tag":"Success","value":NSNull()]]))
+        XCTAssertEqual(values, 1)
+        XCTAssertNotNil(ends["shell"] ?? nil, "A rejection says why")
+        XCTAssertTrue(ends.keys.contains("thread") && ends["thread"]! == nil, "An unexpected end is reported too")
+        XCTAssertEqual(gateway.subscriptionCount, 0)
+        gateway.close()
+    }
+
+    func testAssetURLsStayOnT3sOrigin() throws {
+        let base = URL(string: "https://mac.tail.ts.net:8443")!
+        XCTAssertEqual(T3HTTP.assetURL("/api/assets/x?sig=1", base: base)?.absoluteString, "https://mac.tail.ts.net:8443/api/assets/x?sig=1")
+        for hostile in ["//evil.example/x", "http://mac.tail.ts.net:8443/x", "https://mac.tail.ts.net:9443/x",
+                        "https://user@mac.tail.ts.net:8443/x", "https://evil.example/x", "api/x", "/\\evil.example/x"] {
+            XCTAssertNil(T3HTTP.assetURL(hostile, base: base), hostile)
+        }
+        XCTAssertTrue(T3HTTP.sameOrigin(URL(string: "https://MAC.tail.ts.net:443/a")!, URL(string: "https://mac.tail.ts.net")!))
+        XCTAssertFalse(T3HTTP.sameOrigin(URL(string: "http://mac.tail.ts.net/a")!, URL(string: "https://mac.tail.ts.net")!))
+    }
+
+    func testSharedKeychainUpdatesInPlaceAndNeverDeletes() {
+        typealias Shared = AppConfiguration.Shared
+        var adds = 0
+        XCTAssertEqual(Shared.replace(data: Data(), update: { _ in errSecSuccess }, add: { _ in adds += 1; return errSecSuccess }), .stored)
+        XCTAssertEqual(adds, 0)
+        XCTAssertEqual(Shared.replace(data: Data(), update: { _ in errSecItemNotFound }, add: { _ in errSecSuccess }), .stored)
+        XCTAssertEqual(Shared.replace(data: Data(), update: { _ in errSecItemNotFound }, add: { _ in errSecDuplicateItem }), .failed(errSecDuplicateItem))
+        XCTAssertEqual(Shared.replace(data: Data(), update: { _ in errSecInteractionNotAllowed }, add: { _ in adds += 1; return errSecSuccess }),
+                       .failed(errSecInteractionNotAllowed))
+        XCTAssertEqual(adds, 0, "A refused update must not fall through to replacing the item")
+    }
+
+    func testOlderCacheSnapshotNeverReplacesNewer() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let disk = DiskCache(root: root)
+        let url = root.appendingPathComponent("thread.json")
+        let wroteNew = await disk.write(["newer"], to: url, generation: 2)
+        let wroteOld = await disk.write(["older"], to: url, generation: 1)
+        XCTAssertTrue(wroteNew); XCTAssertFalse(wroteOld)
+        XCTAssertEqual(try JSONDecoder().decode([String].self, from: Data(contentsOf: url)), ["newer"])
+    }
+
+    func testBoundedCacheEvictsLeastRecentlyUsedByCost() {
+        var cache = BoundedCache<String, Data>(budget: 10, cost: \.count)
+        cache.set(Data(count: 4), for: "a"); cache.set(Data(count: 4), for: "b")
+        _ = cache.value(for: "a")
+        let dropped = cache.set(Data(count: 4), for: "c")
+        XCTAssertEqual(dropped.count, 1)
+        XCTAssertNil(cache.peek("b")); XCTAssertNotNil(cache.peek("a")); XCTAssertEqual(cache.total, 8)
+        cache.set(Data(count: 50), for: "huge")
+        XCTAssertEqual(cache.count, 1, "One entry over budget is kept alone, not refused")
+    }
+
+    @MainActor
+    func testEvictedDownloadsAreDeletedButHandedFilesAreNot() throws {
+        let mine = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
+        try Data([1]).write(to: mine)
+        defer { try? FileManager.default.removeItem(at: mine) }
+        StepVideos.set(mine, for: "mine")
+        let download = StepVideos.directory.appendingPathComponent(UUID().uuidString + ".mp4")
+        try Data([1]).write(to: download)
+        StepVideos.set(download, for: "download")
+        StepVideos.removeAll()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: mine.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: download.path))
+    }
+
+    func testAgentDirectoryCarriesTheServicesCLI() throws {
+        let reply = JSONValue.from(["ok": true, "data": ["agents": [["project_id": "p", "thread_id": "t"], ["project_id": "q"]],
+                                                         "cli": "'/opt/sq dir/squircle' --data-dir /data --server http://127.0.0.1:9"]])
+        let directory = try AgentDirectory.decode(reply)
+        XCTAssertEqual(directory.agents, ["p": "t"])
+        XCTAssertEqual(directory.cli, "'/opt/sq dir/squircle' --data-dir /data --server http://127.0.0.1:9")
+        XCTAssertNil(try AgentDirectory.decode(.from(["ok": true, "data": ["agents": []]])).cli)
+        XCTAssertThrowsError(try AgentDirectory.decode(.from(["ok": false])))
+    }
+
+    /// Closing breaks every cycle: the model, its client and sessions go.
+    @MainActor
+    func testClosedModelIsReleased() throws {
+        weak var released: SquircleModel?
+        try autoreleasepool {
+            let model = SquircleModel(configuration: try Self.configuration(), preferences: UserDefaults(suiteName: UUID().uuidString)!)
+            model.startMetadataUpdates()
+            let updates = model.updates
+            released = model
+            model.close()
+            _ = updates
+        }
+        XCTAssertNil(released)
+    }
+
+    static func configuration() throws -> AppConfiguration {
+        try JSONDecoder().decode(AppConfiguration.self, from: Data(#"{"t3_url":"https://127.0.0.1:9","t3_token":"t","squircle_url":"https://127.0.0.1:9","squircle_token":"s","diagnostic_token":"d"}"#.utf8))
     }
 }

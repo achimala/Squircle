@@ -1,2 +1,1 @@
-2 Sources/SquircleApp.swift
 1 Sources/UI/MotionAudit.swift

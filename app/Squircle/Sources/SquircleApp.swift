@@ -51,7 +51,7 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         // Verification only: the debug overlay over Squircle, scoped to the
         // app with this bundle ID, since it can't run injected in a simulator.
         if let bundleID = ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_DEMO"], let configuration = model.configuration {
-            DispatchQueue.main.async { OverlayHost.shared.start(bundleID: bundleID, configuration: configuration) }
+            Task { @MainActor in OverlayHost.shared.start(bundleID: bundleID, configuration: configuration) }
         }
         if let kind = ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_ACTIVITY"] { push.demoActivity(kind) }
         // Verification only: `SQUIRCLE_JANK=1` blocks the main thread for
@@ -68,7 +68,10 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         if ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_UPDATE"] == "1",
            let data = #"{"id":"demo","state":"succeeded","created_at":0,"output":{"version":"0.3.0","build_number":"26","ipa_path":"/x.ipa"}}"#.data(using: .utf8),
            let build = try? JSONDecoder().decode(AppBuild.self, from: data) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { UpdateCurtain.show(in: window, build: build) {} }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                UpdateCurtain.show(in: window, build: build) {}
+            }
         }
         #endif
     }
@@ -95,5 +98,7 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         if let url = contexts.first?.url, let target = PushTarget(url: url) { PushCenter.shared.open(target) }
     }
     func sceneDidEnterBackground(_ scene: UIScene) { model.enteredBackground() }
+    /// The scene is gone for good: so is everything its model started.
+    func sceneDidDisconnect(_ scene: UIScene) { model.close() }
     func sceneWillEnterForeground(_ scene: UIScene) { model.enteringForeground() }
 }
