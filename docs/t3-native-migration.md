@@ -727,7 +727,11 @@ closing to update and goes to the Home Screen, where the icon shows progress;
 it returns to normal if the update fails. iOS has no way to reopen an app after
 replacing it. Squircle `151a7519-aa01-4af6-acaf-b758055dc285` (0.3.0 26) and
 Probe `1abd89ec-8a3d-4403-909e-aa30debb25ff`; transitions verified frame by
-frame in the simulator; not yet on the phone.
+frame in the simulator; not yet on the phone. *Superseded 2026-10-14
+([review fixes](#2026-10-14-code-review-fixes-030-56)): `downloaded_at` was
+set when the request arrived; it now means every byte was sent, and
+`download_started_at` marks the IPA being opened. The curtain waits for
+`downloaded_at`.*
 
 **Correction, real glass morph (2026-10-07):** the previous build faked the
 morph: two glass views crossfaded (materialize/dematerialize in a container)
@@ -1839,3 +1843,41 @@ Verified in the simulator against the coordinator thread with a scratch copy
 of the service: turns that showed nothing now show their steps and lines, and
 a worker's thread opens with its task. Not yet on the phone; the service must
 be restarted for the step history and the marks.
+
+## 2026-10-14 code review fixes (0.3.0 56)
+
+The [October code review](code-review-2026-10.md) found 46 defects (10 high).
+Fix waves W1–W9 are merged into main; source version 0.3.0 (56). The
+resulting contracts are in
+[architecture](architecture.md#boundaries-after-the-october-2026-review) and
+[CLI design](cli.md); the review's status section lists each finding as fixed
+or deferred. Product decisions in AGENTS.md are unchanged.
+
+- **Service:** authentication before any body is read; one JSON error shape
+  for every route with an explicit `retryable`; capture uploads streamed to
+  disk one at a time; a missing preview no longer breaks the catalog; install
+  tickets separate `download_started_at` from `downloaded_at` (every byte
+  sent); shutdown stops simulator recordings and closes T3 device sessions.
+- **App agents:** one agent per app under concurrent first sends; the chosen
+  approval mode (`runtime_mode`, `agent start --runtime-mode`) applies at
+  creation and survives a fresh start; cleanup never deletes a branch with
+  merge commits the base doesn't contain; wake-ups and resets are saved and
+  retried; discard stops a working worker before removing its files.
+- **Phone:** sends land in the conversation that sent them; T3 ending a
+  subscription reconnects; bounded caches and one ordered disk writer; the
+  update curtain waits for every byte; the overlay shares the app's
+  conversation through `ConversationHost` and shows live simulators there as
+  previews; capture always stops its recorder; the jelly stays still under
+  Reduce Motion.
+- **Tests:** 122 Rust tests pass (100 unit, 6 CLI, 13 HTTP contract, 3
+  service lifecycle). The CLI deadline tests failed about one run in three:
+  macOS hands accepted sockets the listener's non-blocking mode, so the fake
+  server sometimes answered before reading the request, and the 3-second
+  bounds timed first-use credential fsync. The fake server now uses blocking
+  sockets and an ordered stop, and the bound only separates the CLI's deadline
+  from reqwest's 60-second fallback; 25 consecutive runs passed.
+
+Not yet verified: the coordinated phone/simulator check in step 4 of the
+review's fix plan (rapid navigation during a delayed send,
+background/foreground, Home with live simulators, scene replacement during
+capture, Reduce Motion, app/overlay parity).

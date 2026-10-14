@@ -4,6 +4,35 @@ Reviewed 2026-10-14 on `code-review`, against source commit `31692b2e267be51ed9e
 
 **46 findings: 0 critical, 10 high, 30 medium, 6 low.**
 
+## Status (2026-10-14)
+
+Fix waves W1–W10 are merged into main (source version 0.3.0 (56)). Everything
+below this section is the original review, kept as the baseline. Current
+contracts: [architecture](architecture.md#boundaries-after-the-october-2026-review)
+and [CLI design](cli.md).
+
+| Findings | Status | Where |
+| --- | --- | --- |
+| H01–H05 | Fixed | W1 (`deb9f8b`) |
+| A01–A08 | Fixed | W2 (`833b3c4`) |
+| T01–T03 | Fixed | W3 (`823c717`) |
+| R01–R04 | Fixed | W4 (`e4c3fe0`); W1 calls `Sims::shutdown` on service shutdown |
+| N01–N11 | Fixed | W5 (`4502217`); N11's invocation comes from `GET /v1/agents` (W1) and `capabilities` (W9) |
+| U01–U03 | Fixed | W6 (`19207cd`), overlay side W7 (`a6ad1f7`): `ConversationHost`, overlay live simulators are previews |
+| O01–O03 | Fixed | W7 (`6914444`, `a6ad1f7`) |
+| B01–B03 | Fixed | W8 (`9f5a712`) |
+| D01–D03, C01 | Fixed | W9 (`dfbc242`); C01 refuses a non-loopback `--server` and adds `POST /v1/t3/threads/{thread}/media` |
+| C03 | Fixed | W9 (media help) and W10 (active docs) |
+| C02 | **Deferred, in part** | The ownership boundaries it asked for landed with their fixes (thread-addressed sends, `ConversationHost`, one rejection mapping, `DiskCache`). The large files were not split and grew (`SquircleModel.swift` 1,433, `ThreadViewController.swift` 1,625, `SquircleOverlay.swift` 1,449, `server.rs` 2,392 lines); `PhonePose.interpolate`/`visible` are still unused |
+
+**Not yet verified:** step 4 of the fix plan, the coordinated phone and
+simulator check (rapid navigation during a delayed send, background/foreground,
+Home with live simulators, scene replacement during capture, Reduce Motion,
+app/overlay parity), and O03's draw-cost profiling on the phone. N05's and
+U01's effect on frame time and bandwidth is not measured. On 2026-10-14 the
+Rust suite passed: 100 unit, 6 CLI, 13 HTTP contract and 3 service lifecycle
+tests. The CLI's deadline tests, flaky on main, were made deterministic in W10.
+
 ## Scope, evidence and severity
 
 The review covers the Rust service and CLI (`src/`), native client (`app/Squircle/Sources/`, including `UI/`), injected overlay, Claude plugin, build configuration, concurrency check, existing tests and relevant architecture/CLI documentation. AGENTS.md and README.md supplied the constraints. Findings below identify concrete control flow, ownership or contract defects; static performance concerns are not presented as measured phone latency.

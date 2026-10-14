@@ -7,6 +7,15 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-14: code review fixes, source version 0.3.0 (56).** The October
+[code review](docs/code-review-2026-10.md)'s fixes are merged: authentication
+before uploads, one JSON error shape with `retryable`, honest install evidence
+(download started vs every byte sent), one agent per app under concurrent
+sends with the chosen approval mode, safe worker cleanup, durable wake-ups,
+simulator recordings that stop with the service, thread-addressed sends and
+bounded caches on the phone. Not yet checked on the phone. See
+[boundaries](docs/architecture.md#boundaries-after-the-october-2026-review).
+
 **2026-10-14: notifications and Live Activity, version 0.3.0 (51).** The Mac
 sends notifications (agent replied or asks, worker finished/needs
 you/errored, build done) and a Live Activity with the agent's current step
@@ -192,6 +201,7 @@ See the evidence page for the scope of rendered transition checks.
 | How does cellular installation work? | [Remote iOS workflow](docs/remote-ios.md) |
 | How does the phone record the screen or performance for the agent? | [Performance capture](docs/perf-capture.md) |
 | What was verified before the T3 replacement? | [Historical validation](docs/validation.md) |
+| What did the October 2026 review find, and what is fixed? | [Code review](docs/code-review-2026-10.md) |
 
 Start with [AGENTS.md](AGENTS.md). Historical Hermes validation describes earlier
 builds and is not evidence that this replacement passed those checks.

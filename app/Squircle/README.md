@@ -46,25 +46,35 @@ Check live behavior by running the app and looking at it.
 
 ## Interface (0.3.0)
 
-`StudioViewController` owns Home's grid of still device portraits
-(`DeviceStage` renders them once with SceneKit; nothing draws continuously),
-the app's conversations (`ThreadViewController`, full height) and
-`SimulatorDock`, the PiPs of simulators the app's agents are using.
-`SimulatorFeeds` shares one T3 H.264 stream per simulator; `SimulatorScreen`
-shows decoded frames through `AVSampleBufferDisplayLayer` and maps touches
-by aspect fit. `ThreadViews.swift` holds conversation rows and the composer;
-`Markdown.swift` renders agent text. DEBUG-only `SQUIRCLE_APP`,
+`StudioViewController` owns one `Route` (Home grid, an app's agent, a thread
+over it) and derives everything on screen from it: Home's grid of still device
+portraits (`DeviceStage` renders them once with SceneKit; nothing draws
+continuously), the app's conversations (`ThreadViewController`, full height)
+and `SimulatorDock`, the PiP/deck of simulators the app's agents are using.
+`ThreadViewController` is also the overlay's conversation; each host states
+what it can do through `ConversationHost` (the overlay shows live simulators
+as previews). `SimulatorFeeds` shares one T3 H.264 stream per simulator while
+a live cell is visible; `SimulatorScreen` shows decoded frames through
+`AVSampleBufferDisplayLayer` and maps touches by aspect fit.
+`ThreadCells.swift` holds the conversation rows, `ThreadViews.swift` the
+composer and thread rows, `Markdown.swift` agent text. DEBUG-only `SQUIRCLE_APP`,
 `SQUIRCLE_SCRUB`, `SQUIRCLE_THREAD` and `SQUIRCLE_SIM_EXPAND` hold real
 states still for captures.
+
+`SquircleModel` owns the T3 connection, conversations and caches. Sends are
+addressed to the conversation that started them (`SendOutcome`); drafts are
+per conversation; caches are bounded and emptied on memory warnings; disk
+writes go through the `DiskCache` actor; `close()` tears the model down. See
+[architecture](../../docs/architecture.md#boundaries-after-the-october-2026-review).
 
 `T3Gateway` implements Effect RPC; `T3ThreadState` reduces snapshots/events.
 `T3DeviceStream` owns one native H.264 connection and an input socket as a pair.
 Video starts before the input handshake; only interactive state enables touch.
 Decode is serial/off the UI thread with one newest frame waiting. A stopped stream
-cannot retain a live channel, and a channel owns its gesture queue. Background and
-navigation release the pair; returning reconnects the saved target. Hide remains
-hidden until explicitly chosen again. The simulator menu includes T3's supported
-restart for stale host captures; restarting closes its running apps. See
+cannot retain a live channel, and a channel owns its gesture queue. A stream runs
+only while a live cell or PiP shows it; background and navigation release it.
+Simulators appear only while an agent's session uses one; the service, not the
+phone, opens and closes T3's device session. See
 [architecture](../../docs/architecture.md) for lifecycle states and boundaries.
 
 Video is AVCC H.264 over T3's authenticated HTTPS feed; touch uses WSS. There
@@ -74,7 +84,13 @@ presentation. Physical-phone decoder creation requires hardware acceleration.
 Native pinch, exclusive input ownership and measured cellular latency/bandwidth
 remain unverified/unimplemented.
 
-Current source: **0.3.0 (19)**, thread redesign: header-less thread, readable
+## History
+
+The notes below record builds 13–19 as they were validated then; they are
+not the current source (build 56 at the time of writing; see the
+[implementation record](../../docs/t3-native-migration.md) for later builds).
+
+Build 19, thread redesign: header-less thread, readable
 agent steps with inline screenshots and recordings, Metal glow, iMessage-style
 send, inline question card, simulator that follows the agent. See
 [thread redesign](../../docs/t3-native-migration.md#2026-10-05-thread-redesign-030-19).
