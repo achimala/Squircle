@@ -276,6 +276,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/t3/projects/{project}/screenshot", get(t3_project_screenshot))
         .route("/v1/t3/threads/{thread}/media", get(thread_media).post(add_thread_media))
         .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
+        .route("/v1/t3/threads/{thread}/media/{id}/poster", get(thread_media_poster))
         .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
         .route("/v1/sims", get(list_sims).post(start_sim))
         .route("/v1/sims/stop", post(stop_sim))
@@ -1044,6 +1045,16 @@ async fn thread_media_file(
         .headers_mut()
         .insert(header::CONTENT_LENGTH, metadata.len().to_string().parse().unwrap());
     Ok(response)
+}
+
+async fn thread_media_poster(
+    State(state): State<AppState>,
+    Path((thread, id)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    let media = crate::media::get(&state.files.root, &thread, &id).map_err(ApiError::missing)?;
+    let poster = crate::media::poster(&media).map_err(ApiError::missing)?;
+    let bytes = tokio::fs::read(&poster).await.map_err(ApiError::internal)?;
+    Ok((private_headers(), [(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response())
 }
 
 async fn t3_step_image(

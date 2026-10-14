@@ -124,6 +124,12 @@ pub trait Host: Send + Sync {
     fn record(&self, device: &str, path: &Path, log: std::fs::File) -> Result<Child>;
     /// A smaller copy of the recording, having removed the original.
     fn compact<'a>(&'a self, raw: &'a Path) -> Pending<'a, Option<PathBuf>>;
+    /// Saves the device's screen as a small JPEG at `path`, best effort:
+    /// the recording's poster, so the phone needn't download the movie to
+    /// show it.
+    fn poster<'a>(&'a self, _device: &'a str, _path: &'a Path) -> Pending<'a, ()> {
+        Box::pin(async {})
+    }
 }
 
 struct AgentsHost(Arc<Agents>);
@@ -163,6 +169,22 @@ impl Host for AgentsHost {
 
     fn compact<'a>(&'a self, raw: &'a Path) -> Pending<'a, Option<PathBuf>> {
         Box::pin(compact(raw))
+    }
+
+    fn poster<'a>(&'a self, device: &'a str, path: &'a Path) -> Pending<'a, ()> {
+        Box::pin(async move {
+            let run = |program: &str, args: &[&std::ffi::OsStr]| {
+                let status = Command::new(program).args(args).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).status();
+                tokio::time::timeout(Duration::from_secs(15), status)
+            };
+            let shot = path.with_extension("png");
+            let taken = run("xcrun", &["simctl".as_ref(), "io".as_ref(), device.as_ref(), "screenshot".as_ref(), shot.as_os_str()]).await;
+            if matches!(taken, Ok(Ok(s)) if s.success()) {
+                let _ = run("/usr/bin/sips", &["-Z".as_ref(), "900".as_ref(), "-s".as_ref(), "format".as_ref(), "jpeg".as_ref(),
+                    "-s".as_ref(), "formatOptions".as_ref(), "70".as_ref(), shot.as_os_str(), "--out".as_ref(), path.as_os_str()]).await;
+            }
+            let _ = std::fs::remove_file(&shot);
+        })
     }
 }
 
@@ -462,6 +484,9 @@ impl Sims {
             let _ = self.save(&mut state);
             (session, recorder)
         };
+        if let Ok(raw) = media::recording_path(&self.root, &session.thread_id, id) {
+            self.host.poster(&session.device_id, &raw.with_extension("poster.jpg")).await;
+        }
         let mut unidentified = None;
         if let Some(mut child) = recorder {
             if let Some(pid) = child.id() {
@@ -523,6 +548,9 @@ impl Sims {
                 started_at: session.started_at, ended_at: session.ended_at.unwrap_or_else(now),
             })
         });
+        if let (Ok(raw), Some(Ok(media))) = (&raw, &filed) {
+            let _ = std::fs::rename(raw.with_extension("poster.jpg"), media.file.with_extension("poster.jpg"));
+        }
         self.update(id, |s| match &filed {
             Some(Ok(media)) => { s.state = "finished".into(); s.media_id = Some(media.id.clone()); }
             Some(Err(error)) => { s.state = "failed".into(); s.error = Some(format!("{error:#}")); }

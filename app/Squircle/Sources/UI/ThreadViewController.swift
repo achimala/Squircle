@@ -985,13 +985,27 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             guard let cell = cell as? SimulatorCell else { return }
             let stepID = use.recordingID.map { "media:" + $0 }
             let tappable = !use.live || host?.expandsSimulators == true
-            cell.configure(use, feeds: simulatorFeeds, video: stepID.flatMap(StepVideos.url(for:)), tappable: tappable)
+            let poster = use.recordingID.flatMap { StepImages.data(for: "poster:" + $0, index: 0) }.flatMap(UIImage.init(data:))
+            cell.configure(use, feeds: simulatorFeeds, video: stepID.flatMap(StepVideos.url(for:)), poster: poster, tappable: tappable)
             cell.showing = onScreen
             cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
-            if let stepID, StepVideos.url(for: stepID) == nil { loadRecording(stepID, item: item.id) }
+            if let stepID, let id = use.recordingID, StepVideos.url(for: stepID) == nil {
+                if poster == nil { loadPoster(id, item: item.id) }
+                if model.autoLoadsRecording(id) { loadRecording(stepID, item: item.id) }
+            }
         }
     }
 
+    private func loadPoster(_ id: String, item: String) {
+        guard loadingRecordings.insert("poster:" + id).inserted else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let data = await model.recordingPoster(id)
+            loadingRecordings.remove("poster:" + id)
+            guard data != nil, StepVideos.url(for: "media:" + id) == nil else { return }
+            await reconfigure(item)
+        }
+    }
     private var loadingRecordings = Set<String>()
     private func loadRecording(_ stepID: String, item: String) {
         guard loadingRecordings.insert(stepID).inserted else { return }
