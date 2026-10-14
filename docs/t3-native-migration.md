@@ -1098,6 +1098,22 @@ checked in the simulator and by GPU timing on the Mac):
   model changes can never hold an update back.
 Not yet verified on the phone.
 
+**Review fixes (W7, 2026-10-14).** The jelly runs at 120 Hz only while
+something moves; while it only breathes the link drops to 30 Hz, and while it
+is still (the open panel, or Reduce Motion) it pauses until its next timed
+blink or glance or a touch or layout. Reduce Motion: no breath, blinks, hops
+or idle glances; it still looks at touches and the field. In the simulator,
+idle alternated between the 30 Hz breath and short full-rate glances; with
+`--reduce-motion` it slept between one-tick wakes. Captures own their
+recorder (idle / recording / stopping); every stop finishes the recorder
+first, a recording with no picture or a failed writer leaves no file, and a
+replaced or disconnected scene cancels it. Performance captures judge each
+frame against the period it ran at and skip gaps across inactive/background
+(`periods`, `resumed`, and a per-hitch `period` in the JSON). In the overlay,
+live simulator rows are previews, not buttons (`expandsSimulators = false`);
+a closed panel or covered conversation releases its streams. Not yet checked
+on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was

@@ -8,7 +8,7 @@ import UIKit
 /// it, and there is no system prompt. Video and Metal layers the app draws
 /// itself may show as their last snapshot or blank.
 @MainActor
-final class ScreenRecorder {
+final class ScreenRecorder: CaptureProducer {
     private let writer: AVAssetWriter
     private let input: AVAssetWriterInput
     private let adaptor: AVAssetWriterInputPixelBufferAdaptor
@@ -22,6 +22,8 @@ final class ScreenRecorder {
     private var interval = 1.0 / 30
     private var cost = 0.0
     private(set) var poster: UIImage?
+    /// Handed over: the file is the attachment's now.
+    private var finished = false
     private let touches: TouchTracker
 
     init?(below overlay: UIWindow) {
@@ -48,7 +50,10 @@ final class ScreenRecorder {
         ])
         guard writer.canAdd(input) else { return nil }
         writer.add(input)
-        guard writer.startWriting() else { return nil }
+        guard writer.startWriting() else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
         writer.startSession(atSourceTime: .zero)
         self.writer = writer
         self.input = input
@@ -106,17 +111,44 @@ final class ScreenRecorder {
         if poster == nil, let image = context.makeImage() { poster = UIImage(cgImage: image) }
     }
 
-    /// Stops and finishes the file; returns it and how long it ran.
-    func finish() async -> (url: URL, duration: Double)? {
+    deinit {
+        link?.invalidate()
+        // Dropped without finishing: the file is of no use.
+        guard !finished else { return }
+        if writer.status == .writing { writer.cancelWriting() }
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    private func stopProducing() {
         link?.invalidate()
         link = nil
         _ = touches.detach()
+    }
+
+    /// Stops and finishes the file; returns it, how long it ran and its
+    /// first picture. Nil (and no file) when it drew no frame or the
+    /// writer failed.
+    func finish() async -> CaptureOutput? {
+        stopProducing()
         let duration = CACurrentMediaTime() - started
+        guard lastFrame >= 0, writer.status == .writing else { return discard() }
         input.markAsFinished()
         writer.endSession(atSourceTime: CMTime(seconds: max(lastFrame, 0.1), preferredTimescale: 600))
         await writer.finishWriting()
-        guard writer.status == .completed else { return nil }
-        return (url, duration)
+        guard writer.status == .completed else { return discard() }
+        finished = true
+        return .screen(url: url, duration: duration, poster: poster)
+    }
+
+    func cancel() {
+        stopProducing()
+        _ = discard()
+    }
+
+    private func discard() -> CaptureOutput? {
+        if writer.status == .writing { writer.cancelWriting() }
+        try? FileManager.default.removeItem(at: url)
+        return nil
     }
 }
 #endif

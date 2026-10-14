@@ -28,6 +28,9 @@ final class OverlayHost {
         observers.append(center.addObserver(forName: UIScene.didActivateNotification, object: nil, queue: .main) { note in
             MainActor.assumeIsolated { OverlayHost.shared.activate(note.object as? UIWindowScene) }
         })
+        observers.append(center.addObserver(forName: UIScene.didDisconnectNotification, object: nil, queue: .main) { note in
+            MainActor.assumeIsolated { OverlayHost.shared.disconnected(note.object as? UIScene) }
+        })
         observers.append(center.addObserver(forName: UIScene.willDeactivateNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { OverlayHost.shared.model?.stopMetadataUpdates() }
         })
@@ -48,6 +51,7 @@ final class OverlayHost {
             .first { $0.activationState == .foregroundActive }
         guard let scene, scene.activationState == .foregroundActive else { return }
         if window?.windowScene !== scene {
+            detach()
             let window = OverlayWindow(windowScene: scene)
             window.windowLevel = .alert + 1
             window.backgroundColor = .clear
@@ -58,6 +62,20 @@ final class OverlayHost {
         }
         model.startMetadataUpdates()
         Task { await model.refresh() }
+    }
+
+    /// Takes the overlay off its scene, ending whatever its controller runs.
+    private func detach() {
+        guard let window else { return }
+        self.window = nil
+        (window.rootViewController as? OverlayController)?.tearDown()
+        window.isHidden = true
+        window.rootViewController = nil
+    }
+
+    private func disconnected(_ scene: UIScene?) {
+        guard let scene, window?.windowScene === scene else { return }
+        detach()
     }
 }
 
@@ -100,6 +118,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private let model: SquircleModel
     /// Simulator streams for the turns' live simulators.
     private lazy var feeds = SimulatorFeeds(model: model)
+    /// Torn down: its window was replaced or its scene went away.
+    private var closed = false
     private var route = OverlayRoute()
 
     /// The bubble and the panel: one piece of glass jelly.
@@ -199,7 +219,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// A screen or performance recording from the + menu: while it runs the
     /// bubble is its stop button.
     private let capture = CaptureSession()
-    private var stopping = false
     /// Tints the bubble's glass while it records.
     private let recordingTint = UIView()
 
@@ -637,16 +656,19 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // drifts a third as far left and fades out first, so text never sits
         // over text.
         let t = push.value.clamped(), width = body.bounds.width
+        // A closed panel shows no conversation: its live simulators let go
+        // of their streams.
+        let inSight: CGFloat = page.isHidden ? 0 : 1
         if let agent {
             place(agent, offset: -width * 0.3 * t)
             agent.host.alpha = (1 - t * 2).clamped()
-            agent.controller.setTransitionProgress(1 - t)
+            agent.controller.setTransitionProgress((1 - t) * inSight)
         }
         if let thread {
             place(thread, offset: width * (1 - t))
             // Only while the agent still shows beneath it.
             thread.host.backgroundColor = paper.withAlphaComponent(paper.cgColor.alpha * ((1 - t) * 2).clamped())
-            thread.controller.setTransitionProgress(t)
+            thread.controller.setTransitionProgress(t * inSight)
         }
 
         // Touches go where the route is headed, from the first frame.
@@ -810,14 +832,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Stops the recording and opens with it in the field: a screen
     /// recording flies in from the screen, a performance one from the bubble.
     private func stopRecording() {
-        guard let recording = capture.recording, !stopping, let window = view.window else { return }
-        stopping = true
+        guard let recording = capture.recording, !capture.isStopping, let window = view.window else { return }
         shutter.impactOccurred(intensity: 0.7)
         let screen = recording.kind == .screen ? HostCapture.image(below: window) : nil
         Task { [weak self] in
             guard let self else { return }
             let attachment = await capture.stop(snapshot: screen)
-            stopping = false
             render()
             guard let attachment else { return open() }
             land(attachment, picture: screen ?? attachment.thumbnail, from: screen == nil ? frame.value : view.bounds)
@@ -941,7 +961,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// A conversation; a simulator the agent uses shows in its turn (you are
     /// already in the app, so no picture-in-picture).
     private func host(_ controller: ThreadViewController) -> Mounted {
-        controller.feeds = feeds
+        controller.host = self
         controller.onToggleFull = { [weak self] in self?.toggleFull() }
         controller.isFull = { [weak self] in self?.route.full ?? false }
         controller.appAttachments = appAttachments
@@ -967,6 +987,25 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         guard let window = view.window, !window.isKeyWindow else { return }
         previousKey = window.windowScene?.keyWindow
         window.makeKey()
+    }
+
+    /// Its window is being replaced or its scene went away: nothing it
+    /// started outlives it (recording, conversations, observers).
+    func tearDown() {
+        guard !closed else { return }
+        closed = true
+        capture.cancel()
+        observations.forEach { $0.cancel() }
+        observations = []
+        unmountThread()
+        if let mounted = agent {
+            agent = nil
+            mounted.controller.tearDown()
+            mounted.controller.willMove(toParent: nil)
+            mounted.host.removeFromSuperview()
+            mounted.controller.removeFromParent()
+        }
+        feeds.close()
     }
 
     // MARK: Sheets
@@ -1306,6 +1345,16 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         }
     }
     #endif
+}
+
+/// The overlay shows the agent's simulator live in its turn as a preview
+/// only: you are already in the app, so there is no picture-in-picture or
+/// large touchable simulator to bring up (user, 2026-10-13).
+extension OverlayController: ConversationHost {
+    var simulatorFeeds: SimulatorFeeds { feeds }
+    var expandsSimulators: Bool { false }
+    func expandSimulator(_ use: SimulatorUse) {}
+    func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>) {}
 }
 
 /// The glass's frame as one spring: origin and size move together toward a

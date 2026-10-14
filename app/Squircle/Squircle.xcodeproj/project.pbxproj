@@ -91,6 +91,7 @@
 		DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
 		EBB5E73877F124DDB564B2FB /* ThreadDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */; };
+		EC790312B147A7CDB5AA90A4 /* OverlayCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97B5F2EC90068F8A4116DF04 /* OverlayCaptureTests.swift */; };
 		ED14D13BF4DEA33CADAEEEEC /* AttachmentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD8598F09B147F0F828D9AA7 /* AttachmentPicker.swift */; };
 		EF17406AB166353AD47A5EA0 /* SquircleActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */; };
 		EF2030F39BE56875E731AD9A /* ThreadCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA04F2B838066131F83E73E4 /* ThreadCells.swift */; };
@@ -142,6 +143,7 @@
 		8A692004605868DC5DD94E0A /* ScreenRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenRecorder.swift; sourceTree = "<group>"; };
 		8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildsViewController.swift; sourceTree = "<group>"; };
 		9685CE2D9A277E148073C169 /* MotionAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionAudit.swift; sourceTree = "<group>"; };
+		97B5F2EC90068F8A4116DF04 /* OverlayCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayCaptureTests.swift; sourceTree = "<group>"; };
 		9AA8EBB035561F94C3724C6D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadTimeline.swift; sourceTree = "<group>"; };
 		B031C12FA385E38F95AAF587 /* CaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSession.swift; sourceTree = "<group>"; };
@@ -180,6 +182,7 @@
 			isa = PBXGroup;
 			children = (
 				DB495D800CF688C469BFF725 /* AppProjectTests.swift */,
+				97B5F2EC90068F8A4116DF04 /* OverlayCaptureTests.swift */,
 				51AB12A9050AE317BDBA9C84 /* SpringTests.swift */,
 				FC334D6BA2EF208D5744BEEE /* SquircleActionTests.swift */,
 				FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */,
@@ -530,6 +533,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */,
+				EC790312B147A7CDB5AA90A4 /* OverlayCaptureTests.swift in Sources */,
 				C5F5AE1D757E9658332F4638 /* SpringTests.swift in Sources */,
 				548C32A10537BFA96967F9CD /* SquircleActionTests.swift in Sources */,
 				A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */,
