@@ -51,7 +51,7 @@ final class AttachmentPicker: NSObject, PHPickerViewControllerDelegate, UIImageP
         }
     }
 
-    private nonisolated static func image(from provider: NSItemProvider) async -> UIImage? {
+    nonisolated static func image(from provider: NSItemProvider) async -> UIImage? {
         guard provider.canLoadObject(ofClass: UIImage.self) else { return nil }
         return await withCheckedContinuation { continuation in
             provider.loadObject(ofClass: UIImage.self) { object, _ in continuation.resume(returning: object as? UIImage) }
