@@ -2,18 +2,39 @@ import AVFoundation
 import AVKit
 import UIKit
 
+/// What a simulator use shows: the simulator itself while it is in use,
+/// the recording filed in the thread's media afterwards, or nothing.
+enum SimulatorContent: Equatable {
+    case live(SimulatorTarget)
+    case recording(mediaID: String)
+    case unavailable
+}
+
 /// A simulator an agent is using now, or used in a turn and recorded.
 struct SimulatorUse: Equatable {
     /// Squircle's session ID, or `t3:<thread>:<device>` for a device T3
     /// opened for a working thread without Squircle recording it.
     let id: String
     let threadID: String
-    let target: SimulatorTarget
     let deviceName: String
     let started: Date
-    var live: Bool
+    let content: SimulatorContent
+
+    init(id: String, threadID: String, deviceName: String, started: Date, content: SimulatorContent) {
+        self.id = id; self.threadID = threadID; self.deviceName = deviceName; self.started = started; self.content = content
+    }
+
+    /// From the service's fields: live, or recorded once a recording is filed.
+    init(id: String, threadID: String, target: SimulatorTarget, deviceName: String, started: Date, live: Bool, recordingID: String? = nil) {
+        let content: SimulatorContent = live ? .live(target) : recordingID.map { .recording(mediaID: $0) } ?? .unavailable
+        self.init(id: id, threadID: threadID, deviceName: deviceName, started: started, content: content)
+    }
+
+    /// The simulator to stream, while it is in use.
+    var target: SimulatorTarget? { if case .live(let target) = content { target } else { nil } }
+    var live: Bool { target != nil }
     /// The recording in the thread's media, once filed.
-    var recordingID: String?
+    var recordingID: String? { if case .recording(let id) = content { id } else { nil } }
 }
 
 /// Draws decoded simulator pictures flat, through the system's video layer:
@@ -94,8 +115,9 @@ final class SimulatorFeeds {
     }
     private var feeds: [SimulatorTarget: Feed] = [:]
     private let model: SquircleModel
-    private var active = true
-    private var closed = false
+    /// Streams run only in the foreground; once closed, nothing attaches.
+    private enum OwnerState { case foreground, background, closed }
+    private var owner = OwnerState.foreground
     private var observers: [Task<Void, Never>] = []
     /// A feed's interactivity changed (input became ready or was lost).
     var onInteractive: (() -> Void)?
@@ -114,7 +136,7 @@ final class SimulatorFeeds {
 
     /// Stops every stream and observer; nothing attaches afterwards.
     func close() {
-        closed = true
+        owner = .closed
         observers.forEach { $0.cancel() }
         observers = []
         for feed in feeds.values { feed.linger?.cancel(); feed.stream.stop() }
@@ -122,7 +144,8 @@ final class SimulatorFeeds {
     }
 
     private func setActive(_ value: Bool) {
-        active = value
+        guard owner != .closed else { return }
+        owner = value ? .foreground : .background
         for feed in feeds.values { if value { feed.stream.start() } else { feed.stream.stop() } }
     }
 
@@ -135,7 +158,7 @@ final class SimulatorFeeds {
             release(old)
         }
         screen.target = target
-        guard !closed, let target, let feed = feeds[target] ?? makeFeed(target) else { return }
+        guard owner != .closed, let target, let feed = feeds[target] ?? makeFeed(target) else { return }
         feed.linger?.cancel()
         feed.linger = nil
         feed.screens.append(Weak(screen: screen))
@@ -174,7 +197,7 @@ final class SimulatorFeeds {
         feed.stream.onScreen = { [weak feed] in feed?.orientation = $0["orientation"].string ?? "portrait" }
         feed.stream.onInteractive = { [weak self] _ in self?.onInteractive?() }
         feeds[target] = feed
-        if active { feed.stream.start() }
+        if owner == .foreground { feed.stream.start() }
         return feed
     }
 
@@ -225,14 +248,24 @@ final class SimulatorDock: UIView {
     private let originY = SpringDriver()
     private var dragging = false
     private var dragStart = CGPoint.zero
+    /// Where the person sent the dock. It alone owns input: the picture it
+    /// expands takes touches from the first frame.
+    enum Route: Equatable {
+        case collapsed, fanned, expanded(String)
+        var expanded: String? { if case .expanded(let id) = self { id } else { nil } }
+    }
+    private var route = Route.collapsed
     /// 0 = in the deck, 1 = fanned out in a row.
     private let fan = SpringDriver()
-    private var wantFanned = false
-    /// 0 = in the deck or row, 1 = large. `expanded` changes only at 0.
+    /// 0 = in the deck or row, 1 = large.
     private let expansion = SpringDriver()
-    private var expanded: String?
-    private var wantExpanded: String?
+    /// The picture drawn large (or growing, or shrinking back). It becomes
+    /// the route's only once the previous one is back in the deck.
+    private var presented: String?
     private var collapseStart: CGFloat = 0
+    #if DEBUG
+    private var loggedDock = ""
+    #endif
 
     private let backdrop = UIView()
     private let badge = Theme.label("", Theme.font(.caption2, 11, .bold), color: .white)
@@ -259,12 +292,12 @@ final class SimulatorDock: UIView {
         addSubview(badge)
         for button in [home, open, shrink] { addSubview(button) }
         home.addAction(UIAction { [weak self] _ in
-            guard let self, let use = uses.first(where: { $0.id == self.expanded }) else { return }
+            guard let self, let use = uses.first(where: { $0.id == self.route.expanded }), let target = use.target else { return }
             Theme.selectionHaptic()
-            feeds.home(use.target)
+            feeds.home(target)
         }, for: .touchUpInside)
         open.addAction(UIAction { [weak self] _ in
-            guard let self, let use = uses.first(where: { $0.id == self.expanded }) else { return }
+            guard let self, let use = uses.first(where: { $0.id == self.route.expanded }) else { return }
             Theme.selectionHaptic()
             collapse()
             onOpenThread?(use.threadID)
@@ -285,12 +318,15 @@ final class SimulatorDock: UIView {
     }
 
     #if DEBUG
-    /// `SQUIRCLE_SIM_FAN=1`: fans the deck out, opens the second picture,
-    /// shrinks it, fans again and gathers, through the same paths as taps.
+    /// `SQUIRCLE_SIM_FAN=1`: fans the deck out, opens the oldest picture,
+    /// shrinks it and reopens it mid-shrink, shrinks it, fans again and
+    /// gathers, through the same paths as taps.
     private func demoFan() async {
         let steps: [(Double, (SimulatorDock) -> Void)] = [
             (8, { dock in dock.deck.first.map { dock.tapped($0.id) } }),
-            (3, { dock in dock.deck.dropFirst().first.map { dock.tapped($0.id) } }),
+            (3, { dock in dock.deck.last.map { dock.tapped($0.id) } }),
+            (3, { $0.collapse() }),
+            (0.15, { dock in dock.deck.last.map { dock.tapped($0.id) } }),
             (3, { $0.collapse() }),
             (2, { dock in dock.deck.first.map { dock.tapped($0.id) } }),
             (2, { $0.backdropTapped() }),
@@ -307,6 +343,14 @@ final class SimulatorDock: UIView {
 
     /// Simulators in use, the conversation on screen and thread titles.
     func update(uses next: [SimulatorUse], currentThread: String?, titles: [String: String]) {
+        #if DEBUG
+        // `SQUIRCLE_SIM_COPIES=N`: the first live simulator N times over, for checking the deck.
+        var next = next
+        if let copies = ProcessInfo.processInfo.environment["SQUIRCLE_SIM_COPIES"].flatMap(Int.init), let first = next.first {
+            next += (1..<max(copies, 1)).map { SimulatorUse(id: first.id + "#\($0)", threadID: first.threadID, deviceName: first.deviceName,
+                                                            started: first.started.addingTimeInterval(Double($0)), content: first.content) }
+        }
+        #endif
         self.currentThread = currentThread
         self.titles = titles
         let ids = next.map(\.id)
@@ -326,7 +370,8 @@ final class SimulatorDock: UIView {
             pip.onTap = { [weak self] in self?.tapped(use.id) }
             pip.onPan = { [weak self] gesture in self?.panned(gesture) }
             pip.onTouch = { [weak self, weak pip] phase, point in
-                guard let self, let pip, expanded == pip.use.id, expansion.target == 1 else { return false }
+                // An end always reaches the simulator, even once input moved on.
+                guard let self, let pip, phase == "end" || route.expanded == pip.use.id else { return false }
                 return feeds.touch(phase, at: point, on: pip.screen)
             }
             insertSubview(pip, belowSubview: badge)
@@ -335,7 +380,7 @@ final class SimulatorDock: UIView {
             pip.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
         }
         order = ids
-        if let wanted = wantExpanded, !ids.contains(wanted) { wantExpanded = nil }
+        if let wanted = route.expanded, !ids.contains(wanted) { route = .collapsed }
         sync()
         animateLayout()
     }
@@ -344,19 +389,18 @@ final class SimulatorDock: UIView {
 
     /// Brings a simulator large (from its PiP or its block in the conversation).
     func expand(_ id: String) {
-        guard expansion.target == 0 || expanded == id else { return }
+        if let current = route.expanded, current != id { return }
         Theme.openHaptic()
-        wantExpanded = id
-        wantFanned = false
+        route = .expanded(id)
         sync()
     }
 
-    /// A tap on a picture: the deck fans out; a single picture or one in the
-    /// row comes large.
+    /// A tap on a picture: the deck fans out; a single picture, one in the
+    /// row, or one still shrinking back comes large.
     private func tapped(_ id: String) {
-        if deck.count > 1, fan.target == 0 {
+        if deck.count > 1, route == .collapsed, id != presented {
             Theme.openHaptic()
-            wantFanned = true
+            route = .fanned
             sync()
         } else {
             expand(id)
@@ -364,39 +408,36 @@ final class SimulatorDock: UIView {
     }
 
     @objc private func collapse() {
-        guard wantExpanded != nil else { return }
+        guard route.expanded != nil else { return }
         Theme.selectionHaptic()
-        wantExpanded = nil
+        route = .collapsed
         sync()
     }
 
     private func gather() {
-        guard wantFanned else { return }
+        guard route == .fanned else { return }
         Theme.selectionHaptic()
-        wantFanned = false
+        route = .collapsed
         sync()
     }
 
     @objc private func backdropTapped() {
-        if wantExpanded != nil { collapse() } else { gather() }
+        if route.expanded != nil { collapse() } else { gather() }
     }
 
-    /// What is expanded changes only while nothing is; the springs head to
-    /// whatever `wantExpanded` and `wantFanned` imply. Pictures that can't be
-    /// seen (behind the deck's top, or docked in the conversation) stop
-    /// decoding and keep their last frame.
+    /// The presented picture changes only while nothing is large; the
+    /// springs head to whatever the route implies.
     private func sync() {
-        if expansion.value <= 0.001, !expansion.isAnimating, expanded != wantExpanded {
-            expanded = wantExpanded
+        if expansion.value <= 0.001, !expansion.isAnimating, presented != route.expanded {
+            presented = route.expanded
             restack()
         }
-        let deck = self.deck
-        if deck.count < 2 { wantFanned = false }
-        let target: CGFloat = expanded != nil && expanded == wantExpanded ? 1 : 0
+        if deck.count < 2, route == .fanned { route = .collapsed }
+        let target: CGFloat = presented != nil && presented == route.expanded ? 1 : 0
         if expansion.target != target || (!expansion.isAnimating && expansion.value != target) {
             expansion.redirect(to: target)
         }
-        let fanTarget: CGFloat = wantFanned ? 1 : 0
+        let fanTarget: CGFloat = route == .fanned ? 1 : 0
         if fan.target != fanTarget || (!fan.isAnimating && fan.value != fanTarget) {
             fan.redirect(to: fanTarget)
         }
@@ -405,20 +446,13 @@ final class SimulatorDock: UIView {
             originX.set(rest.x)
             originY.set(rest.y)
         }
-        let spread = fan.target == 1 || fan.value > 0.001
-        for use in uses {
-            guard let pip = pips[use.id] else { continue }
-            let index = deck.firstIndex(of: use)
-            let seen = use.id == expanded || use.id == wantExpanded || index == 0 || (index != nil && spread)
-            feeds.attach(pip.screen, to: seen ? use.target : nil)
-        }
         layoutDock()
     }
 
     /// The deck's top picture above the rest, the large one above all.
     private func restack() {
         for use in deck.reversed() { if let pip = pips[use.id] { insertSubview(pip, belowSubview: badge) } }
-        if let id = expanded, let pip = pips[id] { insertSubview(pip, belowSubview: badge) }
+        if let id = presented, let pip = pips[id] { insertSubview(pip, belowSubview: badge) }
     }
 
     // MARK: Geometry
@@ -428,7 +462,7 @@ final class SimulatorDock: UIView {
     private static let gap: CGFloat = 10
     private static let captionHeight: CGFloat = 16
 
-    private var shown: [SimulatorUse] { uses.filter { !docked.contains($0.id) || $0.id == expanded } }
+    private var shown: [SimulatorUse] { uses.filter { !docked.contains($0.id) || $0.id == presented } }
     /// Most recently started first: the deck's top picture and the row's corner end.
     private var deck: [SimulatorUse] { shown.reversed() }
 
@@ -482,7 +516,7 @@ final class SimulatorDock: UIView {
     private var bigFrame: CGRect {
         let top = safeAreaInsets.top + 12
         let available = CGRect(x: 16, y: top, width: bounds.width - 32, height: bounds.height - top - safeAreaInsets.bottom - 84)
-        let aspect = expanded.flatMap { pips[$0]?.screen.aspect } ?? 2.17
+        let aspect = presented.flatMap { pips[$0]?.screen.aspect } ?? 2.17
         let height = min(available.height, available.width * aspect)
         let width = height / aspect
         return CGRect(x: available.midX - width / 2, y: available.minY, width: width, height: height)
@@ -501,40 +535,80 @@ final class SimulatorDock: UIView {
         }
     }
 
-    /// Every PiP's frame, the badge, backdrop and controls, from the state alone.
+    /// Everything one picture is, derived at once from the route and the
+    /// springs: where it is drawn, whether it can be seen, who takes its
+    /// touches and whether it decodes. Only a picture that can be seen holds
+    /// a feed; the route's large picture owns input from the first frame.
+    private struct FrameProjection {
+        var frame: CGRect
+        var alpha: CGFloat
+        var shade: CGFloat
+        var cornerRadius: CGFloat
+        var caption: CGFloat
+        /// Takes taps and drags (as a PiP) or, owning input, raw touches.
+        var touchable: Bool
+        var ownsInput: Bool
+        var feed: SimulatorTarget?
+    }
+
+    private func projection(_ use: SimulatorUse, deck: [SimulatorUse], e: CGFloat, f: CGFloat) -> FrameProjection {
+        let index = deck.firstIndex(of: use)
+        let isPresented = use.id == presented
+        var frame: CGRect, alpha: CGFloat, shade: CGFloat = 0
+        if let index {
+            frame = deckFrame(index, top: deck.first).lerp(to: fanFrame(index, of: deck.count, use: use), f)
+            alpha = index <= 2 ? 1 : f
+            shade = 0.18 * CGFloat(min(index, 2)) * (1 - f)
+        } else {
+            frame = deckFrame(0, top: deck.first)
+            alpha = 0
+        }
+        if isPresented { frame = frame.lerp(to: bigFrame, e) }
+        alpha = isPresented ? 1 : alpha * (1 - e)
+        let caption: CGFloat = isPresented && e > 0.05 ? 0 : deck.count > 1 ? f : (showsCaption(use) ? 1 : 0)
+        let ownsInput = route.expanded == use.id
+        let reachable = index == 0 || (index != nil && route == .fanned)
+        // Behind the deck's top only an edge peeks out: it keeps its last picture.
+        let spread = route == .fanned || f > 0.001
+        let decodes = alpha > 0.001 && (isPresented || ownsInput || index == 0 || (index != nil && spread))
+        return FrameProjection(frame: frame, alpha: alpha, shade: shade, cornerRadius: .lerp(12, 30, isPresented ? e : 0),
+                               caption: caption, touchable: ownsInput || (isPresented && e > 0.01) || (reachable && e < 0.01 && route.expanded == nil),
+                               ownsInput: ownsInput, feed: decodes ? use.target : nil)
+    }
+
+    /// Every PiP's frame, feed, the badge, backdrop and controls, from the state alone.
     private func layoutDock() {
         guard bounds.width > 0 else { return }
         let e = expansion.value.clamped(), f = fan.value.clamped()
         let deck = self.deck
-        let fanned = fan.target == 1
+        let fanned = route == .fanned
+        #if DEBUG
+        var decoding = Set<String>()
+        defer {
+            let state = "\(route) input \(uses.filter { pips[$0.id]?.interactive == true }.map { $0.id.suffix(2) }) decoding \(deck.filter { decoding.contains($0.id) }.map { $0.id.suffix(2) })"
+            if state != loggedDock {
+                loggedDock = state
+                print("Simulator dock: e=\(String(format: "%.2f", e)) " + state)
+            }
+        }
+        #endif
         for use in uses {
             guard let pip = pips[use.id] else { continue }
-            let index = deck.firstIndex(of: use)
-            let isExpanded = use.id == expanded
-            var frame: CGRect
-            var alpha: CGFloat
-            if let index {
-                frame = deckFrame(index, top: deck.first).lerp(to: fanFrame(index, of: deck.count, use: use), f)
-                alpha = index <= 2 ? 1 : f
-                pip.shade.alpha = 0.18 * CGFloat(min(index, 2)) * (1 - f)
-            } else {
-                frame = deckFrame(0, top: deck.first)
-                alpha = 0
-                pip.shade.alpha = 0
-            }
-            if isExpanded { frame = frame.lerp(to: bigFrame, e) }
-            alpha = isExpanded ? 1 : alpha * (1 - e)
+            let p = projection(use, deck: deck, e: e, f: f)
             pip.transform = .identity
-            pip.frame = frame
-            pip.cornerRadius = .lerp(12, 30, isExpanded ? e : 0)
+            pip.frame = p.frame
+            pip.alpha = p.alpha
+            pip.shade.alpha = p.shade
+            pip.cornerRadius = p.cornerRadius
             pip.caption.text = titles[use.threadID] ?? "Thread"
-            let caption: CGFloat = deck.count > 1 ? f : (showsCaption(use) ? 1 : 0)
-            pip.caption.alpha = isExpanded && e > 0.05 ? 0 : caption
-            pip.alpha = alpha
-            let reachable = index == 0 || (index != nil && fanned)
-            pip.isUserInteractionEnabled = isExpanded || (reachable && e < 0.01 && expansion.target == 0)
-            pip.interactive = isExpanded && e > 0.99
-            pip.accessibilityLabel = deck.count > 1 && !fanned && index == 0
+            pip.caption.alpha = p.caption
+            pip.isUserInteractionEnabled = p.touchable
+            pip.interactive = p.ownsInput
+            feeds.attach(pip.screen, to: p.feed)
+            #if DEBUG
+            if p.feed != nil { decoding.insert(use.id) }
+            #endif
+            pip.accessibilityLabel = deck.count > 1 && !fanned && deck.first == use
                 ? "\(deck.count) simulators"
                 : (titles[use.threadID] ?? "Agent") + " simulator, " + use.deviceName
         }
@@ -545,10 +619,10 @@ final class SimulatorDock: UIView {
                              width: badgeWidth, height: 18)
         badge.alpha = deck.count > 1 ? (1 - f) * (1 - e) : 0
         backdrop.alpha = max(0.42 * e, 0.2 * f)
-        backdrop.isUserInteractionEnabled = expansion.target == 1 || fanned
+        backdrop.isUserInteractionEnabled = route != .collapsed
         let big = bigFrame
         let buttonY = big.maxY + 16
-        let showsOpen = expanded.flatMap { id in uses.first { $0.id == id } }.map { $0.threadID != currentThread } ?? false
+        let showsOpen = route.expanded.flatMap { id in uses.first { $0.id == id } }.map { $0.threadID != currentThread } ?? false
         let buttons = [home] + (showsOpen ? [open] : []) + [shrink]
         let total = CGFloat(buttons.count) * 48 + CGFloat(buttons.count - 1) * 16
         for (index, button) in [home, open, shrink].enumerated() {
@@ -559,11 +633,11 @@ final class SimulatorDock: UIView {
             button.frame = CGRect(x: left, y: buttonY, width: 48, height: 48)
             button.alpha = e
             button.transform = CGAffineTransform(translationX: 0, y: (1 - e) * 24)
-            button.isUserInteractionEnabled = expansion.target == 1
+            button.isUserInteractionEnabled = route.expanded != nil
         }
-        if let id = expanded, let use = uses.first(where: { $0.id == id }) { home.isEnabled = feeds.isInteractive(use.target) }
-        accessibilityElements = expansion.target == 1
-            ? [expanded.flatMap { pips[$0] }, home, showsOpen ? open : nil, shrink].compactMap { $0 }
+        if let target = uses.first(where: { $0.id == route.expanded })?.target { home.isEnabled = feeds.isInteractive(target) }
+        accessibilityElements = route.expanded != nil
+            ? [route.expanded.flatMap { pips[$0] }, home, showsOpen ? open : nil, shrink].compactMap { $0 }
             : deck.prefix(fanned ? deck.count : 1).compactMap { pips[$0.id] }
     }
 
@@ -572,8 +646,8 @@ final class SimulatorDock: UIView {
     /// In the deck: the whole deck follows the finger, then springs to the
     /// corner it was thrown toward. Fanned out: a drag gathers the row.
     private func panned(_ gesture: UIPanGestureRecognizer) {
-        guard expansion.target == 0 else { return }
-        if fan.target == 1 {
+        guard route.expanded == nil else { return }
+        if route == .fanned {
             if gesture.state == .began { gather() }
             return
         }
@@ -608,7 +682,7 @@ final class SimulatorDock: UIView {
     /// Expanded: dragging down outside the picture shrinks it with the finger.
     /// Fanned out: any drag outside gathers the row.
     @objc private func collapsePanned(_ gesture: UIPanGestureRecognizer) {
-        guard expanded != nil else {
+        guard let id = presented ?? route.expanded else {
             if gesture.state == .began { gather() }
             return
         }
@@ -622,8 +696,11 @@ final class SimulatorDock: UIView {
         case .ended, .cancelled, .failed:
             let velocity = -gesture.velocity(in: self).y / span
             let closing = expansion.value + velocity * 0.2 < 0.6
-            if closing { wantExpanded = nil; Theme.selectionHaptic() }
+            if closing, route.expanded != nil { Theme.selectionHaptic() }
+            // Either way the route decides; held back open, it is this picture's again.
+            route = closing ? .collapsed : .expanded(id)
             expansion.animate(to: closing ? 0 : 1, initialVelocity: velocity)
+            layoutDock()
         default: break
         }
     }
@@ -647,16 +724,22 @@ private final class PiP: UIView {
     var onTap: (() -> Void)?
     var onPan: ((UIPanGestureRecognizer) -> Void)?
     var onTouch: ((_ phase: String, _ point: CGPoint) -> Bool)?
-    /// Large: raw touches go to the simulator instead of moving the PiP.
+    /// Owning input: raw touches go to the simulator instead of moving the
+    /// PiP. Losing it mid-touch ends that touch on the simulator.
     var interactive = false {
-        didSet { tap.isEnabled = !interactive; pan.isEnabled = !interactive }
+        didSet {
+            guard interactive != oldValue else { return }
+            tap.isEnabled = !interactive; pan.isEnabled = !interactive
+            if !interactive, let last = tracking { _ = onTouch?("end", last); tracking = nil }
+        }
     }
     var cornerRadius: CGFloat = 12 {
         didSet { frameView.layer.cornerRadius = cornerRadius; screen.layer.cornerRadius = cornerRadius; shade.layer.cornerRadius = cornerRadius }
     }
     private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
     private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-    private var tracking = false
+    /// Where the touch the simulator is following last was, if any.
+    private var tracking: CGPoint?
 
     init(use: SimulatorUse) {
         self.use = use
@@ -711,9 +794,8 @@ private final class PiP: UIView {
     private func forward(_ touches: Set<UITouch>, _ phase: String) {
         guard interactive, let touch = touches.first else { return }
         let point = touch.location(in: screen)
-        if phase == "begin" { tracking = onTouch?(phase, point) ?? false }
-        else if tracking { _ = onTouch?(phase, point) }
-        if phase == "end" { tracking = false }
+        if phase == "begin" { tracking = onTouch?(phase, point) == true ? point : nil }
+        else if tracking != nil { _ = onTouch?(phase, point); tracking = phase == "end" ? nil : point }
     }
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "begin"); super.touchesBegan(touches, with: event) }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "move"); super.touchesMoved(touches, with: event) }
@@ -734,16 +816,18 @@ final class SimulatorCell: TimelineCell {
         didSet {
             guard showing != oldValue else { return }
             attachFeed()
-            if showing, window != nil { player?.play() } else { player?.pause() }
+            playRecording()
         }
     }
     private let frameView = UIView()
     private let playerLayer = AVPlayerLayer()
     /// The recording's last screen, until (or instead of) the movie.
     private let posterView = UIImageView()
-    private var player: AVQueuePlayer?
-    private var looper: AVPlayerLooper?
-    private var playing: URL?
+    /// The recording's player, its looper and the file it plays, together.
+    private struct Recorded { let url: URL; let player: AVQueuePlayer; let looper: AVPlayerLooper }
+    /// What drives the picture: the shared live feed, or a recording.
+    private enum Playback { case stopped, live(SimulatorTarget), recorded(Recorded) }
+    private var playback = Playback.stopped
     private let dot = UIView()
     private let button = UIControl()
 
@@ -782,44 +866,55 @@ final class SimulatorCell: TimelineCell {
         self.use = use
         if self.feeds !== feeds { self.feeds?.attach(screen, to: nil) }
         self.feeds = feeds
-        screen.isHidden = !use.live
-        dot.isHidden = !use.live
-        attachFeed()
-        button.isEnabled = tappable
-        button.accessibilityTraits = tappable ? .button : .image
-        button.accessibilityLabel = (use.live ? "Live simulator, " : "Simulator recording, ") + use.deviceName
-        if use.live || video == nil {
-            player?.pause(); player = nil; looper = nil; playerLayer.player = nil; playing = nil
-        } else if let video, playing != video, !Motion.reduced {
+        switch (use.content, video) {
+        case (.live(let target), _):
+            playback = .live(target)
+        case (_, let video?) where !Motion.reduced:
+            if case .recorded(let current) = playback, current.url == video { break }
             let queue = AVQueuePlayer()
             queue.isMuted = true
             queue.preventsDisplaySleepDuringVideoPlayback = false
-            looper = AVPlayerLooper(player: queue, templateItem: AVPlayerItem(url: video))
-            playerLayer.player = queue
-            player = queue
-            playing = video
-            if window != nil, showing { queue.play() }
+            playback = .recorded(Recorded(url: video, player: queue, looper: AVPlayerLooper(player: queue, templateItem: AVPlayerItem(url: video))))
+        default:
+            playback = .stopped
         }
+        if case .recorded(let recorded) = playback { playerLayer.player = recorded.player } else { playerLayer.player?.pause(); playerLayer.player = nil }
+        let live = if case .live = playback { true } else { false }
+        let recorded = if case .recorded = playback { true } else { false }
+        screen.isHidden = !live
+        dot.isHidden = !live
+        attachFeed()
+        playRecording()
+        button.isEnabled = tappable
+        button.accessibilityTraits = tappable ? .button : .image
+        button.accessibilityLabel = (live ? "Live simulator, " : "Simulator recording, ") + use.deviceName
         posterView.image = poster
-        posterView.isHidden = use.live || player != nil
+        posterView.isHidden = live || recorded
         setNeedsLayout()
     }
 
     /// Only a cell in a window holds a live stream: one scrolled away,
     /// waiting for reuse or in a hidden conversation lets it go.
     private func attachFeed() {
-        feeds?.attach(screen, to: window != nil && showing && use?.live == true ? use?.target : nil)
+        guard case .live(let target) = playback, window != nil, showing else { feeds?.attach(screen, to: nil); return }
+        feeds?.attach(screen, to: target)
+    }
+
+    /// A recording plays only while its cell can be seen.
+    private func playRecording() {
+        guard case .recorded(let recorded) = playback else { return }
+        if window != nil, showing { recorded.player.play() } else { recorded.player.pause() }
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        player?.pause()
+        if case .recorded(let recorded) = playback { recorded.player.pause() }
         feeds?.attach(screen, to: nil)
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil || !showing { player?.pause() } else { player?.play() }
+        playRecording()
         attachFeed()
     }
 
