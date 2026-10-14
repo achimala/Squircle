@@ -50,6 +50,30 @@ fn argument_errors_are_one_machine_readable_result() {
     );
 }
 
+#[test]
+fn media_is_local_only_and_names_the_selected_service() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("data");
+    let clip = directory.path().join("demo.png");
+    std::fs::write(&clip, b"png").unwrap();
+    let remote = "http://192.0.2.1:9999";
+    let output = command()
+        .args(["--json", "--data-dir"]).arg(&root).args(["--server", remote, "media", "add",
+            "--thread", "c3e60882-f28f-4656-879d-99b3e2dcddbb", "--file"]).arg(&clip)
+        .output()
+        .unwrap();
+    assert_ne!(output.status.code(), Some(0));
+    assert_eq!(json_result(&output)["ok"], false);
+    assert!(!root.exists(), "Nothing is written for another service.");
+
+    let output = command()
+        .args(["--json", "--data-dir"]).arg(&root).args(["--server", remote, "capabilities"])
+        .output()
+        .unwrap();
+    let invocation = json_result(&output)["data"]["invocation"].as_str().unwrap().to_owned();
+    assert!(invocation.contains(&format!("--server {remote}")), "{invocation}");
+    assert!(invocation.contains(root.to_str().unwrap()), "{invocation}");
+}
 
 struct TestServer {
     url: String,
