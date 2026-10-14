@@ -22,8 +22,11 @@ targets:
       - path: Overlay
         excludes: [OverlayLoader.c]
       - path: Resources/Assets.xcassets
-    dependencies:
-      - target: SquircleWidgets
+    # Embedding SquircleWidgets (the Live Activity) needs a profile for its
+    # own App ID, which automatic signing makes only with an Apple account in
+    # Xcode; until then it is built on its own and not embedded. Turn it on:
+    #   dependencies:
+    #     - target: SquircleWidgets
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ai.dreamslate.Squircle
@@ -32,10 +35,10 @@ targets:
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # Push needs a profile with the Push Notifications capability, which
-        # automatic signing makes only with an Apple account in Xcode; until
+        # Push needs the Push Notifications capability in the profile, which
+        # automatic signing adds only with an Apple account in Xcode; until
         # then builds use the wildcard team profile and leave push out.
-        # Turn it on: SquirclePush.entitlements.
+        # Turn it on: Resources/SquirclePush.entitlements.
         CODE_SIGN_ENTITLEMENTS: Resources/Squircle.entitlements
     preBuildScripts:
       - name: Swift concurrency only (no new Combine or Dispatch)
