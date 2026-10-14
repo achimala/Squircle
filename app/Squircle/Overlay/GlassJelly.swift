@@ -195,6 +195,7 @@ final class GlassJelly: UIView {
         stepBlob(dt)
         stepCreature(dt)
         stepFace(dt)
+        stepBridge(dt)
         draw()
     }
 
@@ -283,6 +284,79 @@ final class GlassJelly: UIView {
         yaw.step(dt); pitch.step(dt); roll.step(dt)
     }
 
+    // MARK: Bridge
+
+    /// The neck between the body and the cube, as a liquid bridge: a
+    /// catenoid whose volume is kept, so stretching it lengthens and thins
+    /// its waist (drawing a little from the bodies); below a critical waist
+    /// it pinches off (Plateau–Rayleigh) and each half is drawn back into its
+    /// body with a damped wobble; brought close again, the bodies merge.
+    private var bridgeConnected = true
+    private var waist: CGFloat = 5.5
+    private var catenary: CGFloat = 10
+    private var stubRoot = Mode(), stubCube = Mode()
+    private var cubeScale: CGFloat = 1
+    private static let endRadius: CGFloat = 10
+    private static let restWaist: CGFloat = 5.5
+    private static let pinchWaist: CGFloat = 1.7
+
+    private var rootNow: CGPoint {
+        CGPoint(x: neckRoot.x + lagX.value, y: neckRoot.y + lagY.value)
+    }
+    private var cubeNow: CGPoint {
+        CGPoint(x: creatureWorld.x - layer.position.x + bounds.midX, y: creatureWorld.y - layer.position.y + bounds.midY + hop.value)
+    }
+
+    /// Volume of the catenoid of waist `w` spanning `L` between ends of
+    /// radius `R`, and its shape constant.
+    private static func catenoid(waist w: CGFloat, length L: CGFloat) -> (volume: CGFloat, c: CGFloat) {
+        let R = endRadius, w = min(w, R * 0.999)
+        let c = (L / 2) / acosh(R / w)
+        return (.pi * w * w * (L / 2 + c / 2 * sinh(L / c)), c)
+    }
+
+    private func stepBridge(_ dt: CGFloat) {
+        let L = max(1, hypot(cubeNow.x - rootNow.x, cubeNow.y - rootNow.y))
+        let rest = Self.catenoid(waist: Self.restWaist, length: neckLength).volume
+        if bridgeConnected {
+            // Stretched, it draws a little more jelly from the bodies.
+            let target = rest * (1 + 0.25 * max(0, L / max(1, neckLength) - 1))
+            var lo: CGFloat = 0.05, hi = Self.endRadius * 0.99
+            for _ in 0..<24 {
+                let mid = (lo + hi) / 2
+                if Self.catenoid(waist: mid, length: L).volume < target { lo = mid } else { hi = mid }
+            }
+            waist = lo
+            catenary = Self.catenoid(waist: waist, length: L).c
+            // The cube gives up half of what the bridge took (it is about 0.72 s³).
+            let cubeVolume = 0.72 * pow(Self.creatureSize, 3)
+            cubeScale = cbrt(max(0.8, 1 - 0.5 * (target - rest) / cubeVolume))
+            if waist < Self.pinchWaist, !Motion.reduced {
+                // Pinch: the halves spring back into their bodies.
+                bridgeConnected = false
+                stubRoot.value = L * 0.45
+                stubCube.value = L * 0.45
+                stubRoot.velocity = 0
+                stubCube.velocity = 0
+                creatureSquash.velocity -= 1.4
+                squash.velocity += 30
+            }
+        } else {
+            for _ in 0..<4 {
+                stubRoot.step(dt / 4, frequency: 3.2, damping: 0.35, force: 0)
+                stubCube.step(dt / 4, frequency: 3.4, damping: 0.35, force: 0)
+            }
+            stubRoot.value = max(0, stubRoot.value)
+            stubCube.value = max(0, stubCube.value)
+            cubeScale += (1 - cubeScale) * min(1, dt * 6)
+            // Close enough again: they touch and merge.
+            if L < neckLength * 1.12 {
+                bridgeConnected = true
+                creatureSquash.velocity += 0.8
+            }
+        }
+    }
+
     // MARK: Face
 
     private func stepFace(_ dt: CGFloat) {
@@ -357,8 +431,11 @@ final class GlassJelly: UIView {
     private var deformation: CGAffineTransform {
         let hx = max(1, bodyRect.width / 2), hy = max(1, bodyRect.height / 2)
         let breath = Motion.reduced ? 0 : 0.008 * (1 - opened) * sin(time * 2 * .pi / 4.2)
-        return CGAffineTransform(a: (1 + squash.value / hx) * (1 + breath), b: 0,
-                                 c: -shear.value / hy, d: (1 - squash.value / hy) * (1 + breath), tx: 0, ty: 0)
+        // Area kept: as wide as it gets, it gets that much shorter.
+        let wide = 1 + squash.value / hx
+        _ = hy
+        return CGAffineTransform(a: wide * (1 + breath), b: 0,
+                                 c: -shear.value / hy, d: (1 / wide) * (1 + breath), tx: 0, ty: 0)
     }
 
     private var pillow: CGFloat { min(4, 0.4 * abs(squash.value) + 0.25 * abs(shear.value)) }
@@ -401,8 +478,7 @@ final class GlassJelly: UIView {
         let pillow = self.pillow
         let m = deformation
         let center = CGPoint(x: bodyRect.midX + lagX.value, y: bodyRect.midY + lagY.value)
-        let creature = CGPoint(x: creatureWorld.x - layer.position.x + bounds.midX,
-                               y: creatureWorld.y - layer.position.y + bounds.midY + hop.value)
+        let creature = cubeNow
         let canvas = bounds.insetBy(dx: -Self.margin, dy: -Self.margin)
         let inverse = m.inverted()
         var u = JellyUniforms(
@@ -412,8 +488,9 @@ final class GlassJelly: UIView {
             inverse: SIMD4(Float(inverse.a), Float(inverse.b), Float(inverse.c), Float(inverse.d)),
             creature: SIMD4(Float(creature.x), Float(creature.y), Float(s), Float(neckLength)),
             pose: SIMD4(Float(yaw.value), Float(pitch.value), Float(roll.value), Float(creatureSquash.value)),
-            gaze: SIMD4(Float(gazeX.value), Float(gazeY.value),
-                        Float(neckRoot.x + center.x - bodyRect.midX), Float(neckRoot.y + center.y - bodyRect.midY)),
+            gaze: SIMD4(Float(gazeX.value), Float(gazeY.value), Float(rootNow.x), Float(rootNow.y)),
+            bridge: SIMD4(Float(waist), Float(catenary), Float(Self.endRadius), bridgeConnected ? 1 : 0),
+            stubs: SIMD4(Float(stubRoot.value), Float(stubCube.value), Float(cubeScale), 0),
             center: SIMD2(Float(center.x), Float(center.y)),
             half: SIMD2(Float(half.width), Float(half.height)),
             origin: SIMD2(Float(canvas.minX), Float(canvas.minY)),
@@ -548,6 +625,8 @@ struct JellyUniforms {
     var creature: SIMD4<Float>  // centre xy, size, neck reach
     var pose: SIMD4<Float>      // yaw, pitch, roll, squash
     var gaze: SIMD4<Float>
+    var bridge: SIMD4<Float>
+    var stubs: SIMD4<Float>
     var center: SIMD2<Float>
     var half: SIMD2<Float>
     var origin: SIMD2<Float>
@@ -567,6 +646,7 @@ struct JellyUniforms {
         func near(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Bool { (0..<2).allSatisfy { Swift.abs(a[$0] - b[$0]) < 0.02 } }
         return near(tint, o.tint, 0.002) && near(fill, o.fill, 0.002) && near(inverse, o.inverse, 0.0005)
             && near(face, o.face, 0.003) && near(pose, o.pose, 0.0008) && near(gaze, o.gaze, 0.01)
+            && near(bridge, o.bridge, 0.005) && near(stubs, o.stubs, 0.01)
             && near(creature, o.creature, 0.05) && near(center, o.center) && near(half, o.half) && near(origin, o.origin)
             && Swift.abs(pillow - o.pillow) < 0.02 && radius == o.radius && dark == o.dark && Swift.abs(opened - o.opened) < 0.002
     }
@@ -605,7 +685,9 @@ enum JellyRenderer {
         float4 inverse;   // a b c d
         float4 creature;  // centre xy, size, neck reach
         float4 pose;      // yaw, pitch, roll, squash
-        float4 gaze;
+        float4 gaze;      // look xy, neck root xy
+        float4 bridge;    // waist, catenoid c, end radius, connected
+        float4 stubs;     // stub at the root, stub at the cube, cube scale, -
         float2 center;
         float2 half_;
         float2 origin;
@@ -638,12 +720,6 @@ enum JellyRenderer {
         return roundBox(q, h, u.radius) - u.pillow * max(0.0, 1.0 - along * along);
     }
 
-    // The creature's footprint, flat, a little inside its 3D silhouette.
-    static float foot(float2 p, constant Uniforms& u) {
-        float s = u.creature.z;
-        return roundBox(p - u.creature.xy, float2(s * 0.34), s * 0.26);
-    }
-
     static float smin(float a, float b, float k) {
         float h = max(k - abs(a - b), 0.0) / k;
         return min(a, b) - h * h * k * 0.25;
@@ -655,31 +731,7 @@ enum JellyRenderer {
         return length(pa - ba * h);
     }
 
-    // The liquid neck from the body (gaze.zw) to the cube: as thick as a
-    // finger at rest, thinner as it stretches, gone past twice its length.
-    static float neck(float2 p, constant Uniforms& u) {
-        float2 a = u.gaze.zw, b = u.creature.xy;
-        float len = length(b - a), rest = max(1.0, u.creature.w);
-        float r = 5.5 * clamp((rest * 2.0 - len) / rest, 0.0, 1.0);
-        if (r < 0.3) return 1e4;
-        return segment(p, a, b) - r;
-    }
-
-    static float union3(float db, float2 p, constant Uniforms& u) {
-        return smin(smin(db, neck(p, u), 9.0), foot(p, u), 7.0);
-    }
-
-    static float field(float2 p, constant Uniforms& u) {
-        return union3(blob(rest(p, u), u), p, u);
-    }
-
-    static float height(float2 p, float bevel, constant Uniforms& u) {
-        float t = clamp(-field(p, u) / bevel, 0.0, 1.0);
-        return sqrt(1.0 - (1.0 - t) * (1.0 - t));
-    }
-
-
-    // Two eyes at `c` in a face plane (points). Returns coverage in .a, ink in .rgb.
+    // Two eyes in a face plane (points). Coverage in .a, ink in .rgb.
     static float4 eyes(float2 q, float px, float3 tint, constant Uniforms& u) {
         float lid = u.face.x, happy = u.face.y, squint = u.face.z, worry = u.face.w;
         float3 ink = u.dark > 0.5 ? float3(0.97, 0.95, 0.92) : mix(float3(0.07, 0.05, 0.05), tint * 0.3, 0.2);
@@ -712,8 +764,8 @@ enum JellyRenderer {
         return float4(col, clamp(a, 0.0, 1.0));
     }
 
-    // One material for all of it: translucent tinted jelly, a little deeper
-    // toward its edges, one soft rim of light, one soft highlight.
+    // One material: translucent tinted jelly, deeper toward its edges, one
+    // soft rim of light, one soft highlight.
     static float4 jelly(float3 n, float3 V, float shape, constant Uniforms& u) {
         float3 tint = u.tint.rgb;
         float s = u.tint.a;
@@ -730,8 +782,6 @@ enum JellyRenderer {
         return float4(col, a);
     }
 
-    // MARK: the cube, seen in perspective.
-
     static float3x3 turn(float yaw, float pitch, float roll) {
         float cy = cos(yaw), sy = sin(yaw), cp = cos(pitch), sp = sin(pitch), cr = cos(roll), sr = sin(roll);
         float3x3 ry = float3x3(float3(cy, 0.0, -sy), float3(0.0, 1.0, 0.0), float3(sy, 0.0, cy));
@@ -740,94 +790,121 @@ enum JellyRenderer {
         return ry * rx * rz;
     }
 
-    static float cube(float3 p, float3x3 inv, constant Uniforms& u) {
-        float s = u.creature.z, squash = u.pose.w;
-        float3 l = inv * p;
+    // MARK: one 3D field: the body (a rounded slab), the bridge and the cube.
+
+    struct Scene { float3x3 inv; float3 cube; float s; };
+
+    // The pill or panel: its 2D outline extruded, every edge fully rounded.
+    static float slab(float3 P, constant Uniforms& u) {
+        float d2 = blob(rest(P.xy, u), u);
+        float T = clamp(min(u.half_.x, u.half_.y) * 0.55, 8.0, 12.0);
+        float2 w = float2(d2 + T, abs(P.z));
+        return min(max(w.x, w.y), 0.0) + length(max(w, 0.0)) - T;
+    }
+
+    // The cube; squashed it keeps its volume (wider and deeper as it shortens).
+    static float cubeD(float3 P, Scene sc, constant Uniforms& u) {
+        float s = sc.s, squash = u.pose.w;
+        float3 l = sc.inv * (P - sc.cube);
         l.y -= s * 0.5 * squash;
-        float3 b = float3(s * 0.5 * (1.0 + 0.6 * squash), s * 0.5 * (1.0 - squash), s * 0.4);
+        float side = 1.0 / sqrt(max(0.4, 1.0 - squash));
+        float3 b = float3(s * 0.5 * side, s * 0.5 * (1.0 - squash), s * 0.4 * side);
         float r = s * 0.28;
         float3 q = abs(l) - b + r;
         return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
     }
 
-    struct Cube { float4 color; float cover; };
-
-    static Cube creature(float2 p, float px, bool shade, constant Uniforms& u) {
-        Cube out = { float4(0.0), 0.0 };
-        float s = u.creature.z;
-        float D = 150.0;
-        float3 ro = float3(0.0, 0.0, -D);
-        float3 rd = normalize(float3(p - u.creature.xy, D));
-        float3x3 R = turn(u.pose.x, u.pose.y, u.pose.z);
-        float3x3 inv = transpose(R);
-        float t = D - s * 1.2, dmin = 1e4;
-        bool hit = false;
-        for (int i = 0; i < 48; i++) {
-            float d = cube(ro + rd * t, inv, u);
-            dmin = min(dmin, d);
-            if (d < 0.01) { hit = true; break; }
-            t += d;
-            if (t > D + s * 1.4) break;
+    // The liquid bridge: a catenoid, r(t) = waist·cosh((t − L/2)/c), the
+    // shape surface tension pulls a neck between two bodies into.
+    static float bridgeD(float3 P, Scene sc, constant Uniforms& u) {
+        float3 a = float3(u.gaze.zw, 0.0), b = sc.cube;
+        float3 ba = b - a;
+        float L = max(0.001, length(ba));
+        float3 dir = ba / L;
+        float t = dot(P - a, dir);
+        float rEnd = u.bridge.z;
+        if (u.bridge.w > 0.5) {
+            float tc = clamp(t, 0.0, L);
+            float r = min(rEnd, u.bridge.x * cosh((tc - L * 0.5) / max(0.01, u.bridge.y)));
+            return (length(P - (a + dir * tc)) - r) * 0.8;
         }
-        out.cover = hit ? 1.0 : clamp(1.0 - dmin / px, 0.0, 1.0);
-        if (out.cover <= 0.0 || !shade) return out;
-        float3 pos = ro + rd * t;
-        float e = 0.2;
-        float3 n = normalize(float3(1, -1, -1) * cube(pos + float3(1, -1, -1) * e, inv, u)
-                           + float3(-1, -1, 1) * cube(pos + float3(-1, -1, 1) * e, inv, u)
-                           + float3(-1, 1, -1) * cube(pos + float3(-1, 1, -1) * e, inv, u)
-                           + float3(1, 1, 1) * cube(pos + float3(1, 1, 1) * e, inv, u));
-        // Faces turned up a touch lighter, so it reads as a cube.
-        float shape = 1.0 + 0.25 * (-n.y) - 0.1 * abs(n.x);
-        float4 c = jelly(n, -rd, shape, u);
-        float3 col = c.rgb;
-        float a = c.a;
-        float3 l = inv * pos;
-        float front = smoothstep(-u.creature.z * 0.2, -u.creature.z * 0.36, l.z);
-        float4 face = eyes(l.xy, px * 0.9, u.tint.rgb, u);
-        float k = face.a * front;
-        col = col * (1.0 - k) + face.rgb * k;
-        a = a * (1.0 - k) + k;
-        a = clamp(a, 0.0, 1.0);
-        out.color = float4(min(col, float3(a)), a);
-        return out;
+        // Pinched off: each half is a stub drawn back into its body.
+        float d = 1e4;
+        float la = u.stubs.x, lb = u.stubs.y;
+        if (la > 0.3) {
+            float tc = clamp(t, 0.0, la);
+            float r = mix(rEnd, 2.2, tc / la);
+            d = min(d, (length(P - (a + dir * tc)) - r) * 0.8);
+        }
+        if (lb > 0.3) {
+            float tc = clamp(L - t, 0.0, lb);
+            float r = mix(rEnd, 2.2, tc / lb);
+            d = min(d, (length(P - (b - dir * tc)) - r) * 0.8);
+        }
+        return d;
+    }
+
+    // Menisci: each join is a smooth union, a concave fillet.
+    static float scene(float3 P, Scene sc, constant Uniforms& u) {
+        float body = slab(P, u), neck = bridgeD(P, sc, u), head = cubeD(P, sc, u);
+        return smin(smin(body, neck, 7.0), head, 7.0);
     }
 
     fragment float4 jellyFragment(VOut in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
         float2 p = in.position.xy / u.scale + u.origin;
         float px = 1.0 / u.scale;
-        float2 q = rest(p, u);
-        float db = blob(q, u);
-        float d = union3(db, p, u);
-        float cover = clamp(0.5 - d / px, 0.0, 1.0);
-        Cube c = { float4(0.0), 0.0 };
-        bool near = length(p - u.creature.xy) < u.creature.z * 1.05;
-        if (near) c = creature(p, px, u.mode < 1.0, u);
-        if (u.mode > 1.5) { return float4(0.0, 0.0, 0.0, max(cover, c.cover)); }
-        if (cover <= 0.0 && c.cover <= 0.0) { return float4(0.0); }
+        Scene sc;
+        sc.inv = transpose(turn(u.pose.x, u.pose.y, u.pose.z));
+        sc.cube = float3(u.creature.xy, 0.0);
+        sc.s = u.creature.z * u.stubs.z;
+        // Far from everything: nothing to march.
+        float2 q2 = rest(p, u);
+        float bound = min(blob(q2, u), length(p - u.creature.xy) - sc.s * 0.95);
+        bound = min(bound, segment(p, u.gaze.zw, u.creature.xy) - u.bridge.z);
+        if (bound > 10.0) { return float4(0.0); }
 
-        float4 body = float4(0.0);
-        if (cover > 0.0) {
-            float small = min(u.half_.x, u.half_.y);
-            float bevel = clamp(small * 0.8, 5.0, 16.0);
-            float lift = bevel * 0.7;
-            float e = 0.6;
-            float hx = (height(p + float2(e, 0.0), bevel, u) - height(p - float2(e, 0.0), bevel, u)) / (2.0 * e) * lift;
-            float hy = (height(p + float2(0.0, e), bevel, u) - height(p - float2(0.0, e), bevel, u)) / (2.0 * e) * lift;
-            float3 n = normalize(float3(-hx, -hy, -1.0));
-            float4 j = jelly(n, float3(0.0, 0.0, -1.0), 1.0, u);
-            float3 col = j.rgb;
-            float a = j.a;
-            // Paper inside the panel as it opens, so text reads.
-            float depth = clamp(-d / bevel, 0.0, 1.0);
-            float bodyness = clamp(1.0 - db / 6.0, 0.0, 1.0);
-            float f = u.fill.a * smoothstep(0.15, 0.9, depth) * bodyness;
-            col = col * (1.0 - f) + u.fill.rgb * f;
-            a = clamp(a * (1.0 - f) + f, 0.0, 1.0);
-            body = float4(min(col, float3(a)), a) * cover;
+        float3 ro = float3(p, -60.0), rd = float3(0.0, 0.0, 1.0);
+        float t = 0.0, dmin = 1e4;
+        bool hit = false;
+        for (int i = 0; i < 48; i++) {
+            float d = scene(ro + rd * t, sc, u);
+            dmin = min(dmin, d);
+            if (d < 0.02) { hit = true; break; }
+            t += d;
+            if (t > 120.0) break;
         }
-        // The cube is the same jelly, in front where it is.
-        return mix(body, c.color, c.cover);
+        float cover = hit ? 1.0 : clamp(1.0 - dmin / px, 0.0, 1.0);
+        if (u.mode > 1.5) { return float4(0.0, 0.0, 0.0, cover); }
+        if (cover <= 0.0) { return float4(0.0); }
+        float3 pos = ro + rd * t;
+        float e = 0.15;
+        float3 n = normalize(float3(1, -1, -1) * scene(pos + float3(1, -1, -1) * e, sc, u)
+                           + float3(-1, -1, 1) * scene(pos + float3(-1, -1, 1) * e, sc, u)
+                           + float3(-1, 1, -1) * scene(pos + float3(-1, 1, -1) * e, sc, u)
+                           + float3(1, 1, 1) * scene(pos + float3(1, 1, 1) * e, sc, u));
+        // Faces turned up a touch lighter, so the cube reads as a cube.
+        float shape = 1.0 + 0.25 * (-n.y) - 0.1 * abs(n.x);
+        float4 j = jelly(n, -rd, shape, u);
+        float3 col = j.rgb;
+        float a = j.a;
+
+        float dBody = slab(pos, u), dHead = cubeD(pos, sc, u);
+        // Paper inside the panel as it opens (its flat front only), so text reads.
+        float bevel = clamp(min(u.half_.x, u.half_.y) * 0.8, 5.0, 16.0);
+        float depth = clamp(-blob(rest(pos.xy, u), u) / bevel, 0.0, 1.0);
+        float bodyness = smoothstep(2.0, -0.5, dBody);
+        float f = u.fill.a * smoothstep(0.15, 0.9, depth) * smoothstep(0.75, 0.97, -n.z) * bodyness;
+        col = col * (1.0 - f) + u.fill.rgb * f;
+        a = a * (1.0 - f) + f;
+
+        // The face, on the cube's front.
+        float3 l = sc.inv * (pos - sc.cube);
+        float front = smoothstep(-sc.s * 0.2, -sc.s * 0.36, l.z) * smoothstep(1.5, -0.3, dHead);
+        float4 face = eyes(l.xy / u.stubs.z, px * 0.9, u.tint.rgb, u);
+        float k = face.a * front;
+        col = col * (1.0 - k) + face.rgb * k;
+        a = clamp(a * (1.0 - k) + k, 0.0, 1.0);
+        return float4(min(col, float3(a)), a) * cover;
     }
     """
 }

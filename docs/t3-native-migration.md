@@ -1041,6 +1041,21 @@ drag or fling, pinched apart past twice its length. Still one material in one
 pass, blur only under the jelly, no redraw when idle. Clips: `jelly5-*.mp4`.
 Not on the phone.
 
+Sixth round (user: "neck looks stupid it's clearly just bolted on … needs to
+be more physically accurate"): the jelly is one 3D signed-distance field,
+raymarched in one pass: the pill or panel (its outline extruded with fully
+rounded edges), the bridge and the cube, joined by smooth unions so every join
+is a concave meniscus, with normals and lighting from the combined field. The
+bridge is a liquid bridge: a catenoid r(t) = w·cosh((t − L/2)/c) whose volume
+is kept (each frame the waist w is solved for the current length), so
+stretching lengthens and thins it and draws a little volume from the cube;
+below a critical waist it pinches off and each half retracts into its body on
+a damped spring, with a recoil wobble; when the bodies are close again they
+merge. Squash keeps volume (blob: area; cube: wider and deeper as it
+shortens). Fragments far from the jelly skip the march; nothing redraws while
+nothing changes. Clips: `jelly6-*.mp4`, stills `jelly6-join-*.png`. Not on
+the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
