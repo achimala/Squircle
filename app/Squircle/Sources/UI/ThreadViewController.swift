@@ -77,7 +77,7 @@ private final class WeakBox<Object: AnyObject> {
 final class ThreadViewController: UIViewController, UITableViewDelegate {
     let project: AppProject
     var onBack: (() -> Void)?
-    var currentSessionID: String? { sessionID }
+    var currentSessionID: String? { conversation.threadID }
     /// Whatever shows this conversation: simulator streams, bringing a
     /// simulator large, and which live simulators are on screen.
     weak var host: ConversationHost?
@@ -108,14 +108,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     var isFull: (() -> Bool)?
     /// The model, approvals and anything without a button of its own.
     private let more = Theme.glassButton(symbol: "ellipsis", identifier: "agent.more", accessibilityLabel: "More")
-    /// The model follows one conversation at a time; a thread opened over
-    /// this one takes it and gives it back when it closes.
-    private var isActive: Bool { model.selectedSessionID == sessionID }
+    /// The model follows one conversation at a time. Whoever shows this one
+    /// says whether it is in front (`deactivate`/`reactivate`); in front, it
+    /// has the model while the model has this very conversation open.
+    private var isActive: Bool { active && model.openConversation == conversation }
+    private var active = true
 
     private let model: SquircleModel
-    private var sessionID: String?
-    private var selectionReady = false
-    private var sending = false
+    /// Which conversation this is. Only the model's record of a draft
+    /// becoming a thread (`successor`) or the app's agent moving on changes it.
+    private var conversation: ConversationID
+    /// Keeps this conversation's published media fresh while it is in front.
+    private var freshness: RefreshLease?
+    /// Keeps the app's tasks fresh while the agent's task strip shows.
+    private var taskFreshness: RefreshLease?
     private var shownAttachments = 0
     private let draftScroll = UIScrollView()
     private var observations: [Task<Void, Never>] = []
@@ -143,12 +149,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var questionAnswers: [String: Any] = [:]
     private var questionPicks: [String] = []
 
-    /// A message on its way to the Mac, shown before T3 echoes it back.
-    private var pendingSend: (id: String, text: String, images: Int, known: Set<String>)?
-    /// Echoed messages keep the row identity of their local copy.
-    private var aliases: [String: String] = [:]
     private var flyingID: String?
-    private var showsConversation: Bool { sessionID != nil || pendingSend != nil }
+    /// Your message on its way to the Mac, until T3's thread has it.
+    private var pendingSend: PendingSend? { model.pendingSend(for: conversation) }
+    private var showsConversation: Bool { conversation.threadID != nil || pendingSend != nil }
     /// An expanded turn's summary, pinned to the top while you read inside
     /// that turn; tapping it folds the turn back up.
     private let sticky = SummaryCell(style: .default, reuseIdentifier: nil)
@@ -156,12 +160,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Measured row heights, so long conversations keep their place while
     /// rows above are measured, expanded or folded.
     private var heights: [String: CGFloat] {
-        get { Self.heightCache.value(for: sessionID ?? "") ?? [:] }
-        set { Self.heightCache.set(newValue, for: sessionID ?? "") }
+        get { Self.heightCache.value(for: conversation) ?? [:] }
+        set { Self.heightCache.set(newValue, for: conversation) }
     }
     /// Row heights of the most recently visited threads, so a returning
     /// thread lays out at its true size and opens exactly at the bottom.
-    private static let heightCache = RecentCache<String, [String: CGFloat]>(limit: 16)
+    private static let heightCache = RecentCache<ConversationID, [String: CGFloat]>(limit: 16)
     private var items: [ThreadItem] = []
     private var itemsByID: [String: ThreadItem] = [:]
     /// The turn the live line belonged to, so only that turn's own finish pulses.
@@ -178,11 +182,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var edgeConstraints: [NSLayoutConstraint] = []
     private var safeArea: UIEdgeInsets { overlayLayout?.safe ?? view.safeAreaInsets }
 
+    /// A thread of `project`, or with nil a new conversation (its agent's
+    /// first, with `agent`).
     init(model: SquircleModel, project: AppProject, sessionID: String?, agent: Bool = false) {
         self.isAgent = agent
         self.model = model
         self.project = project
-        self.sessionID = sessionID
+        self.conversation = sessionID.map { .thread($0, appID: project.id) } ?? .draft(UUID(), appID: project.id, agent: agent)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -467,19 +473,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
         observations = [model.observe(by: self, after: .milliseconds(50)) { $0.render() }]
         model.selectProject(project)
-        let requestedSessionID = sessionID
-        if let requestedSessionID {
-            // Show what was last seen of this thread right away, at the bottom.
-            model.prepareSession(requestedSessionID)
-            selectionReady = true
-        }
-        Task { [weak self] in
-            // A thread removed before this ran must not take the model's selection.
-            guard let self, !tornDown else { return }
-            if let requestedSessionID { await model.selectSession(requestedSessionID) } else { await model.beginDraft(agent: isAgent) }
-            selectionReady = true
-            render()
-        }
+        // What was last seen of this thread shows right away, at the bottom.
+        open(conversation)
         render()
     }
 
@@ -579,38 +574,57 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     // MARK: Content
 
-    /// A thread opened over this one closed: take the model back.
+    /// A thread opened over this one closed: it is in front again.
     func reactivate() {
+        guard !tornDown, !active else { return }
+        active = true
+        open(conversation)
+        render()
+    }
+    /// A thread is opening over this one; it lets go of the model.
+    func deactivate() {
+        active = false
+        freshness = nil
+        taskFreshness = nil
+    }
+
+    /// Puts `id` on screen at once from what was last seen of it, then
+    /// follows it live.
+    private func open(_ id: ConversationID) {
+        conversation = id
+        model.show(id)
+        freshness = model.keepFresh(.conversation(id))
         Task { [weak self] in
-            guard let self, !tornDown else { return }
-            if let sessionID { await model.selectSession(sessionID) } else { await model.beginDraft(agent: isAgent) }
+            // A conversation removed or moved on before this ran must not take the model.
+            guard let self, !tornDown, active, conversation == id else { return }
+            await model.open(id)
             render()
         }
     }
-    /// A thread is opening over this one.
-    func deactivate() {}
+
+    /// The conversation this one now is, if it changed: a draft whose
+    /// thread T3 created (even if its first turn then failed), or the
+    /// app's agent the Mac reports after a fresh start or a first send.
+    private func successor() -> ConversationID? {
+        if let next = model.successor(of: conversation) { return next }
+        guard isAgent, pendingSend == nil, let id = model.agentThreadID(for: project), id != conversation.threadID else { return nil }
+        return .thread(id, appID: project.id)
+    }
 
     private func render() {
-        guard isViewLoaded, isActive || !selectionReady else { return }
-        guard selectionReady else {
-            composer.send.isEnabled = false
-            table.isHidden = true
-            draftScroll.isHidden = true
-            return
-        }
-        // The Mac may report the app's agent after this opened as a draft,
-        // or a new one after a fresh start.
-        if isAgent, !sending, pendingSend == nil, let id = model.agentThreadID(for: project), id != sessionID {
-            sessionID = id
+        guard isViewLoaded, active, !tornDown else { return }
+        if let next = successor() {
             pinToBottom = true
-            model.prepareSession(id)
-            Task { [weak self] in await self?.model.selectSession(id) }
+            open(next)
         }
-        composer.send.isEnabled = !sending
+        guard isActive else { return }
+        let phase = pendingSend?.phase
+        let inFlight = phase == .preparing || phase == .creating || phase == .awaitingAcceptance
+        composer.send.isEnabled = !inFlight
         draftScroll.isHidden = showsConversation
         table.isHidden = !showsConversation
         view.accessibilityElements = topControls + [showsConversation ? table : draftScroll, request, notice, jump, strip, composer]
-        let session = model.sessions.first { $0.id == sessionID }
+        let session = model.sessions.first { $0.id == conversation.threadID }
         threadTitle = isAgent ? project.name : session?.displayTitle(in: project) ?? ""
         renderAgent()
         renderStrip()
@@ -637,6 +651,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// Shown on the app's agent while it has open tasks.
     private func renderStrip() {
+        if isAgent, taskFreshness == nil { taskFreshness = model.keepFresh(.tasks(appID: project.id)) }
         let open = isAgent ? model.tasks(for: project).tasks.filter { $0.status.open } : []
         let hidden = open.isEmpty
         strip.configure(open)
@@ -652,7 +667,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func modelMenu() -> [UIMenuElement] {
-        let locked = model.isRunning || sending
+        let locked = model.isRunning || pendingSend != nil
         return model.modelMenu.map { section in
             UIMenu(title: section.title, options: .displayInline, children: section.choices.map { choice in
                 UIAction(title: choice.name, attributes: locked ? .disabled : [],
@@ -784,29 +799,17 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
     }
 
-    /// The conversation with your just-sent message in place until T3 has it.
+    /// The conversation with your message in place until T3's thread has
+    /// it: the same ID, so the row stays put when T3's copy replaces it.
     private func displayedMessages() -> [ChatMessage] {
         var messages = model.messages
-        if let pending = pendingSend {
-            let text = pending.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let echo = messages.first(where: { $0.role == "user" && !pending.known.contains($0.id)
-                && $0.content.trimmingCharacters(in: .whitespacesAndNewlines) == text }) {
-                aliases[echo.id] = pending.id
-                pendingSend = nil
-            } else {
-                var message = ChatMessage(id: pending.id, role: "user", content: pending.text,
-                                          createdAt: ISO8601DateFormatter().string(from: .now))
-                message.attachments = (0..<pending.images).map { "local-\($0)" }
-                messages.append(message)
-            }
-        }
-        guard !aliases.isEmpty else { return messages }
-        return messages.map { message in
-            guard let alias = aliases[message.id] else { return message }
-            var copy = message
-            copy.id = alias
-            return copy
-        }
+        guard let pending = pendingSend, !messages.contains(where: { $0.id == pending.messageID }) else { return messages }
+        var message = ChatMessage(id: pending.messageID, role: "user", content: pending.text,
+                                  createdAt: ISO8601DateFormatter().string(from: .now))
+        message.attachments = (0..<pending.images).map { "local-\($0)" }
+        if case .outcomeUnknown = pending.phase { message.failed = true }
+        messages.append(message)
+        return messages
     }
 
     /// The turn that just finished announces itself once it has settled.
@@ -1170,6 +1173,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func tappable(_ item: ThreadItem?) -> Bool {
         switch item {
         case .agentMessage: return true
+        case .user(let message): return message.failed
         case .action(let line): return line.text?.isEmpty == false || (line.thread != nil && line.state != .archived && onOpenThread != nil)
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
         case .earlier, .summary, .note, .changes: return true
@@ -1233,6 +1237,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .note(let message): toggle(message.id)
         case .update(let message): if let id = message.threadIDs.first { onOpenThread?(id) }
         case .agentMessage(let message): toggle(message.id)
+        case .user(let message): if message.failed { offerResend() }
         case .action(let line):
             // T3 no longer lists an archived worker's thread.
             if line.text?.isEmpty == false { toggle(line.id) } else if let id = line.thread?.raw, line.state != .archived { onOpenThread?(id) }
@@ -1339,43 +1344,64 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     // MARK: Composer and requests
 
     private func send() {
-        guard selectionReady, !sending else { return }
+        guard isActive else { return }
+        // A message whose fate is unknown is settled before another goes.
+        if case .outcomeUnknown? = pendingSend?.phase { offerResend(); return }
         let text = composer.text
         let images = model.attachments
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, images.isEmpty {
             if model.isRunning { Task { await model.stop() } }
             return
         }
-        sending = true
-        composer.send.isEnabled = false
-        Theme.openHaptic()
         let source = composer.textOrigin(in: view)
-        let local = "local:" + UUID().uuidString
-        // Your pictures show in the conversation from the bytes on hand.
-        for (index, image) in images.enumerated() { StepImages.set(image.data, for: local, index: index) }
-        pendingSend = (local, text, images.count, Set(model.messages.filter { $0.role == "user" }.map(\.id)))
-        flyingID = Motion.reduced ? nil : local
-        composer.text = ""
-        pinToBottom = true
-        render()
-        flySend(id: local, from: source)
-        let origin = sessionID
-        Task { [weak self, model, project, isAgent] in
-            let outcome = await model.send(text, in: project, to: origin, agent: isAgent)
-            // The answer belongs to the conversation that sent it: a draft
-            // becomes the thread T3 created, and nothing else moves.
+        switch model.startSend(text, in: project, from: conversation) {
+        case .refused(let reason):
+            model.error = reason
+        case .started(let messageID, let outcome):
+            Theme.openHaptic()
+            // Your pictures show in the conversation from the bytes on hand.
+            for (index, image) in images.enumerated() { StepImages.set(image.data, for: messageID, index: index) }
+            flyingID = Motion.reduced ? nil : messageID
+            composer.text = ""
+            pinToBottom = true
+            render()
+            flySend(id: messageID, from: source)
+            follow(outcome, text: text)
+        }
+    }
+
+    /// A message T3 refused goes back into the field; one it may have taken
+    /// stays as a failed bubble to send again or take back.
+    private func follow(_ outcome: Task<SendOutcome, Never>, text: String) {
+        Task { [weak self] in
+            let result = await outcome.value
             guard let self, !tornDown else { return }
-            sending = false
-            switch outcome {
-            case .sent(let id):
-                if sessionID == origin, origin == nil || origin == id { sessionID = id }
-            case .failed:
-                // A message the Mac did not accept goes back into the field.
-                if pendingSend?.id == local { pendingSend = nil }
-                if composer.text.isEmpty { composer.text = text }
-            }
+            if case .rejected = result, composer.text.isEmpty { composer.text = text }
             render()
         }
+    }
+
+    /// Send again with the same identity (T3 is asked first whether it has
+    /// it), or take the words back into the field.
+    private func offerResend() {
+        guard presentedViewController == nil, case .outcomeUnknown(let reason)? = pendingSend?.phase else { return }
+        let sheet = UIAlertController(title: "Not delivered", message: reason, preferredStyle: .actionSheet)
+        sheet.addAction(UIAlertAction(title: "Try Again", style: .default) { [weak self] _ in
+            guard let self else { return }
+            switch model.startRetry(conversation) {
+            case .refused(let reason): model.error = reason
+            case .started(_, let outcome): follow(outcome, text: "")
+            }
+            render()
+        })
+        sheet.addAction(UIAlertAction(title: "Edit Message", style: .default) { [weak self] _ in
+            guard let self, let text = model.discard(conversation) else { return }
+            if composer.text.isEmpty { composer.text = text }
+            render()
+        })
+        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = composer
+        present(sheet, animated: true)
     }
 
     /// As in Messages: your words become their bubble right where you typed
@@ -1589,6 +1615,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     func tearDown() {
         tornDown = true
+        freshness = nil
+        taskFreshness = nil
         observations.forEach { $0.cancel() }
         observations = []
         onBack = nil
@@ -1611,19 +1639,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     func debugSend(_ text: String) {
         composer.text = text
         send()
-    }
-    /// Verification only: the send animation without dispatching to T3.
-    func debugFlySend(_ text: String) {
-        composer.text = text
-        view.layoutIfNeeded()
-        let source = composer.textOrigin(in: view)
-        let local = "local:debug"
-        pendingSend = (local, text, 0, Set(model.messages.filter { $0.role == "user" }.map(\.id)))
-        flyingID = local
-        composer.text = ""
-        pinToBottom = true
-        render()
-        flySend(id: local, from: source)
     }
     /// Verification only: hands the live line to a new task and back.
     func debugLens() {

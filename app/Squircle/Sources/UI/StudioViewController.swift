@@ -242,9 +242,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 if let text = environment["SQUIRCLE_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
                 }
-                if let text = environment["SQUIRCLE_DEMO_SEND"] {
-                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugFlySend(text) }
-                }
                 if let tab = environment["SQUIRCLE_TASKS"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentTasks(threads: tab == "threads") }
                 }
@@ -262,7 +259,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             }
             if environment["SQUIRCLE_DEMO_LENS"] == "1" { later { [weak self] in self?.thread?.debugLens() } }
             if environment["SQUIRCLE_DEMO_PULSE"] == "1" { later { [weak self] in self?.thread?.debugPulse() } }
-            if let text = environment["SQUIRCLE_DEMO_SEND"] { later { [weak self] in self?.thread?.debugFlySend(text) } }
             if scrub < 1 { hold(spring, at: scrub) }
             if environment["SQUIRCLE_THEN_BACK"] == "1" {
                 Task { [weak self] in try? await Task.sleep(for: .seconds(5)); self?.closeThread() }

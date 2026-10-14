@@ -34,6 +34,10 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     private var swiping = false
     private var behind = false
     private var observation: Task<Void, Never>?
+    /// Keeps the app's tasks fresh while the sheet is up.
+    private var freshness: RefreshLease?
+    /// The next History page is on its way.
+    private var loadingHistory = false
 
     /// Sections top to bottom; done and dropped tasks stay a day before History.
     enum Group: Hashable {
@@ -174,6 +178,7 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         }, for: .valueChanged)
         table.refreshControl = refresh
         observation = model.observe(by: self, after: .milliseconds(100)) { $0.render() }
+        freshness = model.keepFresh(.tasks(appID: project.id))
         Task { await model.refreshTasks() }
         renderTab()
         render()
@@ -356,6 +361,18 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         dataSource.apply(snapshot, animatingDifferences: false)
         if showsHistory, let section = snapshot.indexOfSection(.history) {
             table.scrollToRow(at: IndexPath(row: 0, section: section), at: .top, animated: true)
+        }
+    }
+
+    /// History arrives a page at a time, the next as its last row shows.
+    func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        guard list.hasMoreHistory, !loadingHistory, let id = dataSource.itemIdentifier(for: indexPath),
+              id == list.history.last?.id else { return }
+        loadingHistory = true
+        Task { [weak self] in
+            guard let self else { return }
+            await model.loadMoreHistory(appID: project.id)
+            loadingHistory = false
         }
     }
 
