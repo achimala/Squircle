@@ -58,6 +58,7 @@
 		97C1E54012EDF05F226B3682 /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
 		9D1F202195C47DF92993790B /* PerfRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F9E05172DC12D427E2C642 /* PerfRecorder.swift */; };
 		9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
+		A0139A8A4A249A2D7BE417FD /* TasksPrototype.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6617D505262D7B698607FE2A /* TasksPrototype.swift */; };
 		A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */; };
 		A3A54C0479DF84AA96EE8A82 /* PerfRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F9E05172DC12D427E2C642 /* PerfRecorder.swift */; };
 		A3E8C16A2A67B25E7C0C3B83 /* ThreadTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */; };
@@ -78,6 +79,7 @@
 		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
 		CB3B7947C642FB450BF2C93F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
 		D3823161D75D25966F363568 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
+		D49AED134BBB44D3A12D6EAE /* TasksPrototype.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6617D505262D7B698607FE2A /* TasksPrototype.swift */; };
 		DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
@@ -121,6 +123,7 @@
 		613DF9097AAA330CB0F89A33 /* SquircleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleApp.swift; sourceTree = "<group>"; };
 		614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3RuntimeMode.swift; sourceTree = "<group>"; };
 		61BA8CB62C3A9F516000BF29 /* AgentStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentStep.swift; sourceTree = "<group>"; };
+		6617D505262D7B698607FE2A /* TasksPrototype.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksPrototype.swift; sourceTree = "<group>"; };
 		6D09120CE693437EA02625DD /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
 		70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleClient.swift; sourceTree = "<group>"; };
 		7A74125807E9A3E968F73119 /* SquircleTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -208,6 +211,7 @@
 				33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */,
 				0D5F85DA67966D2090740EE5 /* StageLayout.swift */,
 				2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */,
+				6617D505262D7B698607FE2A /* TasksPrototype.swift */,
 				9AA8EBB035561F94C3724C6D /* Theme.swift */,
 				CA04F2B838066131F83E73E4 /* ThreadCells.swift */,
 				44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */,
@@ -436,6 +440,7 @@
 				3B9BE6F5A38660FAB6765472 /* T3Gateway.swift in Sources */,
 				A431923743BEEBFEA90B97E2 /* T3RuntimeMode.swift in Sources */,
 				B8F5D99583BEDB610EE58565 /* T3ThreadState.swift in Sources */,
+				D49AED134BBB44D3A12D6EAE /* TasksPrototype.swift in Sources */,
 				E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */,
 				EF2030F39BE56875E731AD9A /* ThreadCells.swift in Sources */,
 				EBB5E73877F124DDB564B2FB /* ThreadDetail.swift in Sources */,
@@ -491,6 +496,7 @@
 				96D8D7C221734472B9BF0B8F /* T3Gateway.swift in Sources */,
 				4DDFD13E3021EAE8FBD50E7D /* T3RuntimeMode.swift in Sources */,
 				B8296CCA730E737FD74E28A9 /* T3ThreadState.swift in Sources */,
+				A0139A8A4A249A2D7BE417FD /* TasksPrototype.swift in Sources */,
 				8BAA4E81B553C53F52679B42 /* Theme.swift in Sources */,
 				34D5DA8BF8B35978B9BD486C /* ThreadCells.swift in Sources */,
 				BEF0D97D54BE2869497C9088 /* ThreadDetail.swift in Sources */,

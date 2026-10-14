@@ -1320,6 +1320,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     #if DEBUG
+    /// Design prototype only: pins a view just above the field.
+    func debugPinAboveField(_ pinned: UIView) {
+        pinned.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(pinned)
+        NSLayoutConstraint.activate([
+            pinned.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            pinned.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            pinned.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8)
+        ])
+    }
     /// Verification only: a sample agent question, never sent to T3.
     func debugShowQuestion() {
         debugRequest = .from(["id": "debug-question", "kind": "user-input.requested", "payload": ["requestId": "debug", "questions": [
