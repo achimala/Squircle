@@ -981,6 +981,17 @@ final class LiveCell: TimelineCell {
     }
 }
 
+#if DEBUG
+/// Prototype: something alive in place of the capsule's mark.
+@MainActor
+protocol CapsuleCharacter: AnyObject {
+    var side: CGFloat { get }
+    func set(tone: LiveCapsule.Tone)
+    /// The task text just changed (the old line rises out).
+    func lineChanged()
+}
+#endif
+
 /// The live capsule: the app's mark turning while the agent works, the task
 /// in shimmering text that slides vertically as tasks change, and the time
 /// since the turn began. Sized by its owner; it has no surface of its own
@@ -1045,12 +1056,33 @@ final class LiveCapsule: UIView {
         track.addSubview(label)
     }
 
+    #if DEBUG
+    /// Prototype: a living character in place of the mark (see
+    /// `BubbleCharacter`).
+    var character: (UIView & CapsuleCharacter)? {
+        didSet {
+            oldValue?.removeFromSuperview()
+            if let character {
+                addSubview(character)
+                character.set(tone: tone)
+            }
+            mark.isHidden = character != nil
+            setNeedsLayout()
+        }
+    }
+    private var markSide: CGFloat { character?.side ?? 14 }
+    private func lead(_ height: CGFloat) -> CGFloat {
+        character != nil ? (height - markSide) / 2 : max(12, (height - markSide) / 2 + 1)
+    }
+    #else
     private var markSide: CGFloat { 14 }
-    private var inset: CGFloat { max(12, (bounds.height - markSide) / 2 + 1) }
+    private func lead(_ height: CGFloat) -> CGFloat { max(12, (height - markSide) / 2 + 1) }
+    #endif
+    private var inset: CGFloat { lead(bounds.height) }
 
     /// The width that shows the whole headline, within `limit`.
     func preferredWidth(limit: CGFloat, height: CGFloat) -> CGFloat {
-        let lead = max(12, (height - markSide) / 2 + 1)
+        let lead = lead(height)
         guard let headline, !headline.isEmpty else { return height }
         let text = ceil((headline as NSString).size(withAttributes: [.font: font]).width)
         let time = showsTime && started != nil ? 52 : lead - 2
@@ -1069,6 +1101,9 @@ final class LiveCapsule: UIView {
         edge.locations = [0, NSNumber(value: Double(max(0, width - 11) / width)), NSNumber(value: Double(max(0, width - 2) / width))]
         CATransaction.commit()
         mark.frame = CGRect(x: inset, y: (bounds.height - markSide) / 2, width: markSide, height: markSide)
+        #if DEBUG
+        character?.frame = mark.frame
+        #endif
         elapsed.sizeToFit()
         elapsed.isHidden = !showsTime || started == nil
         elapsed.center = CGPoint(x: bounds.width - inset - 3 - elapsed.bounds.width / 2, y: bounds.height / 2)
@@ -1105,6 +1140,9 @@ final class LiveCapsule: UIView {
             line.isShimmering = tone == .working
             line.textColor = tone == .needsYou ? Theme.warning : .secondaryLabel
             animateMark()
+            #if DEBUG
+            character?.set(tone: tone)
+            #endif
         }
         if next == headline {
             cancelQueued()
@@ -1151,6 +1189,9 @@ final class LiveCapsule: UIView {
             setNeedsLayout()
             return
         }
+        #if DEBUG
+        character?.lineChanged()
+        #endif
         // The finished task rises out of the capsule and fades; the next
         // rises in from below.
         let old = line

@@ -1069,6 +1069,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
+        if let name = environment["SQUIRCLE_BUBBLE_CHARACTER"], let character = BubbleCharacter.make(name) {
+            bubble.character = character
+            retarget()
+        }
         // `SQUIRCLE_BUBBLE_DEMO=1`: the bubble loops through made-up statuses
         // (short, long, a rapid burst, needs you, done, idle) for recordings.
         if environment["SQUIRCLE_BUBBLE_DEMO"] == "1" {
