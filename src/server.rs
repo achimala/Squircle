@@ -171,6 +171,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sims/devices", get(sim_devices))
         .route("/v1/agents", get(list_agents).post(ensure_agent))
         .route("/v1/agents/context", get(agent_context))
+        .route("/v1/agents/restart", post(restart_agent))
+        .route("/v1/agents/fresh", post(fresh_agent))
         .route("/v1/workers", get(list_workers).post(spawn_worker))
         .route("/v1/workers/{id}", get(read_worker))
         .route("/v1/workers/{id}/messages", post(message_worker))
@@ -1759,6 +1761,39 @@ async fn ensure_agent(
         .await
         .map_err(agent_error)?;
     Ok(Json(success(json!({"agent": agent}))))
+}
+
+#[derive(Deserialize)]
+struct ResetAgent {
+    project_id: Option<String>,
+    thread_id: Option<String>,
+    handoff: Option<String>,
+}
+
+async fn restart_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<ResetAgent>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let request = body(payload)?;
+    let result = agents(&state)?
+        .reset(request.project_id.as_deref(), request.thread_id.as_deref(), crate::agents::Reset::Restart)
+        .await.map_err(agent_error)?;
+    Ok(Json(success(result)))
+}
+
+async fn fresh_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<ResetAgent>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let request = body(payload)?;
+    let result = agents(&state)?
+        .reset(request.project_id.as_deref(), request.thread_id.as_deref(), crate::agents::Reset::Fresh { note: request.handoff })
+        .await.map_err(agent_error)?;
+    Ok(Json(success(result)))
 }
 
 #[derive(Deserialize)]

@@ -200,6 +200,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             items.append(UIAction(title: full ? "Make Small" : "Full Screen",
                                   image: UIImage(systemName: full ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")) { _ in onToggleFull() })
         }
+        if isAgent, model.agentThreadID(for: project) != nil {
+            let project = project
+            items.append(UIMenu(options: .displayInline, children: [
+                UIAction(title: "Restart Agent", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+                    Task { await self?.model.resetAgent(project, fresh: false) }
+                },
+                UIMenu(title: "Start Fresh", image: UIImage(systemName: "sparkles"), children: [
+                    UIAction(title: "Start Fresh", subtitle: "New conversation; this one stays in Threads", attributes: .destructive) { [weak self] _ in
+                        Task { await self?.model.resetAgent(project, fresh: true) }
+                    }
+                ])
+            ]))
+        }
         items.append(UIMenu(options: .displayInline, children: [
             UIMenu(title: "Model", subtitle: model.shortAgentName(for: model.modelSelection), image: UIImage(systemName: "cpu"), children: modelMenu()),
             UIMenu(title: "Approvals", subtitle: model.runtimeMode.title, image: UIImage(systemName: model.runtimeMode.symbol), children: approvalMenu())
@@ -475,9 +488,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             draftScroll.isHidden = true
             return
         }
-        // The Mac may report the app's agent after this opened as a draft.
-        if isAgent, sessionID == nil, !sending, pendingSend == nil, let id = model.agentThreadID(for: project) {
+        // The Mac may report the app's agent after this opened as a draft,
+        // or a new one after a fresh start.
+        if isAgent, !sending, pendingSend == nil, let id = model.agentThreadID(for: project), id != sessionID {
             sessionID = id
+            pinToBottom = true
             model.prepareSession(id)
             Task { [weak self] in await self?.model.selectSession(id) }
         }

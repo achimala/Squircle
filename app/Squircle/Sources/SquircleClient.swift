@@ -102,6 +102,17 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         }
     }
 
+    /// Restarts an app agent's session, or starts it fresh in a new thread.
+    func resetAgent(projectID: String, fresh: Bool) async throws {
+        struct Reply: Decodable { let ok: Bool }
+        var request = try request(["v1", "agents", fresh ? "fresh" : "restart"])
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.httpBody = try JSONEncoder().encode(["project_id": projectID])
+        let reply: Reply = try await perform(request, service: "Squircle", exposeAPIError: true)
+        guard reply.ok else { throw ClientError.response("Squircle") }
+    }
+
     /// Starts (or finds) an app's agent on the Mac and gives it a message.
     /// Returns its T3 thread ID.
     func startAgent(projectID: String, message: String, model: String?) async throws -> String {
