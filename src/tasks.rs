@@ -161,11 +161,11 @@ impl Signals {
     }
 }
 
-/// The earlier `id:state id:state` signature (worker states are
-/// `agents::worker_state`'s, build states `queued|running|succeeded|failed`),
-/// read from old `tasks.json` files and from callers not yet passing `Signals`.
-impl From<String> for Signals {
-    fn from(signature: String) -> Self {
+impl Signals {
+    /// The `id:state id:state` signature old `tasks.json` files kept as
+    /// `seen` (worker states `working|needs-you|done|error`, build states
+    /// `queued|running|succeeded|failed`).
+    fn legacy(signature: &str) -> Self {
         let mut signals = Signals::default();
         for (id, state) in signature.split(' ').filter_map(|entry| entry.rsplit_once(':')) {
             let worker = match state {
@@ -190,19 +190,6 @@ impl From<String> for Signals {
         }
         signals
     }
-}
-
-impl From<(String, Option<Status>)> for Signals {
-    fn from((signature, _): (String, Option<Status>)) -> Self {
-        signature.into()
-    }
-}
-
-/// What linked workers and builds say a task's status is, if anything.
-/// Worker states are `agents::worker_state`'s; build states `BuildState`'s.
-pub fn derive(threads: &[&str], builds: &[&str]) -> Option<Status> {
-    let pairs = threads.iter().chain(builds).map(|state| format!("x:{state}")).collect::<Vec<_>>().join(" ");
-    Signals::from(pairs).implied()
 }
 
 /// Done or dropped tasks leave the active list after a day; open ones that
@@ -347,7 +334,7 @@ impl From<StoredRecord> for Record {
             .or(s.archived_at.map(|since| Placement::History { since }))
             .unwrap_or(Placement::Active);
         let observed = s.observed.unwrap_or_else(|| {
-            Observation::default().next(&s.threads, &s.builds, &Signals::from(s.seen)).0
+            Observation::default().next(&s.threads, &s.builds, &Signals::legacy(&s.seen)).0
         });
         Record {
             id: s.id, project_id: s.project_id, ask: s.ask, status: s.status, note: s.note, source: s.source,
@@ -521,7 +508,7 @@ impl Tasks {
     /// An explicit change from the agent or the user. A status set this way
     /// holds until a linked worker or build changes after `observed`, what
     /// they were doing when it was chosen.
-    pub fn update<S: Into<Signals>>(&self, id: &str, update: Update, by: By, observed: Option<S>) -> Result<Task> {
+    pub fn update(&self, id: &str, update: Update, by: By, observed: Option<Signals>) -> Result<Task> {
         let now = crate::model::now();
         let mut book = self.book.lock().unwrap();
         let mut task = book.tasks.get(id).cloned().with_context(|| format!("No task {id}"))?;
@@ -537,7 +524,7 @@ impl Tasks {
             },
         }
         if update.status.is_some() && let Some(observed) = observed {
-            task.hold(&observed.into());
+            task.hold(&observed);
         }
         if update.to_top {
             task.order = book.tasks.values().filter(|t| t.project_id == task.project_id).map(|t| t.order).fold(f64::INFINITY, f64::min) - 1.0;
@@ -590,10 +577,10 @@ impl Tasks {
     /// what it says applies only to a task still at the revision it read,
     /// so a change made meanwhile is never overwritten by older news (the
     /// next tick reads again).
-    pub fn tick<S: Into<Signals>>(&self, signals: impl Fn(&Task) -> S) -> Result<()> {
+    pub fn tick(&self, signals: impl Fn(&Task) -> Signals) -> Result<()> {
         let now = crate::model::now();
         let watched: Vec<Task> = self.book.lock().unwrap().tasks.values().filter(|t| t.watched()).map(Record::publish).collect();
-        let read: Vec<(Task, Signals)> = watched.into_iter().map(|task| { let s = signals(&task).into(); (task, s) }).collect();
+        let read: Vec<(Task, Signals)> = watched.into_iter().map(|task| { let s = signals(&task); (task, s) }).collect();
         let mut book = self.book.lock().unwrap();
         let mut staged: BTreeMap<String, Record> = BTreeMap::new();
         for (task, signals) in &read {
@@ -686,7 +673,7 @@ mod tests {
         let tasks = Tasks::open(dir.path()).unwrap();
         assert_eq!(tasks.get("t").unwrap().archived_at, Some(5));
         // Unchanged work leaves it where it is.
-        tasks.tick(|_| Signals::from("w:done".to_string())).unwrap();
+        tasks.tick(|_| Signals::legacy("w:done")).unwrap();
         assert_eq!(tasks.get("t").unwrap().archived_at, Some(5));
         tasks.tick(|_| worker("2", WorkerPhase::Working)).unwrap();
         let task = tasks.get("t").unwrap();
@@ -721,17 +708,18 @@ mod tests {
         std::fs::remove_file(dir.path().join("tasks.json")).unwrap();
         std::fs::create_dir(dir.path().join("tasks.json")).unwrap();
         let done = Update { status: Some(Status::Done), ..Default::default() };
-        assert!(tasks.update(&id, done, By::User, None::<Signals>).is_err());
+        assert!(tasks.update(&id, done, By::User, None).is_err());
         let task = tasks.get(&id).unwrap();
         assert_eq!((task.status, task.revision, task.history.len()), (Status::Queued, 1, 1));
     }
 
     #[test]
-    fn derive_prefers_questions_then_work_then_the_newest_build() {
-        assert_eq!(derive(&["working", "needs-you"], &["succeeded"]), Some(Status::NeedsYou));
-        assert_eq!(derive(&["done"], &["succeeded", "running"]), Some(Status::InProgress));
-        assert_eq!(derive(&[], &["failed", "succeeded"]), Some(Status::ReadyToTry));
-        assert_eq!(derive(&[], &["succeeded", "failed"]), None);
+    fn linked_work_implies_questions_then_work_then_the_newest_build() {
+        let implied = |signature: &str| Signals::legacy(signature).implied();
+        assert_eq!(implied("w:working v:needs-you b:succeeded"), Some(Status::NeedsYou));
+        assert_eq!(implied("w:done b:succeeded c:running"), Some(Status::InProgress));
+        assert_eq!(implied("b:failed c:succeeded"), Some(Status::ReadyToTry));
+        assert_eq!(implied("b:succeeded c:failed"), None);
     }
 
     #[test]
