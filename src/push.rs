@@ -585,22 +585,16 @@ struct AppLive {
 }
 
 impl AppLive {
-    /// The content to send now, with the current step applied when it
-    /// belongs to the turn still running.
-    fn content(&self) -> Option<LiveState> {
-        match &self.want {
-            Want::Show(state) => {
-                let mut state = state.clone();
-                if let (Some(key), Some(step)) = (&self.stepping, &self.step)
-                    && step.key == *key && let Some(text) = &step.text
-                {
-                    state.status = text.clone();
-                }
-                Some(state)
-            }
-            Want::Pausing { .. } => None,
-            Want::Hide(state) => Some(state.clone()),
+    /// Shown content with the current step applied, when the step belongs
+    /// to the turn still running.
+    fn stepped(&self, state: &LiveState) -> LiveState {
+        let mut state = state.clone();
+        if let (Some(key), Some(step)) = (&self.stepping, &self.step)
+            && step.key == *key && let Some(text) = &step.text
+        {
+            state.status = text.clone();
         }
+        state
     }
 }
 
@@ -624,7 +618,7 @@ fn observe(app: &AppView) -> (LiveState, Option<StepKey>) {
 enum Message {
     Start(LiveState),
     Update(LiveState),
-    End,
+    End(LiveState),
 }
 
 /// Lookups the hub needs from T3, provided by `Agents`.
@@ -1136,7 +1130,6 @@ impl Push {
             }
         }
         for (project, app) in apps.iter_mut() {
-            let content = app.content();
             for device in devices.values_mut() {
                 let here = shown(presence, &device.id);
                 let link = device.links.get(project).cloned();
@@ -1150,8 +1143,8 @@ impl Push {
                 let stage = link.as_ref().map(|l| &l.stage);
                 let (message, token, priority) = match (&app.want, stage) {
                     (Want::Pausing { .. }, _) => continue,
-                    (Want::Show(_), Some(Stage::Running { activity, acked })) => {
-                        let content = content.clone().expect("shown");
+                    (Want::Show(shown), Some(Stage::Running { activity, acked })) => {
+                        let content = app.stepped(shown);
                         let important = acked.as_ref().is_none_or(|(s, _)| {
                             s.working != content.working || s.needs_you != content.needs_you || s.workers != content.workers
                         });
@@ -1166,12 +1159,12 @@ impl Push {
                         (Message::Update(content), activity.token.clone(), if important { 10 } else { 5 })
                     }
                     (Want::Show(_), Some(Stage::Starting { at })) if now.duration_since(*at) < START_WAIT => continue,
-                    (Want::Show(_), _) => {
+                    (Want::Show(shown), _) => {
                         let Some(token) = &device.start_token else { continue };
                         if here != Shown::Background { continue }
-                        (Message::Start(content.clone().expect("shown")), token.clone(), 10)
+                        (Message::Start(app.stepped(shown)), token.clone(), 10)
                     }
-                    (Want::Hide(_), Some(Stage::Running { activity, .. })) => (Message::End, activity.token.clone(), 10),
+                    (Want::Hide(last), Some(Stage::Running { activity, .. })) => (Message::End(last.clone()), activity.token.clone(), 10),
                     (Want::Hide(_), Some(Stage::Starting { .. } | Stage::Absent)) => {
                         // Nothing to end; the phone reports a late start's token, which then ends.
                         device.links.remove(project);
@@ -1183,7 +1176,7 @@ impl Push {
                 let (event, body) = match &message {
                     Message::Start(s) => (LiveEvent::Start, s.clone()),
                     Message::Update(s) => (LiveEvent::Update, s.clone()),
-                    Message::End => (LiveEvent::End, content.clone().expect("hidden")),
+                    Message::End(s) => (LiveEvent::End, s.clone()),
                 };
                 let failures = match link.as_ref().map(|l| l.flight) { Some(Flight::Waiting { failures, .. }) => failures, _ => 0 };
                 let entry = device.links.entry(project.clone()).or_insert_with(|| Link::new(Stage::Absent));
@@ -1245,7 +1238,7 @@ impl Push {
                 // A rejected update is not retried: the next change sends anew.
                 if let Stage::Running { acked, .. } = &mut link.stage { *acked = Some((content.clone(), now)); }
             }
-            (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::End) => {
+            (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::End(_)) => {
                 device.links.remove(&send.project);
                 save = true;
             }
