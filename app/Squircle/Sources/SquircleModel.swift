@@ -1277,6 +1277,13 @@ final class SquircleModel {
     }
     func updateTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) async {
         guard let client else { return }
+        // The row moves as you swipe; the Mac's answer confirms or undoes it.
+        if let status {
+            for (project, list) in tasks {
+                guard let index = list.tasks.firstIndex(where: { $0.id == task.id }) else { continue }
+                tasks[project]?.tasks[index].status = status
+            }
+        }
         do { try await client.updateTask(id: task.id, status: status, toTop: toTop) } catch { self.error = error.localizedDescription }
         await refreshTasks()
     }

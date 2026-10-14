@@ -338,7 +338,7 @@ struct AppTask: Decodable, Equatable, Identifiable {
 
     let id: String
     let ask: String
-    let status: Status
+    var status: Status
     let note: String
     let order: Double
     let updatedAt: Double

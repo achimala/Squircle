@@ -143,13 +143,7 @@ enum ThreadItem: Equatable {
         for (index, turn) in turns.enumerated() {
             let live = running && index == turns.count - 1
             let id = turn.user?.id ?? "start"
-            if let user = turn.user, !user.news.isEmpty {
-                items += user.news.enumerated().map { index, news in
-                    .action(ActionLine(id: "\(user.id)#\(index)", kind: .news(news.state), thread: news.id, title: news.title))
-                }
-            } else if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                items.append(user.isUpdate ? .update(user) : user.agent != nil ? .agentMessage(user) : .user(user))
-            }
+            // What you attached sits above your words, as in Messages.
             if let user = turn.user, !user.attachments.isEmpty || user.captures.contains(where: \.isVideo) {
                 let images = user.attachments.enumerated().map {
                     Shot(step: user.id, index: $0.offset, title: "Your image", attachment: $0.element)
@@ -158,6 +152,13 @@ enum ThreadItem: Equatable {
                     Shot(step: "file:" + $0.path, index: 0, title: "Your recording", video: true, path: $0.path)
                 }
                 items.append(.gallery(id: "gallery:sent:" + user.id, shots: images + clips))
+            }
+            if let user = turn.user, !user.news.isEmpty {
+                items += user.news.enumerated().map { index, news in
+                    .action(ActionLine(id: "\(user.id)#\(index)", kind: .news(news.state), thread: news.id, title: news.title))
+                }
+            } else if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                items.append(user.isUpdate ? .update(user) : user.agent != nil ? .agentMessage(user) : .user(user))
             }
             // A performance capture is for the agent; you see that it went.
             for (index, capture) in (turn.user?.captures ?? []).enumerated() where !capture.isVideo {
