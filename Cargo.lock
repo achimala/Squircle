@@ -1408,6 +1408,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "dirs",
+ "flate2",
  "fs2",
  "futures-util",
  "http-body-util",
