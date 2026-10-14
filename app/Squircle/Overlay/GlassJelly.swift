@@ -81,6 +81,9 @@ final class GlassJelly: UIView {
     private var creatureWorld = CGPoint.zero
     private var creatureVelocity = CGPoint.zero
     private var placedCreature = false
+    private var offsetX = Mode(), offsetY = Mode()
+    /// Carried across a jump of its anchor; no clamps until it is back.
+    private var gliding = false
     private var creatureSquash = Mode(), hop = Mode()
     private var yaw = Wobble(0, response: 0.45, damping: 0.85)
     private var pitch = Wobble(0, response: 0.45, damping: 0.85)
@@ -174,12 +177,21 @@ final class GlassJelly: UIView {
         last = nil
         guard window != nil else { return }
         metal.contentsScale = min(2, window?.screen.scale ?? 2)
+        metal.presentsWithTransaction = true
+        frostMask.metal.presentsWithTransaction = true
         frostMask.metal.contentsScale = 1
         let proxy = DisplayLinkProxy { [weak self] link in self?.tick(link) }
         let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
         link.add(to: .main, forMode: .common)
         self.link = link
+    }
+
+    /// The owner moved or resized it: draw now, in the same transaction, so
+    /// the jelly and its text never sit a frame apart.
+    func layoutChanged() {
+        guard window != nil else { return }
+        draw()
     }
 
     private func tick(_ link: CADisplayLink) {
@@ -201,10 +213,25 @@ final class GlassJelly: UIView {
 
     // MARK: Blob
 
+    /// Where the cube belongs, on screen: the one point the body's motion is
+    /// read from, so a pill growing toward it (text changing) moves nothing.
+    private var anchorWorld: CGPoint {
+        CGPoint(x: layer.position.x - bounds.midX + creatureAnchor.x, y: layer.position.y - bounds.midY + creatureAnchor.y)
+    }
+
     private func sense(_ dt: CGFloat) {
-        let position = layer.position, size = bounds.size
+        let position = anchorWorld, size = bounds.size
         defer { lastPosition = position; lastSize = size }
         guard let lastPosition, let lastSize else { return }
+        // Its anchor jumped (it changed sides): the cube stays where it is on
+        // screen and glides to its new place; the jump is no motion.
+        let jump = CGPoint(x: position.x - lastPosition.x - velocity.x * dt, y: position.y - lastPosition.y - velocity.y * dt)
+        if hypot(jump.x, jump.y) > 24 {
+            offsetX.value -= position.x - lastPosition.x
+            offsetY.value -= position.y - lastPosition.y
+            gliding = true
+            return
+        }
         let v = CGPoint(x: (position.x - lastPosition.x) / dt, y: (position.y - lastPosition.y) / dt)
         let sv = CGSize(width: (size.width - lastSize.width) / dt, height: (size.height - lastSize.height) / dt)
         let a = CGPoint(x: (v.x - velocity.x) / dt, y: (v.y - velocity.y) / dt)
@@ -224,7 +251,8 @@ final class GlassJelly: UIView {
         let reduced = Motion.reduced
         let a = accel, magnitude = max(1, hypot(a.x, a.y))
         var squashForce = -0.16 * (a.x * a.x - a.y * a.y) / magnitude
-        squashForce += 0.1 * (sizeAccel.width - sizeAccel.height) * (1 - 0.6 * opened)
+        // Only the panel resizing squashes it; a pill fitting new text doesn't.
+        squashForce += 0.06 * (sizeAccel.width - sizeAccel.height) * opened
         let shearForce = 0.12 * a.x
         let steps = 4, h = dt / CGFloat(steps)
         for _ in 0..<steps {
@@ -244,24 +272,39 @@ final class GlassJelly: UIView {
     // MARK: Creature
 
     private func stepCreature(_ dt: CGFloat) {
-        // Where it belongs, in the superview's coordinates.
-        let target = CGPoint(x: layer.position.x - bounds.midX + creatureAnchor.x,
-                             y: layer.position.y - bounds.midY + creatureAnchor.y)
+        // A step behind where it belongs: an offset from its anchor that only
+        // the anchor's acceleration moves (the same springy lag as a body on
+        // a short neck), so it glides with the pill and never fights it.
         if !placedCreature || Motion.reduced {
             placedCreature = true
-            creatureWorld = target
-            creatureVelocity = .zero
+            offsetX = Mode()
+            offsetY = Mode()
         } else {
-            // A step behind, so the neck stretches as the blob moves; never
-            // so far it is left behind.
-            let parameters = SpringDriver.Parameters(response: 0.26, damping: 0.78)
-            (creatureWorld.x, creatureVelocity.x) = SpringDriver.step(value: creatureWorld.x, velocity: creatureVelocity.x,
-                                                                     target: target.x, dt: dt, parameters: parameters)
-            (creatureWorld.y, creatureVelocity.y) = SpringDriver.step(value: creatureWorld.y, velocity: creatureVelocity.y,
-                                                                     target: target.y, dt: dt, parameters: parameters)
-            let d = CGPoint(x: creatureWorld.x - target.x, y: creatureWorld.y - target.y), n = hypot(d.x, d.y)
-            if n > 26 { creatureWorld = CGPoint(x: target.x + d.x * 26 / n, y: target.y + d.y * 26 / n) }
+            let steps = 4, h = dt / CGFloat(steps)
+            for _ in 0..<steps {
+                offsetX.step(h, frequency: 4.5, damping: 0.72, force: -accel.x)
+                offsetY.step(h, frequency: 4.5, damping: 0.72, force: -accel.y)
+            }
+            let n = hypot(offsetX.value, offsetY.value), reach: CGFloat = 46
+            if gliding, n < 12 { gliding = false }
+            if !gliding, n > reach { offsetX.value *= reach / n; offsetY.value *= reach / n }
+            // It can't be pushed into the body: toward the neck's root it
+            // squashes the meniscus a few points, then the jelly pushes back.
+            let root = CGPoint(x: layer.position.x - bounds.midX + neckRoot.x, y: layer.position.y - bounds.midY + neckRoot.y)
+            let axis = CGPoint(x: anchorWorld.x - root.x, y: anchorWorld.y - root.y), len = max(1, hypot(axis.x, axis.y))
+            let dir = CGPoint(x: axis.x / len, y: axis.y / len)
+            let along = offsetX.value * dir.x + offsetY.value * dir.y
+            if !gliding, along < -5 {
+                offsetX.value -= (along + 5) * dir.x
+                offsetY.value -= (along + 5) * dir.y
+                let v = offsetX.velocity * dir.x + offsetY.velocity * dir.y
+                if v < 0 { offsetX.velocity -= 1.3 * v * dir.x; offsetY.velocity -= 1.3 * v * dir.y }
+                creatureSquash.velocity += 0.02 * max(0, -v) / 60
+            }
         }
+        let anchor = anchorWorld
+        creatureWorld = CGPoint(x: anchor.x + offsetX.value, y: anchor.y + offsetY.value)
+        creatureVelocity = CGPoint(x: velocity.x + offsetX.velocity, y: velocity.y + offsetY.velocity)
         creatureSquash.target = pressed ? 0.16 : 0
         if !Motion.reduced, tone == .needsYou, time > nextHop {
             // Now and then, a small hop for your attention.
@@ -296,9 +339,9 @@ final class GlassJelly: UIView {
     private var catenary: CGFloat = 10
     private var stubRoot = Mode(), stubCube = Mode()
     private var cubeScale: CGFloat = 1
-    private static let endRadius: CGFloat = 10
-    private static let restWaist: CGFloat = 5.5
-    private static let pinchWaist: CGFloat = 1.7
+    private static let endRadius: CGFloat = 11
+    private static let restWaist: CGFloat = 8
+    private static let pinchWaist: CGFloat = 4.9
 
     private var rootNow: CGPoint {
         CGPoint(x: neckRoot.x + lagX.value, y: neckRoot.y + lagY.value)
@@ -316,11 +359,13 @@ final class GlassJelly: UIView {
     }
 
     private func stepBridge(_ dt: CGFloat) {
-        let L = max(1, hypot(cubeNow.x - rootNow.x, cubeNow.y - rootNow.y))
-        let rest = Self.catenoid(waist: Self.restWaist, length: neckLength).volume
+        let full = max(1, hypot(cubeNow.x - rootNow.x, cubeNow.y - rootNow.y))
+        let L = max(1, full - Self.creatureSize * cubeScale * 0.28)
+        let restLength = max(1, neckLength - Self.creatureSize * 0.28)
+        let rest = Self.catenoid(waist: Self.restWaist, length: restLength).volume
         if bridgeConnected {
             // Stretched, it draws a little more jelly from the bodies.
-            let target = rest * (1 + 0.25 * max(0, L / max(1, neckLength) - 1))
+            let target = rest * (1 + 0.25 * max(0, L / restLength - 1))
             var lo: CGFloat = 0.05, hi = Self.endRadius * 0.99
             for _ in 0..<24 {
                 let mid = (lo + hi) / 2
@@ -331,7 +376,7 @@ final class GlassJelly: UIView {
             // The cube gives up half of what the bridge took (it is about 0.72 s³).
             let cubeVolume = 0.72 * pow(Self.creatureSize, 3)
             cubeScale = cbrt(max(0.8, 1 - 0.5 * (target - rest) / cubeVolume))
-            if waist < Self.pinchWaist, !Motion.reduced {
+            if waist < Self.pinchWaist, !Motion.reduced, !gliding {
                 // Pinch: the halves spring back into their bodies.
                 bridgeConnected = false
                 stubRoot.value = L * 0.45
@@ -350,7 +395,7 @@ final class GlassJelly: UIView {
             stubCube.value = max(0, stubCube.value)
             cubeScale += (1 - cubeScale) * min(1, dt * 6)
             // Close enough again: they touch and merge.
-            if L < neckLength * 1.12 {
+            if L < restLength * 1.12 {
                 bridgeConnected = true
                 creatureSquash.velocity += 0.8
             }
@@ -817,7 +862,11 @@ enum JellyRenderer {
     // The liquid bridge: a catenoid, r(t) = waist·cosh((t − L/2)/c), the
     // shape surface tension pulls a neck between two bodies into.
     static float bridgeD(float3 P, Scene sc, constant Uniforms& u) {
-        float3 a = float3(u.gaze.zw, 0.0), b = sc.cube;
+        // It ends inside the cube's near side, not at its centre, so it never
+        // pushes out the face.
+        float3 a = float3(u.gaze.zw, 0.0);
+        float3 toward = sc.cube - a;
+        float3 b = sc.cube - normalize(toward + 1e-4) * sc.s * 0.28;
         float3 ba = b - a;
         float L = max(0.001, length(ba));
         float3 dir = ba / L;
@@ -899,7 +948,7 @@ enum JellyRenderer {
 
         // The face, on the cube's front.
         float3 l = sc.inv * (pos - sc.cube);
-        float front = smoothstep(-sc.s * 0.2, -sc.s * 0.36, l.z) * smoothstep(1.5, -0.3, dHead);
+        float front = smoothstep(-sc.s * 0.2, -sc.s * 0.34, l.z) * smoothstep(3.0, 0.5, dHead);
         float4 face = eyes(l.xy / u.stubs.z, px * 0.9, u.tint.rgb, u);
         float k = face.a * front;
         col = col * (1.0 - k) + face.rgb * k;

@@ -1056,6 +1056,20 @@ shortens). Fragments far from the jelly skip the march; nothing redraws while
 nothing changes. Clips: `jelly6-*.mp4`, stills `jelly6-join-*.png`. Not on
 the phone.
 
+Seventh round (user: "bridge is too long and narrow … as the text is changing
+the jelly position jitters"): the cube nearly touches the pill, joined by a
+short, thick meniscus (waist 8 of end radius 11, ending inside the cube's near
+side so the face stays flat); flings stretch it modestly and only a big pull
+(waist under 4.9, about twice its length) pinches it. Jitter: the cube was on
+its own spring and display link a frame out of step with the pill. Now it is
+its anchor on the pill plus a lagging offset driven only by the anchor's own
+acceleration (a pill resizing toward it moves nothing), it can't be pushed
+into the pill, a side change carries it across instead of jumping, and the
+jelly draws in the same transaction as the layout (`presentsWithTransaction`).
+Measured on a 60 fps recording of rapid status changes: the cube's edge moves
+only in smooth multi-frame eases (within one pixel otherwise). Clips:
+`jelly7-*.mp4`, still `jelly7-rest.png`. Not on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was

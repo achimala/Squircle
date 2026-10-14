@@ -118,11 +118,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Concentric with the 44-point controls at `inset`.
     private static let panelRadius: CGFloat = 22 + inset
     /// The creature's place at the end of the status pill.
-    private static let creatureCell: CGFloat = 54
+    private static let creatureCell: CGFloat = 42
     /// Room above the panel for the creature's head.
-    private static let headRoom: CGFloat = 40
+    private static let headRoom: CGFloat = 34
     /// The creature's head, open: drag it like the handle, tap it for full screen.
     private let headHandle = UIView()
+    /// The pill's offset inside the glass, 0 (cube on the right) or a cell.
+    private let side = SpringDriver(value: 0)
     private var headPan: UIPanGestureRecognizer!
     /// Stretched with the glass; holds the bubble's line at its own size.
     private let bubbleStage = UIView()
@@ -274,6 +276,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         handle.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTapped)))
 
         frame.onChange = { [weak self] in self?.applyScene() }
+        side.onChange = { [weak self] _ in self?.applyScene() }
         appear.parameters = SpringDriver.Parameters(response: 0.5, damping: 0.68)
         appear.onChange = { [weak self] _ in self?.applyScene() }
         frame.onRest = { [weak self] in self?.rested() }
@@ -408,7 +411,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     /// Full screen, below the status bar's room for the creature's head.
     private var fullFrame: CGRect {
-        let top = view.safeAreaInsets.top + 32
+        let top = view.safeAreaInsets.top + 26
         return CGRect(x: 0, y: top, width: view.bounds.width, height: view.bounds.height - top)
     }
 
@@ -529,18 +532,20 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // pill beside it (tucked under it when there is nothing to say).
         // Open: the creature rises above the panel's top edge as a head.
         let creatureClosed = CGPoint(x: right ? w - 22 : 22, y: lower ? h - 22 : 22)
+        // The pill slides to its new side on a spring rather than popping.
+        if side.target != (right ? 0 : cell) { side.animate(to: right ? 0 : cell) }
         let pill = hasLine
             // A gap before the cube, bridged by the jelly's neck.
-            ? CGRect(x: right ? 0 : cell, y: (lower ? h - 44 : 0) + 3, width: max(1, w - cell), height: 38)
+            ? CGRect(x: side.value, y: (lower ? h - 44 : 0) + 3, width: max(1, w - cell), height: 38)
             : CGRect(x: creatureClosed.x - 12, y: creatureClosed.y - 12, width: 24, height: 24)
         let eased = opened * opened * (3 - 2 * opened)
-        let creatureOpen = CGPoint(x: w / 2, y: -27)
+        let creatureOpen = CGPoint(x: w / 2, y: -20)
         glass.creatureAnchor = CGPoint(x: .lerp(creatureClosed.x, creatureOpen.x, eased), y: .lerp(creatureClosed.y, creatureOpen.y, eased))
         glass.creatureSide = right ? 1 : -1
         // The neck leaves the pill's end, or the panel's top edge.
-        let rootClosed = hasLine ? CGPoint(x: right ? pill.maxX - 14 : pill.minX + 14, y: pill.midY)
+        let rootClosed = hasLine ? CGPoint(x: right ? pill.maxX - 10 : pill.minX + 10, y: pill.midY)
             : CGPoint(x: creatureClosed.x, y: creatureClosed.y)
-        let root = CGPoint(x: .lerp(rootClosed.x, w / 2, eased), y: .lerp(rootClosed.y, 12, eased))
+        let root = CGPoint(x: .lerp(rootClosed.x, w / 2, eased), y: .lerp(rootClosed.y, 8, eased))
         glass.neckRoot = root
         glass.neckLength = max(1, hypot(glass.creatureAnchor.x - root.x, glass.creatureAnchor.y - root.y))
         glass.bodyRect = CGRect(x: .lerp(pill.minX, 0, opened), y: .lerp(pill.minY, 0, opened),
@@ -552,6 +557,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         glass.fillAmount = .lerp(0.15, .lerp(0.84, 0.92, fullness), opened)
         glass.tone = bubble.tone
         glass.typing = route.open && keyboardTop < view.bounds.maxY
+        glass.layoutChanged()
         headHandle.frame = glass.creatureFrame.insetBy(dx: -8, dy: -8)
         headHandle.isHidden = !route.open
         view.bringSubviewToFront(headHandle)
