@@ -1728,9 +1728,16 @@ App Store build may need a small relay, so sending sits behind one interface.
 - **Phone.** `PushCenter` (app target only, never the overlay) asks for
   permission, registers tokens with the Mac on every return to the
   foreground, reports presence, and opens a tapped notification's app,
-  thread or build. `aps-environment` is `development` in the entitlements;
-  the ad hoc (`release-testing`) export signs it as `production`, which the
-  app reads from its embedded provisioning profile.
+  thread or build. `aps-environment` (`development`; the ad hoc
+  `release-testing` export signs it as `production`, which the app reads
+  from its embedded provisioning profile) is in `SquirclePush.entitlements`,
+  not yet the target's: Xcode on this Mac has no Apple account, so automatic
+  signing uses the wildcard team profile, which cannot carry Push (build
+  `e86ee230` failed: "doesn't include the Push Notifications capability").
+  For the same reason the widget extension has no profile ("No profiles for
+  'ai.dreamslate.Squircle.Widgets'", build `358efb85`), so it is not yet
+  embedded. Without both the app gets no tokens, shows no Live Activity and
+  the Mac has no one to send to; the rest of the app is unchanged.
 
 Tested without a key: JWT signature and claims verified against the key's
 public key, alert and activity payloads, burst coalescing, viewed-thread
@@ -1741,6 +1748,11 @@ working, needs you, done. Not yet checked with a real key or on the phone.
 
 ### Creating the APNs key
 
+0. Xcode → Settings → Accounts: sign in with the Apple ID of team
+   `2F26US4NAU`, so signing can give Squircle's App ID the Push capability.
+   Then in `project.yml` point `CODE_SIGN_ENTITLEMENTS` at
+   `Resources/SquirclePush.entitlements`, add the `SquircleWidgets`
+   dependency (commented there) and build.
 1. developer.apple.com/account → Certificates, IDs & Profiles → Keys → +.
 2. Name it (e.g. "Squircle push"), tick **Apple Push Notifications service
    (APNs)**, Configure: environment **Sandbox & Production**, key

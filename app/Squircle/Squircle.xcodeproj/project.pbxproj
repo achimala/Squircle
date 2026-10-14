@@ -98,7 +98,6 @@
 		FB3FA377C1D0CCED56B5215F /* HostCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C2A80FAC707271FB5E24DAF /* HostCapture.swift */; };
 		FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
 		FCD6CE4E2BFA8F5440565BF9 /* PushTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E789B7BEFACE83A6B725DF3 /* PushTarget.swift */; };
-		FE686FCBC5CE4E599092B5FE /* SquircleWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B0960CDAD4EDF34EF7986A50 /* SquircleWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -109,28 +108,7 @@
 			remoteGlobalIDString = 48CB356BF6191F55960F572B;
 			remoteInfo = Squircle;
 		};
-		CEAC0067F8E061329D5C63E0 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = B99870D716447DE6FD076F00 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 5CCAAE598C4761D920524F63;
-			remoteInfo = SquircleWidgets;
-		};
 /* End PBXContainerItemProxy section */
-
-/* Begin PBXCopyFilesBuildPhase section */
-		0E06A001779A4C117A7B7354 /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				FE686FCBC5CE4E599092B5FE /* SquircleWidgets.appex in Embed Foundation Extensions */,
-			);
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		04F9E05172DC12D427E2C642 /* PerfRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfRecorder.swift; sourceTree = "<group>"; };
@@ -333,12 +311,10 @@
 				2B02C2EDDCC2CC2BD51A06F6 /* Bundle private Mac connection */,
 				134999952B6C50207950C0F0 /* Sources */,
 				B126382FE9DBCDE2575964E4 /* Resources */,
-				0E06A001779A4C117A7B7354 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				380F7245A3F10AFAFAB77A20 /* PBXTargetDependency */,
 			);
 			name = Squircle;
 			packageProductDependencies = (
@@ -620,11 +596,6 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		380F7245A3F10AFAFAB77A20 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 5CCAAE598C4761D920524F63 /* SquircleWidgets */;
-			targetProxy = CEAC0067F8E061329D5C63E0 /* PBXContainerItemProxy */;
-		};
 		8F66BBAFFA4E2E16B048A81F /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 48CB356BF6191F55960F572B /* Squircle */;
