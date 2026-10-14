@@ -3,35 +3,14 @@ import UIKit
 /// One visual language for every screen: a lit studio backdrop for the real
 /// devices, system text colors for content, and Liquid Glass only on controls.
 enum Theme {
-    static let accent = palette.accent
-    /// Prominent glass always draws white text, so it may need a deeper tint.
-    static let glassAccent = palette.glassAccent ?? palette.accent
+    /// Terracotta on warm cream (user-chosen "Clay", 2026-10-14).
+    static let accent = dynamic(rgb(0.71, 0.33, 0.20), rgb(0.94, 0.56, 0.41))
     /// Text and symbols on an accent fill (the send button, Install).
-    static let onAccent = palette.onAccent
+    static let onAccent = dynamic(.white, rgb(0.20, 0.08, 0.03))
     /// The page behind conversations and lists that are not on the stage.
-    static let paper = palette.paper
-    static let backdropTop = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.115, green: 0.115, blue: 0.128, alpha: 1)
-            : UIColor(red: 0.984, green: 0.978, blue: 0.968, alpha: 1)
-    }
-    static let backdropBottom = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.032, green: 0.032, blue: 0.038, alpha: 1)
-            : UIColor(red: 0.900, green: 0.890, blue: 0.872, alpha: 1)
-    }
-    static let backdropGlow = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.30, green: 0.30, blue: 0.36, alpha: 0.55)
-            : UIColor(white: 1, alpha: 0.95)
-    }
+    static let paper = dynamic(rgb(0.972, 0.957, 0.933), rgb(0.078, 0.070, 0.064))
     /// Tint for your messages' glass bubbles.
-    static let userGlass = palette.userGlass
-    static let userBubble = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.20, green: 0.21, blue: 0.30, alpha: 1)
-            : UIColor(red: 0.905, green: 0.905, blue: 0.965, alpha: 1)
-    }
+    static let userGlass = dynamic(rgb(0.78, 0.44, 0.28, 0.14), rgb(0.86, 0.50, 0.34, 0.24))
     static let codeFill = UIColor { trait in
         trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.09) : UIColor(white: 0, alpha: 0.055)
     }
@@ -68,15 +47,10 @@ enum Theme {
         return UIColor(red: r / total, green: g / total, blue: b / total, alpha: 1)
     }
 
-    static let success = palette.success
-    static let warning = palette.warning
-    static let failure = palette.failure
-
-    private struct Palette {
-        var accent, onAccent, paper, userGlass: UIColor
-        var glassAccent: UIColor?
-        var success = UIColor.systemGreen, warning = UIColor.systemOrange, failure = UIColor.systemRed
-    }
+    /// Olive, ochre and crimson, apart from the terracotta accent.
+    static let success = dynamic(rgb(0.36, 0.53, 0.24), rgb(0.60, 0.78, 0.44))
+    static let warning = dynamic(rgb(0.72, 0.55, 0.06), rgb(0.95, 0.78, 0.34))
+    static let failure = dynamic(rgb(0.74, 0.13, 0.24), rgb(1.0, 0.44, 0.52))
 
     private static func dynamic(_ light: UIColor, _ dark: UIColor) -> UIColor {
         UIColor { $0.userInterfaceStyle == .dark ? dark : light }
@@ -84,58 +58,6 @@ enum Theme {
     private static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> UIColor {
         UIColor(red: r, green: g, blue: b, alpha: a)
     }
-
-    private static let palette: Palette = {
-        #if DEBUG
-        // Proposals for the user to choose between (SQUIRCLE_THEME=a|b|c).
-        switch ProcessInfo.processInfo.environment["SQUIRCLE_THEME"] {
-        case "a": return graphite
-        case "b": return harbor
-        case "c": return clay
-        default: break
-        }
-        #endif
-        return indigo
-    }()
-
-    private static let indigo = Palette(
-        accent: dynamic(rgb(0.33, 0.35, 0.84), rgb(0.60, 0.62, 1.0)),
-        onAccent: .white,
-        paper: dynamic(rgb(0.973, 0.966, 0.953), rgb(0.067, 0.067, 0.074)),
-        userGlass: dynamic(rgb(0.42, 0.44, 0.95, 0.16), rgb(0.45, 0.47, 1.0, 0.30)))
-
-    #if DEBUG
-    /// A: ink on neutral paper; only status carries colour.
-    private static let graphite = Palette(
-        accent: dynamic(rgb(0.11, 0.11, 0.12), rgb(0.93, 0.93, 0.94)),
-        onAccent: dynamic(.white, rgb(0.07, 0.07, 0.08)),
-        paper: dynamic(rgb(0.965, 0.965, 0.962), rgb(0.058, 0.058, 0.062)),
-        userGlass: dynamic(UIColor(white: 0, alpha: 0.07), UIColor(white: 1, alpha: 0.13)),
-        glassAccent: dynamic(rgb(0.11, 0.11, 0.12), rgb(0.34, 0.34, 0.36)),
-        success: dynamic(rgb(0.20, 0.58, 0.36), rgb(0.40, 0.80, 0.55)),
-        warning: dynamic(rgb(0.80, 0.50, 0.08), rgb(0.98, 0.72, 0.30)),
-        failure: dynamic(rgb(0.80, 0.24, 0.20), rgb(1.0, 0.46, 0.41)))
-
-    /// B: a deep sea teal on cool off-white.
-    private static let harbor = Palette(
-        accent: dynamic(rgb(0.04, 0.42, 0.52), rgb(0.42, 0.79, 0.87)),
-        onAccent: dynamic(.white, rgb(0.02, 0.12, 0.15)),
-        paper: dynamic(rgb(0.955, 0.964, 0.968), rgb(0.052, 0.064, 0.072)),
-        userGlass: dynamic(rgb(0.04, 0.42, 0.52, 0.12), rgb(0.30, 0.66, 0.76, 0.26)),
-        success: dynamic(rgb(0.17, 0.57, 0.35), rgb(0.42, 0.82, 0.57)),
-        warning: dynamic(rgb(0.82, 0.50, 0.08), rgb(1.0, 0.72, 0.30)),
-        failure: dynamic(rgb(0.78, 0.22, 0.24), rgb(1.0, 0.46, 0.46)))
-
-    /// C: terracotta on warm cream, olive and ochre for status.
-    private static let clay = Palette(
-        accent: dynamic(rgb(0.71, 0.33, 0.20), rgb(0.94, 0.56, 0.41)),
-        onAccent: dynamic(.white, rgb(0.20, 0.08, 0.03)),
-        paper: dynamic(rgb(0.972, 0.957, 0.933), rgb(0.078, 0.070, 0.064)),
-        userGlass: dynamic(rgb(0.78, 0.44, 0.28, 0.14), rgb(0.86, 0.50, 0.34, 0.24)),
-        success: dynamic(rgb(0.36, 0.53, 0.24), rgb(0.60, 0.78, 0.44)),
-        warning: dynamic(rgb(0.72, 0.55, 0.06), rgb(0.95, 0.78, 0.34)),
-        failure: dynamic(rgb(0.74, 0.13, 0.24), rgb(1.0, 0.44, 0.52)))
-    #endif
 
     /// Dynamic Type aware; `rounded` is reserved for app names.
     static func font(_ style: UIFont.TextStyle, _ size: CGFloat, _ weight: UIFont.Weight = .regular,
@@ -186,7 +108,7 @@ enum Theme {
         }
         if !prominent { config.baseForegroundColor = .label }
         let button = UIButton(configuration: config)
-        button.tintColor = prominent ? glassAccent : .label
+        button.tintColor = prominent ? accent : .label
         button.accessibilityIdentifier = identifier
         if let accessibilityLabel { button.accessibilityLabel = accessibilityLabel }
         return button
