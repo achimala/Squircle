@@ -167,9 +167,12 @@ final class SimulatorFeeds {
 }
 
 /// Floating pictures of the simulators this app's agents are using right
-/// now, stacked in a corner the person drags them to. Tapping one brings it
-/// large and touchable; it shrinks back with a swipe down or a tap outside.
-/// Everything shown is derived from `uses`, the corner, and two springs.
+/// now. One sits small in a corner the person drags it to; two or more
+/// collapse there into a deck (the most recently started on top, the rest
+/// peeking behind it, a count badge) that fans out into a labelled row when
+/// tapped. Tapping a picture brings it large and touchable; it shrinks back
+/// with a swipe down or a tap outside. Only pictures that can be seen decode.
+/// Everything shown is derived from `uses`, the corner, and four springs.
 @MainActor
 final class SimulatorDock: UIView {
     enum Corner: String { case topLeft, topRight, bottomLeft, bottomRight }
@@ -186,18 +189,22 @@ final class SimulatorDock: UIView {
     private var order: [String] = []
 
     private var corner: Corner
-    /// The stack's top-left while it is dragged or settling into a corner.
+    /// The deck's top-left while it is dragged or settling into a corner.
     private let originX = SpringDriver()
     private let originY = SpringDriver()
     private var dragging = false
     private var dragStart = CGPoint.zero
-    /// 0 = in the stack, 1 = large. `expanded` changes only at 0.
+    /// 0 = in the deck, 1 = fanned out in a row.
+    private let fan = SpringDriver()
+    private var wantFanned = false
+    /// 0 = in the deck or row, 1 = large. `expanded` changes only at 0.
     private let expansion = SpringDriver()
     private var expanded: String?
     private var wantExpanded: String?
     private var collapseStart: CGFloat = 0
 
     private let backdrop = UIView()
+    private let badge = Theme.label("", Theme.font(.caption2, 11, .bold), color: .white)
     private let home = Theme.glassButton(symbol: "house", identifier: "simulator.home", accessibilityLabel: "Simulator Home")
     private let open = Theme.glassButton(symbol: "bubble.left.and.text.bubble.right", identifier: "simulator.thread", accessibilityLabel: "Open thread")
     private let shrink = Theme.glassButton(symbol: "chevron.down", identifier: "simulator.shrink", accessibilityLabel: "Shrink simulator")
@@ -208,9 +215,17 @@ final class SimulatorDock: UIView {
         super.init(frame: .zero)
         backdrop.backgroundColor = UIColor.black
         backdrop.alpha = 0
-        backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(collapse)))
+        backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(backdropTapped)))
         backdrop.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(collapsePanned(_:))))
         addSubview(backdrop)
+        badge.backgroundColor = Theme.accent
+        badge.textAlignment = .center
+        badge.layer.cornerRadius = 9
+        badge.layer.cornerCurve = .continuous
+        badge.clipsToBounds = true
+        badge.isUserInteractionEnabled = false
+        badge.alpha = 0
+        addSubview(badge)
         for button in [home, open, shrink] { addSubview(button) }
         home.addAction(UIAction { [weak self] _ in
             guard let self, let use = uses.first(where: { $0.id == self.expanded }) else { return }
@@ -225,14 +240,36 @@ final class SimulatorDock: UIView {
         }, for: .touchUpInside)
         shrink.addAction(UIAction { [weak self] _ in self?.collapse() }, for: .touchUpInside)
         expansion.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.86)
+        fan.parameters = SpringDriver.Parameters(response: 0.4, damping: 0.8)
         originX.parameters = SpringDriver.Parameters(response: 0.38, damping: 0.8)
         originY.parameters = originX.parameters
-        for driver in [expansion, originX, originY] {
+        for driver in [expansion, fan, originX, originY] {
             driver.onChange = { [weak self] _ in self?.layoutDock() }
             driver.onRest = { [weak self] _ in self?.sync() }
         }
         feeds.onInteractive = { [weak self] in self?.layoutDock() }
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SQUIRCLE_SIM_FAN"] == "1" { Task { [weak self] in await self?.demoFan() } }
+        #endif
     }
+
+    #if DEBUG
+    /// `SQUIRCLE_SIM_FAN=1`: fans the deck out, opens the second picture,
+    /// shrinks it, fans again and gathers, through the same paths as taps.
+    private func demoFan() async {
+        let steps: [(Double, (SimulatorDock) -> Void)] = [
+            (8, { dock in dock.deck.first.map { dock.tapped($0.id) } }),
+            (3, { dock in dock.deck.dropFirst().first.map { dock.tapped($0.id) } }),
+            (3, { $0.collapse() }),
+            (2, { dock in dock.deck.first.map { dock.tapped($0.id) } }),
+            (2, { $0.backdropTapped() }),
+        ]
+        for (delay, step) in steps {
+            try? await Task.sleep(for: .seconds(delay))
+            step(self)
+        }
+    }
+    #endif
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
@@ -255,15 +292,14 @@ final class SimulatorDock: UIView {
         for use in next where pips[use.id] == nil {
             let pip = PiP(use: use)
             pip.screen.onPictureSize = { [weak self] in self?.animateLayout() }
-            pip.onTap = { [weak self] in self?.expand(use.id) }
+            pip.onTap = { [weak self] in self?.tapped(use.id) }
             pip.onPan = { [weak self] gesture in self?.panned(gesture) }
             pip.onTouch = { [weak self, weak pip] phase, point in
                 guard let self, let pip, expanded == pip.use.id, expansion.target == 1 else { return false }
                 return feeds.touch(phase, at: point, on: pip.screen)
             }
-            insertSubview(pip, belowSubview: home)
+            insertSubview(pip, belowSubview: badge)
             pips[use.id] = pip
-            feeds.attach(pip.screen, to: use.target)
             pip.alpha = 0
             pip.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
         }
@@ -280,7 +316,20 @@ final class SimulatorDock: UIView {
         guard expansion.target == 0 || expanded == id else { return }
         Theme.openHaptic()
         wantExpanded = id
+        wantFanned = false
         sync()
+    }
+
+    /// A tap on a picture: the deck fans out; a single picture or one in the
+    /// row comes large.
+    private func tapped(_ id: String) {
+        if deck.count > 1, fan.target == 0 {
+            Theme.openHaptic()
+            wantFanned = true
+            sync()
+        } else {
+            expand(id)
+        }
     }
 
     @objc private func collapse() {
@@ -290,41 +339,101 @@ final class SimulatorDock: UIView {
         sync()
     }
 
-    /// What is expanded changes only while nothing is; the spring heads to
-    /// whatever `wantExpanded` implies.
+    private func gather() {
+        guard wantFanned else { return }
+        Theme.selectionHaptic()
+        wantFanned = false
+        sync()
+    }
+
+    @objc private func backdropTapped() {
+        if wantExpanded != nil { collapse() } else { gather() }
+    }
+
+    /// What is expanded changes only while nothing is; the springs head to
+    /// whatever `wantExpanded` and `wantFanned` imply. Pictures that can't be
+    /// seen (behind the deck's top, or docked in the conversation) stop
+    /// decoding and keep their last frame.
     private func sync() {
         if expansion.value <= 0.001, !expansion.isAnimating, expanded != wantExpanded {
             expanded = wantExpanded
+            restack()
         }
+        let deck = self.deck
+        if deck.count < 2 { wantFanned = false }
         let target: CGFloat = expanded != nil && expanded == wantExpanded ? 1 : 0
         if expansion.target != target || (!expansion.isAnimating && expansion.value != target) {
             expansion.redirect(to: target)
+        }
+        let fanTarget: CGFloat = wantFanned ? 1 : 0
+        if fan.target != fanTarget || (!fan.isAnimating && fan.value != fanTarget) {
+            fan.redirect(to: fanTarget)
         }
         if !dragging, !originX.isAnimating, !originY.isAnimating {
             let rest = cornerOrigin(corner)
             originX.set(rest.x)
             originY.set(rest.y)
         }
+        let spread = fan.target == 1 || fan.value > 0.001
+        for use in uses {
+            guard let pip = pips[use.id] else { continue }
+            let index = deck.firstIndex(of: use)
+            let seen = use.id == expanded || use.id == wantExpanded || index == 0 || (index != nil && spread)
+            feeds.attach(pip.screen, to: seen ? use.target : nil)
+        }
         layoutDock()
+    }
+
+    /// The deck's top picture above the rest, the large one above all.
+    private func restack() {
+        for use in deck.reversed() { if let pip = pips[use.id] { insertSubview(pip, belowSubview: badge) } }
+        if let id = expanded, let pip = pips[id] { insertSubview(pip, belowSubview: badge) }
     }
 
     // MARK: Geometry
 
-    private var pipWidth: CGFloat { uses.count > 2 ? 78 : 96 }
+    private static let deckWidth: CGFloat = 80
+    private static let peek: CGFloat = 6
     private static let gap: CGFloat = 10
     private static let captionHeight: CGFloat = 16
 
     private var shown: [SimulatorUse] { uses.filter { !docked.contains($0.id) || $0.id == expanded } }
+    /// Most recently started first: the deck's top picture and the row's corner end.
+    private var deck: [SimulatorUse] { shown.reversed() }
 
-    private func showsCaption(_ use: SimulatorUse) -> Bool { uses.count > 1 || use.threadID != currentThread }
+    private func showsCaption(_ use: SimulatorUse) -> Bool { use.threadID != currentThread }
 
-    private func pipHeight(_ use: SimulatorUse) -> CGFloat {
-        (pips[use.id].map { pipWidth * $0.screen.aspect } ?? pipWidth * 2.17).rounded()
+    private func aspect(_ use: SimulatorUse?) -> CGFloat { use.flatMap { pips[$0.id]?.screen.aspect } ?? 2.17 }
+
+    private var deckSize: CGSize {
+        let deck = self.deck
+        let height = (Self.deckWidth * aspect(deck.first)).rounded()
+        let caption = deck.count == 1 && showsCaption(deck[0]) ? Self.captionHeight + 4 : 0
+        return CGSize(width: Self.deckWidth, height: height + Self.peek * CGFloat(min(max(deck.count - 1, 0), 2)) + caption)
     }
 
-    private var stackSize: CGSize {
-        let heights = shown.map { pipHeight($0) + (showsCaption($0) ? Self.captionHeight + 4 : 0) }
-        return CGSize(width: pipWidth, height: heights.reduce(0, +) + Self.gap * CGFloat(max(0, heights.count - 1)))
+    /// Picture `index` of the deck: the top one at the origin, each one
+    /// behind a little smaller with its lower edge peeking out.
+    private func deckFrame(_ index: Int, top: SimulatorUse?) -> CGRect {
+        let height = (Self.deckWidth * aspect(top)).rounded()
+        let depth = CGFloat(min(index, 3))
+        let scale = 1 - 0.08 * depth
+        let size = CGSize(width: Self.deckWidth * scale, height: height * scale)
+        return CGRect(x: originX.value + (Self.deckWidth - size.width) / 2,
+                      y: originY.value + height + Self.peek * depth - size.height, width: size.width, height: size.height)
+    }
+
+    /// Picture `index` of the row fanned out from the corner, captions beneath.
+    private func fanFrame(_ index: Int, of count: Int, use: SimulatorUse) -> CGRect {
+        let area = self.area
+        let width = min(112, (area.width - Self.gap * CGFloat(count - 1)) / CGFloat(max(count, 1))).rounded(.down)
+        let height = (width * aspect(use)).rounded()
+        let step = CGFloat(index) * (width + Self.gap)
+        let left = corner == .topLeft || corner == .bottomLeft
+        let top = corner == .topLeft || corner == .topRight
+        return CGRect(x: left ? area.minX + step : area.maxX - width - step,
+                      y: top ? area.minY : max(area.minY, area.maxY - height - Self.captionHeight - 4),
+                      width: width, height: height)
     }
 
     private var area: CGRect {
@@ -333,7 +442,7 @@ final class SimulatorDock: UIView {
     }
 
     private func cornerOrigin(_ corner: Corner) -> CGPoint {
-        let area = self.area, size = stackSize
+        let area = self.area, size = deckSize
         let x = corner == .topLeft || corner == .bottomLeft ? area.minX : area.maxX - size.width
         let y = corner == .topLeft || corner == .topRight ? area.minY : max(area.minY, area.maxY - size.height)
         return CGPoint(x: x, y: y)
@@ -361,33 +470,51 @@ final class SimulatorDock: UIView {
         }
     }
 
-    /// Every PiP's frame, the backdrop and controls, from the state alone.
+    /// Every PiP's frame, the badge, backdrop and controls, from the state alone.
     private func layoutDock() {
         guard bounds.width > 0 else { return }
-        let e = expansion.value.clamped()
-        var y = originY.value
-        let x = originX.value
-        let shown = self.shown
+        let e = expansion.value.clamped(), f = fan.value.clamped()
+        let deck = self.deck
+        let fanned = fan.target == 1
         for use in uses {
             guard let pip = pips[use.id] else { continue }
-            let visible = shown.contains(use)
-            let height = pipHeight(use)
-            var frame = CGRect(x: x, y: y, width: pipWidth, height: height)
-            if visible { y += height + (showsCaption(use) ? Self.captionHeight + 4 : 0) + Self.gap }
+            let index = deck.firstIndex(of: use)
             let isExpanded = use.id == expanded
+            var frame: CGRect
+            var alpha: CGFloat
+            if let index {
+                frame = deckFrame(index, top: deck.first).lerp(to: fanFrame(index, of: deck.count, use: use), f)
+                alpha = index <= 2 ? 1 : f
+                pip.shade.alpha = 0.18 * CGFloat(min(index, 2)) * (1 - f)
+            } else {
+                frame = deckFrame(0, top: deck.first)
+                alpha = 0
+                pip.shade.alpha = 0
+            }
             if isExpanded { frame = frame.lerp(to: bigFrame, e) }
+            alpha = isExpanded ? 1 : alpha * (1 - e)
             pip.transform = .identity
             pip.frame = frame
             pip.cornerRadius = .lerp(12, 30, isExpanded ? e : 0)
             pip.caption.text = titles[use.threadID] ?? "Thread"
-            pip.caption.alpha = showsCaption(use) && !(isExpanded && e > 0.05) ? 1 : 0
-            pip.alpha = visible ? (isExpanded ? 1 : 1 - e) : 0
-            pip.isUserInteractionEnabled = visible && (e < 0.01 || isExpanded)
+            let caption: CGFloat = deck.count > 1 ? f : (showsCaption(use) ? 1 : 0)
+            pip.caption.alpha = isExpanded && e > 0.05 ? 0 : caption
+            pip.alpha = alpha
+            let reachable = index == 0 || (index != nil && fanned)
+            pip.isUserInteractionEnabled = isExpanded || (reachable && e < 0.01 && expansion.target == 0)
             pip.interactive = isExpanded && e > 0.99
-            pip.accessibilityLabel = (titles[use.threadID] ?? "Agent") + " simulator, " + use.deviceName
+            pip.accessibilityLabel = deck.count > 1 && !fanned && index == 0
+                ? "\(deck.count) simulators"
+                : (titles[use.threadID] ?? "Agent") + " simulator, " + use.deviceName
         }
-        backdrop.alpha = 0.42 * e
-        backdrop.isUserInteractionEnabled = expansion.target == 1
+        let top = deckFrame(0, top: deck.first)
+        badge.text = "\(deck.count)"
+        let badgeWidth = max(18, badge.intrinsicContentSize.width + 10)
+        badge.frame = CGRect(x: top.maxX - badgeWidth / 2 - 4, y: top.minY - 5,
+                             width: badgeWidth, height: 18)
+        badge.alpha = deck.count > 1 ? (1 - f) * (1 - e) : 0
+        backdrop.alpha = max(0.42 * e, 0.2 * f)
+        backdrop.isUserInteractionEnabled = expansion.target == 1 || fanned
         let big = bigFrame
         let buttonY = big.maxY + 16
         let showsOpen = expanded.flatMap { id in uses.first { $0.id == id } }.map { $0.threadID != currentThread } ?? false
@@ -406,15 +533,19 @@ final class SimulatorDock: UIView {
         if let id = expanded, let use = uses.first(where: { $0.id == id }) { home.isEnabled = feeds.isInteractive(use.target) }
         accessibilityElements = expansion.target == 1
             ? [expanded.flatMap { pips[$0] }, home, showsOpen ? open : nil, shrink].compactMap { $0 }
-            : uses.compactMap { pips[$0.id] }.filter { $0.alpha > 0 }
+            : deck.prefix(fanned ? deck.count : 1).compactMap { pips[$0.id] }
     }
 
     // MARK: Gestures
 
-    /// Collapsed: the whole stack follows the finger, then springs to the
-    /// corner it was thrown toward.
+    /// In the deck: the whole deck follows the finger, then springs to the
+    /// corner it was thrown toward. Fanned out: a drag gathers the row.
     private func panned(_ gesture: UIPanGestureRecognizer) {
         guard expansion.target == 0 else { return }
+        if fan.target == 1 {
+            if gesture.state == .began { gather() }
+            return
+        }
         switch gesture.state {
         case .began:
             dragging = true
@@ -425,9 +556,10 @@ final class SimulatorDock: UIView {
             originX.set(dragStart.x + t.x)
             originY.set(dragStart.y + t.y)
         case .ended, .cancelled, .failed:
+            guard dragging else { return }
             dragging = false
             let v = gesture.velocity(in: self)
-            let size = stackSize
+            let size = deckSize
             let projected = CGPoint(x: originX.value + size.width / 2 + v.x * 0.2, y: originY.value + size.height / 2 + v.y * 0.2)
             let area = self.area
             let left = projected.x < area.midX, top = projected.y < area.midY
@@ -443,7 +575,12 @@ final class SimulatorDock: UIView {
     }
 
     /// Expanded: dragging down outside the picture shrinks it with the finger.
+    /// Fanned out: any drag outside gathers the row.
     @objc private func collapsePanned(_ gesture: UIPanGestureRecognizer) {
+        guard expanded != nil else {
+            if gesture.state == .began { gather() }
+            return
+        }
         let span = max(1, bounds.height * 0.5)
         switch gesture.state {
         case .began:
@@ -472,6 +609,8 @@ private final class PiP: UIView {
     let use: SimulatorUse
     let screen = SimulatorScreen()
     let caption = Theme.label("", Theme.font(.caption2, 11, .semibold), color: .secondaryLabel)
+    /// Darkens a picture lying behind the deck's top one.
+    let shade = UIView()
     private let frameView = UIView()
     private let dot = UIView()
     var onTap: (() -> Void)?
@@ -482,7 +621,7 @@ private final class PiP: UIView {
         didSet { tap.isEnabled = !interactive; pan.isEnabled = !interactive }
     }
     var cornerRadius: CGFloat = 12 {
-        didSet { frameView.layer.cornerRadius = cornerRadius; screen.layer.cornerRadius = cornerRadius }
+        didSet { frameView.layer.cornerRadius = cornerRadius; screen.layer.cornerRadius = cornerRadius; shade.layer.cornerRadius = cornerRadius }
     }
     private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
     private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
@@ -499,12 +638,16 @@ private final class PiP: UIView {
         frameView.isUserInteractionEnabled = false
         screen.layer.cornerCurve = .continuous
         screen.clipsToBounds = true
+        shade.backgroundColor = .black
+        shade.alpha = 0
+        shade.layer.cornerCurve = .continuous
+        shade.isUserInteractionEnabled = false
         dot.backgroundColor = .systemRed
         dot.layer.cornerRadius = 3.5
         dot.isUserInteractionEnabled = false
         caption.textAlignment = .center
         caption.lineBreakMode = .byTruncatingTail
-        [frameView, screen, dot, caption].forEach(addSubview)
+        [frameView, screen, shade, dot, caption].forEach(addSubview)
         addGestureRecognizer(tap)
         addGestureRecognizer(pan)
         isAccessibilityElement = true
@@ -522,8 +665,9 @@ private final class PiP: UIView {
         frameView.frame = picture
         frameView.layer.shadowPath = UIBezierPath(roundedRect: picture, cornerRadius: cornerRadius).cgPath
         screen.frame = picture
+        shade.frame = picture
         dot.frame = CGRect(x: 8, y: 8, width: 7, height: 7)
-        caption.frame = CGRect(x: -10, y: picture.maxY + 4, width: bounds.width + 20, height: 16)
+        caption.frame = CGRect(x: 0, y: picture.maxY + 4, width: bounds.width, height: 16)
     }
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {

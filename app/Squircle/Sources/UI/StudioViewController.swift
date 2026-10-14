@@ -172,7 +172,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it)
     /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` brings
     /// the first simulator large; `SQUIRCLE_BUILDS=1` shows the app's builds and
-    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills. `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
+    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads` opens Tasks on either tab. `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
@@ -193,6 +193,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 }
                 if let text = environment["SQUIRCLE_DEMO_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugFlySend(text) }
+                }
+                if let tab = environment["SQUIRCLE_TASKS"] {
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentTasks(threads: tab == "threads") }
                 }
                 if environment["SQUIRCLE_BUILDS"] == "1" {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentBuilds() }
@@ -567,7 +570,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         model.selectProject(project)
         let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
-        controller.onThreads = { [weak self] in self?.presentThreads() }
+        controller.onTasks = { [weak self] in self?.presentTasks() }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         host(controller, in: agentHost)
         controller.onBack = { [weak self] in self?.closeApp() }
@@ -809,10 +812,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         present(controller, animated: true)
     }
 
-    private func presentThreads() {
+    private func presentTasks(threads: Bool = false) {
         guard let project = selectedProject, presentedViewController == nil, route == .app(project.id) else { return }
         Theme.selectionHaptic()
-        let controller = ThreadsViewController(model: model, project: project)
+        let controller = TasksViewController(model: model, project: project, threads: threads)
         controller.onOpen = { [weak self, weak controller] id in
             controller?.dismiss(animated: true) { self?.openThread(id) }
         }

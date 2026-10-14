@@ -1,0 +1,50 @@
+# Tasks (2026-10-14, user decision)
+
+The user fires off many asks an hour and lost track of them; the agent did
+too. Tasks are what the user asked an app's agent for, in their words, and
+where each stands. The service owns them, the agent keeps them, the phone
+shows and edits them.
+
+## Model
+
+Kept per app (T3 project) in `<data>/tasks.json`; attachments in
+`<data>/tasks/<id>/media`. A task has the ask, a status (`queued`,
+`in_progress`, `needs_you`, `ready_to_try`, `done`, `dropped`), a few-word
+note, the chat message it came from (the agent's latest user message when it
+adds the task), linked worker threads and builds, an order within its group,
+attached screenshots and clips, and a history of status changes (by agent,
+user or auto).
+
+**Status follows linked work** (`tasks::derive`): a linked worker waiting on a
+question → needs you; a worker working or a build queued/running → in
+progress; the newest linked build succeeded → ready to try. An explicit
+status from the agent or the user holds until a linked worker's or build's
+state changes (the task remembers the states it last saw). The service checks
+every 3 s.
+
+**History:** done and dropped tasks leave the active list after a day, open
+ones that nothing touched for three days too. Nothing is deleted; any change
+brings a task back.
+
+## Agent
+
+`squircle task add|update|link|attach|list|show` (`--help`, `--json`);
+`thread spawn --task` and `build start --task` link as they start. The
+per-turn `[squircle]` note lists the open tasks (also after compaction) and
+asks the agent to add one per new ask, link workers and builds, attach
+pictures worth seeing and keep status and note current. The plugin's
+instructions say the same.
+
+## Phone
+
+- **Tasks button** replaces Threads beside Builds on the app's agent. The
+  sheet has a Tasks | Threads switch; Threads is the old list.
+- **Tasks tab:** groups Needs you, In progress, Ready to try, Queued, then
+  Done (today's). Rows show the ask, the note, linked threads as chips (tap
+  opens the thread), thumbnails (tap opens the picture or plays the clip) and
+  Install when a linked build is ready. Tapping a row opens its most relevant
+  thread. Swipe: Done / Drop, or Top; long press: any status, Move to Top.
+  + adds a task. History folds at the bottom, with search.
+- **Strip** above the message field on the agent while tasks are open:
+  "1 needs you · 5 working · 3 to try"; tapping opens Tasks. The conversation
+  keeps clear of it (it counts as part of the field for the bottom inset).

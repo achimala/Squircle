@@ -286,3 +286,41 @@ enum JSONValue: Codable, Equatable {
     }
 }
 
+
+/// One thing the user asked an app's agent for, and where it stands
+/// (`squircle task`). Linked threads and builds come with their state.
+struct AppTask: Decodable, Equatable, Identifiable {
+    enum Status: String, Decodable, CaseIterable {
+        case needsYou = "needs_you", inProgress = "in_progress", readyToTry = "ready_to_try", queued, done, dropped
+        var open: Bool { self != .done && self != .dropped }
+    }
+    struct Thread: Decodable, Equatable { let id: String; let title: String?; let state: String }
+    struct Build: Decodable, Equatable {
+        let id: String; let state: String; let title: String?; let version: String?
+        let buildNumber: String?; let installable: Bool?
+        enum CodingKeys: String, CodingKey { case id, state, title, version, installable, buildNumber = "build_number" }
+    }
+    struct Media: Decodable, Equatable { let id: String; let kind: String; let caption: String }
+
+    let id: String
+    let ask: String
+    let status: Status
+    let note: String
+    let order: Double
+    let updatedAt: Double
+    let archivedAt: Double?
+    let threads: [Thread]
+    let builds: [Build]
+    let media: [Media]
+
+    enum CodingKeys: String, CodingKey {
+        case id, ask, status, note, order, threads, builds, media
+        case updatedAt = "updated_at", archivedAt = "archived_at"
+    }
+}
+
+/// An app's tasks: the active list and History.
+struct AppTasks: Decodable, Equatable {
+    var tasks: [AppTask] = []
+    var history: [AppTask] = []
+}

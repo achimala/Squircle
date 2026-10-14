@@ -7,6 +7,7 @@
 
 use crate::store::{atomic_json, private_dir, read_json};
 use crate::t3::{T3, T3Config};
+use crate::tasks::{Source, Status, Tasks};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -169,6 +170,7 @@ pub struct Agents {
     status: Mutex<String>,
     flush_scheduled: Mutex<bool>,
     push: std::sync::OnceLock<Arc<crate::push::Push>>,
+    tasks: Arc<Tasks>,
 }
 
 fn quote(path: &Path) -> String {
@@ -277,7 +279,7 @@ async fn remove(root: &Path, state: &GitState, discard: bool) -> Result<Removed>
 }
 
 impl Agents {
-    pub fn open(root: &Path, server: &str) -> Result<Arc<Self>> {
+    pub fn open(root: &Path, server: &str, tasks: Arc<Tasks>) -> Result<Arc<Self>> {
         let path = root.join("agents.json");
         let registry = if path.try_exists()? { read_json(&path)? } else { Registry::default() };
         Ok(Arc::new(Self {
@@ -289,6 +291,7 @@ impl Agents {
             status: Mutex::new("Not connected to T3".into()),
             flush_scheduled: Mutex::new(false),
             push: std::sync::OnceLock::new(),
+            tasks,
         }))
     }
 
@@ -406,6 +409,34 @@ impl Agents {
     /// A thread's row in T3's shell, if T3 has sent it.
     pub fn thread_row(&self, id: &str) -> Option<Value> {
         self.thread(id)
+    }
+
+    /// The T3 project a thread belongs to: an app agent's, a worker's, or
+    /// any thread T3 has sent.
+    pub fn project_of(&self, thread: &str) -> Option<String> {
+        {
+            let registry = self.registry.lock().unwrap();
+            if let Some(agent) = registry.agents.values().find(|a| a.thread_id == thread) {
+                return Some(agent.project_id.clone());
+            }
+            if let Some(worker) = registry.workers.get(thread) {
+                return Some(worker.project_id.clone());
+            }
+        }
+        self.thread(thread).and_then(|t| t["projectId"].as_str().map(str::to_string))
+    }
+
+    /// The user's latest message to an app agent: where a task it adds now
+    /// came from.
+    pub async fn source_message(&self, thread: &str) -> Option<Source> {
+        self.agent_for_thread(thread)?;
+        let client = self.ready().await.ok()?;
+        let detail = self.thread_detail(&client, thread).await.ok()?;
+        detail["messages"].as_array()?.iter().rev()
+            .find(|m| m["role"] == "user" && m["context"]["records"].as_array().is_none_or(|r| r.is_empty())
+                && !m["text"].as_str().unwrap_or("").starts_with('['))
+            .and_then(|m| m["id"].as_str().or(m["messageId"].as_str()))
+            .map(|id| Source { thread_id: thread.into(), message_id: id.into() })
     }
 
     /// The live T3 connection once its thread list has arrived.
@@ -755,10 +786,21 @@ impl Agents {
             workers.iter().map(|w| format!("\n- {} [{}] {} ({})", w["title"].as_str().unwrap_or(""), w["branch"].as_str().unwrap_or(""),
                 w["state"].as_str().unwrap_or(""), w["id"].as_str().unwrap_or(""))).collect()
         };
+        let mut open: Vec<_> = self.tasks.list(&agent.project_id).into_iter()
+            .filter(|t| t.archived_at.is_none() && t.status.open()).collect();
+        let rank = |s: Status| [Status::NeedsYou, Status::InProgress, Status::ReadyToTry, Status::Queued].iter().position(|x| *x == s);
+        open.sort_by(|a, b| rank(a.status).cmp(&rank(b.status)).then(a.order.total_cmp(&b.order)));
+        let tasks = if open.is_empty() { " none".to_string() } else {
+            open.iter().take(40).map(|t| format!("\n- [{}] {}{} ({})", t.status.label(), t.ask.replace('\n', " "),
+                if t.note.is_empty() { String::new() } else { format!(" — {}", t.note) }, t.id)).collect()
+        };
         format!(
             "[squircle] You are {app}'s app agent: you coordinate, and worker threads do the implementation \
              (`{cli} thread --help`), unless the user says otherwise; archive a worker once its work is merged or abandoned, \
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
+             Your tasks, the user's open asks (`{cli} task --help`):{tasks}\n\
+             Add a task for each new ask, in the user's words; link its workers (`thread spawn --task`) and builds (`build start --task`), \
+             attach screenshots or clips worth seeing, and set its status and note when that changes (linked workers and builds move it too).\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
              copied out of /tmp into ~/.t3/userdata/attachments; a build you start or check this turn shows as an Install card. \
              No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.{refreshed}",

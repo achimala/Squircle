@@ -1,4 +1,4 @@
-use crate::{agents::Agents, apps, push::Push, sims::Sims, artifact, model::*, preview, projects, store::Store, xcode};
+use crate::{agents::Agents, apps, push::Push, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::Store, xcode};
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -39,6 +39,7 @@ pub struct AppState {
     agents: Option<Arc<Agents>>,
     sims: Option<Arc<Sims>>,
     push: Option<Arc<Push>>,
+    tasks: Option<Arc<Tasks>>,
 }
 
 impl AppState {
@@ -54,6 +55,7 @@ impl AppState {
             agents: None,
             sims: None,
             push: None,
+            tasks: None,
         }
     }
 }
@@ -186,6 +188,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/push/activities", post(push_activity))
         .route("/v1/push/presence", post(push_presence))
         .route("/v1/push/test", post(push_test))
+        .route("/v1/tasks", get(list_tasks).post(add_task))
+        .route("/v1/tasks/{id}", get(show_task).patch(update_task))
+        .route("/v1/tasks/{id}/link", post(link_task))
+        .route("/v1/tasks/{id}/media", post(attach_task))
+        .route("/v1/tasks/{id}/media/{media}", get(task_media_file))
         .route("/v1/import", post(import))
         .route("/v1/diagnostics", post(ingest))
         .route(
@@ -236,7 +243,8 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
             store.save_job(&job)?;
         }
     }
-    let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?))?;
+    let tasks = Arc::new(Tasks::open(&store.root)?);
+    let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?), tasks.clone())?;
     let push = Push::open(&store.root)?;
     agents.attach_push(push.clone());
     let sims = Sims::open(&store.root, agents.clone())?;
@@ -244,6 +252,19 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     state.agents = Some(agents.clone());
     state.sims = Some(sims.clone());
     state.push = Some(push.clone());
+    state.tasks = Some(tasks.clone());
+    {
+        // Linked workers and builds move tasks on; old ones age into History.
+        let state = state.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = tasks.tick(|task| task_signals(&state, task)) {
+                    eprintln!("Tasks not updated: {error:#}");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        });
+    }
     eprintln!(
         "Squircle listening on {}. Keep this process running; HTTPS/Tailscale is managed separately.",
         listener.local_addr()?
@@ -1877,6 +1898,8 @@ struct SpawnWorker {
     provider: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    /// A task to link the worker to.
+    task: Option<String>,
 }
 
 async fn spawn_worker(
@@ -1886,10 +1909,16 @@ async fn spawn_worker(
 ) -> ApiResult<Json<Value>> {
     auth(&state, &headers, false)?;
     let r = body(payload)?;
+    if let Some(task) = &r.task {
+        tasks_of(&state)?.get(task).map_err(ApiError::missing)?;
+    }
     let worker = agents(&state)?
         .spawn(&r.coordinator, &r.title, &r.branch, r.base.as_deref(), &r.prompt, r.provider.as_deref(), r.model.as_deref(), r.effort.as_deref())
         .await
         .map_err(agent_error)?;
+    if let (Some(task), Some(id)) = (&r.task, worker["id"].as_str()) {
+        tasks_of(&state)?.link(task, Some(id), None, false).map_err(task_error)?;
+    }
     Ok(Json(success(worker)))
 }
 
@@ -2017,4 +2046,229 @@ async fn push_test(
     auth(&state, &headers, false)?;
     let request = body(payload)?;
     Ok(Json(success(push(&state)?.test(request.live_activity).await)))
+}
+
+// MARK: Tasks
+
+fn task_error(error: anyhow::Error) -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "task_failed",
+        message: format!("{error:#}"),
+        next: "Read the message; run squircle task --help.",
+    }
+}
+
+fn tasks_of(state: &AppState) -> ApiResult<Arc<Tasks>> {
+    state.tasks.clone().ok_or_else(|| task_error(anyhow::anyhow!("Tasks are not running in this service")))
+}
+
+/// A task's linked workers' and builds' states, and the status they imply.
+fn task_signals(state: &AppState, task: &tasks::Task) -> (String, Option<tasks::Status>) {
+    let threads: Vec<&str> = task.threads.iter().map(|id| {
+        state.agents.as_ref().and_then(|a| a.thread_row(id)).map_or("missing", |row| crate::agents::worker_state(&row))
+    }).collect();
+    let store = state.store.lock().unwrap();
+    let builds: Vec<&str> = task.builds.iter().map(|id| match store.load_job(id).map(|j| j.state) {
+        Ok(BuildState::Queued) => "queued",
+        Ok(BuildState::Running) => "running",
+        Ok(BuildState::Succeeded) => "succeeded",
+        Ok(_) => "failed",
+        Err(_) => "missing",
+    }).collect();
+    drop(store);
+    let signature = task.threads.iter().zip(&threads).chain(task.builds.iter().zip(&builds))
+        .map(|(id, state)| format!("{id}:{state}")).collect::<Vec<_>>().join(" ");
+    (signature, tasks::derive(&threads, &builds))
+}
+
+/// A task as the phone and the agent see it: linked threads and builds
+/// with their titles and states, and its media.
+fn task_view(state: &AppState, task: &tasks::Task) -> Value {
+    let threads: Vec<Value> = task.threads.iter().map(|id| {
+        let row = state.agents.as_ref().and_then(|a| a.thread_row(id));
+        json!({"id": id, "title": row.as_ref().and_then(|r| r["title"].as_str()),
+               "state": row.as_ref().map_or("missing", crate::agents::worker_state)})
+    }).collect();
+    let store = state.store.lock().unwrap();
+    let builds: Vec<Value> = task.builds.iter().map(|id| match store.load_job(id) {
+        Ok(job) => json!({"id": id, "state": job.state, "title": job.output.as_ref().map(|o| o.title.clone()),
+            "version": job.output.as_ref().map(|o| o.version.clone()), "build_number": job.output.as_ref().map(|o| o.build_number.clone()),
+            "installable": job.output.as_ref().is_some_and(|o| o.ipa_path.is_some())}),
+        Err(_) => json!({"id": id, "state": "missing"}),
+    }).collect();
+    drop(store);
+    let media: Vec<Value> = state.tasks.as_ref().map(|t| t.media(&task.id)).unwrap_or_default().into_iter()
+        .map(|m| json!({"id": m.id, "kind": m.kind, "caption": m.caption, "content_type": m.content_type, "created_at": m.created_at}))
+        .collect();
+    let mut value = serde_json::to_value(task).unwrap_or(Value::Null);
+    value["threads"] = json!(threads);
+    value["builds"] = json!(builds);
+    value["media"] = json!(media);
+    if let Some(object) = value.as_object_mut() { object.remove("seen"); }
+    value
+}
+
+/// The app a request is about: a T3 project ID, or any of its threads.
+fn task_project(state: &AppState, project: Option<String>, thread: Option<&str>) -> ApiResult<String> {
+    if let Some(project) = project { return Ok(project); }
+    let thread = thread.ok_or_else(|| ApiError::bad("Pass --thread (your thread ID) or --project"))?;
+    agents(state)?.project_of(thread).ok_or_else(|| ApiError::bad(format!("T3 has no thread {thread} in any project")))
+}
+
+#[derive(Deserialize)]
+struct TaskQuery {
+    project: Option<String>,
+    thread: Option<String>,
+}
+
+async fn list_tasks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    query: std::result::Result<Query<TaskQuery>, QueryRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let Query(query) = query.map_err(|e| ApiError::bad(e.body_text()))?;
+    let project = task_project(&state, query.project, query.thread.as_deref())?;
+    let mut all = tasks_of(&state)?.list(&project);
+    all.sort_by(|a, b| a.order.total_cmp(&b.order));
+    let (history, active): (Vec<_>, Vec<_>) = all.iter().partition(|t| t.archived_at.is_some());
+    let mut history = history;
+    history.sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
+    Ok(Json(success(json!({
+        "project_id": project,
+        "tasks": active.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
+        "history": history.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
+    }))))
+}
+
+#[derive(Deserialize)]
+struct AddTask {
+    project: Option<String>,
+    thread: Option<String>,
+    ask: String,
+    status: Option<tasks::Status>,
+    note: Option<String>,
+    #[serde(default)]
+    by_user: bool,
+}
+
+async fn add_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<AddTask>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let r = body(payload)?;
+    let project = task_project(&state, r.project, r.thread.as_deref())?;
+    let source = match (&r.thread, &state.agents) {
+        (Some(thread), Some(agents)) if !r.by_user => agents.source_message(thread).await,
+        _ => None,
+    };
+    let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
+    let task = tasks_of(&state)?
+        .add(&project, &r.ask, r.status, r.note.as_deref(), by, source, vec![])
+        .map_err(task_error)?;
+    Ok(Json(success(json!({"task": task_view(&state, &task),
+        "next": "Link its workers and builds as you start them; set its status when it changes."}))))
+}
+
+async fn show_task(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let task = tasks_of(&state)?.get(&id).map_err(ApiError::missing)?;
+    Ok(Json(success(json!({"task": task_view(&state, &task)}))))
+}
+
+#[derive(Deserialize)]
+struct UpdateTask {
+    #[serde(flatten)]
+    update: tasks::Update,
+    #[serde(default)]
+    by_user: bool,
+}
+
+async fn update_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<UpdateTask>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let r = body(payload)?;
+    let tasks = tasks_of(&state)?;
+    let current = tasks.get(&id).map_err(ApiError::missing)?;
+    let signature = task_signals(&state, &current).0;
+    let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
+    let task = tasks.update(&id, r.update, by, Some(signature)).map_err(task_error)?;
+    Ok(Json(success(json!({"task": task_view(&state, &task)}))))
+}
+
+#[derive(Deserialize)]
+struct LinkTask {
+    thread: Option<String>,
+    build: Option<String>,
+    #[serde(default)]
+    remove: bool,
+}
+
+async fn link_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<LinkTask>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let r = body(payload)?;
+    let task = tasks_of(&state)?.link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove).map_err(task_error)?;
+    Ok(Json(success(json!({"task": task_view(&state, &task)}))))
+}
+
+#[derive(Deserialize)]
+struct AttachTask {
+    file: PathBuf,
+    caption: Option<String>,
+}
+
+async fn attach_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    payload: std::result::Result<Json<AttachTask>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let r = body(payload)?;
+    let tasks = tasks_of(&state)?;
+    let media = tasks.attach(&id, &r.file, r.caption.as_deref()).map_err(task_error)?;
+    Ok(Json(success(json!({"id": media.id, "task_id": id, "kind": media.kind, "caption": media.caption,
+        "next": "It shows on the task on the phone within a few seconds."}))))
+}
+
+async fn task_media_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, media)): Path<(String, String)>,
+) -> ApiResult<Response> {
+    auth(&state, &headers, false)?;
+    let dir = tasks_of(&state)?.media_dir(&id).map_err(ApiError::bad)?;
+    let media = crate::media::get_in(&dir, &media).map_err(ApiError::missing)?;
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&media.file)
+        .await
+        .map_err(ApiError::missing)?;
+    let metadata = file.metadata().await.map_err(ApiError::internal)?;
+    if !metadata.is_file() {
+        return Err(ApiError::internal("Invalid media file"));
+    }
+    let mut response = (
+        private_headers(),
+        [(header::CONTENT_TYPE, media.content_type.clone())],
+        Body::from_stream(ReaderStream::new(file)),
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_LENGTH, metadata.len().to_string().parse().unwrap());
+    Ok(response)
 }

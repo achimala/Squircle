@@ -82,7 +82,7 @@ finishes, errors or needs input, once per turn outcome. Agents never poll.
 
 The service sends the phone notifications and its Live Activity directly to
 APNs with your own auth key (no relay; a relay would replace only the
-transport). See [notifications](t3-native-migration.md#2026-10-14-notifications-and-the-live-activity-030-49)
+transport). See [notifications](t3-native-migration.md#2026-10-14-notifications-and-the-live-activity-030-51)
 for creating the key.
 
 | Command | Result |

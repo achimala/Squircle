@@ -144,6 +144,12 @@ enum Commands {
         #[command(subcommand)]
         command: PushCommand,
     },
+    /// The user's asks to an app's agent and where each stands; the phone shows them as Tasks.
+    #[command(after_help = "One task per thing the user asked for, in their words. Status: queued, in_progress, needs_you, ready_to_try, done, dropped.\nLinked workers and builds move a task on by themselves (a worker working → in_progress, waiting on a question → needs_you, a linked build succeeding → ready_to_try); a status you set holds until one of them changes.\nDone and dropped tasks move to History after a day, untouched open ones after three days; any change brings one back.\n  squircle task add --thread YOUR_THREAD_ID --ask \"stack the sims and fan them out\"\n  squircle thread spawn ... --task TASK_ID      links the worker\n  squircle build start ... --task TASK_ID       links the build\n  squircle task update TASK_ID --status needs_you --note \"pick a layout\"\n  squircle task attach TASK_ID --file /abs/shot.png --caption \"New strip\"\n  squircle task list --thread YOUR_THREAD_ID")]
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
     /// Worker threads of an app agent: spawn, message, read, answer, archive.
     #[command(after_help = "Workers are ordinary T3 threads, each in its own worktree on a new branch. Do not poll: the app agent receives a [worker update] message when a worker finishes, errors or needs input.")]
     Thread {
@@ -230,6 +236,8 @@ enum ThreadCommand {
         model: Option<String>,
         #[arg(long, help = "Reasoning effort, e.g. high; default: the provider's")]
         effort: Option<String>,
+        #[arg(long, help = "Link the worker to this task (squircle task --help)")]
+        task: Option<String>,
     },
     /// Message a thread; folds into its turn if it is mid-turn.
     Send { id: String, text: String },
@@ -277,6 +285,63 @@ enum PushCommand {
     },
     /// Whether a key is set and which phones registered (no tokens shown).
     Status,
+}
+#[derive(Subcommand)]
+enum TaskCommand {
+    /// Record a new ask in the user's words; it starts queued unless you say otherwise.
+    Add {
+        #[arg(long, help = "Your thread ID (the app is taken from it)")]
+        thread: Option<String>,
+        #[arg(long, help = "T3 project ID instead of a thread")]
+        project: Option<String>,
+        #[arg(long, help = "What the user asked for, in their words, trimmed to a line")]
+        ask: String,
+        #[arg(long, value_enum)]
+        status: Option<squircle::tasks::Status>,
+        #[arg(long, help = "What it waits on, in a few words")]
+        note: Option<String>,
+    },
+    /// Change a task's status, note or wording.
+    Update {
+        id: String,
+        #[arg(long, value_enum)]
+        status: Option<squircle::tasks::Status>,
+        #[arg(long, help = "What it waits on or what happened, in a few words")]
+        note: Option<String>,
+        #[arg(long)]
+        ask: Option<String>,
+        #[arg(long, help = "Put it first in its group")]
+        top: bool,
+    },
+    /// Link (or with --remove unlink) a worker thread or a build.
+    Link {
+        id: String,
+        #[arg(long)]
+        thread: Option<String>,
+        #[arg(long)]
+        build: Option<String>,
+        #[arg(long)]
+        remove: bool,
+    },
+    /// Attach a screenshot or clip (png, jpg, mp4, mov, m4v); the phone shows it on the task.
+    Attach {
+        id: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, help = "One line saying what it shows")]
+        caption: Option<String>,
+    },
+    /// The app's tasks, open first; --all adds done ones and History.
+    List {
+        #[arg(long, help = "Your thread ID (the app is taken from it)")]
+        thread: Option<String>,
+        #[arg(long, help = "T3 project ID instead of a thread")]
+        project: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// One task with its linked threads, builds, media and history.
+    Show { id: String },
 }
 #[derive(Subcommand)]
 enum SimCommand {
@@ -379,6 +444,8 @@ enum BuildCommand {
             help = "Leave out the Squircle debug overlay that device builds otherwise carry (never in App Store exports)"
         )]
         no_overlay: bool,
+        #[arg(long, help = "Link the build to this task; it becomes ready to try when the build succeeds")]
+        task: Option<String>,
     },
     /// List persisted build records, newest first.
     List,
@@ -632,6 +699,10 @@ fn thread_id(id: &str) -> Result<&str> {
     uuid::Uuid::parse_str(id).context("Thread ID must be a UUID")?;
     Ok(id)
 }
+fn task_id(id: &str) -> Result<&str> {
+    uuid::Uuid::parse_str(id).context("Task ID must be a UUID")?;
+    Ok(id)
+}
 fn valid_id(id: &str) -> Result<&str> {
     uuid::Uuid::parse_str(id).context("Build ID must be a UUID")?;
     Ok(id)
@@ -650,7 +721,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -715,6 +786,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 allow_provisioning_updates,
                 preview,
                 no_overlay,
+                task,
             } => {
                 let request = BuildRequest {
                     project: project.canonicalize()?,
@@ -733,7 +805,14 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                     capture_preview: *preview,
                     no_overlay: *no_overlay,
                 };
-                post(cli, "/v1/builds", serde_json::to_value(request)?).await?
+                let started = post(cli, "/v1/builds", serde_json::to_value(request)?).await?;
+                if let (Some(task), Some(build)) = (task, started["data"]["job"]["id"].as_str()) {
+                    let linked = post(cli, &format!("/v1/tasks/{}/link", task_id(task)?), json!({"build":build})).await?;
+                    if linked["ok"] != true {
+                        eprintln!("The build started but was not linked to the task: {}", linked["error"]["message"]);
+                    }
+                }
+                started
             }
             BuildCommand::List => get(cli, "/v1/builds").await?,
             BuildCommand::Status { build_id } => {
@@ -1015,9 +1094,34 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 }
             }
         },
+        Commands::Task { command } => match command {
+            TaskCommand::Add { thread, project, ask, status, note } => post(cli, "/v1/tasks",
+                json!({"thread":thread,"project":project,"ask":ask,"status":status,"note":note})).await?,
+            TaskCommand::Update { id, status, note, ask, top } => request(cli, reqwest::Method::PATCH, &format!("/v1/tasks/{}", task_id(id)?),
+                Some(json!({"status":status,"note":note,"ask":ask,"to_top":top})), false).await?,
+            TaskCommand::Link { id, thread, build, remove } => post(cli, &format!("/v1/tasks/{}/link", task_id(id)?),
+                json!({"thread":thread,"build":build,"remove":remove})).await?,
+            TaskCommand::Attach { id, file, caption } => post(cli, &format!("/v1/tasks/{}/media", task_id(id)?),
+                json!({"file":std::path::absolute(file)?,"caption":caption})).await?,
+            TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,
+            TaskCommand::List { thread, project, all } => {
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(thread.as_ref().map(|t| ("thread", t)))
+                    .extend_pairs(project.as_ref().map(|p| ("project", p))).finish();
+                let mut value = get(cli, &format!("/v1/tasks?{query}")).await?;
+                if !*all && value["ok"] == true {
+                    let data = &mut value["data"];
+                    if let Some(tasks) = data["tasks"].as_array_mut() {
+                        tasks.retain(|t| !matches!(t["status"].as_str(), Some("done" | "dropped")));
+                    }
+                    if let Some(object) = data.as_object_mut() { object.remove("history"); }
+                }
+                value
+            }
+        },
         Commands::Thread { command } => match command {
-            ThreadCommand::Spawn { coordinator, title, branch, base, prompt, provider, model, effort } => post(cli, "/v1/workers",
-                json!({"coordinator":coordinator,"title":title,"branch":branch,"base":base,"prompt":prompt,"provider":provider,"model":model,"effort":effort})).await?,
+            ThreadCommand::Spawn { coordinator, title, branch, base, prompt, provider, model, effort, task } => post(cli, "/v1/workers",
+                json!({"coordinator":coordinator,"title":title,"branch":branch,"base":base,"prompt":prompt,"provider":provider,"model":model,"effort":effort,"task":task})).await?,
             ThreadCommand::Send { id, text } => post(cli, &format!("/v1/workers/{}/messages", thread_id(id)?), json!({"text":text})).await?,
             ThreadCommand::Status { coordinator } => {
                 let query = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(coordinator.as_ref().map(|c| ("coordinator", c))).finish();
