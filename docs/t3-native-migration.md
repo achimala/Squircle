@@ -954,23 +954,49 @@ frame in a real-speed simulator recording (iPhone 17 Pro, iOS 27.0). Letters Abr
 build: job `cb942484-6b95-4ebe-9061-26b5d25bad8d` (overlay key `6650da73…`,
 main at `b2e8e58`); not yet on the phone.
 
-**Glass jelly bubble (prototype on branch `overlay-bubble`, 2026-10-14, awaiting
-the user's reaction):** the user picked the jelly character and asked for "actual
-semitransparent frosted glass 3d jelly … instead of being a character inside a
-bubble it can just be the glassy bubble, and when expanded the rest of the
-platter expands out around it". `GlassJelly` is the bubble: the app behind,
-frosted by the system's live blur masked to a rippling squircle outline; a
-handwritten Metal shader (compiled from source at first use) lighting it as a
-cushion (tint deepening toward the edge, a rim lit toward the light, a gloss
-streak, a glint, light gathered inside); a soft shadow in its colour. It
-breathes, churns while working, gulps each new task, hops for "needs you",
-jiggles when done, squishes under a finger and stretches along its motion.
-The status text sits on it. Opening, the panel grows out of the whole jelly
-and hangs above it (below, if it is high) like a speech bubble; the jelly
-shrinks to a droplet and stays as the anchor (tap it to close); full screen
-runs from the screen's edge to just above it. DEBUG `SQUIRCLE_JELLY_EYES=1` adds two
-beads for eyes. Checked in simulator recordings only (clips in
-`attachments/overlay-bubble/jelly-*.mp4`); GPU cost not measured on a phone.
+**Glass jelly overlay (prototype on branch `overlay-bubble`, 2026-10-14,
+awaiting the user's reaction):** first the user picked the jelly character and
+asked for "actual semitransparent frosted glass 3d jelly"; then, on that
+prototype: "motion is kinda weird and unnatural, has some weird insets and
+divots … want more, like, jiggle physics … let the jelly become the platter
+rather than having this generic divorced glass platter … stand out a little …
+feel separate from the rest of the app … make it feel more alive again" (eyes).
+
+- `GlassJelly` is the overlay's glass: the bubble and, grown, the panel that
+  holds the conversation (the Liquid Glass view is gone). Material: the app
+  behind frosted by the system's live blur masked to the outline; a
+  handwritten Metal shader (compiled from source at first use) lighting it as
+  a cushion (tint deepening at the rim, a rim lit toward the light, a gloss
+  streak, a glint, light gathered inside) and filling it with paper as it
+  opens; a soft shadow in its colour. Terracotta while working, ochre for
+  "needs you", olive when done; the rim and glow keep the panel visibly its
+  own layer over the app.
+- Motion is a small soft body: the controller only drives the frame spring;
+  the jelly feels that frame's acceleration and resizing, and squash, shear
+  and a lag offset (damped springs, about 3 Hz as a bubble, slower and calmer
+  as a panel) ring down. The outline is the rest squircle under an affine
+  squash and shear with its edges pillowed outward, so it bulges but never
+  dents. A finger squashes it while held, a status change or finished task
+  kicks it, "needs you" hops every few seconds; idle it barely breathes.
+- Eyes: beside the bubble's line, and open, peeking just under the panel's
+  top rim (where you grab it; the handle's pill is gone), drawn above the
+  conversation on a soft patch of paper. They blink (sometimes twice),
+  glance at any touch on the screen (the overlay window sees each touch
+  first), read along while it works, look at the field while you type,
+  squint when poked, smile when done and tilt worried when it needs you.
+- Opening, the bubble's line leaves in the first fifth and the conversation
+  fades in over the last 60% (no blur: the jelly is the paper, and a blur
+  turns clear areas black). Main's live docked ↔ full layout and handle path
+  are unchanged; full screen, the jelly's corners follow the display's.
+- Cost: the shader redraws only while something changes; a settled panel
+  draws nothing per frame. Not measured on a phone.
+
+Verified in the simulator (iPhone 18 Pro, iOS 27.0) from real-touch
+recordings driven by a throwaway XCUITest (tap in the app, fling, slow drag,
+poke open, type, pull down by the face), light and dark, frame by frame at
+12–20 fps: no dents, the panel settles in under a second, text legible on
+paper in both appearances. Clips: `attachments/overlay-bubble/jelly2-*.mp4`.
+Not on the phone.
 
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
