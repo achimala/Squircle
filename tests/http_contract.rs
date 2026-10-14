@@ -7,7 +7,7 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use squircle::{
-    model::{Ticket, now, token},
+    model::{PreviewArtifact, PreviewState, Ticket, TransferEvidence, now, token},
     server::{AppState, router},
     store::Store,
 };
@@ -69,7 +69,7 @@ impl Fixture {
         archive.write_all(&[7u8; 64 * 1024]).unwrap();
         archive.finish().unwrap();
         let ipa_bytes = fs::read(&ipa).unwrap();
-        let state = AppState::new(store, Some("https://mac.test".into()));
+        let state = AppState::new(store, Some("https://mac.test".into())).unwrap();
         let app = router(state.clone());
         Self {
             _directory: directory,
@@ -80,6 +80,13 @@ impl Fixture {
             ipa,
             ipa_bytes,
         }
+    }
+
+    /// A new service over the same data directory, which rereads its records.
+    fn reopen(&mut self) {
+        let root = self.state.store.lock().unwrap().root.clone();
+        self.state = AppState::new(Store::open(root).unwrap(), Some("https://mac.test".into())).unwrap();
+        self.app = router(self.state.clone());
     }
 
     async fn request(
@@ -229,7 +236,7 @@ async fn bearer_permissions_separate_control_from_diagnostic_uploads() {
 
 #[tokio::test]
 async fn preview_download_is_bound_to_its_job_and_control_token() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let id = fixture.import().await;
     let other = fixture.import().await;
     let path = format!("/v1/builds/{id}/preview");
@@ -247,10 +254,10 @@ async fn preview_download_is_bound_to_its_job_and_control_token() {
         let mut job = store.load_job(&id).unwrap();
         let artifact = store.job_dir(&id).unwrap().join("preview.png");
         fs::write(&artifact, png).unwrap();
-        job.output.as_mut().unwrap().preview_path = Some(artifact);
-        job.output.as_mut().unwrap().preview_state = Some("succeeded".into());
+        job.set_preview(PreviewState::Ready(PreviewArtifact { path: artifact, captured_at: 1, source: None }));
         store.save_job(&job).unwrap();
     }
+    fixture.reopen();
     let response = fixture
         .request("GET", &path, Some(&fixture.control), None)
         .await;
@@ -282,10 +289,11 @@ async fn preview_download_is_bound_to_its_job_and_control_token() {
     {
         let store = fixture.state.store.lock().unwrap();
         let mut job = store.load_job(&other).unwrap();
-        job.output.as_mut().unwrap().preview_path =
-            Some(store.job_dir(&id).unwrap().join("preview.png"));
+        let path = store.job_dir(&id).unwrap().join("preview.png");
+        job.set_preview(PreviewState::Ready(PreviewArtifact { path, captured_at: 1, source: None }));
         store.save_job(&job).unwrap();
     }
+    fixture.reopen();
     assert_eq!(
         fixture
             .request(
@@ -543,7 +551,7 @@ async fn app_metadata_and_versioned_preview_survive_refresh_and_restart() {
     assert_eq!(error["error"]["code"], "preview_changed");
     fs::remove_file(&source).unwrap();
     let root = fixture.state.store.lock().unwrap().root.clone();
-    let reopened = router(AppState::new(Store::open(root).unwrap(), None));
+    let reopened = router(AppState::new(Store::open(root).unwrap(), None).unwrap());
     let response = reopened
         .oneshot(
             Request::builder()
@@ -729,8 +737,7 @@ async fn invalid_and_expired_tickets_cannot_fetch_any_installation_resource() {
         build_id: id,
         expires_at: now() - 1,
         base_url: "https://mac.test".into(),
-        download_started_at: None,
-        downloaded_at: None,
+        transfer: TransferEvidence::NotStarted,
     };
     fixture
         .state

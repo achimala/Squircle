@@ -16,7 +16,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
     fs::OpenOptions,
     net::SocketAddr,
     path::PathBuf,
@@ -25,7 +24,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::Semaphore;
 use tokio_util::io::ReaderStream;
 
 #[derive(Clone)]
@@ -1326,9 +1325,12 @@ async fn link_status(
         .unwrap()
         .load_ticket(&token)
         .map_err(|_| ApiError::missing("Unknown install link"))?;
-    Ok(Json(success(
-        json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,"transfer":ticket.transfer}),
-    )))
+    let mut view = json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,
+        "download_started_at":null,"downloaded_at":null});
+    if let (Some(view), Value::Object(transfer)) = (view.as_object_mut(), json!(ticket.transfer)) {
+        view.extend(transfer);
+    }
+    Ok(Json(success(view)))
 }
 fn private_headers() -> [(header::HeaderName, &'static str); 3] {
     [
@@ -1699,7 +1701,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
-        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
         let authorization = headers(&state);
         let job = import_ipa(&state, &source, |source, destination| {
             // A nonblocking acquisition makes a regression fail immediately,
@@ -1716,12 +1718,12 @@ mod tests {
             Ok(output)
         })?;
         let stored = state.store.lock().unwrap().load_job(&job.id)?;
-        assert_eq!(stored.state, BuildState::Succeeded);
-        assert_eq!(stored.source, "imported_ipa_signature_not_verified");
-        let output = stored.output.unwrap();
+        assert_eq!(stored.state(), BuildState::Succeeded);
+        assert_eq!(stored.origin, BuildOrigin::Imported);
+        let output = stored.output().unwrap();
         assert_eq!(output.bundle_id, "dev.example.probe");
         assert_eq!(
-            std::fs::read(output.ipa_path.unwrap())?,
+            std::fs::read(output.ipa_path.as_ref().unwrap())?,
             std::fs::read(source)?
         );
         Ok(())
@@ -1733,7 +1735,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
-        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
         let job = import_ipa(&state, &source, copy_and_inspect_ipa)?;
         let diagnostic_token = state
             .store
@@ -1795,7 +1797,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
-        let state = AppState::new(Store::open(dir.path().join("state"))?, None);
+        let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
         use tower::ServiceExt;
         let response = router(state.clone())
             .oneshot(
@@ -1818,7 +1820,7 @@ mod tests {
     #[tokio::test]
     async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_deduplicate() {
         let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None);
+        let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
         let _active = state.slots.clone().acquire_owned().await.unwrap();
         let request = request(dir.path());
         let Json(first) = start(
@@ -1850,7 +1852,7 @@ mod tests {
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if state.store.lock().unwrap().load_job(&id).unwrap().state == BuildState::Cancelled
+                if state.store.lock().unwrap().load_job(&id).unwrap().state() == BuildState::Cancelled
                 {
                     break;
                 }
@@ -1873,7 +1875,7 @@ mod tests {
     #[tokio::test]
     async fn draining_refuses_new_side_effects() {
         let dir = tempfile::tempdir().unwrap();
-        let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None);
+        let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
         state.draining.store(true, Ordering::Release);
         let error = start(
             State(state.clone()),
@@ -2203,23 +2205,34 @@ fn tasks_of(state: &AppState) -> ApiResult<Arc<Tasks>> {
     state.tasks.clone().ok_or_else(|| task_error(anyhow::anyhow!("Tasks are not running in this service")))
 }
 
-/// A task's linked workers' and builds' states, and the status they imply.
-fn task_signals(state: &AppState, task: &tasks::Task) -> (String, Option<tasks::Status>) {
-    let threads: Vec<&str> = task.threads.iter().map(|id| {
-        state.agents.as_ref().and_then(|a| a.thread_row(id)).map_or("missing", |row| crate::agents::worker_state(&row))
+/// What a task's linked workers and builds are doing, from memory only (the
+/// shell's thread rows and the job index), so every tick can cover History
+/// too. A row T3 hasn't sent is no fact (`Missing`), never news.
+fn task_signals(state: &AppState, task: &tasks::Task) -> tasks::Signals {
+    use tasks::{BuildPhase, WorkerPhase};
+    let workers = task.threads.iter().map(|id| {
+        let row = state.agents.as_ref().and_then(|a| a.thread_row(id));
+        let phase = match row.as_ref().map(crate::agents::worker_state) {
+            Some("needs-you") => WorkerPhase::NeedsYou,
+            Some("working") => WorkerPhase::Working,
+            Some("error") => WorkerPhase::Error,
+            Some("done") => WorkerPhase::Done,
+            _ => WorkerPhase::Missing,
+        };
+        let turn = row.as_ref().and_then(|r| r["latestTurn"]["turnId"].as_str()).map(str::to_owned);
+        tasks::WorkerSignal { thread: id.clone(), turn, phase }
     }).collect();
-    // Job records are replaced atomically; reading them needs no record lock.
-    let store = &state.files;
-    let builds: Vec<&str> = task.builds.iter().map(|id| match store.load_job(id).map(|j| j.state) {
-        Ok(BuildState::Queued) => "queued",
-        Ok(BuildState::Running) => "running",
-        Ok(BuildState::Succeeded) => "succeeded",
-        Ok(_) => "failed",
-        Err(_) => "missing",
+    let builds = task.builds.iter().map(|id| {
+        let phase = match state.jobs.state(id) {
+            Some(BuildState::Queued) => BuildPhase::Queued,
+            Some(BuildState::Running) => BuildPhase::Running,
+            Some(BuildState::Succeeded) => BuildPhase::Succeeded,
+            Some(BuildState::Failed | BuildState::Cancelled | BuildState::Interrupted) => BuildPhase::Failed,
+            None => BuildPhase::Missing,
+        };
+        tasks::BuildSignal { build: id.clone(), phase }
     }).collect();
-    let signature = task.threads.iter().zip(&threads).chain(task.builds.iter().zip(&builds))
-        .map(|(id, state)| format!("{id}:{state}")).collect::<Vec<_>>().join(" ");
-    (signature, tasks::derive(&threads, &builds))
+    tasks::Signals { revision: Some(task.revision), workers, builds }
 }
 
 /// A task as the phone and the agent see it: linked threads and builds
@@ -2232,13 +2245,14 @@ fn task_view(state: &AppState, task: &tasks::Task) -> Value {
         json!({"id": id, "title": title,
                "state": row.as_ref().map_or("missing", crate::agents::worker_state)})
     }).collect();
-    // Job records are replaced atomically; reading them needs no record lock.
-    let store = &state.files;
-    let builds: Vec<Value> = task.builds.iter().map(|id| match store.load_job(id) {
-        Ok(job) => json!({"id": id, "state": job.state, "title": job.output.as_ref().map(|o| o.title.clone()),
-            "version": job.output.as_ref().map(|o| o.version.clone()), "build_number": job.output.as_ref().map(|o| o.build_number.clone()),
-            "installable": job.output.as_ref().is_some_and(|o| o.ipa_path.is_some())}),
-        Err(_) => json!({"id": id, "state": "missing"}),
+    let builds: Vec<Value> = task.builds.iter().map(|id| match state.jobs.get(id) {
+        Some(view) => {
+            let output = view.job.output();
+            json!({"id": id, "state": view.job.state(), "title": output.map(|o| o.title.clone()),
+                "version": output.map(|o| o.version.clone()), "build_number": output.map(|o| o.build_number.clone()),
+                "installable": view.job.ipa().is_some()})
+        }
+        None => json!({"id": id, "state": "missing"}),
     }).collect();
     let media: Vec<Value> = state.tasks.as_ref().map(|t| t.media(&task.id)).unwrap_or_default().into_iter()
         .map(|m| json!({"id": m.id, "kind": m.kind, "caption": m.caption, "content_type": m.content_type, "created_at": m.created_at}))
@@ -2247,7 +2261,6 @@ fn task_view(state: &AppState, task: &tasks::Task) -> Value {
     value["threads"] = json!(threads);
     value["builds"] = json!(builds);
     value["media"] = json!(media);
-    if let Some(object) = value.as_object_mut() { object.remove("seen"); }
     value
 }
 
@@ -2262,24 +2275,86 @@ fn task_project(state: &AppState, project: Option<String>, thread: Option<&str>)
 struct TaskQuery {
     project: Option<String>,
     thread: Option<String>,
+    /// History entries per page (1–100, default 20).
+    history_limit: Option<usize>,
+    /// The `history_next` cursor of the previous page.
+    history_before: Option<String>,
 }
 
+const HISTORY_PAGE: usize = 20;
+
+/// Active tasks, and one page of History, newest first. Only the returned
+/// tasks are expanded (linked work, media), so a long History costs a poll
+/// nothing beyond its first page.
 async fn list_tasks(
     State(state): State<AppState>,
     query: std::result::Result<Query<TaskQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
+    let limit = query.history_limit.unwrap_or(HISTORY_PAGE);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad("history_limit must be between 1 and 100"));
+    }
+    let before = query.history_before.as_deref().map(HistoryCursor::parse).transpose().map_err(ApiError::bad)?;
     let project = task_project(&state, query.project, query.thread.as_deref())?;
-    let mut all = tasks_of(&state)?.list(&project);
-    all.sort_by(|a, b| a.order.total_cmp(&b.order));
-    let (history, active): (Vec<_>, Vec<_>) = all.iter().partition(|t| t.archived_at.is_some());
-    let mut history = history;
-    history.sort_by(|a, b| b.archived_at.cmp(&a.archived_at));
-    Ok(Json(success(json!({
-        "project_id": project,
-        "tasks": active.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
-        "history": history.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
-    }))))
+    let tasks = tasks_of(&state)?;
+    let view = tokio::task::spawn_blocking(move || {
+        let mut all = tasks.list(&project);
+        all.sort_by(|a, b| a.order.total_cmp(&b.order));
+        let (history, active): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.archived_at.is_some());
+        let (page, next) = history_page(history, before.as_ref(), limit);
+        json!({
+            "project_id": project,
+            "tasks": active.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
+            "history": page.iter().map(|t| task_view(&state, t)).collect::<Vec<_>>(),
+            "history_next": next.map(|c| c.to_string()),
+        })
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(success(view)))
+}
+
+/// A position in History: entries strictly older than (archived_at, id).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HistoryCursor {
+    archived_at: u64,
+    id: String,
+}
+
+impl HistoryCursor {
+    fn of(task: &tasks::Task) -> Self {
+        Self { archived_at: task.archived_at.unwrap_or_default(), id: task.id.clone() }
+    }
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        let invalid = || format!("Invalid history cursor {value:?}");
+        let (at, id) = value.split_once('.').ok_or_else(invalid)?;
+        Ok(Self { archived_at: at.parse().map_err(|_| invalid())?, id: id.to_owned() })
+    }
+    /// Newest first: later archive time, then higher ID.
+    fn key(&self) -> (std::cmp::Reverse<u64>, std::cmp::Reverse<&str>) {
+        (std::cmp::Reverse(self.archived_at), std::cmp::Reverse(self.id.as_str()))
+    }
+}
+
+impl std::fmt::Display for HistoryCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.archived_at, self.id)
+    }
+}
+
+/// One page of History after `before`, newest first, and the cursor for the
+/// next page if there is more. Stable while tasks enter History or leave it.
+fn history_page(mut history: Vec<tasks::Task>, before: Option<&HistoryCursor>, limit: usize) -> (Vec<tasks::Task>, Option<HistoryCursor>) {
+    history.sort_by(|a, b| HistoryCursor::of(a).key().cmp(&HistoryCursor::of(b).key()));
+    let mut page: Vec<tasks::Task> = history.into_iter()
+        .filter(|t| before.is_none_or(|b| HistoryCursor::of(t).key() > b.key()))
+        .take(limit + 1)
+        .collect();
+    let more = page.len() > limit;
+    page.truncate(limit);
+    let next = if more { page.last().map(HistoryCursor::of) } else { None };
+    (page, next)
 }
 
 #[derive(Deserialize)]
@@ -2332,9 +2407,9 @@ async fn update_task(
     let r = body(payload)?;
     let tasks = tasks_of(&state)?;
     let current = tasks.get(&id).map_err(ApiError::missing)?;
-    let signature = task_signals(&state, &current).0;
+    let observed = task_signals(&state, &current);
     let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
-    let task = tasks.update(&id, r.update, by, Some(signature)).map_err(task_error)?;
+    let task = tasks.update(&id, r.update, by, Some(observed)).map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
 }
 

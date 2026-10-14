@@ -550,7 +550,7 @@ fn validate_bundle(bundle: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BuildMode, BuildOutput, BuildRequest, BuildState};
+    use crate::model::{BuildMode, BuildOrigin, BuildOutput, BuildRequest, JobPhase, Provenance};
 
     // A real 1×1 PNG. Publications copy its exact bytes rather than rendering a
     // stand-in screen from a project name or other metadata.
@@ -590,12 +590,9 @@ mod tests {
             id: Uuid::new_v4().to_string(),
             created_at: 1,
             updated_at: 2,
-            state: BuildState::Succeeded,
-            error: None,
-            source: "xcodebuild".into(),
-            source_revision: Some("submitted-revision".into()),
-            source_dirty: Some(false),
-            request: Some(BuildRequest {
+            origin: BuildOrigin::Project {
+                provenance: Provenance { revision: Some("submitted-revision".into()), dirty: Some(false) },
+                request: BuildRequest {
                 project: registration.project.clone(),
                 scheme: registration.scheme.clone(),
                 configuration: "Release".into(),
@@ -605,22 +602,17 @@ mod tests {
                 capture_preview: true,
                 request_id: None,
                 no_overlay: false,
-            }),
-            output: Some(BuildOutput {
-                preview_path: None,
-                preview_state: None,
-                preview_error: None,
-                preview_captured_at: None,
-                preview_source: None,
+            }},
+            phase: JobPhase::Succeeded { preview: PreviewState::Absent, output: BuildOutput {
                 archive_path: None,
                 ipa_path: None,
-                app_path: None,
+                app_path: Some("/Example.app".into()),
                 dsym_paths: vec![],
                 bundle_id: "dev.example.app".into(),
                 version: "1".into(),
                 build_number: "1".into(),
                 title: "Build title".into(),
-            }),
+            }},
         }
     }
 
@@ -726,10 +718,8 @@ mod tests {
         let source = temp.path().join("capture.png");
         fs::write(&source, PNG)?;
         let mut job = build(&registration);
-        let output = job.output.as_mut().unwrap();
-        output.preview_path = Some(source);
-        output.preview_captured_at = Some(100);
-        output.preview_source = Some("built_simulator_product".into());
+        let shot = |captured_at, source| PreviewState::Ready(PreviewArtifact { path: temp.path().join("capture.png"), captured_at, source: Some(source) });
+        job.set_preview(shot(100, PreviewSource::BuiltSimulatorProduct));
         store.save_job(&job)?;
         let captured = sync_build_preview(&store, &job)?;
         assert_eq!(captured.id, edited.id);
@@ -749,10 +739,9 @@ mod tests {
             Some("submitted-revision")
         );
         assert_eq!(sync_build_preview(&store, &job)?, captured);
-        job.output.as_mut().unwrap().preview_captured_at = Some(99);
+        job.set_preview(shot(99, PreviewSource::BuiltSimulatorProduct));
         assert_eq!(sync_build_preview(&store, &job)?, captured);
-        job.output.as_mut().unwrap().preview_captured_at = Some(101);
-        job.output.as_mut().unwrap().preview_source = Some("current_working_tree".into());
+        job.set_preview(shot(101, PreviewSource::CurrentWorkingTree));
         store.save_job(&job)?;
         let rebuilt = sync_build_preview(&store, &job)?;
         assert_ne!(
@@ -771,7 +760,7 @@ mod tests {
         let agent_preview = publish_preview(
             &store,
             &app.id,
-            publication(job.output.as_ref().unwrap().preview_path.clone().unwrap()),
+            publication(source),
         )?;
         assert_eq!(agent_preview.preview.as_ref().unwrap().source, "agent");
         assert_eq!(sync_build_preview(&store, &job)?, agent_preview);
@@ -785,7 +774,9 @@ mod tests {
         let source = temp.path().join("capture.png");
         fs::write(&source, PNG)?;
         let mut job = build(&registration);
-        job.output.as_mut().unwrap().bundle_id = "dev.other.app".into();
+        if let JobPhase::Succeeded { output, .. } = &mut job.phase {
+            output.bundle_id = "dev.other.app".into();
+        }
         store.save_job(&job)?;
         let mut request = publication(source);
         request.build_id = Some(job.id);

@@ -665,34 +665,27 @@ fn sync_dir(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BuildOutput, BuildState};
+    use crate::model::{BuildOrigin, BuildOutput};
 
     fn job() -> Job {
         Job {
             id: Uuid::new_v4().to_string(),
             created_at: 1,
             updated_at: 1,
-            state: BuildState::Succeeded,
-            request: None,
-            error: None,
-            source: "test".into(),
-            source_revision: None,
-            source_dirty: None,
-            output: Some(BuildOutput {
-                preview_path: None,
-                preview_state: None,
-                preview_error: None,
-                preview_captured_at: None,
-                preview_source: None,
-                archive_path: None,
-                ipa_path: None,
-                app_path: None,
-                dsym_paths: vec![],
-                bundle_id: "dev.example.app".into(),
-                version: "1.0".into(),
-                build_number: "1".into(),
-                title: "Example".into(),
-            }),
+            origin: BuildOrigin::Imported,
+            phase: JobPhase::Succeeded {
+                preview: PreviewState::Absent,
+                output: BuildOutput {
+                    archive_path: None,
+                    ipa_path: Some("/Example.ipa".into()),
+                    app_path: None,
+                    dsym_paths: vec![],
+                    bundle_id: "dev.example.app".into(),
+                    version: "1.0".into(),
+                    build_number: "1".into(),
+                    title: "Example".into(),
+                },
+            },
         }
     }
 
@@ -719,8 +712,7 @@ mod tests {
             build_id: job.id.clone(),
             expires_at: 44,
             base_url: "https://example.test".into(),
-            download_started_at: None,
-            downloaded_at: None,
+            transfer: crate::model::TransferEvidence::NotStarted,
         };
         store.save_ticket(&ticket)?;
         let control_token = store.settings.control_token.clone();
@@ -731,7 +723,7 @@ mod tests {
         assert_eq!(store.settings.diagnostic_token, diagnostic_token);
         assert_ne!(control_token, diagnostic_token);
         assert_eq!(
-            store.load_job(&job.id)?.output.unwrap().bundle_id,
+            store.load_job(&job.id)?.output().unwrap().bundle_id,
             "dev.example.app"
         );
         assert_eq!(store.list_jobs()?.len(), 1);
@@ -751,17 +743,18 @@ mod tests {
         store.save_job(&job)?;
         let artifact_path = store.job_dir(&job.id)?.join("app.ipa");
         fs::write(&artifact_path, b"artifact bytes")?;
-        job.output.as_mut().unwrap().ipa_path = Some(artifact_path);
+        if let JobPhase::Succeeded { output, .. } = &mut job.phase {
+            output.ipa_path = Some(artifact_path);
+        }
         store.save_job(&job)?;
         drop(store);
 
         let restarted = Store::open(root)?;
         let stored_path = restarted
             .load_job(&job.id)?
-            .output
+            .ipa()
             .unwrap()
-            .ipa_path
-            .unwrap();
+            .to_path_buf();
         assert!(stored_path.is_absolute());
         // Joining an unrelated cwd has no effect on an absolute persisted path;
         // avoid changing the process-wide cwd while other tests run in parallel.
@@ -865,7 +858,12 @@ mod tests {
             assert!(store.load_ticket(id).is_err());
         }
         let mut job = job();
-        job.output = None;
+        job.origin = BuildOrigin::Project {
+            request: serde_json::from_value(json!({"project": "/P.xcodeproj", "scheme": "P", "configuration": "Debug",
+                "mode": "simulator", "export_options": null, "request_id": null}))?,
+            provenance: Default::default(),
+        };
+        job.phase = JobPhase::Failed { message: "no product".into() };
         store.save_job(&job)?;
         assert!(
             store
@@ -943,8 +941,7 @@ mod tests {
             build_id: job.id.clone(),
             expires_at: 10,
             base_url: "https://example.test".into(),
-            download_started_at: None,
-            downloaded_at: None,
+            transfer: crate::model::TransferEvidence::NotStarted,
         };
         store.save_ticket(&ticket)?;
         for path in [
