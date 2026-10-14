@@ -235,38 +235,46 @@ fn app_image(image: &Image) -> bool {
     image.main || (image.path.contains(".app/") && !image.path.contains("SquircleOverlay.framework"))
 }
 
-/// Runs a symbol tool with a deadline, so a wedged `atos` or `dwarfdump`
-/// cannot hang `perf show`; its stdout, or nothing if it failed or timed out.
+/// Runs a symbol tool in its own process group with a deadline, so a wedged
+/// `atos` or `dwarfdump` cannot hang `perf show`; its stdout, or nothing if it
+/// failed, timed out or wrote more than 16 MiB. The leader is reaped only
+/// after its group is killed (as in `xcode::run_bounded`), so nothing it started
+/// outlives it and the output is read within the same deadline.
 fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> Option<Vec<u8>> {
+    use std::os::unix::process::CommandExt as _;
+    const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
+    let deadline = Instant::now() + limit;
     let mut child = command
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .process_group(0)
         .spawn()
         .ok()?;
+    let pid = child.id() as libc::pid_t;
     if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
         std::thread::spawn(move || { let _ = stdin.write_all(&input); });
     }
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (sender, output) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take()?;
+    std::thread::spawn(move || {
         let mut out = Vec::new();
-        let _ = stdout.read_to_end(&mut out);
-        out
+        let read = stdout.take(MAX_OUTPUT + 1).read_to_end(&mut out);
+        let _ = sender.send(read.ok().filter(|_| out.len() as u64 <= MAX_OUTPUT).map(|_| out));
     });
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
+    let ended = loop {
+        if crate::xcode::leader_exited(pid) {
+            break true;
         }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     };
-    let out = reader.join().ok()?;
-    status.filter(|s| s.success()).map(|_| out)
+    crate::xcode::kill_group(pid);
+    let status = child.wait().ok()?;
+    let out = output.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()??;
+    (ended && status.success()).then_some(out)
 }
 
 /// A symbol file whose identity matches the image: the file, and the
@@ -694,6 +702,25 @@ pub fn show(root: &Path, which: &str, given: &[PathBuf]) -> Result<(String, Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbol_tools_finish_within_their_deadline_and_leave_nothing_running() {
+        let started = Instant::now();
+        // The background sleep holds stdout after the shell exits.
+        let out = run(Command::new("/bin/sh").args(["-c", "cat; sleep 30 & echo $!"]), Some(b"in ".to_vec()), Duration::from_secs(10)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let out = String::from_utf8(out).unwrap();
+        let left: libc::pid_t = out.trim_start_matches("in ").trim().parse().unwrap();
+        let gone = (0..150).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            (unsafe { libc::kill(left, 0) }) != 0
+        });
+        assert!(gone);
+
+        let started = Instant::now();
+        assert!(run(Command::new("/bin/sleep").arg("30"), None, Duration::from_millis(300)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
 
     #[test]
     fn heaviest_path_follows_the_busiest_child() {
