@@ -11,8 +11,9 @@ use std::{
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    time::UNIX_EPOCH,
+    io::{Read as _, Write as _},
+    process::{Command, Stdio},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -32,27 +33,59 @@ pub fn captures_dir(root: &Path) -> PathBuf {
 /// "performance".
 pub fn store(root: &Path, kind: &str, bytes: &[u8]) -> Result<PathBuf> {
     ensure!(!bytes.is_empty() && bytes.len() <= MAX_UPLOAD_BYTES, "A capture must be between 1 byte and 300 MB");
+    let staged = staging_path(root)?;
+    let stored = crate::media::create_private(&staged)
+        .and_then(|mut file| Ok(file.write_all(bytes)?))
+        .and_then(|_| store_file(root, kind, &staged));
+    if stored.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    stored
+}
+
+/// A fresh hidden path in the private captures folder for an upload to be
+/// streamed into (create it with mode 0600), then passed to `store_file`.
+pub fn staging_path(root: &Path) -> Result<PathBuf> {
+    Ok(private_captures(root)?.join(format!(".{}.partial", uuid::Uuid::new_v4())))
+}
+
+fn private_captures(root: &Path) -> Result<PathBuf> {
+    crate::store::private_dir(root)?;
+    let dir = captures_dir(root);
+    crate::store::private_dir(&dir)?;
+    Ok(dir.canonicalize()?)
+}
+
+/// Checks an upload already written to `staged` (from `staging_path`) and
+/// moves it into the captures; returns its absolute path. On error the
+/// caller removes `staged`.
+pub fn store_file(root: &Path, kind: &str, staged: &Path) -> Result<PathBuf> {
+    let meta = fs::symlink_metadata(staged)?;
+    ensure!(meta.is_file(), "An upload must be a regular file");
+    let size = meta.len() as usize;
+    ensure!(size > 0 && size <= MAX_UPLOAD_BYTES, "A capture must be between 1 byte and 300 MB");
     let extension = match kind {
         "video" => {
-            ensure!(bytes.len() > 12 && &bytes[4..8] == b"ftyp", "A screen recording must be an MP4 file");
+            let mut head = [0u8; 12];
+            let read = fs::File::open(staged)?.read(&mut head)?;
+            ensure!(size > 12 && read == 12 && &head[4..8] == b"ftyp", "A screen recording must be an MP4 file");
             "mp4"
         }
         "performance" => {
-            ensure!(bytes.len() <= MAX_PERF_BYTES, "A performance capture must be at most 64 MB");
-            let capture: Capture = serde_json::from_slice(bytes).context("A performance capture must be Squircle perf JSON")?;
+            ensure!(size <= MAX_PERF_BYTES, "A performance capture must be at most 64 MB");
+            let capture: Capture = serde_json::from_slice(&fs::read(staged)?).context("A performance capture must be Squircle perf JSON")?;
             ensure!(capture.format == "squircle-perf", "Not a Squircle performance capture");
             "perf.json"
         }
         _ => bail!("kind must be video or performance"),
     };
-    let dir = captures_dir(root);
-    fs::create_dir_all(&dir)?;
-    let dir = dir.canonicalize()?;
-    let id = uuid::Uuid::new_v4();
-    let path = dir.join(format!("{id}.{extension}"));
-    let partial = dir.join(format!(".{id}.partial"));
-    fs::write(&partial, bytes)?;
-    fs::rename(&partial, &path)?;
+    let path = private_captures(root)?.join(format!("{}.{extension}", uuid::Uuid::new_v4()));
+    fs::rename(staged, &path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
     Ok(path)
 }
 
@@ -202,56 +235,113 @@ fn app_image(image: &Image) -> bool {
     image.main || (image.path.contains(".app/") && !image.path.contains("SquircleOverlay.framework"))
 }
 
-fn dwarf_uuids(path: &Path) -> Vec<String> {
-    Command::new("xcrun").arg("dwarfdump").arg("--uuid").arg(path).output().ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines()
-            .filter_map(|l| l.strip_prefix("UUID: ").and_then(|r| r.split_whitespace().next()).map(str::to_uppercase))
-            .collect())
+/// Runs a symbol tool with a deadline, so a wedged `atos` or `dwarfdump`
+/// cannot hang `perf show`; its stdout, or nothing if it failed or timed out.
+fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> Option<Vec<u8>> {
+    let mut child = command
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
+        std::thread::spawn(move || { let _ = stdin.write_all(&input); });
+    }
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.read_to_end(&mut out);
+        out
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let out = reader.join().ok()?;
+    status.filter(|s| s.success()).map(|_| out)
+}
+
+/// A symbol file whose identity matches the image: the file, and the
+/// architecture of the slice with that UUID.
+type Symbols = (PathBuf, String);
+
+/// `dwarfdump --uuid`: each slice's (UUID, architecture).
+fn dwarf_uuids(path: &Path) -> Vec<(String, String)> {
+    run(Command::new("xcrun").arg("dwarfdump").arg("--uuid").arg(path), None, Duration::from_secs(30))
+        .map(|out| parse_uuids(&String::from_utf8_lossy(&out)))
         .unwrap_or_default()
 }
 
-/// The symbol file for `image`: a given dSYM, a Squircle build's, one
+/// "UUID: 1A2B… (arm64) /path" lines.
+fn parse_uuids(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|l| {
+            let mut words = l.strip_prefix("UUID: ")?.split_whitespace();
+            let uuid = words.next()?.to_uppercase();
+            let arch = words.next()?.trim_start_matches('(').trim_end_matches(')').to_owned();
+            Some((uuid, arch))
+        })
+        .collect()
+}
+
+/// `file` (a DWARF file or binary) or the DWARF files in a dSYM bundle, if
+/// one has `uuid`. A file is checked like a bundle: a path is no identity.
+fn matching(path: &Path, uuid: &str, uuids: &dyn Fn(&Path) -> Vec<(String, String)>) -> Option<Symbols> {
+    let candidates: Vec<PathBuf> = if path.is_file() {
+        vec![path.to_path_buf()]
+    } else {
+        fs::read_dir(path.join("Contents/Resources/DWARF")).ok()?.flatten().map(|e| e.path()).collect()
+    };
+    candidates.into_iter().find_map(|file| {
+        let arch = uuids(&file).into_iter().find(|(u, _)| u == uuid)?.1;
+        Some((file, arch))
+    })
+}
+
+/// Where `image`'s symbols come from: a given dSYM, a Squircle build's, one
 /// Spotlight knows, or the binary itself when it is on this Mac (simulator).
-fn symbol_file(image: &Image, given: &[PathBuf], store: Option<&Store>, preferred_job: Option<&str>) -> Option<(PathBuf, String)> {
+/// Each must carry the image's UUID. `Err` names given files that didn't.
+fn symbol_file(image: &Image, given: &[PathBuf], store: Option<&Store>, preferred_job: Option<&str>) -> Result<(Symbols, String), String> {
     let uuid = image.uuid.to_uppercase();
     if uuid.is_empty() {
-        return None;
+        return Err(String::new());
     }
-    let dwarf_in = |dsym: &Path| -> Option<PathBuf> {
-        if dsym.is_file() {
-            return Some(dsym.to_path_buf());
-        }
-        let dir = dsym.join("Contents/Resources/DWARF");
-        fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| dwarf_uuids(p).contains(&uuid))
-    };
-    for dsym in given {
-        if let Some(file) = dwarf_in(dsym) {
-            return Some((file, "given dSYM".into()));
-        }
+    let uuids = &dwarf_uuids;
+    if let Some(found) = given.iter().find_map(|dsym| matching(dsym, &uuid, uuids)) {
+        return Ok((found, "given dSYM".into()));
     }
     if let Some(store) = store {
         let mut jobs = store.list_jobs().unwrap_or_default();
         jobs.sort_by_key(|j| preferred_job != Some(j.id.as_str()));
         for job in jobs {
             for dsym in job.output.iter().flat_map(|o| o.dsym_paths.iter()) {
-                if let Some(file) = dwarf_in(dsym) {
-                    return Some((file, format!("dSYM of build {}", job.id)));
+                if let Some(found) = matching(dsym, &uuid, uuids) {
+                    return Ok((found, format!("dSYM of build {}", job.id)));
                 }
             }
         }
     }
-    if let Ok(found) = Command::new("mdfind").arg(format!("com_apple_xcode_dsym_uuids == {uuid}")).output() {
-        for line in String::from_utf8_lossy(&found.stdout).lines() {
-            if let Some(file) = dwarf_in(Path::new(line)) {
-                return Some((file, "dSYM found by Spotlight".into()));
-            }
+    let spotlight = run(Command::new("mdfind").arg(format!("com_apple_xcode_dsym_uuids == {uuid}")), None, Duration::from_secs(15));
+    for line in String::from_utf8_lossy(&spotlight.unwrap_or_default()).lines() {
+        if let Some(found) = matching(Path::new(line), &uuid, uuids) {
+            return Ok((found, "dSYM found by Spotlight".into()));
         }
     }
     let binary = Path::new(&image.path);
-    if binary.is_file() && dwarf_uuids(binary).contains(&uuid) {
-        return Some((binary.to_path_buf(), "the binary on this Mac".into()));
+    if binary.is_file() {
+        if let Some(found) = matching(binary, &uuid, uuids) {
+            return Ok((found, "the binary on this Mac".into()));
+        }
     }
-    None
+    Err(if given.is_empty() { String::new() } else { "the given --dsym is a different build".into() })
 }
 
 /// Xcode's copy of the phone's system libraries, for system frames.
@@ -267,13 +357,26 @@ fn device_support(image: &Image, device: &DeviceInfo) -> Option<PathBuf> {
     file.is_file().then_some(file)
 }
 
+/// Symbols for a system image, only from a file with its UUID.
+fn system_file(image: &Image, device: &DeviceInfo) -> Option<Symbols> {
+    let uuid = image.uuid.to_uppercase();
+    if uuid.is_empty() {
+        return None;
+    }
+    let local = Path::new(&image.path);
+    device_support(image, device)
+        .into_iter()
+        .chain(local.is_file().then(|| local.to_path_buf()))
+        .find_map(|file| matching(&file, &uuid, &dwarf_uuids))
+}
+
 /// `atos` for one image's addresses; one name per address, in order.
-fn atos(file: &Path, load: &str, addresses: &[u64]) -> Vec<Option<String>> {
+fn atos((file, arch): &Symbols, load: &str, addresses: &[u64]) -> Vec<Option<String>> {
     let mut names = Vec::with_capacity(addresses.len());
     for chunk in addresses.chunks(400) {
-        let output = Command::new("xcrun").args(["atos", "-arch", "arm64", "-o"]).arg(file).args(["-l", load])
-            .args(chunk.iter().map(|a| format!("{a:#x}"))).output();
-        let lines: Vec<String> = output.map(|o| String::from_utf8_lossy(&o.stdout).lines().map(str::to_owned).collect()).unwrap_or_default();
+        let output = run(Command::new("xcrun").args(["atos", "-arch", arch, "-o"]).arg(file).args(["-l", load])
+            .args(chunk.iter().map(|a| format!("{a:#x}"))), None, Duration::from_secs(60));
+        let lines: Vec<String> = output.map(|o| String::from_utf8_lossy(&o).lines().map(str::to_owned).collect()).unwrap_or_default();
         for i in 0..chunk.len() {
             let line = lines.get(i).cloned().unwrap_or_default();
             // atos echoes an address it can't name.
@@ -324,15 +427,22 @@ fn resolve_frames(capture: &Capture, given: &[PathBuf], store: Option<&Store>) -
         let Some(image) = capture.images.get(*index) else { continue };
         let app = app_image(image);
         let file = if app {
-            let found = symbol_file(image, given, store, preferred);
-            match &found {
-                Some((_, source)) => sources.push(format!("{}: {source}", image.name)),
-                None => missing.push(format!("{} (UUID {})", image.name, image.uuid)),
+            match symbol_file(image, given, store, preferred) {
+                Ok((file, source)) => {
+                    sources.push(format!("{}: {source}", image.name));
+                    Some(file)
+                }
+                Err(why) if why.is_empty() => {
+                    missing.push(format!("{} (UUID {})", image.name, image.uuid));
+                    None
+                }
+                Err(why) => {
+                    missing.push(format!("{} (UUID {}; {why})", image.name, image.uuid));
+                    None
+                }
             }
-            found.map(|f| f.0)
         } else {
-            let path = Path::new(&image.path);
-            device_support(image, &capture.device).or_else(|| path.is_file().then(|| path.to_path_buf()))
+            system_file(image, &capture.device)
         };
         let names = file.as_ref().map(|f| atos(f, &image.load_address, addresses)).unwrap_or_default();
         for (i, address) in addresses.iter().enumerate() {
@@ -358,14 +468,8 @@ fn demangle(frames: &mut HashMap<u64, Frame>) {
             continue;
         }
         let input: String = keys.iter().map(|k| frames[k].symbol.clone() + "\n").collect();
-        let Ok(mut child) = Command::new("xcrun").arg(tool).args(&args).stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped()).spawn() else { continue };
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(input.as_bytes());
-        }
-        let Ok(output) = child.wait_with_output() else { continue };
-        for (key, line) in keys.iter().zip(String::from_utf8_lossy(&output.stdout).lines()) {
+        let Some(output) = run(Command::new("xcrun").arg(tool).args(&args), Some(input.into_bytes()), Duration::from_secs(30)) else { continue };
+        for (key, line) in keys.iter().zip(String::from_utf8_lossy(&output).lines()) {
             if let Some(frame) = frames.get_mut(key) {
                 frame.symbol = line.to_owned();
             }
@@ -598,6 +702,24 @@ mod tests {
         let s2: &[u64] = &[4, 1];
         let path = heaviest_path(&[s1, s1, s1, s2]);
         assert_eq!(path, vec![(1, 4), (2, 3), (3, 3)]);
+    }
+
+    #[test]
+    fn symbol_files_must_carry_the_image_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrong = dir.path().join("Old");
+        let right = dir.path().join("App.dSYM/Contents/Resources/DWARF/App");
+        fs::create_dir_all(right.parent().unwrap()).unwrap();
+        fs::write(&wrong, b"").unwrap();
+        fs::write(&right, b"").unwrap();
+        let text = "UUID: 1111AAAA-0000-0000-0000-000000000000 (arm64) x\nUUID: 2222bbbb-0000-0000-0000-000000000000 (arm64e) x";
+        assert_eq!(parse_uuids(text)[1], ("2222BBBB-0000-0000-0000-000000000000".into(), "arm64e".into()));
+        let uuids = |p: &Path| -> Vec<(String, String)> {
+            if p.ends_with("App") { parse_uuids(text) } else { vec![("9999".into(), "arm64".into())] }
+        };
+        assert_eq!(matching(&wrong, "1111AAAA-0000-0000-0000-000000000000", &uuids), None, "A given file from another build is not used.");
+        let bundle = dir.path().join("App.dSYM");
+        assert_eq!(matching(&bundle, "2222BBBB-0000-0000-0000-000000000000", &uuids), Some((right, "arm64e".into())));
     }
 
     #[test]

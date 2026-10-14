@@ -4,7 +4,8 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
+    fs::{self, File},
+    io::Write as _,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -50,6 +51,29 @@ fn directory(root: &Path, thread: &str) -> Result<PathBuf> {
     Ok(root.join("threads").join(thread).join("media"))
 }
 
+/// Creates the thread's media folder and its parents as private store
+/// directories (0700, no symlinks), whatever the umask.
+fn private_directory(root: &Path, thread: &str) -> Result<PathBuf> {
+    let dir = directory(root, thread)?;
+    for path in [root.to_path_buf(), root.join("threads"), root.join("threads").join(thread), dir.clone()] {
+        crate::store::private_dir(&path)?;
+    }
+    Ok(dir)
+}
+
+/// A new private file (0600); fails if anything, a symlink included, is
+/// already at `path`.
+pub(crate) fn create_private(path: &Path) -> Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path).with_context(|| format!("Creating {}", path.display()))
+}
+
 fn kind(path: &Path) -> Result<(&'static str, &'static str)> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     Ok(match ext.as_str() {
@@ -75,13 +99,11 @@ pub fn add_recording(root: &Path, thread: &str, file: &Path, clip: SimulatorClip
 /// Where a recording in progress is written: beside the media it will join,
 /// hidden from listings until it is moved in.
 pub fn recording_path(root: &Path, thread: &str, session: &str) -> Result<PathBuf> {
-    let dir = directory(root, thread)?;
-    fs::create_dir_all(&dir)?;
-    Ok(dir.join(format!(".{session}.recording.mp4")))
+    Ok(private_directory(root, thread)?.join(format!(".{session}.recording.mp4")))
 }
 
 fn store(root: &Path, thread: &str, file: &Path, caption: Option<&str>, simulator: Option<SimulatorClip>, take: bool) -> Result<Media> {
-    store_in(&directory(root, thread)?, thread, file, caption, simulator, take)
+    store_in(&private_directory(root, thread)?, thread, file, caption, simulator, take)
 }
 
 /// Copies `file` into another owner's media folder (a task's, say); its
@@ -97,16 +119,28 @@ fn store_in(dir: &Path, thread: &str, file: &Path, caption: Option<&str>, simula
     if size == 0 || size > MAX_BYTES {
         bail!("Media must be between 1 byte and 512 MB");
     }
-    fs::create_dir_all(&dir)?;
+    crate::store::private_dir(&dir)?;
     let id = uuid::Uuid::new_v4().to_string();
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_ascii_lowercase();
     let stored = dir.join(format!("{id}.{ext}"));
     let partial = dir.join(format!(".{id}.partial"));
     if take {
         fs::rename(file, &stored).context("Moving the recording into media")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stored, fs::Permissions::from_mode(0o600))?;
+        }
     } else {
-        fs::copy(file, &partial).context("Copying media")?;
-        fs::rename(&partial, &stored)?;
+        let copied = (|| -> Result<()> {
+            std::io::copy(&mut File::open(file)?, &mut create_private(&partial)?)?;
+            Ok(fs::rename(&partial, &stored)?)
+        })()
+        .context("Copying media");
+        if copied.is_err() {
+            let _ = fs::remove_file(&partial);
+        }
+        copied?;
     }
     // A recording belongs where its session began.
     let created_at = match &simulator {
@@ -126,7 +160,7 @@ fn store_in(dir: &Path, thread: &str, file: &Path, caption: Option<&str>, simula
     };
     let record = dir.join(format!("{id}.json"));
     let partial = dir.join(format!(".{id}.json.partial"));
-    fs::write(&partial, serde_json::to_vec_pretty(&media)?)?;
+    create_private(&partial)?.write_all(&serde_json::to_vec_pretty(&media)?)?;
     fs::rename(&partial, &record)?;
     Ok(media)
 }
@@ -182,6 +216,15 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].caption, "Tapping through onboarding");
         assert_eq!(get(root.path(), thread, &media.id).unwrap().bytes, 18);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&root.path().join("threads")), 0o700, "Private whatever the umask.");
+            assert_eq!(mode(&root.path().join("threads").join(thread)), 0o700);
+            assert_eq!(mode(&media.file), 0o600);
+            assert_eq!(mode(&media.file.with_extension("json")), 0o600);
+        }
         assert!(add(root.path(), "../etc", &clip, None).is_err());
         let text = root.path().join("notes.txt");
         fs::write(&text, b"x").unwrap();

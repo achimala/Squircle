@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 use squircle::{model::*, store::Store};
@@ -111,7 +111,8 @@ enum Commands {
         #[command(subcommand)]
         command: PerfCommand,
     },
-    /// Publish a recording or image into a T3 thread so Squircle shows it inline.
+    /// Publish a recording or image into a T3 thread so Squircle shows it inline (this Mac's service only).
+    #[command(after_help = "Writes this Mac's data directory directly, so it needs a --server on this Mac (the default) using that same --data-dir. Simulator sessions file their own recordings: squircle sim --help.")]
     Media {
         #[command(subcommand)]
         command: MediaCommand,
@@ -183,6 +184,9 @@ enum AgentCommand {
         message: Option<String>,
         #[arg(long, help = "Claude model slug; default: the project's default or claude-opus-5-5")]
         model: Option<String>,
+        #[arg(long, value_parser = ["approval-required", "auto-accept-edits", "auto", "full-access"],
+            help = "T3 runtime mode the agent's thread is created with, before its first turn; default: the service's")]
+        runtime_mode: Option<String>,
     },
     /// List app agents and the service's T3 connection.
     List,
@@ -383,7 +387,7 @@ enum PerfCommand {
 #[derive(Subcommand)]
 enum MediaCommand {
     /// Copy an mp4/mov/png/jpg into the thread's media; the phone shows it in the conversation.
-    #[command(after_help = "Record a simulator flow first, for example with T3's agent-device: record start /tmp/demo.mp4 --scope device … record stop.")]
+    #[command(after_help = "To show a simulator flow, use squircle sim start / sim stop instead: the session records itself and the recording appears in your turn.")]
     Add {
         #[arg(long, help = "T3 thread ID shown in the agent's instructions")]
         thread: String,
@@ -574,6 +578,17 @@ enum AppCommand {
     },
 }
 
+/// Whether `server` is a service on this Mac, which local-only commands
+/// (`media`) can stand in for by writing its data directory.
+fn local_server(server: &str) -> bool {
+    url::Url::parse(server).is_ok_and(|url| match url.host() {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    })
+}
+
 fn root(cli: &Cli) -> Result<PathBuf> {
     Ok(cli.data_dir.clone().unwrap_or(
         dirs::data_local_dir()
@@ -721,7 +736,8 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"},
+                "invocation":squircle::agents::cli_invocation(&std::path::absolute(root(cli)?)?, &cli.server)}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -1014,6 +1030,11 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
         }
         Commands::Media { command } => {
             let root = root(cli)?;
+            ensure!(
+                local_server(&cli.server),
+                "media writes this Mac's data directory and cannot publish to {}; run it on the service's Mac with its --data-dir",
+                cli.server
+            );
             match command {
                 MediaCommand::Add { thread, file, caption } => {
                     let media = squircle::media::add(&root, thread, file, caption.as_deref())?;
@@ -1059,8 +1080,8 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
         },
         Commands::Agent { command } => match command {
             AgentCommand::Setup { remove } => success(squircle::agents::setup(&root(cli)?, &cli.server, *remove).await?),
-            AgentCommand::Start { project, message, model } => {
-                post(cli, "/v1/agents", json!({"project_id":project,"message":message,"model":model})).await?
+            AgentCommand::Start { project, message, model, runtime_mode } => {
+                post(cli, "/v1/agents", json!({"project_id":project,"message":message,"model":model,"runtime_mode":runtime_mode})).await?
             }
             AgentCommand::List => get(cli, "/v1/agents").await?,
             AgentCommand::Restart { target } => {
