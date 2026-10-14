@@ -311,6 +311,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SQUIRCLE_TASKS"] == nil { ScrollSweep.start(table) }
+        #endif
         view.backgroundColor = .clear
         view.accessibilityViewIsModal = true
 
