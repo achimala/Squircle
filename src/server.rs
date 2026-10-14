@@ -623,7 +623,7 @@ async fn start(
             sync_job_app(&state, &job).await;
         }
         if let Some(push) = &state.push {
-            push.build_finished(&job);
+            push.build_finished(&job, None);
         }
         state.cancellations.lock().unwrap().remove(&job.id);
         drop(permit);
