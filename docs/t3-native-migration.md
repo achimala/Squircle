@@ -998,6 +998,30 @@ poke open, type, pull down by the face), light and dark, frame by frame at
 paper in both appearances. Clips: `attachments/overlay-bubble/jelly2-*.mp4`.
 Not on the phone.
 
+Third round (user: "too jiggly and the eyes are twitchy … should probably be a
+squircle … rounded 3d cubeoid … a little less creepy if the jelly dude were
+detached … extends/pushes above … faintly blur"):
+
+- The creature is its own body: a rounded cube of frosted jelly raymarched in
+  perspective (top and side faces show; it leans into its motion and toward
+  what it looks at), eyes on its front. It sits at the status pill's end,
+  joined by a liquid neck (a smooth union of the two outlines that stretches
+  as the creature follows a step behind). Open, it rises above the panel's top
+  edge as a head on the same neck; the head is the handle (drag to resize,
+  tap for full screen, pull down to close). The panel and full screen leave
+  room above for it.
+- Calmer: the blob's squash and lag are a third of before and well damped;
+  only the frame's real motion moves it. The creature squashes when poked,
+  gulps finished tasks, hops every few seconds when it needs you.
+- Eyes: glances are held targets reached on a critically damped spring (reading
+  along the line a word at a time while working); blinks are timed, 0.24 s.
+- Both bodies blur the app behind them (live system blur masked to their
+  outline); the panel's paper is a little translucent.
+
+Verified the same way (real touches including head tap, full screen and pull
+down; light and dark). Clips: `attachments/overlay-bubble/jelly3-*.mp4`.
+Not on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was

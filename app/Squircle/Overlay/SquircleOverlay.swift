@@ -117,6 +117,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private static let inset: CGFloat = 12
     /// Concentric with the 44-point controls at `inset`.
     private static let panelRadius: CGFloat = 22 + inset
+    /// The creature's place at the end of the status pill.
+    private static let creatureCell: CGFloat = 44
+    /// Room above the panel for the creature's head.
+    private static let headRoom: CGFloat = 34
+    /// The creature's head, open: drag it like the handle, tap it for full screen.
+    private let headHandle = UIView()
+    private var headPan: UIPanGestureRecognizer!
     /// Stretched with the glass; holds the bubble's line at its own size.
     private let bubbleStage = UIView()
     private let bubble = LiveCapsule()
@@ -204,7 +211,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubble.showsTime = false
         bubble.onHeadlineChange = { [weak self] in self?.retarget() }
         // The jelly's eyes sit where the mark was; its colour is the tone.
-        bubble.markSlot = 22
+        bubble.markSlot = 0
         bubble.tintsText = false
         bubble.textColor = .label.withAlphaComponent(0.75)
         bubble.onLineChange = { [weak self] in self?.glass.gulp() }
@@ -253,6 +260,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         flashFade.onRest = { [weak self] _ in self?.flash.removeFromSuperview() }
         flight.onChange = { [weak self] _ in self?.applyFlight() }
         flight.onRest = { [weak self] _ in self?.landed() }
+        headPan = UIPanGestureRecognizer(target: self, action: #selector(handleDragged(_:)))
+        headPan.delegate = self
+        headHandle.addGestureRecognizer(headPan)
+        headHandle.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTapped)))
+        headHandle.isAccessibilityElement = true
+        headHandle.accessibilityTraits = .adjustable
+        headHandle.accessibilityLabel = "Resize"
+        view.addSubview(headHandle)
         handlePan = UIPanGestureRecognizer(target: self, action: #selector(handleDragged(_:)))
         handlePan.delegate = self
         handle.addGestureRecognizer(handlePan)
@@ -358,10 +373,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private var safeBounds: CGRect { view.bounds.inset(by: view.safeAreaInsets).insetBy(dx: Self.inset, dy: Self.inset) }
 
+    /// The status pill and, at its end, the creature; the creature alone
+    /// when there is nothing to say.
     private var bubbleSize: CGSize {
-        let limit = min(300, view.bounds.width * 0.72)
+        let limit = min(300, view.bounds.width * 0.72) - Self.creatureCell
         bubble.widthLimit = limit
-        return CGSize(width: bubble.preferredWidth(limit: limit, height: 44), height: 44)
+        guard bubble.headline?.isEmpty == false else { return CGSize(width: Self.creatureCell, height: 44) }
+        return CGSize(width: bubble.preferredWidth(limit: limit, height: 40) + Self.creatureCell, height: 44)
     }
 
     private var bubbleFrame: CGRect {
@@ -381,12 +399,18 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let height = (miniHeight ?? min(safe.height * 0.66, 600)).clamped(Self.minimumHeight, safe.height)
         let size = CGSize(width: min(safe.width, 390), height: height)
         var y = lower ? bubble.maxY - size.height : bubble.minY
-        y = y.clamped(safe.minY, max(safe.minY, min(safe.maxY, keyboardTop - 8) - size.height))
+        y = y.clamped(safe.minY + Self.headRoom, max(safe.minY + Self.headRoom, min(safe.maxY, keyboardTop - 8) - size.height))
         return CGRect(x: bubble.midX > view.bounds.midX ? safe.maxX - size.width : safe.minX, y: y,
                       width: size.width, height: size.height)
     }
 
-    private var targetFrame: CGRect { !route.open ? bubbleFrame : route.full ? view.bounds : miniFrame }
+    private var targetFrame: CGRect { !route.open ? bubbleFrame : route.full ? fullFrame : miniFrame }
+
+    /// Full screen, below the status bar's room for the creature's head.
+    private var fullFrame: CGRect {
+        let top = view.safeAreaInsets.top + 26
+        return CGRect(x: 0, y: top, width: view.bounds.width, height: view.bounds.height - top)
+    }
 
     /// Shorter than this, a released handle closes the panel.
     private static let minimumHeight: CGFloat = 180
@@ -397,7 +421,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // A finger on the handle sets the content up itself.
         if !route.open { liveLayout = false }
         if clipLayout == nil, dragZone == nil, route.open || panelSize == .zero {
-            let size = route.open && route.full ? view.bounds.size : miniFrame.size
+            let size = route.open && route.full ? fullFrame.size : miniFrame.size
             // The panel showing in full moves to the other panel size live;
             // only content arriving from the bubble cross-blurs.
             let shown = panelSize != .zero && page.alpha > 0.98 && !page.isHidden && outgoing == nil && view.window != nil
@@ -420,7 +444,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Lays the panel's content out at a new resting size. If it shows (and
     /// `crossBlur`), a picture of how it was blurs out as the glass stretches.
     private func layOutPanel(at size: CGSize, crossBlur: Bool = true, safe given: UIEdgeInsets? = nil) {
-        let safe = given ?? (size == view.bounds.size ? view.safeAreaInsets : .zero)
+        let safe = given ?? (size == fullFrame.size ? safeArea(in: fullFrame) : .zero)
         guard size != panelSize || safe != panelSafe, size.width > 0 else { return }
         outgoing?.view.removeFromSuperview()
         outgoing = nil
@@ -486,7 +510,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // changes never reads as opening. 0…1 mini → full.
         let openHeight = min(panelSize.height, outgoing?.size.height ?? .greatestFiniteMagnitude)
         let opened = clipLayout != nil ? 1 : ((rect.height - bubbleSize.height) / max(1, openHeight - bubbleSize.height)).clamped()
-        let fullness = ((rect.height - miniFrame.height) / max(1, bounds.height - miniFrame.height)).clamped()
+        let fullness = ((rect.height - miniFrame.height) / max(1, fullFrame.height - miniFrame.height)).clamped()
         // Appearing, it grows in place from its own centre.
         let appeared = appear.value
         glass.transform = .identity
@@ -497,28 +521,39 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             glass.transform = CGAffineTransform(scaleX: scale, y: scale)
         }
         glass.alpha = (appeared * 1.6).clamped()
-        // Full screen, its corners follow the display's.
-        glass.cornerRadius = min(rect.height / 2, rect.width / 2, .lerp(Self.panelRadius, 54, fullness))
+        // Full screen, the corners round less.
+        let w = rect.width, h = rect.height, cell = Self.creatureCell
+        let right = anchor?.right ?? true
+        let hasLine = bubble.headline?.isEmpty == false
+        // Closed: the creature at the pill's end on the bubble's side, the
+        // pill beside it (tucked under it when there is nothing to say).
+        // Open: the creature rises above the panel's top edge as a head.
+        let creatureClosed = CGPoint(x: right ? w - cell / 2 : cell / 2, y: lower ? h - 22 : 22)
+        let pill = hasLine
+            ? CGRect(x: right ? 0 : cell, y: (lower ? h - 44 : 0) + 2, width: max(1, w - cell), height: 40)
+            : CGRect(x: creatureClosed.x - 12, y: creatureClosed.y - 12, width: 24, height: 24)
+        let eased = opened * opened * (3 - 2 * opened)
+        let creatureOpen = CGPoint(x: w / 2, y: -21)
+        glass.creatureAnchor = CGPoint(x: .lerp(creatureClosed.x, creatureOpen.x, eased), y: .lerp(creatureClosed.y, creatureOpen.y, eased))
+        glass.creatureSide = right ? 1 : -1
+        glass.bodyRect = CGRect(x: .lerp(pill.minX, 0, opened), y: .lerp(pill.minY, 0, opened),
+                                width: .lerp(pill.width, w, opened), height: .lerp(pill.height, h, opened))
+        glass.cornerRadius = .lerp(hasLine ? 16 : 10, .lerp(Self.panelRadius, 40, fullness), opened)
         glass.opened = opened
         glass.fill = Theme.paper
-        // Clear enough as a bubble to be glass, paper as a panel so text reads.
-        glass.fillAmount = .lerp(0.55, .lerp(0.9, 0.97, fullness), opened)
+        // A little translucent: the app shows through, faintly blurred.
+        glass.fillAmount = .lerp(0.3, .lerp(0.84, 0.92, fullness), opened)
         glass.tone = bubble.tone
         glass.typing = route.open && keyboardTop < view.bounds.maxY
-        // Eyes: beside the bubble's line; open, peeking just under the
-        // panel's top rim, above its buttons and text (where you grab it).
-        let w = rect.width
-        glass.bubbleEye = CGPoint(x: w <= bubbleSize.height + 0.5 ? w / 2 : .lerp(w / 2, 20, ((w - 44) / 20).clamped()), y: rect.height / 2)
-        glass.panelEye = CGPoint(x: w / 2, y: panelSafe.top + 11)
+        headHandle.frame = glass.creatureFrame.insetBy(dx: -8, dy: -8)
+        headHandle.isHidden = !route.open
+        view.bringSubviewToFront(headHandle)
 
-        // Each content is stretched to the glass: the bubble's line from its
-        // own size (laid out at the glass's width while it is just a bubble),
-        // the conversation from where it rests.
-        let lineWidth = CGFloat.lerp(rect.width, bubbleSize.width, (opened * 10).clamped())
-        stretch(bubbleStage, from: CGSize(width: lineWidth, height: bubbleSize.height), into: local)
+        // The status line sits in the pill, and leaves in the first fifth of
+        // the opening.
+        bubbleStage.transform = .identity
+        bubbleStage.frame = pill
         if bubble.frame.size != bubbleStage.bounds.size { bubble.frame = bubbleStage.bounds }
-        // The line leaves in the first fifth of the opening, before the
-        // stretch shows on it.
         bubbleStage.alpha = (1 - opened * 5).clamped()
         if let clip = clipLayout {
             // Revealed from the bottom by the glass, at its laid-out size.
@@ -903,7 +938,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             return route.open && !route.full && point.y < inset + 48 && point.x > inset + 48 && point.x < body.bounds.width - inset - 48
                 && !handle.frame.contains(point)
         }
-        if gesture === handlePan { return route.open }
+        if gesture === handlePan || gesture === headPan { return route.open }
         return true
     }
 
@@ -943,7 +978,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             let top = dragStart.minY + dy + vy * 0.15
             let tall = tallestDocked
             frame.release()
-            if top < tall.minY - 0.4 * (tall.minY - view.bounds.minY) {
+            if top < tall.minY - 0.4 * (tall.minY - fullFrame.minY) {
                 enter(.full)
                 route.full = true
             } else if top > collapseTop + 0.4 * (Self.minimumHeight - bubbleSize.height) {
@@ -984,7 +1019,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The tallest docked panel: the docked panel's sides and bottom, its top
     /// just under the safe area.
     private var tallestDocked: CGRect {
-        let docked = miniFrame, top = safeBounds.minY
+        let docked = miniFrame, top = safeBounds.minY + Self.headRoom
         return CGRect(x: docked.minX, y: top, width: docked.width, height: docked.maxY - top)
     }
 
@@ -993,7 +1028,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     /// Holds the glass where the finger's top edge puts it on the path.
     private func follow(top: CGFloat) {
-        let tall = tallestDocked, full = view.bounds
+        let tall = tallestDocked, full = fullFrame
         let zone: DragZone = top < tall.minY ? .full : top > collapseTop ? .collapse : .docked
         enter(zone)
         let rect: CGRect

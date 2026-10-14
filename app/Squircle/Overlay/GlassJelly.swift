@@ -2,23 +2,25 @@
 import Metal
 import UIKit
 
-/// The overlay's one piece of jelly: the bubble, and grown, the panel that
-/// holds the conversation (user, 2026-10-14: "frosted glass 3d jelly … let
-/// the jelly become the platter … more jiggle physics … make it feel more
-/// alive again" with eyes).
+/// The overlay's jelly (user, 2026-10-14). Two bodies of frosted glass jelly
+/// joined by a liquid neck:
 ///
-/// Material: the app behind, frosted by the system's live blur masked to the
-/// outline; a handwritten Metal shader lighting it as a soft cushion (tint
-/// deepening at the rim, a rim lit toward the light, a gloss streak, a glint,
-/// light gathered inside) and filling it with paper as it opens so text
-/// reads; a soft shadow in its colour; two eyes inside it.
+/// - the **blob**: the status line's pill, and grown, the panel holding the
+///   conversation (a soft cushion that fills with paper as it opens);
+/// - the **creature**: a rounded cube of jelly, drawn in 3D with perspective
+///   (its top and a side face show; it leans into its motion and toward a
+///   touch), with two eyes on its front. It sits at the pill's end while the
+///   agent works, and rises above the panel's top edge as a head when open.
 ///
-/// Motion is a small soft body, not noise. Its owner only sets the frame (a
-/// spring); the jelly feels that frame's acceleration and resizing and its
-/// body lags, squashes, stretches and shears on damped springs, then rings
-/// down. The outline is always the rest squircle under an affine squash and
-/// shear with its edges pillowed outward, so it can bulge and wobble but
-/// never dent. Taps, finished tasks and state changes kick the same springs.
+/// The neck is a smooth union of the two outlines, so it thins as they part
+/// and pinches if the creature, on its own lagging spring, pulls too far.
+/// Behind both, the app is faintly blurred (the system's live blur, masked).
+///
+/// Motion: the owner only sets the frame and where the creature belongs. The
+/// blob feels the frame's acceleration and gives a little (damped squash and
+/// shear of the rest shape, edges pillowed outward, never dented); the
+/// creature follows a step behind, squashes when touched or landing, hops for
+/// attention. Eyes move in eased glances with holds and blink on a timer.
 @MainActor
 final class GlassJelly: UIView {
     var tone = LiveCapsule.Tone.idle {
@@ -26,65 +28,81 @@ final class GlassJelly: UIView {
             guard tone != oldValue else { return }
             toneTime = 0
             switch tone {
-            case .done: kick(squash: 140, shear: 50)
-            case .needsYou: kick(squash: -70, hop: -90)
-            case .working: kick(squash: 40)
-            case .idle: break
+            case .done: creatureSquash.velocity -= 1.6
+            case .needsYou: hop.velocity -= 70
+            case .working, .idle: break
             }
         }
     }
-    /// The conversation and the bubble's line: masked to the outline and
-    /// carried by the body as it wobbles.
+    /// The status line or the conversation: masked to the blob, carried by it.
     let content = UIView()
-    /// The rest shape's corner radius.
-    var cornerRadius: CGFloat = 22
-    /// 0 bubble … 1 panel: fills with `fill`, calms down, eyes move to `panelEye`.
+    /// The blob's rest shape, in bounds coordinates.
+    var bodyRect = CGRect(x: 0, y: 0, width: 44, height: 44)
+    var cornerRadius: CGFloat = 18
+    /// Where the creature belongs, in bounds coordinates (its centre).
+    var creatureAnchor = CGPoint(x: 22, y: 22)
+    /// +1 when the creature sits to the right of the blob, -1 to the left.
+    var creatureSide: CGFloat = 1
+    static let creatureSize: CGFloat = 34
+    /// 0 bubble … 1 panel: fills with paper, calms down.
     var opened: CGFloat = 0
     var fill = UIColor.white
     var fillAmount: CGFloat = 0
-    /// Where the eyes sit (bounds coordinates) as a bubble and as a panel.
-    var bubbleEye = CGPoint(x: 22, y: 22)
-    var panelEye = CGPoint(x: 22, y: 22)
     /// The keyboard is up: it watches the field.
     var typing = false
 
+    /// The creature as drawn now, in the superview's coordinates.
+    var creatureFrame: CGRect {
+        let s = Self.creatureSize
+        return CGRect(x: creatureWorld.x - s / 2, y: creatureWorld.y - s / 2, width: s, height: s)
+    }
+
     private let shadow = CAShapeLayer()
+    private let creatureShadow = CAShapeLayer()
     private let frost = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
     private let frostMask = ShapeView()
     private let contentMask = CAShapeLayer()
     private let metal = CAMetalLayer()
-    /// The eyes, drawn by the same shader above the content, so text
-    /// scrolling under the panel's top never runs through its face.
-    private let face = CAMetalLayer()
-    private static let margin: CGFloat = 36
+    private let creatureLayer = CAMetalLayer()
+    private static let margin: CGFloat = 60
 
-    // Body: squash (points the sides move out, the top and bottom in),
+    // Blob: squash (points the sides move out, the top and bottom in),
     // shear (points the top moves left), lag (points behind the frame).
     private var squash = Mode(), shear = Mode(), lagX = Mode(), lagY = Mode()
-    private var pressed = false
-    private var lastPosition: CGPoint?
-    private var lastSize: CGSize?
+    private var lastPosition: CGPoint?, lastSize: CGSize?
     private var velocity = CGPoint.zero, sizeVelocity = CGSize.zero
     private var accel = CGPoint.zero, sizeAccel = CGSize.zero
 
-    // Face.
-    private var lookX = Wobble(0, response: 0.22, damping: 0.75)
-    private var lookY = Wobble(0, response: 0.22, damping: 0.75)
-    private var lid = Wobble(1, response: 0.06, damping: 1)
-    private var happy = Wobble(0, response: 0.25, damping: 0.8)
-    private var squint = Wobble(0, response: 0.1, damping: 0.9)
-    private var worry = Wobble(0, response: 0.3, damping: 0.9)
+    // Creature: its own place a step behind, squash, hop and lean.
+    private var creatureWorld = CGPoint.zero
+    private var creatureVelocity = CGPoint.zero
+    private var placedCreature = false
+    private var creatureSquash = Mode(), hop = Mode()
+    private var yaw = Wobble(0, response: 0.45, damping: 0.85)
+    private var pitch = Wobble(0, response: 0.45, damping: 0.85)
+    private var roll = Wobble(0, response: 0.5, damping: 0.85)
+    private var pressed = false
+
+    // Face: glances (eased, held), blinks (timed), expressions.
+    private var gazeX = Wobble(0, response: 0.16, damping: 1)
+    private var gazeY = Wobble(0, response: 0.16, damping: 1)
+    private var gazeHold: CGFloat = 0
+    private var readStep = 0
+    private var lid: CGFloat = 1
+    private var blinkStart: CGFloat = -1
+    private var nextBlink: CGFloat = 2.5
+    private var doubleBlink = false
+    private var happy = Wobble(0, response: 0.3, damping: 1)
+    private var squint = Wobble(0, response: 0.12, damping: 1)
+    private var worry = Wobble(0, response: 0.35, damping: 1)
+    private var squintUntil: CGFloat = 0
+    private var finger: (point: CGPoint, at: CGFloat)?
     private var tint = (r: Wobble(0, response: 0.35, damping: 1), g: Wobble(0, response: 0.35, damping: 1),
                         b: Wobble(0, response: 0.35, damping: 1), a: Wobble(0, response: 0.35, damping: 1))
     private var tintSet = false
-    private var finger: (point: CGPoint, at: CGFloat)?
-    private var squintUntil: CGFloat = 0
-    private var nextBlink: CGFloat = 1.5, blinkEnd: CGFloat = 0, secondBlink = false
-    private var nextGlance: CGFloat = 3, glance = CGPoint.zero
-    private var nextFidget: CGFloat = 1.5
-    private var nextHop: CGFloat = 0
 
     private var time: CGFloat = 0, toneTime: CGFloat = 0, glowTime: CGFloat = 0
+    private var nextHop: CGFloat = 1.5
     private var link: CADisplayLink?
     private var last: CFTimeInterval?
     private var drawn: JellyUniforms?
@@ -95,23 +113,25 @@ final class GlassJelly: UIView {
         shadow.fillColor = UIColor.clear.cgColor
         shadow.shadowOffset = CGSize(width: 0, height: 6)
         layer.addSublayer(shadow)
+        creatureShadow.fillColor = UIColor.clear.cgColor
+        creatureShadow.shadowOffset = CGSize(width: 0, height: 7)
+        creatureShadow.shadowRadius = 7
+        layer.addSublayer(creatureShadow)
         frostMask.shape.fillColor = UIColor.black.cgColor
         frost.mask = frostMask
         frost.isUserInteractionEnabled = false
         addSubview(frost)
-        metal.device = JellyRenderer.device
-        metal.pixelFormat = .bgra8Unorm
-        metal.isOpaque = false
-        metal.framebufferOnly = true
+        for target in [metal, creatureLayer] {
+            target.device = JellyRenderer.device
+            target.pixelFormat = .bgra8Unorm
+            target.isOpaque = false
+            target.framebufferOnly = true
+        }
         layer.addSublayer(metal)
         contentMask.fillColor = UIColor.black.cgColor
         content.layer.mask = contentMask
         addSubview(content)
-        face.device = JellyRenderer.device
-        face.pixelFormat = .bgra8Unorm
-        face.isOpaque = false
-        face.framebufferOnly = true
-        layer.addSublayer(face)
+        layer.addSublayer(creatureLayer)
     }
 
     @available(*, unavailable)
@@ -119,30 +139,20 @@ final class GlassJelly: UIView {
 
     // MARK: Events
 
-    /// A finished task: it swallows it (stretches up, then rings).
-    func gulp() { kick(squash: -55) }
+    /// A finished task: the creature gulps it down.
+    func gulp() { creatureSquash.velocity += 1.1 }
 
-    /// Somewhere a finger touched (bounds coordinates): it glances there.
-    func look(at point: CGPoint) { finger = (point, time) }
-
-    private func kick(squash s: CGFloat = 0, shear h: CGFloat = 0, hop: CGFloat = 0) {
-        guard !Motion.reduced else { return }
-        // A panel is heavier: the same news moves it less.
-        let calm = 1 - 0.75 * opened
-        squash.velocity += s * calm
-        shear.velocity += h * calm
-        lagY.velocity += hop * calm
+    /// Somewhere a finger touched (bounds coordinates).
+    func look(at point: CGPoint) {
+        if let finger, time - finger.at < 0.4, hypot(point.x - finger.point.x, point.y - finger.point.y) < 30 { return }
+        finger = (point, time)
+        gazeHold = 0
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         super.touchesBegan(touches, with: event)
         pressed = true
-        squintUntil = time + 0.45
-        kick(squash: 60)
-        if let touch = touches.first { look(at: touch.location(in: self)) }
-    }
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        super.touchesMoved(touches, with: event)
+        squintUntil = time + 0.5
         if let touch = touches.first { look(at: touch.location(in: self)) }
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -156,7 +166,7 @@ final class GlassJelly: UIView {
     private func letGo() {
         guard pressed else { return }
         pressed = false
-        kick(squash: -90)
+        creatureSquash.velocity -= 1.2
     }
 
     override func didMoveToWindow() {
@@ -166,7 +176,7 @@ final class GlassJelly: UIView {
         last = nil
         guard window != nil else { return }
         metal.contentsScale = min(2, window?.screen.scale ?? 2)
-        face.contentsScale = window?.screen.scale ?? 3
+        creatureLayer.contentsScale = window?.screen.scale ?? 3
         let proxy = DisplayLinkProxy { [weak self] link in self?.tick(link) }
         let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 60, preferred: 60)
@@ -184,71 +194,95 @@ final class GlassJelly: UIView {
         time += dt
         toneTime += dt
         sense(dt)
-        stepBody(dt)
+        stepBlob(dt)
+        stepCreature(dt)
         stepFace(dt)
         draw()
     }
 
-    // MARK: Body
+    // MARK: Blob
 
-    /// The frame's motion as its owner moves it, smoothed.
     private func sense(_ dt: CGFloat) {
         let position = layer.position, size = bounds.size
         defer { lastPosition = position; lastSize = size }
         guard let lastPosition, let lastSize else { return }
         let v = CGPoint(x: (position.x - lastPosition.x) / dt, y: (position.y - lastPosition.y) / dt)
         let sv = CGSize(width: (size.width - lastSize.width) / dt, height: (size.height - lastSize.height) / dt)
-        let k: CGFloat = 0.5
         let a = CGPoint(x: (v.x - velocity.x) / dt, y: (v.y - velocity.y) / dt)
         let sa = CGSize(width: (sv.width - sizeVelocity.width) / dt, height: (sv.height - sizeVelocity.height) / dt)
+        // Smoothed hard: the body answers the move, not each frame's noise.
+        let k: CGFloat = 0.25
         accel = CGPoint(x: .lerp(accel.x, a.x, k), y: .lerp(accel.y, a.y, k))
         sizeAccel = CGSize(width: .lerp(sizeAccel.width, sa.width, k), height: .lerp(sizeAccel.height, sa.height, k))
         velocity = v
         sizeVelocity = sv
     }
 
-    private func stepBody(_ dt: CGFloat) {
-        let half = CGSize(width: bounds.width / 2, height: bounds.height / 2)
-        let small = min(half.width, half.height)
-        // Jelly rings at about 3 Hz and dies in a second; the panel is
-        // slower and calmer.
-        let frequency = CGFloat.lerp(3.1, 2.0, opened), damping = CGFloat.lerp(0.14, 0.3, opened)
+    private func stepBlob(_ dt: CGFloat) {
+        let small = min(bodyRect.width, bodyRect.height) / 2
+        // Weighty: low, well damped, and calmer still as a panel.
+        let frequency = CGFloat.lerp(2.2, 1.6, opened), damping = CGFloat.lerp(0.42, 0.6, opened)
         let reduced = Motion.reduced
-        // Inertia: the body lags what moves it, is pressed flat along a
-        // push and stretched along a stop; growing, it overshoots.
         let a = accel, magnitude = max(1, hypot(a.x, a.y))
-        var squashForce = -0.35 * (a.x * a.x - a.y * a.y) / magnitude
-        squashForce += 0.25 * (sizeAccel.width - sizeAccel.height) * (1 - 0.5 * opened)
-        let shearForce = 0.28 * a.x
-        // While held down it sits squashed.
-        squash.target = pressed ? small * 0.22 : 0
-        if !reduced {
-            switch tone {
-            case .needsYou where opened < 0.5 && time > nextHop:
-                // Every few seconds, a small hop for your attention.
-                nextHop = time + 2.6
-                kick(squash: -50, hop: -110)
-            case .working where opened < 0.5 && time > nextFidget:
-                // Alive while it works: a small, irregular wobble now and then.
-                nextFidget = time + .random(in: 0.9...1.8)
-                kick(squash: .random(in: -22...22), shear: .random(in: -16...16))
-            default: break
-            }
-        }
+        var squashForce = -0.16 * (a.x * a.x - a.y * a.y) / magnitude
+        squashForce += 0.1 * (sizeAccel.width - sizeAccel.height) * (1 - 0.6 * opened)
+        let shearForce = 0.12 * a.x
         let steps = 4, h = dt / CGFloat(steps)
         for _ in 0..<steps {
             squash.step(h, frequency: frequency, damping: damping, force: reduced ? 0 : squashForce)
             shear.step(h, frequency: frequency * 0.85, damping: damping, force: reduced ? 0 : shearForce)
-            lagX.step(h, frequency: frequency, damping: damping * 1.4, force: reduced ? 0 : -0.3 * a.x)
-            lagY.step(h, frequency: frequency, damping: damping * 1.4, force: reduced ? 0 : -0.3 * a.y)
+            lagX.step(h, frequency: frequency, damping: damping * 1.3, force: reduced ? 0 : -0.15 * a.x)
+            lagY.step(h, frequency: frequency, damping: damping * 1.3, force: reduced ? 0 : -0.15 * a.y)
         }
-        // Never more than a fraction of itself, and a panel only a little.
-        let reach = min(small * 0.3, CGFloat.lerp(14, 9, opened))
+        let reach = min(small * 0.15, CGFloat.lerp(6, 4, opened))
         squash.limit(reach)
         shear.limit(reach)
-        lagX.limit(10)
-        lagY.limit(14)
+        lagX.limit(6)
+        lagY.limit(8)
         if reduced { squash.value = 0; shear.value = 0; lagX.value = 0; lagY.value = 0 }
+    }
+
+    // MARK: Creature
+
+    private func stepCreature(_ dt: CGFloat) {
+        // Where it belongs, in the superview's coordinates.
+        let target = CGPoint(x: layer.position.x - bounds.midX + creatureAnchor.x,
+                             y: layer.position.y - bounds.midY + creatureAnchor.y)
+        if !placedCreature || Motion.reduced {
+            placedCreature = true
+            creatureWorld = target
+            creatureVelocity = .zero
+        } else {
+            // A step behind, so the neck stretches as the blob moves; never
+            // so far it is left behind.
+            let parameters = SpringDriver.Parameters(response: 0.26, damping: 0.78)
+            (creatureWorld.x, creatureVelocity.x) = SpringDriver.step(value: creatureWorld.x, velocity: creatureVelocity.x,
+                                                                     target: target.x, dt: dt, parameters: parameters)
+            (creatureWorld.y, creatureVelocity.y) = SpringDriver.step(value: creatureWorld.y, velocity: creatureVelocity.y,
+                                                                     target: target.y, dt: dt, parameters: parameters)
+            let d = CGPoint(x: creatureWorld.x - target.x, y: creatureWorld.y - target.y), n = hypot(d.x, d.y)
+            if n > 26 { creatureWorld = CGPoint(x: target.x + d.x * 26 / n, y: target.y + d.y * 26 / n) }
+        }
+        creatureSquash.target = pressed ? 0.16 : 0
+        if !Motion.reduced, tone == .needsYou, time > nextHop {
+            // Now and then, a small hop for your attention.
+            nextHop = time + 3.2
+            hop.velocity -= 75
+        }
+        let steps = 4, h = dt / CGFloat(steps)
+        for _ in 0..<steps {
+            creatureSquash.step(h, frequency: 2.6, damping: 0.4, force: 0)
+            // Gravity pulls a hop back down; the floor is its rest place.
+            hop.step(h, frequency: 2.2, damping: 0.5, force: 0)
+        }
+        creatureSquash.limit(0.22)
+        hop.limit(14)
+        // It leans into its motion and turns a little toward what it looks at.
+        let v = creatureVelocity
+        yaw.target = -0.34 * creatureSide + (v.x / 2600).clamped(-0.25, 0.25) + gazeX.target * 0.05
+        pitch.target = -0.42 + (v.y / 2600).clamped(-0.2, 0.2) - gazeY.target * 0.04
+        roll.target = (v.x / 4000).clamped(-0.12, 0.12)
+        yaw.step(dt); pitch.step(dt); roll.step(dt)
     }
 
     // MARK: Face
@@ -257,75 +291,81 @@ final class GlassJelly: UIView {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         let color: UIColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success : Theme.accent
         color.resolvedColor(with: traitCollection).getRed(&r, green: &g, blue: &b, alpha: &a)
-        let strength: CGFloat = tone == .idle ? 0.45 : 0.85
+        let strength: CGFloat = tone == .idle ? 0.5 : 0.85
         (tint.r.target, tint.g.target, tint.b.target, tint.a.target) = (r, g, b, strength)
         if !tintSet {
             tintSet = true
             (tint.r.value, tint.g.value, tint.b.value, tint.a.value) = (r, g, b, strength)
         }
+        tint.r.step(dt); tint.g.step(dt); tint.b.step(dt); tint.a.step(dt)
 
-        // Where it looks: your finger, the field while you type, the text
-        // while it works, you when it needs you, else around.
-        var target = CGPoint.zero
-        let eye = eyeCenter
-        if let finger, time - finger.at < 1.4 {
-            let d = CGPoint(x: finger.point.x - eye.x, y: finger.point.y - eye.y)
-            let n = max(1, hypot(d.x, d.y))
-            target = CGPoint(x: 2.4 * d.x / n, y: 1.8 * d.y / n)
-        } else if typing, opened > 0.5 {
-            target = CGPoint(x: 0, y: 1.8)
-        } else if tone == .working, opened < 0.5 {
-            target = CGPoint(x: 1.2 + 1.1 * CGFloat(Int(time * 2.4) % 3) / 2, y: 0.4)
-        } else if tone == .needsYou {
-            target = CGPoint(x: 0, y: -0.4)
-        } else {
-            if time > nextGlance {
-                glance = [CGPoint(x: -2, y: 0.4), CGPoint(x: 2, y: -0.4), .zero, .zero, CGPoint(x: 0.8, y: 1.2)].randomElement()!
-                nextGlance = time + .random(in: 2.2...5)
-            }
-            target = glance
-        }
-        (lookX.target, lookY.target) = (target.x, target.y)
-
-        if time > nextBlink, happy.value < 0.3, squint.value < 0.3 {
-            blinkEnd = time + 0.11
-            if !secondBlink, Int.random(in: 0..<4) == 0 {
-                secondBlink = true
-                nextBlink = time + 0.24
+        // Glances: a target is held for a while, and reached on an eased,
+        // critically damped move; never a per-frame wobble.
+        if time >= gazeHold {
+            var target = CGPoint.zero, hold: CGFloat = 1
+            let center = creatureAnchor
+            if let finger, time - finger.at < 1.6 {
+                let d = CGPoint(x: finger.point.x - center.x, y: finger.point.y - center.y), n = max(1, hypot(d.x, d.y))
+                target = CGPoint(x: 2.4 * d.x / n, y: 1.6 * d.y / n)
+                hold = 0.35
+            } else if typing, opened > 0.5 {
+                target = CGPoint(x: 0, y: 1.8)
+                hold = 0.6
+            } else if tone == .working, opened < 0.5 {
+                // Reading along the line, a word or two at a time.
+                readStep = (readStep + 1) % 4
+                target = CGPoint(x: -creatureSide * (0.6 + 0.6 * CGFloat(readStep)), y: 0.5)
+                hold = .random(in: 0.5...0.85)
+            } else if tone == .needsYou {
+                target = CGPoint(x: 0, y: -0.3)
+                hold = 1
             } else {
-                secondBlink = false
-                nextBlink = time + .random(in: 2...5)
+                target = [CGPoint(x: -1.8, y: 0.4), CGPoint(x: 1.8, y: -0.3), .zero, .zero, CGPoint(x: 0.6, y: 1.1)].randomElement()!
+                hold = .random(in: 2.4...5)
+            }
+            (gazeX.target, gazeY.target) = (target.x, target.y)
+            gazeHold = time + hold
+        }
+        gazeX.step(dt); gazeY.step(dt)
+
+        // Blinks: shut quickly, open a little slower, every few seconds.
+        if blinkStart < 0, time > nextBlink, happy.value < 0.3, squint.value < 0.3 {
+            blinkStart = time
+        }
+        if blinkStart >= 0 {
+            let p = (time - blinkStart) / 0.24
+            lid = p < 0.35 ? 1 - p / 0.35 : min(1, (p - 0.35) / 0.65)
+            lid = lid * lid * (3 - 2 * lid)
+            if p >= 1 {
+                blinkStart = -1
+                lid = 1
+                if !doubleBlink, Int.random(in: 0..<5) == 0 {
+                    doubleBlink = true
+                    nextBlink = time + 0.18
+                } else {
+                    doubleBlink = false
+                    nextBlink = time + .random(in: 3...6)
+                }
             }
         }
-        lid.target = time < blinkEnd ? 0.06 : tone == .working && opened < 0.5 ? 0.78 : 1
         happy.target = tone == .done && toneTime < 4 ? 1 : 0
         squint.target = time < squintUntil ? 1 : 0
         worry.target = tone == .needsYou ? 1 : 0
-        for spring in [\GlassJelly.lookX, \.lookY, \.lid, \.happy, \.squint, \.worry] as [ReferenceWritableKeyPath<GlassJelly, Wobble>] {
-            self[keyPath: spring].step(dt)
-        }
-        tint.r.step(dt); tint.g.step(dt); tint.b.step(dt); tint.a.step(dt)
-    }
-
-    private var eyeCenter: CGPoint {
-        CGPoint(x: .lerp(bubbleEye.x, panelEye.x, opened), y: .lerp(bubbleEye.y, panelEye.y, opened))
+        happy.step(dt); squint.step(dt); worry.step(dt)
     }
 
     // MARK: Shape
 
-    /// The body's affine part, about the rest centre: x' = a x + c y, y' = d y.
     private var deformation: CGAffineTransform {
-        let hx = max(1, bounds.width / 2), hy = max(1, bounds.height / 2)
-        // Breathing, only as a bubble, barely.
-        let breath = Motion.reduced ? 0 : 0.012 * (1 - opened) * sin(time * 2 * .pi / 3.8)
+        let hx = max(1, bodyRect.width / 2), hy = max(1, bodyRect.height / 2)
+        let breath = Motion.reduced ? 0 : 0.008 * (1 - opened) * sin(time * 2 * .pi / 4.2)
         return CGAffineTransform(a: (1 + squash.value / hx) * (1 + breath), b: 0,
                                  c: -shear.value / hy, d: (1 - squash.value / hy) * (1 + breath), tx: 0, ty: 0)
     }
 
-    /// How far the edges bow out: more the more it is deformed.
-    private var pillow: CGFloat { min(7, 0.45 * abs(squash.value) + 0.3 * abs(shear.value)) }
+    private var pillow: CGFloat { min(4, 0.4 * abs(squash.value) + 0.25 * abs(shear.value)) }
 
-    /// The rest squircle with pillowed edges, about the origin.
+    /// The rest rounded box with pillowed edges, about the origin.
     private func restPath(half: CGSize, radius: CGFloat, pillow: CGFloat) -> CGPath {
         let path = CGMutablePath()
         let count = 144
@@ -345,7 +385,6 @@ final class GlassJelly: UIView {
         return path
     }
 
-    /// Signed distance from the pillowed rounded box; matches the shader.
     nonisolated static func distance(_ q: CGPoint, half: CGSize, radius: CGFloat, pillow: CGFloat) -> CGFloat {
         let qx = abs(q.x) - half.width + radius, qy = abs(q.y) - half.height + radius
         let box = hypot(max(qx, 0), max(qy, 0)) + min(max(qx, qy), 0) - radius
@@ -357,77 +396,95 @@ final class GlassJelly: UIView {
     // MARK: Drawing
 
     private func draw() {
-        guard bounds.width > 1, bounds.height > 1 else { return }
-        let half = CGSize(width: bounds.width / 2, height: bounds.height / 2)
+        guard bounds.width > 1, bounds.height > 1, bodyRect.width > 1 else { return }
+        let s = Self.creatureSize
+        let half = CGSize(width: bodyRect.width / 2, height: bodyRect.height / 2)
         let radius = min(cornerRadius, half.width, half.height)
         let pillow = self.pillow
         let m = deformation
-        let center = CGPoint(x: bounds.midX + lagX.value, y: bounds.midY + lagY.value)
-        let margin = Self.margin
-        let canvas = bounds.insetBy(dx: -margin, dy: -margin)
+        let center = CGPoint(x: bodyRect.midX + lagX.value, y: bodyRect.midY + lagY.value)
+        let creature = CGPoint(x: creatureWorld.x - layer.position.x + bounds.midX,
+                               y: creatureWorld.y - layer.position.y + bounds.midY + hop.value)
+        let canvas = bounds.insetBy(dx: -Self.margin, dy: -Self.margin)
         let inverse = m.inverted()
-        let eye = eyeCenter
+        if opened < 0.98 { glowTime += 1.0 / 60.0 }
+        let dark: Float = traitCollection.userInterfaceStyle == .dark ? 1 : 0
         var u = JellyUniforms(
             tint: SIMD4(Float(tint.r.value), Float(tint.g.value), Float(tint.b.value), Float(tint.a.value)),
             fill: fillVector,
-            eye: SIMD4(Float(eye.x - bounds.midX), Float(eye.y - bounds.midY), Float(lookX.value), Float(lookY.value)),
-            face: SIMD4(Float(lid.value), Float(happy.value), Float(squint.value), Float(worry.value)),
+            face: SIMD4(Float(lid), Float(happy.value), Float(squint.value), Float(worry.value)),
             inverse: SIMD4(Float(inverse.a), Float(inverse.b), Float(inverse.c), Float(inverse.d)),
+            creature: SIMD4(Float(creature.x), Float(creature.y), Float(s), 20),
+            pose: SIMD4(Float(yaw.value), Float(pitch.value), Float(roll.value), Float(creatureSquash.value)),
+            gaze: SIMD4(Float(gazeX.value), Float(gazeY.value), 0, 0),
             center: SIMD2(Float(center.x), Float(center.y)),
             half: SIMD2(Float(half.width), Float(half.height)),
             origin: SIMD2(Float(canvas.minX), Float(canvas.minY)),
             scale: Float(metal.contentsScale), radius: Float(radius), pillow: Float(pillow),
             time: Float(glowTime), churn: Float(tone == .working ? 1 : 0.3), opened: Float(opened),
-            dark: traitCollection.userInterfaceStyle == .dark ? 1 : 0, mode: 0)
-        // Inner light drifts only as a bubble; a settled panel is still.
-        if opened < 0.98 { glowTime += 1.0 / 60.0 }
-        u.time = Float(glowTime)
-        // Settled and unchanged: nothing to draw.
-        if let drawn, drawnCanvas == canvas, drawn.isClose(to: u) { return }
-        drawn = u
-        drawnCanvas = canvas
+            dark: dark, mode: 0)
 
-        let rest = restPath(half: half, radius: radius, pillow: pillow)
-        // Rest coordinates → bounds: deform about the centre, then move.
-        var toBounds = m.concatenating(CGAffineTransform(translationX: center.x, y: center.y))
-        let onScreen = rest.copy(using: &toBounds) ?? rest
+        let creatureRect = CGRect(x: creature.x - s * 1.1, y: creature.y - s * 1.1, width: s * 2.2, height: s * 2.2).integral
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        frost.frame = bounds
-        frostMask.frame = frost.bounds
-        frostMask.shape.path = onScreen
-        shadow.frame = bounds
-        shadow.shadowPath = onScreen
-        shadow.shadowColor = UIColor(red: tint.r.value, green: tint.g.value, blue: tint.b.value, alpha: 1).cgColor
-        shadow.shadowOpacity = Float(.lerp(0.22 + 0.3 * tint.a.value, 0.22, opened))
-        shadow.shadowRadius = .lerp(8, 18, opened)
-        // The content rides the body: same deformation, masked to the rest
-        // outline in its own coordinates.
-        content.transform = .identity
-        content.bounds = CGRect(origin: .zero, size: bounds.size)
-        content.center = center
-        content.transform = m
-        var toContent = CGAffineTransform(translationX: half.width, y: half.height)
-        contentMask.frame = content.bounds
-        contentMask.path = rest.copy(using: &toContent)
-        if metal.frame != canvas {
-            metal.frame = canvas
-            metal.drawableSize = CGSize(width: canvas.width * metal.contentsScale, height: canvas.height * metal.contentsScale)
+        // The creature: always alive, always drawn (a small canvas).
+        if creatureLayer.frame.size != creatureRect.size {
+            creatureLayer.drawableSize = CGSize(width: creatureRect.width * creatureLayer.contentsScale,
+                                                height: creatureRect.height * creatureLayer.contentsScale)
         }
-        // The face's own small canvas, around where the eyes are now.
-        let eyeOnScreen = CGPoint(x: eye.x - bounds.midX + lookX.value, y: eye.y - bounds.midY + lookY.value).applying(toBounds)
-        let faceRect = CGRect(x: eyeOnScreen.x - 26, y: eyeOnScreen.y - 18, width: 52, height: 36).integral
-        if face.frame.size != faceRect.size {
-            face.drawableSize = CGSize(width: faceRect.width * face.contentsScale, height: faceRect.height * face.contentsScale)
+        creatureLayer.frame = creatureRect
+        let foot = CGRect(x: creature.x - s * 0.42, y: creature.y - s * 0.3, width: s * 0.84, height: s * 0.84)
+        creatureShadow.frame = bounds
+        creatureShadow.shadowPath = UIBezierPath(roundedRect: foot, cornerRadius: s * 0.3).cgPath
+        creatureShadow.shadowColor = UIColor(red: tint.r.value, green: tint.g.value, blue: tint.b.value, alpha: 1).cgColor
+        creatureShadow.shadowOpacity = Float(0.18 + 0.2 * tint.a.value)
+
+        // The blob and neck: only when something changed.
+        let changed = drawn.map { !(drawnCanvas == canvas && $0.isClose(to: u)) } ?? true
+        if changed {
+            let rest = restPath(half: half, radius: radius, pillow: pillow)
+            var toBounds = m.concatenating(CGAffineTransform(translationX: center.x, y: center.y))
+            let onScreen = rest.copy(using: &toBounds) ?? rest
+            let blend = CGMutablePath()
+            blend.addPath(onScreen)
+            blend.addPath(UIBezierPath(roundedRect: CGRect(x: creature.x - s * 0.5, y: creature.y - s * 0.5, width: s, height: s),
+                                       cornerRadius: s * 0.3).cgPath)
+            // The blur covers the whole canvas: the head is above the bounds.
+            frost.frame = canvas
+            frostMask.frame = frost.bounds
+            var toFrost = CGAffineTransform(translationX: -canvas.minX, y: -canvas.minY)
+            frostMask.shape.path = blend.copy(using: &toFrost)
+            shadow.frame = bounds
+            shadow.shadowPath = onScreen
+            shadow.shadowColor = creatureShadow.shadowColor
+            shadow.shadowOpacity = Float(.lerp(0.16 + 0.22 * tint.a.value, 0.2, opened))
+            shadow.shadowRadius = .lerp(8, 18, opened)
+            content.transform = .identity
+            content.bounds = CGRect(origin: .zero, size: bounds.size)
+            content.center = CGPoint(x: bounds.midX + center.x - bodyRect.midX, y: bounds.midY + center.y - bodyRect.midY)
+            // Deform about the blob's centre.
+            let pivot = CGPoint(x: bodyRect.midX - bounds.midX, y: bodyRect.midY - bounds.midY)
+            content.transform = CGAffineTransform(translationX: -pivot.x, y: -pivot.y).concatenating(m)
+                .concatenating(CGAffineTransform(translationX: pivot.x, y: pivot.y))
+            var toContent = CGAffineTransform(translationX: bodyRect.midX, y: bodyRect.midY)
+            contentMask.frame = content.bounds
+            contentMask.path = rest.copy(using: &toContent)
+            if metal.frame != canvas {
+                metal.frame = canvas
+                metal.drawableSize = CGSize(width: canvas.width * metal.contentsScale, height: canvas.height * metal.contentsScale)
+            }
         }
-        face.frame = faceRect
         CATransaction.commit()
-        render(&u, into: metal)
-        var f = u
-        f.mode = 1
-        f.origin = SIMD2(Float(faceRect.minX), Float(faceRect.minY))
-        f.scale = Float(face.contentsScale)
-        render(&f, into: face)
+        if changed {
+            drawn = u
+            drawnCanvas = canvas
+            render(&u, into: metal)
+        }
+        var c = u
+        c.mode = 1
+        c.origin = SIMD2(Float(creatureRect.minX), Float(creatureRect.minY))
+        c.scale = Float(creatureLayer.contentsScale)
+        render(&c, into: creatureLayer)
     }
 
     private var fillVector: SIMD4<Float> {
@@ -454,7 +511,7 @@ final class GlassJelly: UIView {
     }
 }
 
-/// A damped oscillator driven by a force, in points.
+/// A damped oscillator driven by a force.
 private struct Mode {
     var value: CGFloat = 0
     var velocity: CGFloat = 0
@@ -503,9 +560,11 @@ struct Wobble {
 struct JellyUniforms {
     var tint: SIMD4<Float>
     var fill: SIMD4<Float>
-    var eye: SIMD4<Float>       // centre (rest coordinates), look
     var face: SIMD4<Float>      // lid, happy, squint, worry
-    var inverse: SIMD4<Float>   // the deformation's inverse (a b c d)
+    var inverse: SIMD4<Float>   // the blob's deformation, inverted (a b c d)
+    var creature: SIMD4<Float>  // centre xy, size, neck reach
+    var pose: SIMD4<Float>      // yaw, pitch, roll, squash
+    var gaze: SIMD4<Float>
     var center: SIMD2<Float>
     var half: SIMD2<Float>
     var origin: SIMD2<Float>
@@ -516,16 +575,17 @@ struct JellyUniforms {
     var churn: Float
     var opened: Float
     var dark: Float
-    /// 0: the body; 1: only the eyes.
+    /// 0: the blob and neck; 1: the creature.
     var mode: Float
 
+    /// For the blob layer: whether anything it draws has moved.
     func isClose(to o: JellyUniforms) -> Bool {
-        func near(_ a: SIMD4<Float>, _ b: SIMD4<Float>) -> Bool { (0..<4).allSatisfy { Swift.abs(a[$0] - b[$0]) < 0.002 } }
+        func near(_ a: SIMD4<Float>, _ b: SIMD4<Float>, _ e: Float) -> Bool { (0..<4).allSatisfy { Swift.abs(a[$0] - b[$0]) < e } }
         func near(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Bool { (0..<2).allSatisfy { Swift.abs(a[$0] - b[$0]) < 0.02 } }
-        return near(tint, o.tint) && near(fill, o.fill) && near(eye, o.eye) && near(face, o.face) && near(inverse, o.inverse)
-            && near(center, o.center) && near(half, o.half) && near(origin, o.origin) && abs(pillow - o.pillow) < 0.02
-            && radius == o.radius && dark == o.dark && (opened > 0.98 || abs(time - o.time) < 0.001)
-            && abs(opened - o.opened) < 0.002 && churn == o.churn
+        return near(tint, o.tint, 0.002) && near(fill, o.fill, 0.002) && near(inverse, o.inverse, 0.0005)
+            && near(creature, o.creature, 0.05) && near(center, o.center) && near(half, o.half) && near(origin, o.origin)
+            && Swift.abs(pillow - o.pillow) < 0.02 && radius == o.radius && dark == o.dark
+            && (opened > 0.98 || Swift.abs(time - o.time) < 0.001) && Swift.abs(opened - o.opened) < 0.002 && churn == o.churn
     }
 }
 
@@ -536,7 +596,14 @@ enum JellyRenderer {
     /// Compiled from source once, so the overlay framework needs no
     /// separate Metal library.
     static let pipeline: MTLRenderPipelineState? = {
-        guard let device, let library = try? device.makeLibrary(source: source, options: nil) else { return nil }
+        guard let device else { return nil }
+        let library: MTLLibrary
+        do { library = try device.makeLibrary(source: source, options: nil) } catch {
+            #if DEBUG
+            print("GlassJelly shader:", error)
+            #endif
+            return nil
+        }
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "jellyVertex")
         descriptor.fragmentFunction = library.makeFunction(name: "jellyFragment")
@@ -549,11 +616,13 @@ enum JellyRenderer {
     using namespace metal;
 
     struct Uniforms {
-        float4 tint;     // rgb, strength
-        float4 fill;     // rgb, amount
-        float4 eye;      // centre xy (rest), look xy
-        float4 face;     // lid, happy, squint, worry
-        float4 inverse;  // a b c d
+        float4 tint;      // rgb, strength
+        float4 fill;      // rgb, amount
+        float4 face;      // lid, happy, squint, worry
+        float4 inverse;   // a b c d
+        float4 creature;  // centre xy, size, neck reach
+        float4 pose;      // yaw, pitch, roll, squash
+        float4 gaze;
         float2 center;
         float2 half_;
         float2 origin;
@@ -569,24 +638,40 @@ enum JellyRenderer {
         return out;
     }
 
-    // Screen point → rest coordinates (about the centre, undeformed).
     static float2 rest(float2 p, constant Uniforms& u) {
         float2 d = p - u.center;
         return float2(u.inverse.x * d.x + u.inverse.z * d.y, u.inverse.y * d.x + u.inverse.w * d.y);
     }
 
-    static float sdf(float2 q, constant Uniforms& u) {
-        float2 h = u.half_;
-        float2 b = abs(q) - h + u.radius;
-        float box = length(max(b, 0.0)) + min(max(b.x, b.y), 0.0) - u.radius;
-        float nx = abs(q.x) / max(1.0, h.x), ny = abs(q.y) / max(1.0, h.y);
-        float along = nx > ny ? q.y / max(1.0, h.y) : q.x / max(1.0, h.x);
-        return box - u.pillow * max(0.0, 1.0 - along * along);
+    static float roundBox(float2 q, float2 h, float r) {
+        float2 b = abs(q) - h + r;
+        return length(max(b, 0.0)) + min(max(b.x, b.y), 0.0) - r;
     }
 
-    // A cushion: flat on top, rounding down to the edge over `bevel` points.
+    static float blob(float2 q, constant Uniforms& u) {
+        float2 h = u.half_;
+        float nx = abs(q.x) / max(1.0, h.x), ny = abs(q.y) / max(1.0, h.y);
+        float along = nx > ny ? q.y / max(1.0, h.y) : q.x / max(1.0, h.x);
+        return roundBox(q, h, u.radius) - u.pillow * max(0.0, 1.0 - along * along);
+    }
+
+    // The creature's footprint, flat, a little inside its 3D silhouette.
+    static float foot(float2 p, constant Uniforms& u) {
+        float s = u.creature.z;
+        return roundBox(p - u.creature.xy, float2(s * 0.42), s * 0.3);
+    }
+
+    static float smin(float a, float b, float k) {
+        float h = max(k - abs(a - b), 0.0) / k;
+        return min(a, b) - h * h * k * 0.25;
+    }
+
+    static float field(float2 p, constant Uniforms& u) {
+        return smin(blob(rest(p, u), u), foot(p, u), u.creature.w);
+    }
+
     static float height(float2 p, float bevel, constant Uniforms& u) {
-        float t = clamp(-sdf(rest(p, u), u) / bevel, 0.0, 1.0);
+        float t = clamp(-field(p, u) / bevel, 0.0, 1.0);
         return sqrt(1.0 - (1.0 - t) * (1.0 - t));
     }
 
@@ -596,27 +681,149 @@ enum JellyRenderer {
         return length(pa - ba * h);
     }
 
+    // Two eyes at `c` in a face plane (points). Returns coverage in .a, ink in .rgb.
+    static float4 eyes(float2 q, float px, float3 tint, constant Uniforms& u) {
+        float lid = u.face.x, happy = u.face.y, squint = u.face.z, worry = u.face.w;
+        float3 ink = u.dark > 0.5 ? float3(0.97, 0.95, 0.92) : mix(float3(0.07, 0.05, 0.05), tint * 0.3, 0.2);
+        float3 col = float3(0.0);
+        float a = 0.0;
+        for (int i = 0; i < 2; i++) {
+            float sgn = i == 0 ? -1.0 : 1.0;
+            float2 c = u.gaze.xy + float2(sgn * 5.2, -1.2);
+            float2 v = q - c;
+            float ang = sgn * worry * 0.38;
+            v = float2(cos(ang) * v.x - sin(ang) * v.y, sin(ang) * v.x + cos(ang) * v.y);
+            float grow = 1.0 + 0.12 * worry;
+            float2 rr = float2(2.5, max(0.3, 3.6 * lid)) * grow;
+            float bead = (length(v / rr) - 1.0) * min(rr.x, rr.y);
+            float R = 2.7;
+            float2 w = v - float2(0.0, R * 0.55);
+            float arc = w.y < R * 0.1 ? abs(length(w) - R) - 0.9 : 9.0;
+            float2 tip = float2(-sgn * 1.7, 0.0);
+            float chevron = min(segment(v, float2(sgn * 1.5, -2.0), tip), segment(v, tip, float2(sgn * 1.5, 2.0))) - 0.85;
+            float kb = smoothstep(px, -px, bead) * (1.0 - happy) * (1.0 - squint);
+            float ka = smoothstep(px, -px, arc) * happy * (1.0 - squint);
+            float ks = smoothstep(px, -px, chevron) * squint;
+            float k = clamp(kb + ka + ks, 0.0, 1.0) * 0.95;
+            col = col * (1.0 - k) + ink * k;
+            a = a * (1.0 - k) + k;
+            float glint = exp(-length_squared((v - float2(-0.9, -1.4) * grow) / 0.75)) * kb;
+            col += float3(glint * 0.9);
+            a += glint * 0.4;
+        }
+        return float4(col, clamp(a, 0.0, 1.0));
+    }
+
+    // MARK: the creature, a rounded cube of jelly seen in perspective.
+
+    static float3x3 turn(float yaw, float pitch, float roll) {
+        float cy = cos(yaw), sy = sin(yaw), cp = cos(pitch), sp = sin(pitch), cr = cos(roll), sr = sin(roll);
+        float3x3 ry = float3x3(float3(cy, 0.0, -sy), float3(0.0, 1.0, 0.0), float3(sy, 0.0, cy));
+        float3x3 rx = float3x3(float3(1.0, 0.0, 0.0), float3(0.0, cp, sp), float3(0.0, -sp, cp));
+        float3x3 rz = float3x3(float3(cr, sr, 0.0), float3(-sr, cr, 0.0), float3(0.0, 0.0, 1.0));
+        return ry * rx * rz;
+    }
+
+    static float cube(float3 p, float3x3 inv, constant Uniforms& u) {
+        float s = u.creature.z, squash = u.pose.w;
+        float3 l = inv * p;
+        // Squashed, it widens and settles onto its base.
+        l.y -= s * 0.5 * squash;
+        float3 b = float3(s * 0.5 * (1.0 + 0.6 * squash), s * 0.5 * (1.0 - squash), s * 0.36);
+        float r = s * 0.26;
+        float3 q = abs(l) - b + r;
+        return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+    }
+
+    static float4 creature(float2 p, float px, constant Uniforms& u) {
+        float s = u.creature.z;
+        float D = 150.0;
+        float3 ro = float3(0.0, 0.0, -D);
+        float3 rd = normalize(float3(p - u.creature.xy, D));
+        float3x3 R = turn(u.pose.x, u.pose.y, u.pose.z);
+        float3x3 inv = transpose(R);
+        float t = D - s * 1.2, dmin = 1e4;
+        bool hit = false;
+        for (int i = 0; i < 56; i++) {
+            float d = cube(ro + rd * t, inv, u);
+            dmin = min(dmin, d);
+            if (d < 0.01) { hit = true; break; }
+            t += d;
+            if (t > D + s * 1.4) break;
+        }
+        if (!hit) {
+            // A soft edge instead of stair steps.
+            float edge = clamp(1.0 - dmin / px, 0.0, 1.0);
+            if (edge <= 0.0) return float4(0.0);
+        }
+        float3 pos = ro + rd * t;
+        float e = 0.2;
+        float3 n = normalize(float3(1, -1, -1) * cube(pos + float3(1, -1, -1) * e, inv, u)
+                           + float3(-1, -1, 1) * cube(pos + float3(-1, -1, 1) * e, inv, u)
+                           + float3(-1, 1, -1) * cube(pos + float3(-1, 1, -1) * e, inv, u)
+                           + float3(1, 1, 1) * cube(pos + float3(1, 1, 1) * e, inv, u));
+        // How much jelly the light passes through.
+        float thick = 0.4;
+        for (int i = 0; i < 18; i++) {
+            float d = cube(pos + rd * thick, inv, u);
+            if (d > 0.0) break;
+            thick += max(0.6, -d);
+        }
+        float3 tint = u.tint.rgb;
+        float s0 = u.tint.a;
+        float3 V = -rd;
+        float3 L = normalize(float3(-0.5, -0.9, -0.7));
+        float diff = max(dot(n, L), 0.0);
+        float fres = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 3.0);
+        float spec = pow(max(dot(reflect(-L, n), V), 0.0), 70.0);
+        // Frosted and clear-ish: colour gathers where it is thick (its
+        // edges seen side-on), the middle stays light.
+        float absorb = 1.0 - exp(-thick * (0.016 + 0.03 * s0));
+        float3 glass = mix(tint, float3(1.0), 0.35);
+        float3 col = glass * absorb * (0.55 + 0.45 * diff);
+        float a = 0.1 + 0.55 * absorb;
+        // The top catches light; the underside goes deep.
+        col += float3(0.2) * smoothstep(0.3, 0.95, -n.y);
+        a += 0.12 * smoothstep(0.3, 0.95, -n.y);
+        col *= 1.0 - 0.3 * smoothstep(0.3, 0.95, n.y);
+        float3 l = inv * pos;
+        float glow = exp(-length_squared((l.xy - float2(s * 0.14, s * 0.26)) / (s * 0.26)));
+        col += mix(tint, float3(1.0), 0.5) * glow * 0.35 * s0;
+        a += glow * 0.12;
+        col += float3(1.0) * fres * 0.7;
+        a += fres * 0.55;
+        col += float3(spec * 1.2);
+        a += spec;
+        // The face is on its front.
+        float front = smoothstep(-s * 0.18, -s * 0.32, l.z);
+        float4 face = eyes(l.xy, px * 0.9, tint, u);
+        float k = face.a * front;
+        col = col * (1.0 - k) + face.rgb * k;
+        a = a * (1.0 - k) + k;
+        a = clamp(a, 0.0, 1.0);
+        col = min(col, float3(a));
+        float cover = hit ? 1.0 : clamp(1.0 - dmin / px, 0.0, 1.0);
+        return float4(col, a) * cover;
+    }
+
     fragment float4 jellyFragment(VOut in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
         float2 p = in.position.xy / u.scale + u.origin;
-        float2 q = rest(p, u);
-        float d = sdf(q, u);
         float px = 1.0 / u.scale;
+        if (u.mode > 0.5) { return creature(p, px, u); }
+
+        float2 q = rest(p, u);
+        float db = blob(q, u);
+        float d = smin(db, foot(p, u), u.creature.w);
         float cover = clamp(0.5 - d / px, 0.0, 1.0);
         if (cover <= 0.0) { return float4(0.0); }
 
-        float3 col = float3(0.0);
-        float a = 0.0;
-        float3 tint = u.tint.rgb;
-        float s = u.tint.a;
         float small = min(u.half_.x, u.half_.y);
-        if (u.mode < 0.5) {
         float bevel = clamp(small * 0.8, 5.0, 16.0);
         float lift = bevel * 0.7;
         float e = 0.6;
         float hx = (height(p + float2(e, 0.0), bevel, u) - height(p - float2(e, 0.0), bevel, u)) / (2.0 * e) * lift;
         float hy = (height(p + float2(0.0, e), bevel, u) - height(p - float2(0.0, e), bevel, u)) / (2.0 * e) * lift;
         float3 n = normalize(float3(-hx, -hy, 1.0));
-
         float3 L = normalize(float3(-0.45, -0.8, 0.9));
         float fres = pow(1.0 - n.z, 1.6);
         float2 side = normalize(n.xy + 1e-5);
@@ -625,28 +832,26 @@ enum JellyRenderer {
         float spec = pow(max(R.z, 0.0), 120.0) * 1.3 + pow(max(R.z, 0.0), 14.0) * 0.12;
         float depth = clamp(-d / bevel, 0.0, 1.0);
 
-        // Light travels further through the jelly near its edge.
+        float3 tint = u.tint.rgb;
+        float s = u.tint.a;
         float absorb = s * (0.12 + 0.8 * fres);
-        col = tint * absorb;
-        a = absorb;
+        float3 col = tint * absorb;
+        float a = absorb;
 
-        // Paper fills the inside as it opens, so text reads; the rim stays glass.
-        float f = u.fill.a * smoothstep(0.15, 0.9, depth);
+        // Paper inside the blob as it opens (not in the neck): text reads,
+        // and the app still shows through, faintly blurred.
+        float bodyness = clamp(1.0 - db / 6.0, 0.0, 1.0);
+        float f = u.fill.a * smoothstep(0.15, 0.9, depth) * bodyness;
         col = col * (1.0 - f) + u.fill.rgb * f;
         a = a * (1.0 - f) + f;
 
-        // Light gathered inside, opposite the light, near the bottom corner.
         float r0 = min(small, 22.0);
         float t = u.time;
-        float2 c1 = float2(u.half_.x - r0 * (0.62 + 0.08 * sin(t * 1.3 * (0.5 + u.churn))), u.half_.y - r0 * (0.5 + 0.06 * cos(t * 1.7)));
-        float2 c2 = float2(u.half_.x * (-0.2 + 0.3 * sin(t * 0.9 * u.churn + 1.0)) * (1.0 - u.opened), u.half_.y * 0.25 * cos(t * 1.1 * u.churn));
-        float caus = exp(-length_squared((q - c1) / (r0 * float2(0.55, 0.32)))) * 0.55
-                   + exp(-length_squared((q - c2) / (r0 * 0.4))) * 0.25 * u.churn * (1.0 - u.opened);
-        float3 glow = mix(tint, float3(1.0), 0.55);
-        col += glow * caus * s * 0.9;
-        a += caus * s * 0.45;
+        float2 c1 = float2(u.half_.x - r0 * (0.62 + 0.08 * sin(t * 1.1)), u.half_.y - r0 * 0.5);
+        float caus = exp(-length_squared((q - c1) / (r0 * float2(0.55, 0.32)))) * 0.5 * (1.0 - 0.5 * u.opened);
+        col += mix(tint, float3(1.0), 0.55) * caus * s * 0.9;
+        a += caus * s * 0.4;
 
-        // Rim: bright where it faces the light, deeper where it turns away.
         float rim = fres * facing;
         col += float3(1.0) * rim * 0.75;
         a += rim * 0.75;
@@ -654,10 +859,9 @@ enum JellyRenderer {
         col += tint * 0.45 * shade * s;
         a += shade * (0.3 + 0.3 * s);
 
-        // The candy gloss: a soft streak just inside the top edge.
         float2 g0 = float2(-u.half_.x * 0.08, -u.half_.y + r0 * 0.42);
         float2 gq = (q - g0) / float2(max(4.0, u.half_.x - r0 * 0.55), r0 * 0.2);
-        float gloss = exp(-pow(length_squared(gq), 2.0)) * mix(0.7, 0.45, u.opened);
+        float gloss = exp(-pow(length_squared(gq), 2.0)) * mix(0.6, 0.4, u.opened) * bodyness;
         col += float3(gloss);
         a += gloss;
 
@@ -666,43 +870,6 @@ enum JellyRenderer {
         a += edge;
         col += float3(spec);
         a += spec;
-        } else {
-        // Open, the face sits on a soft patch of the panel's paper, so text
-        // scrolling under the panel's top fades out behind it.
-        float2 hc = u.eye.xy + u.eye.zw * 0.5;
-        float halo = exp(-length_squared((q - hc) / float2(13.0, 7.5))) * u.opened * u.fill.a * 0.95;
-        col = u.fill.rgb * halo;
-        a = halo;
-
-        // Eyes: two beads inside it. Happy: arcs. Poked: squeezed shut.
-        // Worried: tilted, a little bigger.
-        float lid = u.face.x, happy = u.face.y, squint = u.face.z, worry = u.face.w;
-        float3 ink = u.dark > 0.5 ? float3(0.96, 0.94, 0.9) : mix(float3(0.07, 0.05, 0.05), tint * 0.3, 0.25);
-        for (int i = 0; i < 2; i++) {
-            float sgn = i == 0 ? -1.0 : 1.0;
-            float2 c = u.eye.xy + u.eye.zw + float2(sgn * 4.7, 0.0);
-            float2 v = q - c;
-            float ang = sgn * worry * 0.38;
-            v = float2(cos(ang) * v.x - sin(ang) * v.y, sin(ang) * v.x + cos(ang) * v.y);
-            float grow = 1.0 + 0.15 * worry;
-            float2 rr = float2(2.3, max(0.25, 3.3 * lid)) * grow;
-            float bead = (length(v / rr) - 1.0) * min(rr.x, rr.y);
-            float R = 2.5;
-            float2 w = v - float2(0.0, R * 0.55);
-            float arc = w.y < R * 0.1 ? abs(length(w) - R) - 0.85 : 9.0;
-            float2 tip = float2(-sgn * 1.6, 0.0);
-            float chevron = min(segment(v, float2(sgn * 1.4, -1.9), tip), segment(v, tip, float2(sgn * 1.4, 1.9))) - 0.8;
-            float kb = smoothstep(px, -px, bead) * (1.0 - happy) * (1.0 - squint);
-            float ka = smoothstep(px, -px, arc) * happy * (1.0 - squint);
-            float ks = smoothstep(px, -px, chevron) * squint;
-            float k = clamp(kb + ka + ks, 0.0, 1.0) * 0.94;
-            col = col * (1.0 - k) + ink * k;
-            a = a * (1.0 - k) + k;
-            float glint = exp(-length_squared((v - float2(-0.8, -1.3) * grow) / 0.7)) * kb;
-            col += float3(glint * 0.85);
-            a += glint * 0.4;
-        }
-        }
 
         a = clamp(a, 0.0, 1.0);
         col = min(col, float3(a));
