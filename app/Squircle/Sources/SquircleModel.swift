@@ -3,8 +3,10 @@ import Foundation
 import Network
 import UIKit
 
-/// What a send became, for the conversation that sent it.
+/// How a message the conversation sent ended, addressed to the conversation
+/// that sent it.
 enum SendOutcome: Equatable {
+    /// T3 took it, in this thread (new when the conversation was a draft).
     case sent(threadID: String)
     case failed(String)
 }
@@ -952,11 +954,6 @@ final class SquircleModel {
         } catch { return .failed(error.localizedDescription) }
         if selectedSessionID == id { isRunning = true; status = "Working" }
         return .sent(threadID: id)
-    }
-    /// Today's controller sends without naming its conversation: the open one.
-    /// W6's ThreadViewController uses `send(_:in:to:agent:)`; delete this then.
-    func send(_ spoken: String, in project: AppProject) async {
-        _ = await send(spoken, in: project, to: selectedSessionID, agent: draftIsAgent)
     }
     /// T3 streams tool calls without their inputs or screenshots; the Mac
     /// fills those in shortly after each new activity. A failed fetch tries

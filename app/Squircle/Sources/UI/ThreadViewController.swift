@@ -17,25 +17,6 @@ protocol ConversationHost: AnyObject {
     func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>)
 }
 
-/// How a message the conversation sent ended, addressed to the conversation
-/// that sent it.
-enum SendOutcome: Equatable {
-    /// T3 took it, in this thread (new when the conversation was a draft).
-    case sent(threadID: String)
-    case failed(String)
-}
-
-// W5: replace. A stand-in until the model sends to an explicit destination
-// itself; delete this extension when `SquircleModel` provides the method.
-extension SquircleModel {
-    func send(_ text: String, in project: AppProject, to threadID: String?, agent: Bool) async -> SendOutcome {
-        await send(text, in: project)
-        if let error { return .failed(error) }
-        guard let id = selectedSessionID else { return .failed(ClientError.configuration.localizedDescription) }
-        return .sent(threadID: id)
-    }
-}
-
 /// The values used most recently, at most `limit`, the least recently used
 /// dropped first. Emptied when the system runs low on memory: everything in
 /// it can be measured or loaded again.
