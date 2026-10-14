@@ -3,6 +3,7 @@ use crate::{
     apps::{self, AppRecord, AppRegistration},
     model::{BuildMode, BuildRequest},
     store::{Store, private_dir},
+    xcode,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -11,12 +12,11 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
-use tokio::{io::AsyncReadExt, process::Command, time::Instant};
+use tokio::{process::Command, time::Instant};
 
 #[derive(Serialize)]
 pub struct Directory {
@@ -479,88 +479,39 @@ pub fn import_inspected(store: &Store, inspection: &Inspection, name: &str) -> R
     )
 }
 
-struct ProcessGroup(libc::pid_t);
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        if self.0 > 0 {
-            unsafe {
-                libc::kill(-self.0, libc::SIGKILL);
-            }
-        }
-    }
-}
 async fn xcode_json(args: &[OsString], deadline: Instant) -> Result<Vec<u8>> {
     let mut command = Command::new("/usr/bin/xcodebuild");
     command.args(args);
     bounded_output(command, deadline).await
 }
 
-async fn bounded_output(mut command: Command, deadline: Instant) -> Result<Vec<u8>> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
-    let mut child = command
-        .spawn()
-        .context("Cannot run xcodebuild; select an installed Xcode on the Mac")?;
-    let mut group = ProcessGroup(child.id().context("Xcode inspection has no PID")? as libc::pid_t);
-    let mut stdout = child.stdout.take().context("Xcode stdout unavailable")?;
-    let mut stderr = child.stderr.take().context("Xcode stderr unavailable")?;
-    let work = async {
-        let mut output = Vec::new();
-        let mut errors = Vec::new();
-        tokio::try_join!(
-            async {
-                (&mut stdout)
-                    .take(8 * 1024 * 1024 + 1)
-                    .read_to_end(&mut output)
-                    .await?;
-                ensure!(
-                    output.len() <= 8 * 1024 * 1024,
-                    "Xcode inspection output exceeds 8 MiB"
-                );
-                Ok::<_, anyhow::Error>(())
-            },
-            async {
-                (&mut stderr)
-                    .take(1024 * 1024 + 1)
-                    .read_to_end(&mut errors)
-                    .await?;
-                ensure!(
-                    errors.len() <= 1024 * 1024,
-                    "Xcode inspection diagnostics exceed 1 MiB"
-                );
-                Ok::<_, anyhow::Error>(())
-            }
-        )?;
-        let status = child.wait().await?;
-        ensure!(
-            status.success(),
-            "xcodebuild inspection failed ({status}): {}",
-            String::from_utf8_lossy(&errors)
-                .chars()
-                .take(1500)
-                .collect::<String>()
-        );
-        Ok::<_, anyhow::Error>(output)
-    };
-    let result = tokio::time::timeout_at(deadline, work)
-        .await
-        .unwrap_or_else(|_| {
-            Err(anyhow::anyhow!(
-                "Xcode inspection exceeded 45 seconds; resolve packages/setup in Xcode, then retry"
-            ))
-        });
-    if child.try_wait()?.is_some() {
-        group.0 = 0;
-    } else {
-        drop(group);
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
-    }
-    result
+async fn bounded_output(command: Command, deadline: Instant) -> Result<Vec<u8>> {
+    let finished = xcode::run_bounded(
+        command,
+        xcode::Sink::Capture(8 * 1024 * 1024),
+        xcode::Sink::Capture(1024 * 1024),
+        deadline,
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        xcode::RunError::TimedOut | xcode::RunError::Cancelled => anyhow::anyhow!(
+            "Xcode inspection exceeded 45 seconds; resolve packages/setup in Xcode, then retry"
+        ),
+        xcode::RunError::Failed(error) => {
+            error.context("Cannot run xcodebuild; select an installed Xcode on the Mac")
+        }
+    })?;
+    ensure!(
+        finished.status.success(),
+        "xcodebuild inspection failed ({}): {}",
+        finished.status,
+        String::from_utf8_lossy(&finished.stderr)
+            .chars()
+            .take(1500)
+            .collect::<String>()
+    );
+    Ok(finished.stdout)
 }
 
 #[cfg(test)]

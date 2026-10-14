@@ -8,12 +8,10 @@ use std::{
     ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
-use tokio::{io::AsyncReadExt, process::Command, sync::watch, time::Instant};
+use tokio::{process::Command, sync::watch, time::Instant};
 
 pub struct Capture {
     pub path: PathBuf,
@@ -256,22 +254,8 @@ fn validate_png(bytes: &[u8]) -> Result<()> {
     );
     Ok(())
 }
-async fn cancelled(mut cancel: watch::Receiver<bool>) {
-    loop {
-        if *cancel.borrow_and_update() || cancel.changed().await.is_err() {
-            return;
-        }
-    }
-}
-struct Group(libc::pid_t);
-impl Drop for Group {
-    fn drop(&mut self) {
-        if self.0 > 0 {
-            unsafe {
-                libc::kill(-self.0, libc::SIGKILL);
-            }
-        }
-    }
+async fn cancelled(cancel: watch::Receiver<bool>) {
+    xcode::cancelled(Some(cancel)).await
 }
 
 async fn command(
@@ -280,57 +264,30 @@ async fn command(
     deadline: Instant,
     cancel: watch::Receiver<bool>,
 ) -> Result<Vec<u8>> {
-    ensure!(
-        !*cancel.borrow() && cancel.has_changed().is_ok(),
-        "Preview cancelled"
-    );
     let mut log = OpenOptions::new().create(true).append(true).open(log)?;
     writeln!(log, "\n$ /usr/bin/xcrun simctl {args:?}")?;
     let mut command = Command::new("/usr/bin/xcrun");
-    command
-        .arg("simctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(log.try_clone()?)
-        .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
-    let mut child = command.spawn().context("Cannot start xcrun simctl")?;
-    let mut group = Group(child.id().context("simctl has no PID")? as libc::pid_t);
-    let mut stdout = child.stdout.take().context("simctl has no output")?;
-    let work = async {
-        let mut bytes = Vec::new();
-        (&mut stdout)
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .await?;
-        ensure!(
-            bytes.len() <= 1024 * 1024,
-            "Simulator command output exceeds 1 MiB"
-        );
-        let status = child.wait().await?;
-        ensure!(
-            status.success(),
-            "simctl command failed ({status}); inspect build log"
-        );
-        Ok::<_, anyhow::Error>(bytes)
-    };
-    let result = tokio::select! {
-        result = work => result,
-        _ = cancelled(cancel) => Err(anyhow::anyhow!("Preview cancelled")),
-        _ = tokio::time::sleep_until(deadline) => Err(anyhow::anyhow!("Simulator preview command timed out")),
-    };
-    if child.try_wait()?.is_some() {
-        group.0 = 0;
-    } else {
-        drop(group);
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
-    }
-    if let Ok(bytes) = &result {
-        log.write_all(bytes)?;
-    }
-    result
+    command.arg("simctl").args(args);
+    let finished = xcode::run_bounded(
+        command,
+        xcode::Sink::Capture(1024 * 1024),
+        xcode::Sink::File(log.try_clone()?),
+        deadline,
+        Some(cancel),
+    )
+    .await
+    .map_err(|error| match error {
+        xcode::RunError::Cancelled => anyhow::anyhow!("Preview cancelled"),
+        xcode::RunError::TimedOut => anyhow::anyhow!("Simulator preview command timed out"),
+        xcode::RunError::Failed(error) => error.context("simctl command did not complete"),
+    })?;
+    ensure!(
+        finished.status.success(),
+        "simctl command failed ({}); inspect build log",
+        finished.status
+    );
+    log.write_all(&finished.stdout)?;
+    Ok(finished.stdout)
 }
 
 #[cfg(test)]
