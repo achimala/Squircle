@@ -76,13 +76,21 @@ final class T3Gateway {
     private var subscriptions: [String: (JSONValue) -> Void] = [:]
     /// When T3 last sent anything; T3 answers every Ping, so silence means a dead socket.
     private var lastFrame = ContinuousClock.now
+    /// Requests whose reply is large (T3's config is about 1 MB). URLSession
+    /// only hands over whole messages and reports no bytes for sockets, so
+    /// on a slow link the reply, and every Pong queued behind it, can take
+    /// longer than the usual silence allowance while the socket is healthy.
+    private var patient: Set<String> = []
+    private var silenceAllowed: Duration { patient.isEmpty ? .seconds(40) : .seconds(150) }
     var onDisconnect: (() -> Void)?
+    /// Why T3 refused the last socket's upgrade, if it did.
+    private(set) var rejection: Error?
     var isOpen: Bool { socket != nil }
     init(configuration: AppConfiguration) { http = T3HTTP(configuration: configuration) }
     func connect() async throws {
         disconnect(notify: false)
         let ws = http.session.webSocketTask(with: try await http.socketRequest("/ws"))
-        disconnect(notify: false)
+        disconnect(notify: false); rejection = nil
         socket = ws; ws.maximumMessageSize = 32 * 1024 * 1024; ws.resume(); lastFrame = .now
         receiver = Task { [weak self] in
             do {
@@ -94,7 +102,11 @@ final class T3Gateway {
                     let frame = try JSONDecoder().decode(JSONValue.self, from: data)
                     for item in frame.array.isEmpty ? [frame] : frame.array { self?.receive(item) }
                 }
-            } catch { self?.drop(ws) }
+            } catch {
+                // A refused upgrade is not a network blip: say why.
+                let status = (ws.response as? HTTPURLResponse)?.statusCode ?? 101
+                self?.drop(ws, error: status == 101 ? nil : ClientError.http("T3", status))
+            }
         }
         heartbeat = Task { [weak self] in
             while !Task.isCancelled {
@@ -102,14 +114,16 @@ final class T3Gateway {
                 guard !Task.isCancelled, let self else { return }
                 // A half-open socket (a network change, a suspended app) never
                 // errors on its own; no reply to two pings means it's gone.
-                if lastFrame.duration(to: .now) > .seconds(40) { drop(ws); return }
+                if lastFrame.duration(to: .now) > silenceAllowed { drop(ws); return }
                 do { try await write(.from(["_tag":"Ping"])) } catch { drop(ws); return }
             }
         }
     }
-    /// Whether T3 still answers on this socket, within `timeout`.
-    func probe(timeout: Duration = .seconds(4)) async -> Bool {
+    /// Whether T3 still answers on this socket, within `timeout`. A Pong
+    /// behind a large reply can't arrive in time; the heartbeat judges then.
+    func probe(timeout: Duration = .seconds(8)) async -> Bool {
         guard let ws = socket else { return false }
+        guard patient.isEmpty else { return true }
         let asked = ContinuousClock.now
         Task { try? await write(.from(["_tag":"Ping"])) }
         while asked.duration(to: .now) < timeout {
@@ -120,14 +134,15 @@ final class T3Gateway {
         drop(ws)
         return false
     }
-    private func drop(_ ws: URLSessionWebSocketTask) {
-        if socket === ws { disconnect(notify: true) }
+    private func drop(_ ws: URLSessionWebSocketTask, error: Error? = nil) {
+        guard socket === ws else { return }
+        rejection = error; disconnect(notify: true, error: error)
     }
-    func disconnect(notify: Bool = false) {
+    func disconnect(notify: Bool = false, error: Error? = nil) {
         receiver?.cancel(); heartbeat?.cancel(); socket?.cancel(with: .goingAway, reason: nil); socket = nil
         receiver = nil; heartbeat = nil
-        let waiting = pending; pending.removeAll(); subscriptions.removeAll()
-        for p in waiting.values { p.resume(throwing: ClientError.connection("T3")) }
+        let waiting = pending; pending.removeAll(); subscriptions.removeAll(); patient.removeAll()
+        for p in waiting.values { p.resume(throwing: error ?? ClientError.connection("T3")) }
         if notify { onDisconnect?() }
     }
     #if DEBUG
@@ -143,18 +158,21 @@ final class T3Gateway {
             try? await Task.sleep(for: .milliseconds(100))
         }
     }
-    func call(_ method: String, _ payload: JSONValue = .object([:])) async throws -> JSONValue {
+    /// `large`: the reply may take minutes on a slow link; see `patient`.
+    func call(_ method: String, _ payload: JSONValue = .object([:]), large: Bool = false) async throws -> JSONValue {
         try await open()
         let id = UUID().uuidString
+        defer { patient.remove(id) }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pending[id] = continuation
+                if large { patient.insert(id) }
                 Task {
                     do { try await write(.from(["_tag":"Request", "id":id, "tag":method, "payload":payload.foundation, "headers":[]])) }
                     catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
                 }
                 Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(45))
+                    try? await Task.sleep(for: large ? .seconds(150) : .seconds(45))
                     self?.pending.removeValue(forKey: id)?.resume(throwing: ClientError.backend("T3",408,"T3 did not acknowledge this request. Refresh the thread before retrying."))
                 }
             }

@@ -89,7 +89,13 @@ final class SquircleModel {
     private var connector: Task<Void,Never>?
     /// The wait before the connector's next attempt; cancelling it retries now.
     private var nap: Task<Void,Never>?
+    /// Reconnect was tapped: abandon the attempt under way and start afresh.
+    private var retryNow = false
     private var failingSince: ContinuousClock.Instant?
+    /// When T3's config (models, about 1 MB) last arrived; it rarely changes,
+    /// so a reconnect doesn't fetch it again.
+    private var configLoaded: ContinuousClock.Instant?
+    private var configLoader: Task<Void,Never>?
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     /// Background time ran out and the socket was closed; reconnect on return.
     private var suspended = false
@@ -287,13 +293,20 @@ final class SquircleModel {
         connector = Task { [weak self] in
             var delay: Duration = .zero
             while let self, !connected, !suspended {
-                if delay > .zero {
+                if delay > .zero, !retryNow {
                     let nap = Task { [delay] in _ = try? await Task.sleep(for: delay) }
                     self.nap = nap; await nap.value; self.nap = nil
                     if suspended { break }
                 }
+                retryNow = false
                 do { try await openConnection() }
-                catch {
+                catch where Self.isRejected(error) {
+                    // Retrying can't fix a refused credential; say what to do.
+                    log("T3 refused this build's session: \(error.localizedDescription)")
+                    self.error = "T3 no longer accepts this build’s session. Pair Squircle with T3 again on your Mac and install a new build."
+                    status = "Not signed in"; isLoading = false
+                    break
+                } catch {
                     log("T3 connect failed: \(error.localizedDescription)")
                     let since = failingSince ?? .now; failingSince = since
                     if since.duration(to: .now) >= Self.reconnectGrace {
@@ -308,26 +321,50 @@ final class SquircleModel {
             if connected { await refreshServices() }
         }
     }
-    /// One connection attempt: socket, config, live subscriptions, and the
-    /// open thread resubscribed. Its transcript stays on screen meanwhile;
-    /// T3's snapshot then brings it up to date.
+    /// Reconnect, tapped: a fresh attempt now, without the backoff or an
+    /// attempt stuck waiting on a slow socket.
+    func reconnect() async {
+        guard !connected else { await refreshServices(); return }
+        failingSince = nil; error = nil; status = "Connecting"; isLoading = true
+        if connector != nil { retryNow = true; gateway?.disconnect(notify: false) }
+        keepConnected(); nap?.cancel()
+    }
+    nonisolated static func isRejected(_ error: Error) -> Bool {
+        if case ClientError.http(_, let status) = error { return status == 401 || status == 403 }
+        return false
+    }
+    /// One connection attempt: socket, live subscriptions, and the open
+    /// thread resubscribed. Its transcript stays on screen meanwhile; T3's
+    /// snapshot then brings it up to date. T3's config is about 1 MB, which
+    /// a weak cellular link takes a minute to carry, so it loads afterwards
+    /// instead of holding the connection up.
     private func openConnection() async throws {
         guard let gateway else { throw ClientError.configuration }
         try await gateway.connect()
         do {
-            consumeConfig(try await gateway.call("server.getConfig"))
-            devices = try await gateway.call("device.list")
             try await gateway.subscribe("orchestration.subscribeShell") { [weak self] in self?.consumeShell($0) }
             try await gateway.subscribe("subscribeDeviceState") { [weak self] in self?.devices = $0 }
             threadSubscription = nil
             if let id = selectedSessionID { try await subscribeThread(id) }
+            devices = try await gateway.call("device.list")
             // The socket may have failed while subscribing; then try again.
             guard gateway.isOpen, !suspended else { throw ClientError.connection("T3") }
-        } catch { gateway.disconnect(notify: false); throw error }
+        } catch { gateway.disconnect(notify: false); throw gateway.rejection ?? error }
         connected = true; status = isRunning ? "Working" : "Connected"; failingSince = nil; error = nil
         log("T3 connected")
+        loadConfig()
         // A thread opened while this attempt was under way.
         if let id = selectedSessionID, threadSubscription == nil { await selectSession(id) }
+    }
+    private func loadConfig() {
+        guard configLoader == nil, configLoaded.map({ $0.duration(to: .now) > .seconds(600) }) ?? true else { return }
+        configLoader = Task { [weak self] in
+            // A dropped socket fails this; the next connection asks again.
+            if let config = try? await self?.gateway?.call("server.getConfig", large: true) {
+                self?.consumeConfig(config); self?.configLoaded = .now
+            }
+            self?.configLoader = nil
+        }
     }
     /// Squircle went to the background: hold the socket for as long as iOS
     /// gives (about 30 s), so a quick app switch never drops it.
