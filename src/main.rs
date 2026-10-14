@@ -240,6 +240,9 @@ enum ThreadCommand {
         model: Option<String>,
         #[arg(long, help = "Reasoning effort, e.g. high; default: the provider's")]
         effort: Option<String>,
+        #[arg(long, value_parser = ["approval-required", "auto-accept-edits", "auto", "full-access"],
+            help = "T3 runtime mode; default: yours (the app agent's), mapped to the provider's closest; the result says what it allows")]
+        runtime_mode: Option<String>,
         #[arg(long, help = "Link the worker to this task (squircle task --help)")]
         task: Option<String>,
     },
@@ -1141,8 +1144,8 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             }
         },
         Commands::Thread { command } => match command {
-            ThreadCommand::Spawn { coordinator, title, branch, base, prompt, provider, model, effort, task } => post(cli, "/v1/workers",
-                json!({"coordinator":coordinator,"title":title,"branch":branch,"base":base,"prompt":prompt,"provider":provider,"model":model,"effort":effort,"task":task})).await?,
+            ThreadCommand::Spawn { coordinator, title, branch, base, prompt, provider, model, effort, runtime_mode, task } => post(cli, "/v1/workers",
+                json!({"coordinator":coordinator,"title":title,"branch":branch,"base":base,"prompt":prompt,"provider":provider,"model":model,"effort":effort,"runtime_mode":runtime_mode,"task":task})).await?,
             ThreadCommand::Send { id, text } => post(cli, &format!("/v1/workers/{}/messages", thread_id(id)?), json!({"text":text})).await?,
             ThreadCommand::Status { coordinator } => {
                 let query = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(coordinator.as_ref().map(|c| ("coordinator", c))).finish();
