@@ -101,6 +101,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private let glass = UIVisualEffectView(effect: Theme.glassEffect())
     private let frame = FrameSpring()
+    /// 0 → 1 once, when the bubble first appears: it grows and fades in
+    /// where it rests. Until the first real layout it has no place at all,
+    /// so the spring never starts from a made-up frame.
+    private let appear = SpringDriver()
+    private var placed = false
     /// 0 = the agent, 1 = a thread over it.
     private let push = SpringDriver()
     /// The one inset between the screen's safe area and the glass, and
@@ -187,6 +192,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         view.addSubview(glass)
         bubble.isUserInteractionEnabled = false
         bubble.showsTime = false
+        bubble.onHeadlineChange = { [weak self] in self?.retarget() }
         bubble.isAccessibilityElement = true
         bubble.accessibilityTraits = .button
         bubble.accessibilityLabel = "Squircle"
@@ -235,6 +241,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         handle.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTapped)))
 
         frame.onChange = { [weak self] in self?.applyScene() }
+        appear.parameters = SpringDriver.Parameters(response: 0.5, damping: 0.68)
+        appear.onChange = { [weak self] _ in self?.applyScene() }
         frame.onRest = { [weak self] in self?.rested() }
         push.onChange = { [weak self] value in
             if value <= 0.001 { self?.sync() } else { self?.applyScene() }
@@ -256,8 +264,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        guard view.bounds.width > 0, view.window != nil else { return }
         // Rotation or a first layout: rest exactly where the route says.
-        if !frame.isAnimating, !frame.isHeld { frame.set(targetFrame) } else { applyScene() }
+        if !placed || (!frame.isAnimating && !frame.isHeld) { frame.set(targetFrame) } else { applyScene() }
+        if !placed {
+            placed = true
+            appear.animate(to: 1)
+        }
     }
 
     // MARK: Model
@@ -265,6 +278,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private var project: AppProject? { model.projects.first }
 
     private func render() {
+        #if DEBUG
+        if let demo = demoStatus, project == nil {
+            bubble.configure(headline: demo.headline, started: nil, tone: demo.tone)
+            retarget()
+            return
+        }
+        #endif
         guard let project else {
             bubble.configure(headline: model.error, started: nil, tone: model.error == nil ? .idle : .needsYou)
             retarget()
@@ -288,7 +308,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
         // What the bubble says: whoever needs you, else what the agent is
         // doing (its live step), else a working thread.
-        let headline: String?, tone: LiveCapsule.Tone, started: Date?
+        var headline: String?, tone: LiveCapsule.Tone, started: Date?
         if let waiting = active.first(where: { $0.phase == .needsYou }) {
             (headline, tone, started) = ("Needs you · " + title(waiting), .needsYou, nil)
         } else if let busy = active.first(where: { $0.id == agentID }) ?? active.first {
@@ -299,6 +319,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         } else {
             (headline, tone, started) = (nil, .idle, nil)
         }
+        #if DEBUG
+        if let demo = demoStatus { (headline, tone, started) = (demo.headline, demo.tone, nil) }
+        #endif
         bubble.configure(headline: headline, started: started, tone: tone)
         bubble.accessibilityValue = headline ?? "Idle"
         if let build = model.updatingTo {
@@ -319,7 +342,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private var safeBounds: CGRect { view.bounds.inset(by: view.safeAreaInsets).insetBy(dx: Self.inset, dy: Self.inset) }
 
     private var bubbleSize: CGSize {
-        CGSize(width: bubble.preferredWidth(limit: min(300, view.bounds.width * 0.72), height: 44), height: 44)
+        let limit = min(300, view.bounds.width * 0.72)
+        bubble.widthLimit = limit
+        return CGSize(width: bubble.preferredWidth(limit: limit, height: 44), height: 44)
     }
 
     private var bubbleFrame: CGRect {
@@ -354,7 +379,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         guard view.bounds.width > 0 else { return }
         // A finger on the handle sets the content up itself.
         if clipLayout == nil, dragZone == nil, route.open || panelSize == .zero { layOutPanel(at: route.open && route.full ? view.bounds.size : miniFrame.size) }
-        guard !frame.isHeld else { return }
+        // Before its first layout it has no place to move from.
+        guard !frame.isHeld, placed else { return }
         let target = targetFrame
         if frame.target != target || velocity != nil { frame.animate(to: target, velocity: velocity, sizeVelocity: sizeVelocity) }
     }
@@ -429,10 +455,21 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let rect = frame.value
         let bounds = view.bounds, bubbleSize = self.bubbleSize
         let local = CGRect(origin: .zero, size: rect.size)
-        // 0 at bubble size, 1 at the panel's size; 0…1 mini → full.
-        let opened = clipLayout != nil ? 1 : Self.progress(rect.size, from: bubbleSize, to: panelSize).clamped()
+        // 0 at the bubble's height, 1 at the smallest panel in play; by
+        // height alone, so the bubble's own width springing as its text
+        // changes never reads as opening. 0…1 mini → full.
+        let openHeight = min(panelSize.height, outgoing?.size.height ?? .greatestFiniteMagnitude)
+        let opened = clipLayout != nil ? 1 : ((rect.height - bubbleSize.height) / max(1, openHeight - bubbleSize.height)).clamped()
         let fullness = ((rect.height - miniFrame.height) / max(1, bounds.height - miniFrame.height)).clamped()
+        // Appearing, it grows in place from its own centre.
+        let appeared = appear.value
+        glass.transform = .identity
         glass.frame = rect
+        if appeared != 1 {
+            let scale = CGFloat.lerp(0.5, 1, appeared)
+            glass.transform = CGAffineTransform(scaleX: scale, y: scale)
+        }
+        glass.alpha = (appeared * 1.6).clamped()
         let radius = min(rect.height / 2, rect.width / 2, .lerp(Self.panelRadius, 0, fullness))
         Theme.setGlassCorner(glass, radius: radius)
         glass.contentView.layer.cornerRadius = radius
@@ -1028,8 +1065,36 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// (`capture`: as a long press does);
     /// `SQUIRCLE_OVERLAY_CYCLE=1` loops bubble → mini → full → thread → back
     /// → mini → bubble for recordings (`SQUIRCLE_SLOW` slows the springs).
+    private var demoStatus: (headline: String?, tone: LiveCapsule.Tone)?
+
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
+        // `SQUIRCLE_BUBBLE_DEMO=1`: the bubble loops through made-up statuses
+        // (short, long, a rapid burst, needs you, done, idle) for recordings.
+        if environment["SQUIRCLE_BUBBLE_DEMO"] == "1" {
+            let script: [(String?, LiveCapsule.Tone, Double)] = [
+                (nil, .idle, 2.5),
+                ("Reading SquircleOverlay.swift", .working, 2.4),
+                ("Searching for LiveCapsule", .working, 2.4),
+                ("Running xcodebuild", .working, 0.15), ("Editing ThreadCells.swift", .working, 0.15),
+                ("Editing Theme.swift", .working, 0.15), ("Editing SquircleOverlay.swift", .working, 2.6),
+                ("Building Letters Abroad for the iPhone 17 Pro simulator with the overlay", .working, 2.8),
+                ("Testing", .working, 2.4),
+                ("Needs you · Letters Abroad", .needsYou, 3),
+                ("Done · Letters Abroad", .done, 3)
+            ]
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                while true {
+                    for (headline, tone, pause) in script {
+                        guard let self else { return }
+                        self.demoStatus = (headline, tone)
+                        self.render()
+                        try? await Task.sleep(for: .seconds(pause))
+                    }
+                }
+            }
+        }
         if let slow = environment["SQUIRCLE_SLOW"].flatMap(Double.init) { SpringDriver.debugSlowMotion = slow }
         if let mode = environment["SQUIRCLE_OVERLAY_OPEN"] {
             Task { [weak self] in
