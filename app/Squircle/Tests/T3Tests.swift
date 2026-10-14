@@ -69,6 +69,12 @@ final class T3Tests: XCTestCase {
         }
     }
 
+    func testUUIDScanFindsBuildIDsInText() {
+        let text = "Build 3A396BB0-a97f-478f-ab18-9be4a83c744c done; café x3a396bb0-a97f-478f-ab18-9be4a83c744 and 101c1dc8-0000-4000-8000-000000000001."
+        XCTAssertEqual(ThreadItem.uuids(in: text), ["3a396bb0-a97f-478f-ab18-9be4a83c744c", "101c1dc8-0000-4000-8000-000000000001"])
+        XCTAssertEqual(ThreadItem.uuids(in: "3a396bb0-a97f-478f-ab18"), [])
+    }
+
     func testAVCCHandlesFragmentedAndCoalescedHTTPBytes() throws {
         let packets = Data([0,0,0,4,1,11,12,13, 0,0,0,3,2,21,22, 0,0,0,2,3,31])
         for split in 0...packets.count {

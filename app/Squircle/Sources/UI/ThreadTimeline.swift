@@ -324,17 +324,41 @@ enum ThreadItem: Equatable {
         guard !builds.isEmpty else { return [] }
         let known = Dictionary(builds.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
         var seen = Set<String>(), found: [AppBuild] = []
-        for message in messages {
-            let text = message.content + "\n" + message.detail + "\n" + (message.step?.actions.compactMap(\.build).joined(separator: " ") ?? "")
-            var range = text.startIndex..<text.endIndex
-            while let match = text.range(of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
-                                          options: .regularExpression, range: range) {
-                let id = text[match].lowercased()
+        func scan(_ text: String) {
+            for id in uuids(in: text) {
                 if let build = known[id], seen.insert(id).inserted { found.append(build) }
-                range = match.upperBound..<text.endIndex
             }
         }
+        for message in messages {
+            scan(message.content); scan(message.detail)
+            message.step?.actions.compactMap(\.build).forEach(scan)
+        }
         return found
+    }
+
+    /// Lowercased UUIDs in `text`, in order. A byte scan: a regular
+    /// expression over every step's output cost the timeline most of its time.
+    static func uuids(in text: String) -> [String] {
+        var text = text
+        return text.withUTF8 { b -> [String] in
+            var found: [String] = []
+            guard b.count >= 36 else { return found }
+            func hex(_ c: UInt8) -> Bool { (48...57).contains(c) || (65...70).contains(c) || (97...102).contains(c) }
+            var i = 0
+            while i <= b.count - 36 {
+                var ok = true
+                for j in 0..<36 {
+                    let c = b[i + j]
+                    if j == 8 || j == 13 || j == 18 || j == 23 { if c != 45 { ok = false; break } }
+                    else if !hex(c) { ok = false; break }
+                }
+                if ok {
+                    found.append(String(decoding: UnsafeBufferPointer(rebasing: b[i..<i + 36]), as: UTF8.self).lowercased())
+                    i += 36
+                } else { i += 1 }
+            }
+            return found
+        }
     }
 
     private static func headline(work: [ChatMessage], answer: ChatMessage?) -> String {

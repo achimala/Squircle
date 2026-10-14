@@ -1269,8 +1269,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         Task { [weak self] in
             guard let self else { return }
             let data = await model.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment)
+            let picture = data == nil ? nil : await GalleryCell.prepare(shot)
             loadingImages.remove(key)
-            guard data != nil, dataSource.indexPath(for: item) != nil else { return }
+            guard picture != nil, dataSource.indexPath(for: item) != nil else { return }
             var snapshot = dataSource.snapshot()
             snapshot.reconfigureItems([item])
             await dataSource.apply(snapshot, animatingDifferences: false)
@@ -1285,8 +1286,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             guard let self else { return }
             if MediaFiles.sizes[shot.step] == nil, await model.mediaSize(shot.step) != nil { await reconfigure(item) }
             let data = await model.loadStepImage(shot.step, index: shot.index)
+            let picture = data == nil ? nil : await FigureCell.prepare(shot)
             loadingImages.remove(shot.step)
-            if data != nil { await reconfigure(item) }
+            if picture != nil { await reconfigure(item) }
         }
     }
 
