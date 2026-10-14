@@ -423,7 +423,7 @@ final class SquircleModel {
         do {
             // With a shell already held, T3 sends only what changed since
             // (or a fresh snapshot when it can't).
-            var shellRequest: [String: Any] = [:]
+            var shellRequest: [String: Any] = ["requestCompletionMarker": true]
             if let sequence = shell["snapshotSequence"].int { shellRequest["afterSequence"] = sequence }
             try await gateway.subscribe("orchestration.subscribeShell", .from(shellRequest), receive: { [weak self] in self?.consumeShell($0, batched: true) },
                                         ended: { [weak self] in self?.connectionSubscriptionEnded("shell", $0) })
@@ -546,7 +546,11 @@ final class SquircleModel {
     private func consumeShell(_ item: JSONValue, batched: Bool = false) {
         liveShell = true
         if item["kind"].string == "snapshot" { shell = item["snapshot"]; ConnectionTrace.mark("shell.snapshot") }
-        else if item["kind"].string == "synchronized" { ConnectionTrace.mark("shell.synchronized"); return }
+        else if item["kind"].string == "synchronized" {
+            // Up to date with T3, whether or not anything changed.
+            if ConnectionTrace.enabled, !tracedHome, !projects.isEmpty { tracedHome = true; ConnectionTrace.mark("home.live", "synchronized") }
+            return
+        }
         else {
             // Replayed and live events overlap; each applies once, and the
             // shell remembers how far it got for the next resume.
