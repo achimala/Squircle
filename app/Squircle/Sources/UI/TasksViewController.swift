@@ -82,9 +82,17 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             }
             let cell = table.dequeueReusableCell(withIdentifier: "task", for: path) as! TaskCell
             guard let task = task(id) else { return cell }
-            let build = task.builds.last(where: { $0.state == "succeeded" && $0.installable == true })
+            let linked = task.builds.last(where: { $0.state == "succeeded" && $0.installable == true })
                 .flatMap { b in self.model.builds.first { $0.id == b.id } }
-            cell.configure(task, faded: task.archivedAt != nil, install: build.map { _ in self.installing == task.id ? "Opening…" : "Install" })
+            // Only the app's newest build installs from here: an older one
+            // would take the app back. The others are named instead.
+            let newest = linked.flatMap { build in
+                self.model.builds.filter { $0.bundleID == build.bundleID && $0.canInstall }.max { $0.date < $1.date }
+            }
+            let build = linked?.id == newest?.id ? linked : nil
+            let shipped = linked.map { "In \($0.title) \($0.version)" }
+            cell.configure(task, faded: task.archivedAt != nil, shipped: build == nil ? shipped : nil,
+                           install: build.map { _ in self.installing == task.id ? "Opening…" : "Install" })
             cell.onThread = { [weak self] thread in self?.onOpen?(thread) }
             cell.onMedia = { [weak self] media in self?.openMedia(media, of: task) }
             cell.onInstall = { [weak self] in if let build { self?.install(build, for: task) } }
@@ -491,10 +499,10 @@ private final class TaskCell: UITableViewCell {
         loads = []
     }
 
-    func configure(_ task: AppTask, faded: Bool, install title: String?) {
+    func configure(_ task: AppTask, faded: Bool, shipped: String?, install title: String?) {
         ask.text = task.ask
         ask.textColor = faded || !task.status.open ? .secondaryLabel : .label
-        let detail = [faded ? Self.statusName(task.status) : nil, task.note.isEmpty ? nil : task.note].compactMap { $0 }
+        let detail = [faded ? Self.statusName(task.status) : nil, task.note.isEmpty ? nil : task.note, shipped].compactMap { $0 }
         note.text = detail.joined(separator: " · ")
         note.isHidden = detail.isEmpty
         install.isHidden = title == nil
