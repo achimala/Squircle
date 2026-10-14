@@ -12,7 +12,7 @@ final class Composer: UIView, UITextViewDelegate {
         config.image = UIImage(systemName: "arrow.up")
         config.cornerStyle = .capsule
         config.baseBackgroundColor = Theme.accent
-        config.baseForegroundColor = .white
+        config.baseForegroundColor = Theme.onAccent
         config.contentInsets = .zero
         let button = UIButton(configuration: config)
         button.accessibilityIdentifier = "thread.send"

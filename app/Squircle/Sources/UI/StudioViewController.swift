@@ -167,12 +167,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// screen capture: `SQUIRCLE_GRID` (grid scroll in points), `SQUIRCLE_APP`
     /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it)
     /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` brings
-    /// the first simulator large. `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
+    /// the first simulator large; `SQUIRCLE_BUILDS=1` shows the app's builds and
+    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills. `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
         func value(_ key: String) -> CGFloat? { environment[key].flatMap(Double.init).map { CGFloat($0) } }
         if let slow = value("SQUIRCLE_SLOW") { SpringDriver.debugSlowMotion = Double(slow) }
+        if environment["SQUIRCLE_NO_DOCK"] == "1" { dock.isHidden = true }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard let self else { return }
@@ -184,6 +186,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             guard let scrub = value("SQUIRCLE_SCRUB") else {
                 if let text = environment["SQUIRCLE_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
+                }
+                if let text = environment["SQUIRCLE_DEMO_SEND"] {
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugFlySend(text) }
+                }
+                if environment["SQUIRCLE_BUILDS"] == "1" {
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentBuilds() }
                 }
                 return
             }

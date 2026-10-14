@@ -3,43 +3,14 @@ import UIKit
 /// One visual language for every screen: a lit studio backdrop for the real
 /// devices, system text colors for content, and Liquid Glass only on controls.
 enum Theme {
-    static let accent = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.60, green: 0.62, blue: 1.0, alpha: 1)
-            : UIColor(red: 0.33, green: 0.35, blue: 0.84, alpha: 1)
-    }
+    /// Terracotta on warm cream (user-chosen "Clay", 2026-10-14).
+    static let accent = dynamic(rgb(0.71, 0.33, 0.20), rgb(0.94, 0.56, 0.41))
+    /// Text and symbols on an accent fill (the send button, Install).
+    static let onAccent = dynamic(.white, rgb(0.20, 0.08, 0.03))
     /// The page behind conversations and lists that are not on the stage.
-    static let paper = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.067, green: 0.067, blue: 0.074, alpha: 1)
-            : UIColor(red: 0.973, green: 0.966, blue: 0.953, alpha: 1)
-    }
-    static let backdropTop = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.115, green: 0.115, blue: 0.128, alpha: 1)
-            : UIColor(red: 0.984, green: 0.978, blue: 0.968, alpha: 1)
-    }
-    static let backdropBottom = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.032, green: 0.032, blue: 0.038, alpha: 1)
-            : UIColor(red: 0.900, green: 0.890, blue: 0.872, alpha: 1)
-    }
-    static let backdropGlow = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.30, green: 0.30, blue: 0.36, alpha: 0.55)
-            : UIColor(white: 1, alpha: 0.95)
-    }
+    static let paper = dynamic(rgb(0.972, 0.957, 0.933), rgb(0.078, 0.070, 0.064))
     /// Tint for your messages' glass bubbles.
-    static let userGlass = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.45, green: 0.47, blue: 1.0, alpha: 0.30)
-            : UIColor(red: 0.42, green: 0.44, blue: 0.95, alpha: 0.16)
-    }
-    static let userBubble = UIColor { trait in
-        trait.userInterfaceStyle == .dark
-            ? UIColor(red: 0.20, green: 0.21, blue: 0.30, alpha: 1)
-            : UIColor(red: 0.905, green: 0.905, blue: 0.965, alpha: 1)
-    }
+    static let userGlass = dynamic(rgb(0.78, 0.44, 0.28, 0.14), rgb(0.86, 0.50, 0.34, 0.24))
     static let codeFill = UIColor { trait in
         trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.09) : UIColor(white: 0, alpha: 0.055)
     }
@@ -76,9 +47,17 @@ enum Theme {
         return UIColor(red: r / total, green: g / total, blue: b / total, alpha: 1)
     }
 
-    static let success = UIColor.systemGreen
-    static let warning = UIColor.systemOrange
-    static let failure = UIColor.systemRed
+    /// Olive, ochre and crimson, apart from the terracotta accent.
+    static let success = dynamic(rgb(0.36, 0.53, 0.24), rgb(0.60, 0.78, 0.44))
+    static let warning = dynamic(rgb(0.72, 0.55, 0.06), rgb(0.95, 0.78, 0.34))
+    static let failure = dynamic(rgb(0.74, 0.13, 0.24), rgb(1.0, 0.44, 0.52))
+
+    private static func dynamic(_ light: UIColor, _ dark: UIColor) -> UIColor {
+        UIColor { $0.userInterfaceStyle == .dark ? dark : light }
+    }
+    private static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> UIColor {
+        UIColor(red: r, green: g, blue: b, alpha: a)
+    }
 
     /// Dynamic Type aware; `rounded` is reserved for app names.
     static func font(_ style: UIFont.TextStyle, _ size: CGFloat, _ weight: UIFont.Weight = .regular,
