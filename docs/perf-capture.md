@@ -61,8 +61,8 @@ frames are named on the phone with `dladdr`; app frames on the Mac.
 
 ## Delivery
 
-- Upload: `POST /v1/perf` on the Squircle service with the diagnostics token
-  the overlay already holds (same private connection as diagnostics). Gzip JSON;
+- Upload: `POST /v1/perf` on the Squircle service over the paired connection the
+  overlay already reads (which token it holds was not checked). Gzip JSON;
   ~1–3 MB for a 60 s capture with hitch-only stacks.
 - Into the conversation: the composer gets a "Performance · 12 s · 4 hitches"
   attachment chip; on send, the message text carries a one-line reference the
