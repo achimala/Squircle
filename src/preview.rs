@@ -107,17 +107,12 @@ pub async fn capture(
             .join(uuid::Uuid::new_v4().to_string())
             .join(&job.id);
         fs::create_dir_all(&directory)?;
-        let built = xcode::run(&simulator_request, &directory, cancel.clone()).await?;
+        let built = xcode::build(&simulator_request, &directory, cancel.clone()).await?;
         ensure!(
-            built.bundle_id == output.bundle_id,
+            built.metadata().bundle_id == output.bundle_id,
             "Preview simulator bundle ID differs from the archived app"
         );
-        (
-            built
-                .app_path
-                .context("Preview build has no simulator app")?,
-            "current_working_tree",
-        )
+        (built.app().to_path_buf(), "current_working_tree")
     };
     let info =
         plist::Value::from_file(app.join("Info.plist")).context("Cannot inspect preview app")?;
