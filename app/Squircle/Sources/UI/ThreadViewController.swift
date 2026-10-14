@@ -333,6 +333,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         composer.onSend = { [weak self] in self?.send() }
         composer.onChange = { [weak self] in self?.renderSend() }
         composer.attachMenu = attachMenu()
+        composer.onImages = { [weak self] images in
+            for image in images { if let attachment = ImageAttachment(image) { self?.model.attach(attachment) } }
+        }
         composer.onRemoveAttachment = { [weak self] id in self?.model.removeAttachment(id) }
         jump.alpha = 0
         jump.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
