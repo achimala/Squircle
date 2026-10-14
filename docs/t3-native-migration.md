@@ -1499,3 +1499,45 @@ note re-injected after compaction.
 
 Squircle build `5f52e109-f73e-42c1-8946-ae7ca8675cf2` (0.3.0 45, main at
 `076d35e`); the Install card for another app's build is not yet checked on screen.
+
+## 2026-10-14 restart and start fresh (0.3.0 46)
+
+User: running agents keep an old system prompt, and the LanguageApp agent
+had a long history of doing all the work itself; they wanted a way to fix
+that from the phone or by telling the agent.
+
+- **Finding:** Claude Code stores a `prompt_snapshot` of the system prompt
+  in the session and restores it on `--resume`. A session relaunched with an
+  updated `app-agent.md` still answered from the old prompt (scratch
+  `claude -p --resume` with an old and a new plugin copy). So relaunching
+  alone does not update instructions; the earlier note that the role is the
+  system prompt "on every launch and `--resume`" only holds for the first
+  launch.
+- **`squircle agent restart`** sends T3 `thread.session.stop` (history and
+  resume cursor kept; plugin and hooks reload on the next launch) and marks
+  the agent so its next turn note carries the current `app-agent.md` body
+  once, as replacing any earlier version.
+- **`squircle agent fresh`** creates a new agent thread on the same model,
+  renames the old one "<app> agent (until <date>)" (not archived, so it
+  stays in the phone's Threads), stops its session, moves its workers to the
+  new coordinator and starts the new thread with a `[handoff]` turn (context
+  record `squircle-handoff`): app, last 8 commits, workers, the user's last 8
+  messages, the old agent's last reply and the agent's `--handoff` note. No
+  model runs in the service.
+- **Mid-turn:** both are stored as `pending` in `agents.json` and run when
+  the agent's turn ends, so an agent can run them on itself. The plugin has
+  one line telling it how.
+- **Phone:** the agent's ⋯ menu has Restart Agent and Start Fresh (a
+  destructive confirm item). The agent view follows the Mac's agent for the
+  app, so a new thread replaces the old one in place within one refresh
+  (≤4 s); the handoff renders as a quiet "Started fresh" line.
+
+Verified on the scratch project: restart kept a codeword and the agent then
+described the new fresh-start rule it had denied before; telling the agent
+"start fresh" ran after its turn, the new agent's first reply was two short
+sentences; Start Fresh from the ⋯ menu in the simulator switched the open
+conversation in place. LanguageApp's agent was started fresh from the ⋯
+menu (deferred through a running turn); its first reply was three short
+sentences naming the open item. Not yet checked on the physical phone.
+
+Squircle build `e76693ea-4f76-47c2-a735-b327e0ff49c5` (0.3.0 46, main at `adec020`) succeeded; not yet installed on the phone.

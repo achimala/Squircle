@@ -67,6 +67,8 @@ directory and adds the T3 instance; `--remove` takes it out).
 | --- | --- |
 | `t3 connect --url URL`, `t3 status` | Service's own T3 session; connection state |
 | `agent start --project T3_ID [--message TEXT]` | Create or find the app's agent and send it a message |
+| `agent restart --project ID\|--thread ID` | Relaunch the agent's Claude session on the same thread; its next turn gets the current instructions (once, in the turn note) with history kept. Runs when the agent's turn ends |
+| `agent fresh --project ID\|--thread ID [--handoff TEXT]` | Replace the agent with a new thread seeded by a handoff (app, recent commits, workers, recent user messages, last reply, the note); the old thread is renamed "… (until DATE)" and stays in Threads; workers move over. Runs when the agent's turn ends |
 | `agent list`, `agent context [--hook]` | Agents; the per-turn note (thread ID, live workers) its hook injects |
 | `thread spawn --coordinator ID --title T --branch B --prompt P` | Worker thread in its own worktree, branched from the checkout's current branch |
 | `thread send ID TEXT`, `thread read ID`, `thread answer ID TEXT` | Message, inspect (last reply, diff stat, pending question), answer |

@@ -7,6 +7,12 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-14: restart and start fresh, version 0.3.0 (46).** An app's agent
+can be restarted (same history, current instructions) or started fresh (new
+thread with a handoff; the old one stays in Threads) from its ⋯ menu or by
+telling it. See
+[restart and start fresh](docs/t3-native-migration.md#2026-10-14-restart-and-start-fresh-030-46).
+
 **2026-10-13: one look everywhere, version 0.3.0 (41).** Conversations read
 like plain chat in the app and the overlay alike: status lines are plain text,
 your messages keep glass bubbles, and model and approvals sit in a ⋯ menu. See
