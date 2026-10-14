@@ -1488,6 +1488,21 @@ impl Agents {
     pub fn status(&self) -> String {
         self.status.lock().unwrap().clone()
     }
+
+    /// T3's providers for the phone's model menus. T3's config also carries,
+    /// per instance, the skill and command catalog of each of the last 16
+    /// folders it ran a turn in (about 35 KB each, so about 1 MB with
+    /// workers' worktrees), which the phone would otherwise carry over cellular.
+    pub async fn providers(&self) -> Result<Value> {
+        let config = self.client().await?.call("server.getConfig", json!({})).await?;
+        Ok(Value::Array(config["providers"].as_array().into_iter().flatten().map(|provider| {
+            let mut provider = provider.clone();
+            if let Some(fields) = provider.as_object_mut() {
+                for key in ["workspaceSnapshots", "skills", "slashCommands"] { fields.remove(key); }
+            }
+            provider
+        }).collect()))
+    }
 }
 
 #[cfg(test)]

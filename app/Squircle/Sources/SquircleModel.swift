@@ -408,9 +408,8 @@ final class SquircleModel {
     }
     /// One connection attempt: socket, live subscriptions, and the open
     /// thread resubscribed. Its transcript stays on screen meanwhile; T3's
-    /// snapshot then brings it up to date. T3's config is about 1 MB, which
-    /// a weak cellular link takes a minute to carry, so it loads afterwards
-    /// instead of holding the connection up.
+    /// snapshot then brings it up to date. Models load afterwards from the
+    /// service, which trims T3's 1 MB config.
     private func openConnection() async throws {
         guard let gateway else { throw ClientError.configuration }
         try await gateway.connect()
@@ -452,8 +451,8 @@ final class SquircleModel {
     private func loadConfig() {
         guard configLoader == nil, configLoaded.map({ $0.duration(to: .now) > .seconds(600) }) ?? true else { return }
         configLoader = Task { [weak self] in
-            // A dropped socket fails this; the next connection asks again.
-            if let config = try? await self?.gateway?.call("server.getConfig", large: true) {
+            // A failure here is retried on the next connection.
+            if let config = try? await self?.client?.providers() {
                 self?.consumeConfig(config); self?.configLoaded = .now
             }
             self?.configLoader = nil

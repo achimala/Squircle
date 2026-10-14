@@ -234,6 +234,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sims/devices", get(sim_devices))
         .route("/v1/agents", get(list_agents).post(ensure_agent))
         .route("/v1/agents/context", get(agent_context))
+        .route("/v1/t3/providers", get(t3_providers))
         .route("/v1/agents/restart", post(restart_agent))
         .route("/v1/agents/fresh", post(fresh_agent))
         .route("/v1/workers", get(list_workers).post(spawn_worker))
@@ -2019,6 +2020,11 @@ async fn fresh_agent(
 #[derive(Deserialize)]
 struct ContextQuery {
     cwd: PathBuf,
+}
+
+async fn t3_providers(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let providers = agents(&state)?.providers().await.map_err(agent_error)?;
+    Ok(Json(success(json!({"providers": providers}))))
 }
 
 async fn agent_context(

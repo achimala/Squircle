@@ -205,6 +205,15 @@ final class SquircleClient {
         return reply.data["media"].array
     }
 
+    /// T3's providers and models, trimmed by the service: T3's own config is
+    /// about 1 MB, nearly all of it per-folder catalogs the phone never shows.
+    func providers() async throws -> JSONValue {
+        struct Reply: Decodable { let ok: Bool; let data: JSONValue }
+        let reply: Reply = try await get(["v1", "t3", "providers"])
+        guard reply.ok else { throw ClientError.response("Squircle") }
+        return reply.data
+    }
+
     /// Simulator sessions Squircle is recording for agents (`squircle sim`).
     func simulatorSessions() async throws -> [JSONValue] {
         struct Reply: Decodable { let ok: Bool; let data: JSONValue }

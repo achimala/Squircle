@@ -1881,3 +1881,28 @@ Not yet verified: the coordinated phone/simulator check in step 4 of the
 review's fix plan (rapid navigation during a delayed send,
 background/foreground, Home with live simulators, scene replacement during
 capture, Reduce Motion, app/overlay parity).
+
+## 2026-10-14 T3's 1 MB config
+
+Build 55 stopped holding the connection on `server.getConfig` because its
+reply had reached about 1 MB and outlasted the 40 s liveness deadline on
+cellular. Measured against T3 0.0.45 on the Mac (read-only probe): 949 KB, of
+which 830 KB is `providers[].workspaceSnapshots`. For each provider instance
+T3 keeps, in memory, the skill and slash-command catalog of the last 16
+folders it started a turn in (`upsertProviderWorkspaceSnapshot`, `.slice(-16)`;
+32 for Antigravity), about 34 KB each for Claude with the installed plugins
+(80 commands, 12 skills) and 20 KB for Codex. Every worker worktree adds one;
+removing the worktree, archiving the thread or `server.refreshProviders`
+doesn't drop it. It is not persisted, so restarting T3 clears it. At the time:
+claudeAgent 16 folders (13 already deleted), squircle 6, codex 3. So it is
+bounded, at roughly 16 × 35 KB per used instance (about 1.5 MB with claude,
+squircle and codex full), and grows with the size of the skill catalog.
+`subscribeServerConfig` sends the same list; no narrower T3 RPC exists. T3
+does accept `permessage-deflate`, but the 34 KB blocks exceed deflate's
+window (gzip only gets 949 → 219 KB).
+
+Now the phone asks the Squircle service (`GET /v1/t3/providers`), which reads
+T3's config locally and drops `workspaceSnapshots`, `skills` and
+`slashCommands`: 24 KB (2 KB gzipped). The socket's large-reply allowance is
+gone. T3's shell snapshot is separate: 92 KB for 62 unarchived threads (about
+1.4 KB each), growing until workers are archived.
