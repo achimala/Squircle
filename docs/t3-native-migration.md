@@ -931,6 +931,27 @@ panel's shortest layout morphing into the bubble. Verified from real-touch
 recordings: drag up into full screen and back, handle tap to full and back,
 continuous with nothing re-wrapping and nothing changing at rest.
 
+**Fluid bubble, launch in place (user, 2026-10-14):** "as the agent changes
+what it's doing the bubble resizes and text changes kinda abruptly and often
+clips off … the squircle button flies into place from some random location".
+Causes: the bubble's line was laid out at the glass's width every frame, so it
+re-truncated as the width sprang, and the opening progress averaged width and
+height, so a width change alone read as partly open (the line was squeezed to
+the new width and stretched, and the panel's paper blurred in). At launch the
+first `render()` animated the glass's spring from its zero frame before the
+first layout. Now `LiveCapsule` lays each line out at its own text width
+(within `widthLimit`, truncated there), moves lines only by transform, and
+fades its trailing 9 pt, so the springing edge reveals or hides text softly;
+the old task rises and fades out quickly as the new one rises in. A task shows
+at least 1.1 s; changes within that collapse into the latest (tone changes,
+such as Needs you, show at once). Opening progress is by height only. The
+glass gets no frame until the first layout in a window, then grows in at its
+resting place (`appear`, scale 0.5 → 1 with a little overshoot, fading in).
+DEBUG: `SQUIRCLE_BUBBLE_DEMO=1` loops made-up statuses. Checked frame by
+frame in a real-speed simulator recording (iPhone 17 Pro, iOS 27.0). Letters Abroad
+build: job `cb942484-6b95-4ebe-9061-26b5d25bad8d` (overlay key `6650da73…`,
+main at `b2e8e58`); not yet on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
@@ -1419,3 +1440,27 @@ closed it at the ~30 s limit and reconnected on return; forced drops
 reconnected in ~0.2 s, with the thread's transcript and live simulator PiPs
 intact and no notice. Not tested: toggling the simulator's network (needs root
 on the Mac) and a T3 that stays down. Not yet on the phone.
+
+## 2026-10-14 Clay palette
+
+User: "The purple theme in the app is a bit sloppy btw can we come up with a
+nicer design." Three alternatives (Graphite: ink on neutral paper; Harbor:
+deep teal; Clay: terracotta on warm cream) were captured in the simulator in
+both appearances (Home, the agent conversation, Builds); the user picked
+**Clay**. It is now the only palette, in the app and the injected overlay
+(both use `Theme`):
+
+- accent terracotta (light 0.71/0.33/0.20, dark 0.94/0.56/0.41);
+  `Theme.onAccent` (white / deep brown) for text on accent fills;
+- paper warm cream 0.972/0.957/0.933, dark warm charcoal 0.078/0.070/0.064;
+- your bubbles a sand tint of the accent;
+- status olive (success), ochre (warning) and crimson (failure) instead of
+  system green/orange/red, so they stay apart from the accent.
+
+The purple palette and the unused studio backdrop colours were removed. DEBUG
+capture hooks kept for stills: `SQUIRCLE_BUILDS=1` (the app's builds),
+`SQUIRCLE_NO_DOCK=1` (hide simulator PiPs) and `SQUIRCLE_DEMO_SEND` on the
+agent (the send animation, never sent to T3). Checked in the simulator: Home,
+agent conversation, Builds and the overlay (full) in light and dark.
+Squircle build `715bcac7-ecac-4db7-ae31-a7c97b272ee4` (0.3.0 44, main at
+`dcda2df`); not yet on the phone.

@@ -778,7 +778,7 @@ final class BuildCell: TimelineCell {
         config.title = "Install"
         config.cornerStyle = .capsule
         config.baseBackgroundColor = Theme.accent
-        config.baseForegroundColor = .white
+        config.baseForegroundColor = Theme.onAccent
         let button = UIButton(configuration: config)
         button.accessibilityIdentifier = "thread.build.install"
         return button
@@ -985,10 +985,18 @@ final class LiveCell: TimelineCell {
 /// in shimmering text that slides vertically as tasks change, and the time
 /// since the turn began. Sized by its owner; it has no surface of its own
 /// (the overlay's bubble puts it on glass).
+///
+/// Each line is laid out at its own width (within `widthLimit`), never at
+/// the capsule's current width, so a capsule whose width springs never
+/// squeezes or re-truncates its text; whatever its edge cuts fades out
+/// instead of being clipped mid-glyph. A task shows for at least `dwell`
+/// before the next replaces it; changes in between collapse into the latest.
 final class LiveCapsule: UIView {
     enum Tone: Equatable { case idle, working, needsYou, done }
     /// Clips the sliding lines to the capsule.
     private let track = LayoutView()
+    /// Fades the track's trailing edge.
+    private let edge = CAGradientLayer()
     private var line = ShimmerLabel()
     private(set) var headline: String?
     private(set) var tone = Tone.idle
@@ -998,6 +1006,15 @@ final class LiveCapsule: UIView {
     private var timer: Timer?
     var showsTime = true { didSet { setNeedsLayout() } }
     var font = Theme.font(.subheadline, 15, .semibold) { didSet { line.font = font; setNeedsLayout() } }
+    /// The widest the owner lets the capsule get (`preferredWidth`'s limit),
+    /// when it animates the capsule's width itself.
+    var widthLimit: CGFloat?
+    /// Called when a held-back headline shows, so the owner can resize.
+    var onHeadlineChange: (() -> Void)?
+    private static let dwell: TimeInterval = 1.1
+    private var shownAt: Date?
+    private var queued: String??
+    private var flush: Task<Void, Never>?
 
     init() {
         super.init(frame: .zero)
@@ -1006,9 +1023,13 @@ final class LiveCapsule: UIView {
         mark.layer.cornerRadius = 4.5
         elapsed.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
         elapsed.textColor = .tertiaryLabel
-        track.onLayout = { [weak self] in self?.placeLine() }
+        track.onLayout = { [weak self] in self?.placeLines() }
         track.clipsToBounds = true
         track.layer.cornerCurve = .continuous
+        edge.startPoint = CGPoint(x: 0, y: 0.5)
+        edge.endPoint = CGPoint(x: 1, y: 0.5)
+        edge.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+        track.layer.mask = edge
         style(line)
         [track, mark, elapsed].forEach(addSubview)
     }
@@ -1041,56 +1062,121 @@ final class LiveCapsule: UIView {
         let radius = bounds.height / 2
         track.frame = bounds
         track.layer.cornerRadius = radius
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        edge.frame = track.bounds
+        let width = max(1, track.bounds.width)
+        edge.locations = [0, NSNumber(value: Double(max(0, width - 11) / width)), NSNumber(value: Double(max(0, width - 2) / width))]
+        CATransaction.commit()
         mark.frame = CGRect(x: inset, y: (bounds.height - markSide) / 2, width: markSide, height: markSide)
         elapsed.sizeToFit()
         elapsed.isHidden = !showsTime || started == nil
         elapsed.center = CGPoint(x: bounds.width - inset - 3 - elapsed.bounds.width / 2, y: bounds.height / 2)
-        placeLine()
+        placeLines()
     }
 
-    /// Where a line rests: after the mark, short of the timer.
-    private var restingFrame: CGRect {
+    /// Where a line rests: after the mark, as wide as its text, short of the
+    /// timer (or of where it would be at `widthLimit`).
+    private func restingFrame(_ label: ShimmerLabel) -> CGRect {
         let x = mark.frame.maxX + 11
         let end = elapsed.isHidden ? track.bounds.width - inset + 2 : elapsed.frame.minX - 8
-        return CGRect(x: x, y: 0, width: max(0, end - x), height: track.bounds.height)
+        var room = end - x
+        if let widthLimit { room = widthLimit - (track.bounds.width - room) }
+        let text = ceil(((label.text ?? "") as NSString).size(withAttributes: [.font: font]).width) + 1
+        return CGRect(x: x, y: 0, width: max(0, min(text, room)), height: track.bounds.height)
     }
 
-    private func placeLine() {
-        if line.layer.animationKeys() == nil { line.frame = restingFrame }
+    /// Lines move by their transforms; their frames are only ever where they rest.
+    private func placeLines() {
+        for case let label as ShimmerLabel in track.subviews {
+            let rest = restingFrame(label)
+            label.bounds = CGRect(origin: .zero, size: rest.size)
+            label.center = CGPoint(x: rest.midX, y: rest.midY)
+        }
     }
 
     func configure(headline next: String?, started: Date?, tone: Tone = .working) {
         self.started = started
         tick()
-        if tone != self.tone {
+        let toneChanged = tone != self.tone
+        if toneChanged {
             self.tone = tone
             mark.backgroundColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success : Theme.accent
             line.isShimmering = tone == .working
             line.textColor = tone == .needsYou ? Theme.warning : .secondaryLabel
             animateMark()
         }
+        if next == headline {
+            cancelQueued()
+            return
+        }
+        // The same kind of news within `dwell` of the last waits its turn;
+        // only the latest is kept.
+        let wait = shownAt.map { Self.dwell - Date.now.timeIntervalSince($0) } ?? 0
+        if !toneChanged, headline != nil, next != nil, wait > 0, window != nil {
+            queued = .some(next)
+            if flush == nil {
+                flush = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(wait))
+                    guard !Task.isCancelled else { return }
+                    self?.showQueued()
+                }
+            }
+            return
+        }
+        cancelQueued()
+        show(next)
+    }
+
+    private func cancelQueued() {
+        queued = nil
+        flush?.cancel()
+        flush = nil
+    }
+
+    private func showQueued() {
+        flush = nil
+        guard let next = queued else { return }
+        queued = nil
         guard next != headline else { return }
-        let first = headline == nil
+        show(next)
+        onHeadlineChange?()
+    }
+
+    private func show(_ next: String?) {
         headline = next
-        guard !first, next != nil, window != nil, !Motion.reduced, track.bounds.height > 0 else {
+        shownAt = .now
+        guard window != nil, !Motion.reduced, track.bounds.height > 0 else {
             line.text = next
             setNeedsLayout()
             return
         }
-        // The finished task slides up out of the capsule; the next slides in.
+        // The finished task rises out of the capsule and fades; the next
+        // rises in from below.
         let old = line
         let fresh = ShimmerLabel()
         style(fresh)
         fresh.textColor = line.textColor
         fresh.text = next
         line = fresh
-        let rest = restingFrame, travel = track.bounds.height * 0.8
-        fresh.frame = rest.offsetBy(dx: 0, dy: travel)
-        UIView.animate(withDuration: 0.55, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0,
+        let rest = restingFrame(fresh), travel = track.bounds.height * 0.62
+        fresh.bounds = CGRect(origin: .zero, size: rest.size)
+        fresh.center = CGPoint(x: rest.midX, y: rest.midY)
+        fresh.transform = CGAffineTransform(translationX: 0, y: travel)
+        fresh.alpha = 0
+        UIView.animate(withDuration: 0.6, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0,
                        options: [.allowUserInteraction, .beginFromCurrentState]) {
-            old.frame = rest.offsetBy(dx: 0, dy: -travel)
-            fresh.frame = rest
-        } completion: { _ in old.removeFromSuperview() }
+            old.transform = CGAffineTransform(translationX: 0, y: -travel)
+            fresh.transform = .identity
+        } completion: { [weak self] _ in
+            if old !== self?.line { old.removeFromSuperview() }
+        }
+        UIView.animate(withDuration: 0.22, delay: 0, options: [.allowUserInteraction, .beginFromCurrentState, .curveEaseOut]) {
+            old.alpha = 0
+        }
+        UIView.animate(withDuration: 0.34, delay: 0.1, options: [.allowUserInteraction, .curveEaseOut]) {
+            fresh.alpha = 1
+        }
     }
 
     private func tick() {
