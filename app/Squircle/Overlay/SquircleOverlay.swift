@@ -142,6 +142,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// conversation is laid out once at this size and pinned to the glass's
     /// bottom edge, which reveals it. Nothing re-lays out per frame.
     private var clipLayout: CGSize?
+    /// Docked ↔ full screen (and back): the content is laid out at the
+    /// glass's own frame every frame, with the safe area that frame covers,
+    /// until the spring rests. Its text column keeps the docked width
+    /// (`contentWidth`), so nothing re-wraps; the controls, the field and the
+    /// fade move to where they are at the other end.
+    private var liveLayout = false
+    /// The panel's laid-out safe area (the part of the screen's it covers).
+    private var panelSafe = UIEdgeInsets.zero
     /// Where along the handle's path the finger is.
     private enum DragZone { case docked, full, collapse }
     private var dragZone: DragZone?
@@ -428,7 +436,15 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private func retarget(velocity: CGPoint? = nil, sizeVelocity: CGSize = .zero) {
         guard view.bounds.width > 0 else { return }
         // A finger on the handle sets the content up itself.
-        if clipLayout == nil, dragZone == nil, route.open || panelSize == .zero { layOutPanel(at: route.open && route.full ? fullFrame.size : miniFrame.size) }
+        if !route.open { liveLayout = false }
+        if clipLayout == nil, dragZone == nil, route.open || panelSize == .zero {
+            let size = route.open && route.full ? fullFrame.size : miniFrame.size
+            // The panel showing in full moves to the other panel size live;
+            // only content arriving from the bubble cross-blurs.
+            let shown = panelSize != .zero && page.alpha > 0.98 && !page.isHidden && outgoing == nil && view.window != nil
+            if route.open, shown, size != panelSize { liveLayout = true }
+            if !liveLayout { layOutPanel(at: size) }
+        }
         // Before its first layout it has no place to move from.
         guard placed else { return }
         if !jellySpring.isHeld, jellySpring.target != jellyTarget { jellySpring.animate(to: jellyTarget) }
@@ -446,8 +462,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     /// Lays the panel's content out at a new resting size. If it shows (and
     /// `crossBlur`), a picture of how it was blurs out as the glass stretches.
-    private func layOutPanel(at size: CGSize, crossBlur: Bool = true) {
-        guard size != panelSize, size.width > 0 else { return }
+    private func layOutPanel(at size: CGSize, crossBlur: Bool = true, safe given: UIEdgeInsets? = nil) {
+        let safe = given ?? panelSafeArea(size)
+        guard size != panelSize || safe != panelSafe, size.width > 0 else { return }
         outgoing?.view.removeFromSuperview()
         outgoing = nil
         let showing = crossBlur && panelSize != .zero && page.alpha > 0.02 && !page.isHidden && view.window != nil
@@ -458,13 +475,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         page.transform = .identity
         page.bounds = CGRect(origin: .zero, size: size)
         body.frame = page.bounds
-        let safe = panelSafeArea(size)
+        panelSafe = safe
         // At the top centre, level with the ⋯ button; the strip it grabs runs
         // from the panel's edge to below the buttons.
         handle.frame = CGRect(x: size.width / 2 - 60, y: safe.top, width: 120, height: Self.inset + 44)
         handle.subviews.first?.frame = CGRect(x: 42, y: 7, width: 36, height: 5)
         for mounted in [agent, thread].compactMap({ $0 }) {
-            mounted.controller.setOverlayLayout(inset: Self.inset, safe: safe)
+            mounted.controller.setOverlayLayout(inset: Self.inset, safe: safe, contentWidth: contentWidth)
             place(mounted, offset: 0)
             mounted.controller.view.layoutIfNeeded()
         }
@@ -515,6 +532,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let fullness = ((rect.height - miniFrame.height) / max(1, fullFrame.height - miniFrame.height)).clamped()
         // The panel grows out of the jelly: no glass while closed.
         glass.frame = rect
+        if liveLayout, route.open { layOutPanel(at: rect.size, crossBlur: false, safe: safeArea(in: rect)) }
         glass.alpha = (opened * 4).clamped()
         glass.isHidden = glass.alpha == 0 && !route.open
         let radius = min(rect.height / 2, rect.width / 2, Self.panelRadius)
@@ -600,7 +618,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The top `y` points of the panel's content are above the glass: the
     /// handle and the conversations' top controls ride the visible edge.
     private func revealTop(_ y: CGFloat) {
-        handle.frame.origin.y = y + panelSafeArea(panelSize).top
+        handle.frame.origin.y = y + panelSafe.top
         agent?.controller.setVisibleTop(y)
         thread?.controller.setVisibleTop(y)
     }
@@ -652,6 +670,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     }
 
     private func rested() {
+        if !frame.isAnimating, !frame.isHeld, liveLayout {
+            liveLayout = false
+            layOutPanel(at: frame.value.size, crossBlur: false)
+            applyScene()
+        }
         if !frame.isAnimating, !frame.isHeld, clipLayout != nil {
             // At rest: laid out at its own size once. The conversation keeps
             // its newest line where it was, so nothing moves.
@@ -842,7 +865,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         body.insertSubview(host, belowSubview: handle)
         controller.didMove(toParent: self)
         let mounted = (controller, host)
-        controller.setOverlayLayout(inset: Self.inset, safe: panelSafeArea(panelSize))
+        controller.setOverlayLayout(inset: Self.inset, safe: panelSafe, contentWidth: contentWidth)
         // The system's scroll-edge blur can't draw inside the blurred,
         // stretched layers of the morph, so it would pop in at rest; the
         // overlay always fades the conversation under its controls instead.
@@ -976,6 +999,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                 // Docked under the bubble, the panel's top is the bubble's.
                 if !lower { anchor = (anchor?.right ?? true, top - Self.gap - Self.jellySide / 2) }
             }
+            // Revealed from the bottom while only the height changes; a
+            // change of width (to or from full screen) is laid out live.
+            if clipLayout != nil, route.open, abs(targetFrame.width - frame.value.width) > 0.5 {
+                clipLayout = nil
+                liveLayout = true
+            }
             // The spring takes over: content follows the route again.
             dragZone = nil
             setNeedsUpdateOfSupportedInterfaceOrientations()
@@ -983,6 +1012,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         default: break
         }
     }
+
+    /// The conversation's column: the docked panel's width, docked or not.
+    private var contentWidth: CGFloat { miniFrame.width }
 
     /// The tallest docked panel: the docked panel's sides and bottom, its top
     /// just under the safe area.
@@ -1019,32 +1051,23 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let tall = tallestDocked
         switch zone {
         case .docked:
+            liveLayout = false
             // Laid out once, a little taller than the tallest docked panel
             // so the spring's overshoot never shows its edge.
             let size = CGSize(width: tall.width, height: tall.height + 40)
             layOutPanel(at: size, crossBlur: false)
             clipLayout = size
         case .full:
-            // Between the tallest docked panel and the full screen, one
-            // layout blurs into the other: what shows now is pictured, the
-            // other end is laid out.
-            if clipLayout != nil {
-                clipLayout = nil
-                outgoing?.view.removeFromSuperview()
-                outgoing = nil
-                keepPicture()
-                let picture = outgoing
-                outgoing = nil
-                layOutPanel(at: fullFrame.size, crossBlur: false)
-                outgoing = picture
-            } else if panelSize == fullFrame.size {
-                layOutPanel(at: tall.size)
-            } else {
-                layOutPanel(at: fullFrame.size)
-            }
+            // Between the tallest docked panel and the full screen the
+            // content is laid out live at the glass's frame.
+            clipLayout = nil
+            outgoing?.view.removeFromSuperview()
+            outgoing = nil
+            liveLayout = true
         case .collapse:
             // The shortest panel, which stretches into the bubble.
             clipLayout = nil
+            liveLayout = false
             layOutPanel(at: CGSize(width: tall.width, height: Self.minimumHeight), crossBlur: false)
         }
         applyScene()
