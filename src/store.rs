@@ -14,6 +14,7 @@ const MAX_PAGE_SIZE: usize = 1000;
 
 /// The service serializes all access to this store, including read/modify/write
 /// operations, with its outer mutex and holds the exclusive service lock.
+#[derive(Clone)]
 pub struct Store {
     pub root: PathBuf,
     pub settings: Settings,
@@ -439,6 +440,7 @@ mod tests {
             build_id: job.id.clone(),
             expires_at: 44,
             base_url: "https://example.test".into(),
+            download_started_at: None,
             downloaded_at: None,
         };
         store.save_ticket(&ticket)?;
@@ -662,6 +664,7 @@ mod tests {
             build_id: job.id.clone(),
             expires_at: 10,
             base_url: "https://example.test".into(),
+            download_started_at: None,
             downloaded_at: None,
         };
         store.save_ticket(&ticket)?;

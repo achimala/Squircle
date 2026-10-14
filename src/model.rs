@@ -99,7 +99,13 @@ pub struct Ticket {
     pub build_id: String,
     pub expires_at: u64,
     pub base_url: String,
-    /// When iOS first fetched the IPA: the person confirmed installation.
+    /// When the service first opened the IPA for a download request. A request
+    /// alone is not evidence of installation: transfers can fail or be aborted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_started_at: Option<u64>,
+    /// When the service first finished sending every byte of the IPA. iOS
+    /// fetches it only after the person confirms the install prompt; this still
+    /// does not prove installation or launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloaded_at: Option<u64>,
 }
@@ -144,8 +150,20 @@ pub fn success(data: impl Serialize) -> serde_json::Value {
 }
 
 pub fn failure(code: &str, message: impl AsRef<str>, next_step: &str) -> serde_json::Value {
+    failure_with(code, message, next_step, false)
+}
+
+/// `retryable` means the request was refused before any side effect, so the
+/// same request may be sent again as is. Failures whose outcome is ambiguous
+/// (a mutation that may have happened) are never retryable.
+pub fn failure_with(
+    code: &str,
+    message: impl AsRef<str>,
+    next_step: &str,
+    retryable: bool,
+) -> serde_json::Value {
     serde_json::json!({"schema_version": SCHEMA_VERSION, "ok": false, "error": {
-        "code": code, "message": message.as_ref(), "retryable": false, "next_step": next_step
+        "code": code, "message": message.as_ref(), "retryable": retryable, "next_step": next_step
     }})
 }
 

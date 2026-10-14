@@ -4,10 +4,11 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{
-        DefaultBodyLimit, Path, Query, State,
+        DefaultBodyLimit, Path, Query, Request, State,
         rejection::{JsonRejection, QueryRejection},
     },
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
@@ -29,10 +30,17 @@ use tokio_util::io::ReaderStream;
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Job, ticket and app-catalog records: held across their read/modify/write.
     pub store: Arc<Mutex<Store>>,
+    /// The same store's immutable root and credentials, for authentication and
+    /// paths without waiting behind record or catalog file I/O.
+    files: Arc<Store>,
+    /// Serializes per-build diagnostic appends and reads (append-only files).
+    diagnostics: Arc<Mutex<()>>,
     cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
     slots: Arc<Semaphore>,
     inspection_slots: Arc<Semaphore>,
+    uploads: Arc<Semaphore>,
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
     recovery_jobs: Arc<Mutex<HashMap<String, Job>>>,
@@ -45,10 +53,13 @@ pub struct AppState {
 impl AppState {
     pub fn new(store: Store, public_url: Option<String>) -> Self {
         Self {
+            files: Arc::new(store.clone()),
             store: Arc::new(Mutex::new(store)),
+            diagnostics: Arc::default(),
             cancellations: Arc::default(),
             slots: Arc::new(Semaphore::new(1)),
             inspection_slots: Arc::new(Semaphore::new(2)),
+            uploads: Arc::new(Semaphore::new(1)),
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
             recovery_jobs: Arc::default(),
@@ -66,38 +77,57 @@ struct ApiError {
     code: &'static str,
     message: String,
     next: &'static str,
+    /// Refused before any side effect; see `model::failure_with`.
+    retryable: bool,
 }
 impl ApiError {
+    fn new(status: StatusCode, code: &'static str, message: impl ToString, next: &'static str) -> Self {
+        Self { status, code, message: message.to_string(), next, retryable: false }
+    }
     fn bad(message: impl ToString) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            code: "invalid_request",
-            message: message.to_string(),
-            next: "Check the command help and supplied values.",
-        }
+        Self::new(StatusCode::BAD_REQUEST, "invalid_request", message, "Check the command help and supplied values.")
     }
     fn missing(message: impl ToString) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            code: "not_found",
-            message: message.to_string(),
-            next: "Check the build ID or request a new install link.",
-        }
+        Self::new(StatusCode::NOT_FOUND, "not_found", message, "Check the build ID or request a new install link.")
     }
     fn internal(error: impl ToString) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "operation_failed",
-            message: error.to_string(),
-            next: "Inspect the saved build log or run squircle doctor.",
-        }
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "operation_failed", error, "Inspect the saved build log or run squircle doctor.")
     }
     fn unavailable() -> Self {
+        // Admission is refused before any work starts; retry after a restart.
         Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "service_draining",
-            message: "Service is shutting down or paused after a persistence error".into(),
-            next: "Inspect service output and storage, then restart before submitting work.",
+            retryable: true,
+            ..Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_draining",
+                "Service is shutting down or paused after a persistence error",
+                "Inspect service output and storage, then restart before submitting work.",
+            )
+        }
+    }
+    fn too_large(message: impl ToString) -> Self {
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message, "Send a smaller request body.")
+    }
+    /// Axum's own rejections (query, path, body, size, method) in the same
+    /// envelope as handler errors.
+    fn rejection(status: StatusCode, message: String) -> Self {
+        let (code, next) = match status {
+            StatusCode::UNAUTHORIZED => ("unauthorized", "Use the control token for builds; the diagnostics token only permits uploads."),
+            StatusCode::NOT_FOUND => ("not_found", "Check the endpoint and IDs."),
+            StatusCode::METHOD_NOT_ALLOWED => ("method_not_allowed", "Check the HTTP method for this endpoint."),
+            StatusCode::PAYLOAD_TOO_LARGE => ("payload_too_large", "Send a smaller request body."),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => ("invalid_request", "Send JSON with Content-Type: application/json."),
+            s if s.is_client_error() => ("invalid_request", "Check the command help and supplied values."),
+            _ => ("operation_failed", "Inspect service output or run squircle doctor."),
+        };
+        let message = if message.is_empty() {
+            status.canonical_reason().unwrap_or("Request failed").to_string()
+        } else {
+            message
+        };
+        Self {
+            retryable: matches!(status, StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE),
+            ..Self::new(status, code, message, next)
         }
     }
 }
@@ -105,7 +135,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
             self.status,
-            Json(failure(self.code, self.message, self.next)),
+            Json(failure_with(self.code, self.message, self.next, self.retryable)),
         )
             .into_response()
     }
@@ -118,40 +148,69 @@ fn auth(state: &AppState, headers: &HeaderMap, diagnostics: bool) -> ApiResult<(
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .unwrap_or("");
-    let store = state.store.lock().unwrap();
+    let settings = &state.files.settings;
     let expected = if diagnostics {
-        &store.settings.diagnostic_token
+        &settings.diagnostic_token
     } else {
-        &store.settings.control_token
+        &settings.control_token
     };
     let a = Sha256::digest(supplied.as_bytes());
     let b = Sha256::digest(expected.as_bytes());
     if a.iter().zip(b).fold(0u8, |x, (a, b)| x | (a ^ b)) != 0 {
-        return Err(ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            code: "unauthorized",
-            message: "A valid token for this operation is required".into(),
-            next: "Use the control token for builds; the diagnostics token only permits uploads.",
-        });
+        return Err(ApiError::rejection(
+            StatusCode::UNAUTHORIZED,
+            "A valid token for this operation is required".into(),
+        ));
     }
     Ok(())
 }
 fn body<T>(value: std::result::Result<Json<T>, JsonRejection>) -> ApiResult<T> {
     value
         .map(|Json(v)| v)
-        .map_err(|e| ApiError::bad(e.body_text()))
+        .map_err(|e| ApiError::rejection(e.status(), e.body_text()))
+}
+fn parse_query<T>(value: std::result::Result<Query<T>, QueryRejection>) -> ApiResult<T> {
+    value
+        .map(|Query(v)| v)
+        .map_err(|e| ApiError::rejection(e.status(), e.body_text()))
+}
+
+/// Runs before any extractor, so a rejected request's body is never read.
+async fn require_control(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    match auth(&state, request.headers(), false) {
+        Ok(()) => next.run(request).await,
+        Err(error) => error.into_response(),
+    }
+}
+async fn require_diagnostics(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    match auth(&state, request.headers(), true) {
+        Ok(()) => next.run(request).await,
+        Err(error) => error.into_response(),
+    }
+}
+
+/// Wraps any error response that is not already Squircle JSON (Axum's plain
+/// text extractor rejections, 405s, empty 413s) in the versioned envelope.
+async fn envelope_errors(response: Response) -> Response {
+    let status = response.status();
+    let is_json = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if !(status.is_client_error() || status.is_server_error()) || is_json {
+        return response;
+    }
+    let text = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+        .unwrap_or_default();
+    ApiError::rejection(status, text).into_response()
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route(
-            "/health",
-            get(|State(state): State<AppState>| async move {
-                Json(success(
-                    json!({"service":"squircle","version":env!("CARGO_PKG_VERSION"),"accepting_builds":!state.draining.load(Ordering::Acquire)}),
-                ))
-            }),
-        )
+    // Everything here requires the control token, checked before extraction.
+    let control = Router::new()
         .route("/v1/builds", get(list).post(start))
         .route("/v1/apps", get(list_apps).post(register_app))
         .route("/v1/apps/import", post(import_app))
@@ -194,17 +253,32 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/tasks/{id}/media", post(attach_task))
         .route("/v1/tasks/{id}/media/{media}", get(task_media_file))
         .route("/v1/import", post(import))
-        .route("/v1/diagnostics", post(ingest))
-        .route(
-            "/v1/captures",
-            post(upload_capture).layer(DefaultBodyLimit::max(crate::perf::MAX_UPLOAD_BYTES)),
-        )
+        .route("/v1/captures", post(upload_capture))
         .route("/v1/install-links/{token}", get(link_status))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_control));
+    let diagnostics = Router::new()
+        .route("/v1/diagnostics", post(ingest))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_diagnostics));
+    // Install links carry their own unguessable, expiring token.
+    let public = Router::new()
+        .route(
+            "/health",
+            get(|State(state): State<AppState>| async move {
+                Json(success(
+                    json!({"service":"squircle","version":env!("CARGO_PKG_VERSION"),"accepting_builds":!state.draining.load(Ordering::Acquire)}),
+                ))
+            }),
+        )
         .route("/install/{token}", get(install_page))
         .route("/install/{token}/manifest.plist", get(download_manifest))
-        .route("/install/{token}/app.ipa", get(download_ipa))
-        .fallback(|| async { ApiError::missing("Unknown endpoint") })
+        .route("/install/{token}/app.ipa", get(download_ipa));
+    Router::new()
+        .merge(control)
+        .merge(diagnostics)
+        .merge(public)
+        .fallback(|| async { ApiError::rejection(StatusCode::NOT_FOUND, "Unknown endpoint".into()) })
         .layer(DefaultBodyLimit::max(1024 * 1024))
+        .layer(middleware::map_response(envelope_errors))
         .with_state(state)
 }
 
@@ -308,8 +382,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     Ok(())
 }
 
-async fn list(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
+async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let mut jobs = state
         .store
         .lock()
@@ -324,10 +397,8 @@ async fn list(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Js
 }
 async fn status(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let recovered = state.recovery_jobs.lock().unwrap().get(&id).cloned();
     let (job, launches, log) = {
         let store = state.store.lock().unwrap();
@@ -358,10 +429,8 @@ async fn status(
 }
 async fn start(
     State(state): State<AppState>,
-    headers: HeaderMap,
     request: std::result::Result<Json<BuildRequest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let mut request = body(request)?;
     if request.scheme.trim().is_empty() || request.configuration.trim().is_empty() {
         return Err(ApiError::bad("Scheme and configuration are required"));
@@ -407,12 +476,7 @@ async fn start(
                 .find(|j| j.request.as_ref().and_then(|r| r.request_id.as_ref()) == Some(key))
         {
             if prior.request.as_ref() != Some(&request) {
-                return Err(ApiError {
-                    status: StatusCode::CONFLICT,
-                    code: "request_id_conflict",
-                    message: "Request ID already belongs to different build arguments".into(),
-                    next: "Use a new request ID for different work.",
-                });
+                return Err(ApiError::new(StatusCode::CONFLICT, "request_id_conflict", "Request ID already belongs to different build arguments", "Use a new request ID for different work."));
             }
             return Ok(Json(success(json!({"job":prior,"replayed":true}))));
         }
@@ -530,11 +594,9 @@ struct PreviewRequest {
 
 async fn capture_preview(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     input: std::result::Result<Json<PreviewRequest>, JsonRejection>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    auth(&state, &headers, false)?;
     let input = body(input)?;
     let simulator = preview::simulator_id(input.simulator.as_deref()).map_err(ApiError::bad)?;
     let (sender, mut receiver) = watch::channel(false);
@@ -551,12 +613,7 @@ async fn capture_preview(
         }
         let mut cancellations = state.cancellations.lock().unwrap();
         if cancellations.contains_key(&id) {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                code: "preview_in_progress",
-                message: "This build already has work in progress".into(),
-                next: "Poll build status before recapturing.",
-            });
+            return Err(ApiError::new(StatusCode::CONFLICT, "preview_in_progress", "This build already has work in progress", "Poll build status before recapturing."));
         }
         if cancellations.len() >= 16 {
             return Err(ApiError::bad("Build/preview queue is full (16 jobs)"));
@@ -637,12 +694,9 @@ struct InspectQuery {
 }
 
 async fn browse_projects(
-    State(state): State<AppState>,
-    headers: HeaderMap,
     query: std::result::Result<Query<BrowseQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
-    let Query(query) = query.map_err(|error| ApiError::bad(error.body_text()))?;
+    let query = parse_query(query)?;
     let directory = tokio::task::spawn_blocking(move || projects::browse(query.path.as_deref()))
         .await
         .map_err(ApiError::internal)?
@@ -651,19 +705,15 @@ async fn browse_projects(
 }
 fn inspection_busy() -> ApiError {
     ApiError {
-        status: StatusCode::TOO_MANY_REQUESTS,
-        code: "inspection_busy",
-        message: "Two Xcode inspections are already running".into(),
-        next: "Wait for an existing inspection to finish, then retry.",
+        retryable: true,
+        ..ApiError::new(StatusCode::TOO_MANY_REQUESTS, "inspection_busy", "Two Xcode inspections are already running", "Wait for an existing inspection to finish, then retry.")
     }
 }
 async fn inspect_project(
     State(state): State<AppState>,
-    headers: HeaderMap,
     query: std::result::Result<Query<InspectQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
-    let Query(query) = query.map_err(|error| ApiError::bad(error.body_text()))?;
+    let query = parse_query(query)?;
     let _permit = state
         .inspection_slots
         .clone()
@@ -680,10 +730,8 @@ async fn inspect_project(
 }
 async fn import_app(
     State(state): State<AppState>,
-    headers: HeaderMap,
     input: std::result::Result<Json<projects::ImportRequest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let input = body(input)?;
     if input.name.trim().is_empty() || input.name.len() > 200 || input.name.contains('\0') {
         return Err(ApiError::bad("App name must contain 1–200 characters"));
@@ -715,8 +763,7 @@ async fn import_app(
     Ok(Json(success(public_app(app))))
 }
 
-async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
+async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let apps = apps::list(&state.store.lock().unwrap()).map_err(ApiError::internal)?;
     Ok(Json(success(
         apps.into_iter().map(public_app).collect::<Vec<_>>(),
@@ -725,20 +772,16 @@ async fn list_apps(State(state): State<AppState>, headers: HeaderMap) -> ApiResu
 
 async fn get_app(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let app = apps::get(&state.store.lock().unwrap(), &id).map_err(ApiError::missing)?;
     Ok(Json(success(public_app(app))))
 }
 
 async fn register_app(
     State(state): State<AppState>,
-    headers: HeaderMap,
     input: std::result::Result<Json<apps::AppRegistration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let input = body(input)?;
     let app = tokio::task::spawn_blocking(move || {
         let store = state.store.lock().unwrap();
@@ -754,11 +797,9 @@ async fn register_app(
 
 async fn update_app(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     input: std::result::Result<Json<apps::AppUpdate>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let input = body(input)?;
     let app = tokio::task::spawn_blocking(move || {
         let store = state.store.lock().unwrap();
@@ -775,11 +816,9 @@ async fn update_app(
 
 async fn publish_app_preview(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     input: std::result::Result<Json<apps::PreviewPublication>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let input = body(input)?;
     let app = tokio::task::spawn_blocking(move || {
         let store = state.store.lock().unwrap();
@@ -807,11 +846,10 @@ struct StepsQuery {
 /// Tool-call details T3 omits from its client stream; see `t3steps`.
 async fn t3_steps(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(thread): Path<String>,
-    Query(query): Query<StepsQuery>,
+    query: std::result::Result<Query<StepsQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
+    let query = parse_query(query)?;
     let mut steps = crate::t3steps::steps(&thread, query.since.as_deref())
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?;
@@ -823,11 +861,8 @@ async fn t3_steps(
 
 /// The newest real screenshot captured in a project's threads; see `t3steps`.
 async fn t3_project_screenshot(
-    State(state): State<AppState>,
-    headers: HeaderMap,
     Path(project): Path<String>,
 ) -> ApiResult<Response> {
-    auth(&state, &headers, false)?;
     let image = crate::t3steps::project_screenshot(&project)
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?
@@ -838,10 +873,8 @@ async fn t3_project_screenshot(
 /// Recordings and images agents published into a thread (`squircle media add`).
 async fn thread_media(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(thread): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let root = state.store.lock().unwrap().root.clone();
     let items = crate::media::list(&root, &thread).map_err(ApiError::bad)?;
     let items: Vec<Value> = items
@@ -853,10 +886,8 @@ async fn thread_media(
 
 async fn thread_media_file(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((thread, id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    auth(&state, &headers, false)?;
     let root = state.store.lock().unwrap().root.clone();
     let media = crate::media::get(&root, &thread, &id).map_err(ApiError::missing)?;
     let file = tokio::fs::OpenOptions::new()
@@ -882,11 +913,8 @@ async fn thread_media_file(
 }
 
 async fn t3_step_image(
-    State(state): State<AppState>,
-    headers: HeaderMap,
     Path((thread, call, index)): Path<(String, String, usize)>,
 ) -> ApiResult<Response> {
-    auth(&state, &headers, false)?;
     let image = crate::t3steps::image(&thread, &call, index)
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?
@@ -896,11 +924,9 @@ async fn t3_step_image(
 
 async fn app_preview(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
-    Query(query): Query<PreviewVersion>,
+    query: std::result::Result<Query<PreviewVersion>, QueryRejection>,
 ) -> ApiResult<Response> {
-    auth(&state, &headers, false)?;
     let (file, preview_id) = {
         let store = state.store.lock().unwrap();
         let app = apps::get(&store, &id).map_err(ApiError::missing)?;
@@ -912,12 +938,7 @@ async fn app_preview(
             .as_ref()
             .is_some_and(|version| version != &preview.id)
         {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                code: "preview_changed",
-                message: "App preview has changed since metadata was read".into(),
-                next: "Refresh app metadata and request its current preview version.",
-            });
+            return Err(ApiError::new(StatusCode::CONFLICT, "preview_changed", "App preview has changed since metadata was read", "Refresh app metadata and request its current preview version."));
         }
         let file = crate::store::open_private_read(&preview.path).map_err(ApiError::missing)?;
         (file, preview.id)
@@ -941,10 +962,8 @@ async fn app_preview(
 
 async fn download_preview(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
-    auth(&state, &headers, false)?;
     let path = {
         let store = state.store.lock().unwrap();
         let job = store.load_job(&id).map_err(ApiError::missing)?;
@@ -1075,10 +1094,8 @@ async fn git_output(
 
 async fn cancel(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let job = state
         .store
         .lock()
@@ -1101,10 +1118,8 @@ struct ImportRequest {
 }
 async fn import(
     State(state): State<AppState>,
-    headers: HeaderMap,
     input: std::result::Result<Json<ImportRequest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let input = body(input)?;
     // Copying, ZIP inspection and fsync stay off both the HTTP worker and the
     // global store lock, so an import cannot block authentication/cancellation.
@@ -1192,11 +1207,9 @@ fn default_ttl() -> u64 {
 }
 async fn create_link(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     input: std::result::Result<Json<LinkRequest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let input = body(input)?;
     if !(60..=86400).contains(&input.ttl_seconds) {
         return Err(ApiError::bad(
@@ -1226,6 +1239,7 @@ async fn create_link(
         build_id: id.clone(),
         expires_at: now() + input.ttl_seconds,
         base_url: base.clone(),
+        download_started_at: None,
         downloaded_at: None,
     };
     store.save_ticket(&ticket).map_err(ApiError::internal)?;
@@ -1240,12 +1254,7 @@ fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, Job)> {
         .load_ticket(token)
         .map_err(|_| ApiError::missing("Invalid install link"))?;
     if ticket.expires_at <= now() {
-        return Err(ApiError {
-            status: StatusCode::GONE,
-            code: "link_expired",
-            message: "Install link expired".into(),
-            next: "Request a new install link for the same build.",
-        });
+        return Err(ApiError::new(StatusCode::GONE, "link_expired", "Install link expired", "Request a new install link for the same build."));
     }
     let job = store
         .load_job(&ticket.build_id)
@@ -1265,10 +1274,8 @@ fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, Job)> {
 /// the person confirms the system install prompt.
 async fn link_status(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(token): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let ticket = state
         .store
         .lock()
@@ -1359,11 +1366,9 @@ struct Page {
 }
 async fn diagnostics(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
-    Query(page): Query<Page>,
+    page: std::result::Result<Query<Page>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let data = state
         .store
         .lock()
@@ -1381,11 +1386,9 @@ struct CaptureQuery {
 /// it links the returned path.
 async fn upload_capture(
     State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<CaptureQuery>,
+    query: std::result::Result<Query<CaptureQuery>, QueryRejection>,
     bytes: axum::body::Bytes,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let root = state.store.lock().unwrap().root.clone();
     let path = tokio::task::spawn_blocking(move || crate::perf::store(&root, &query.kind, &bytes))
         .await
@@ -1396,10 +1399,8 @@ async fn upload_capture(
 
 async fn ingest(
     State(state): State<AppState>,
-    headers: HeaderMap,
     event: std::result::Result<Json<Diagnostic>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, true)?;
     let mut event = body(event)?;
     // Foundation UUID.uuidString uses uppercase. Normalize valid UUIDs at the
     // wire boundary so storage paths and replay comparisons remain canonical.
@@ -1429,11 +1430,9 @@ struct LogPage {
 }
 async fn build_log(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
-    Query(page): Query<LogPage>,
+    page: std::result::Result<Query<LogPage>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let path = {
         let store = state.store.lock().unwrap();
         store.load_job(&id).map_err(ApiError::missing)?;
@@ -1723,12 +1722,7 @@ fn sims(state: &AppState) -> ApiResult<Arc<Sims>> {
 }
 
 fn sim_error(error: anyhow::Error) -> ApiError {
-    ApiError {
-        status: StatusCode::CONFLICT,
-        code: "simulator_failed",
-        message: format!("{error:#}"),
-        next: "Read the message; run squircle sim --help.",
-    }
+    ApiError::new(StatusCode::CONFLICT, "simulator_failed", format!("{error:#}"), "Read the message; run squircle sim --help.")
 }
 
 #[derive(Deserialize)]
@@ -1738,11 +1732,9 @@ struct SimQuery {
 
 async fn list_sims(
     State(state): State<AppState>,
-    headers: HeaderMap,
     query: std::result::Result<Query<SimQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
-    let Query(query) = query.map_err(|e| ApiError::bad(e.body_text()))?;
+    let query = parse_query(query)?;
     Ok(Json(success(sims(&state)?.list(query.thread.as_deref()))))
 }
 
@@ -1754,10 +1746,8 @@ struct StartSim {
 
 async fn start_sim(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<StartSim>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let request = body(payload)?;
     let started = sims(&state)?.start(&request.thread_id, request.device.as_deref()).await.map_err(sim_error)?;
     Ok(Json(success(started)))
@@ -1771,38 +1761,29 @@ struct StopSim {
 
 async fn stop_sim(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<StopSim>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let request = body(payload)?;
     let session = sims(&state)?.stop(request.thread_id.as_deref(), request.id.as_deref()).await.map_err(sim_error)?;
     let next = if session.media_id.is_some() { "The recording now shows in this turn on the phone." } else { "No recording was saved; see error." };
     Ok(Json(success(json!({"session": session, "next": next}))))
 }
 
-async fn sim_devices(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
+async fn sim_devices(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(success(sims(&state)?.devices().await.map_err(sim_error)?)))
 }
 
 // MARK: App agents
 
 fn agent_error(error: anyhow::Error) -> ApiError {
-    ApiError {
-        status: StatusCode::CONFLICT,
-        code: "agent_failed",
-        message: format!("{error:#}"),
-        next: "Read the message; run squircle agent --help or squircle thread --help.",
-    }
+    ApiError::new(StatusCode::CONFLICT, "agent_failed", format!("{error:#}"), "Read the message; run squircle agent --help or squircle thread --help.")
 }
 
 fn agents(state: &AppState) -> ApiResult<Arc<Agents>> {
     state.agents.clone().ok_or_else(|| agent_error(anyhow::anyhow!("App agents are not running in this service")))
 }
 
-async fn list_agents(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
+async fn list_agents(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let agents = agents(&state)?;
     Ok(Json(success(json!({"agents": agents.list(), "t3": agents.status()}))))
 }
@@ -1816,10 +1797,8 @@ struct EnsureAgent {
 
 async fn ensure_agent(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<EnsureAgent>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let request = body(payload)?;
     let agent = agents(&state)?
         .ensure(&request.project_id, request.message.as_deref(), request.model.as_deref())
@@ -1837,10 +1816,8 @@ struct ResetAgent {
 
 async fn restart_agent(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<ResetAgent>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let request = body(payload)?;
     let result = agents(&state)?
         .reset(request.project_id.as_deref(), request.thread_id.as_deref(), crate::agents::Reset::Restart)
@@ -1850,10 +1827,8 @@ async fn restart_agent(
 
 async fn fresh_agent(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<ResetAgent>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let request = body(payload)?;
     let result = agents(&state)?
         .reset(request.project_id.as_deref(), request.thread_id.as_deref(), crate::agents::Reset::Fresh { note: request.handoff })
@@ -1868,11 +1843,9 @@ struct ContextQuery {
 
 async fn agent_context(
     State(state): State<AppState>,
-    headers: HeaderMap,
     query: std::result::Result<Query<ContextQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
-    let Query(query) = query.map_err(|e| ApiError::bad(e.body_text()))?;
+    let query = parse_query(query)?;
     Ok(Json(success(json!({"context": agents(&state)?.context(&query.cwd)}))))
 }
 
@@ -1883,11 +1856,9 @@ struct WorkerQuery {
 
 async fn list_workers(
     State(state): State<AppState>,
-    headers: HeaderMap,
     query: std::result::Result<Query<WorkerQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
-    let Query(query) = query.map_err(|e| ApiError::bad(e.body_text()))?;
+    let query = parse_query(query)?;
     Ok(Json(success(json!({"workers": agents(&state)?.workers(query.coordinator.as_deref())}))))
 }
 
@@ -1907,10 +1878,8 @@ struct SpawnWorker {
 
 async fn spawn_worker(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<SpawnWorker>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let r = body(payload)?;
     if let Some(task) = &r.task {
         tasks_of(&state)?.get(task).map_err(ApiError::missing)?;
@@ -1925,8 +1894,7 @@ async fn spawn_worker(
     Ok(Json(success(worker)))
 }
 
-async fn read_worker(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
+async fn read_worker(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     Ok(Json(success(agents(&state)?.read(&id).await.map_err(agent_error)?)))
 }
 
@@ -1937,11 +1905,9 @@ struct WorkerText {
 
 async fn message_worker(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     payload: std::result::Result<Json<WorkerText>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let text = body(payload)?.text;
     if text.trim().is_empty() {
         return Err(ApiError::bad("Message text is empty"));
@@ -1952,11 +1918,9 @@ async fn message_worker(
 
 async fn answer_worker(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     payload: std::result::Result<Json<WorkerText>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let text = body(payload)?.text;
     agents(&state)?.answer(&id, &text).await.map_err(agent_error)?;
     Ok(Json(success(json!({"answered": id}))))
@@ -1970,11 +1934,9 @@ struct ArchiveWorker {
 
 async fn archive_worker(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     payload: std::result::Result<Json<ArchiveWorker>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let discard = body(payload)?.discard;
     Ok(Json(success(agents(&state)?.archive(&id, discard).await.map_err(agent_error)?)))
 }
@@ -1988,10 +1950,8 @@ struct CleanupWorkers {
 
 async fn cleanup_workers(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<CleanupWorkers>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let request = body(payload)?;
     Ok(Json(success(agents(&state)?.cleanup(&request.coordinator, request.dry_run).await.map_err(agent_error)?)))
 }
@@ -2000,37 +1960,30 @@ fn push(state: &AppState) -> ApiResult<Arc<Push>> {
     state.push.clone().ok_or_else(|| ApiError::internal("Notifications run only inside squircle serve"))
 }
 
-async fn push_status(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
+async fn push_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(success(push(&state)?.status())))
 }
 
 async fn push_register(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<crate::push::Registration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     push(&state)?.register(body(payload)?).map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
 async fn push_activity(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<crate::push::ActivityRegistration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     push(&state)?.register_activity(body(payload)?).map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
 async fn push_presence(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<crate::push::PresenceReport>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     push(&state)?.report_presence(body(payload)?).map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
@@ -2043,10 +1996,8 @@ struct PushTest {
 
 async fn push_test(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<PushTest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let request = body(payload)?;
     Ok(Json(success(push(&state)?.test(request.live_activity).await)))
 }
@@ -2054,12 +2005,7 @@ async fn push_test(
 // MARK: Tasks
 
 fn task_error(error: anyhow::Error) -> ApiError {
-    ApiError {
-        status: StatusCode::BAD_REQUEST,
-        code: "task_failed",
-        message: format!("{error:#}"),
-        next: "Read the message; run squircle task --help.",
-    }
+    ApiError::new(StatusCode::BAD_REQUEST, "task_failed", format!("{error:#}"), "Read the message; run squircle task --help.")
 }
 
 fn tasks_of(state: &AppState) -> ApiResult<Arc<Tasks>> {
@@ -2129,11 +2075,9 @@ struct TaskQuery {
 
 async fn list_tasks(
     State(state): State<AppState>,
-    headers: HeaderMap,
     query: std::result::Result<Query<TaskQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
-    let Query(query) = query.map_err(|e| ApiError::bad(e.body_text()))?;
+    let query = parse_query(query)?;
     let project = task_project(&state, query.project, query.thread.as_deref())?;
     let mut all = tasks_of(&state)?.list(&project);
     all.sort_by(|a, b| a.order.total_cmp(&b.order));
@@ -2160,10 +2104,8 @@ struct AddTask {
 
 async fn add_task(
     State(state): State<AppState>,
-    headers: HeaderMap,
     payload: std::result::Result<Json<AddTask>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let r = body(payload)?;
     let project = task_project(&state, r.project, r.thread.as_deref())?;
     let source = match (&r.thread, &state.agents) {
@@ -2178,8 +2120,7 @@ async fn add_task(
         "next": "Link its workers and builds as you start them; set its status when it changes."}))))
 }
 
-async fn show_task(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
+async fn show_task(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let task = tasks_of(&state)?.get(&id).map_err(ApiError::missing)?;
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
 }
@@ -2194,11 +2135,9 @@ struct UpdateTask {
 
 async fn update_task(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     payload: std::result::Result<Json<UpdateTask>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let r = body(payload)?;
     let tasks = tasks_of(&state)?;
     let current = tasks.get(&id).map_err(ApiError::missing)?;
@@ -2218,11 +2157,9 @@ struct LinkTask {
 
 async fn link_task(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     payload: std::result::Result<Json<LinkTask>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let r = body(payload)?;
     let task = tasks_of(&state)?.link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove).map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
@@ -2236,11 +2173,9 @@ struct AttachTask {
 
 async fn attach_task(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(id): Path<String>,
     payload: std::result::Result<Json<AttachTask>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    auth(&state, &headers, false)?;
     let r = body(payload)?;
     let tasks = tasks_of(&state)?;
     let media = tasks.attach(&id, &r.file, r.caption.as_deref()).map_err(task_error)?;
@@ -2250,10 +2185,8 @@ async fn attach_task(
 
 async fn task_media_file(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path((id, media)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    auth(&state, &headers, false)?;
     let dir = tasks_of(&state)?.media_dir(&id).map_err(ApiError::bad)?;
     let media = crate::media::get_in(&dir, &media).map_err(ApiError::missing)?;
     let file = tokio::fs::OpenOptions::new()

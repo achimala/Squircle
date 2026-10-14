@@ -721,6 +721,7 @@ async fn invalid_and_expired_tickets_cannot_fetch_any_installation_resource() {
         build_id: id,
         expires_at: now() - 1,
         base_url: "https://mac.test".into(),
+        download_started_at: None,
         downloaded_at: None,
     };
     fixture
