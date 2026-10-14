@@ -13,7 +13,7 @@ you/errored, build done) and a Live Activity with the agent's current step
 straight to Apple with your own APNs key (`squircle push setup`). See
 [notifications](docs/t3-native-migration.md#2026-10-14-notifications-and-the-live-activity-030-51).
 
-**2026-10-14: tasks, version 0.3.0 (50).** Each app keeps a list of what you
+**2026-10-14: tasks, version 0.3.0 (53).** Each app keeps a list of what you
 asked its agent for and where each stands: the agent adds and updates them
 (`squircle task`), linked workers and builds move them on, and old ones age
 into History. On the phone, Tasks replaces the Threads button (Threads is a
