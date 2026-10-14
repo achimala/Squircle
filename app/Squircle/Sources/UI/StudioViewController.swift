@@ -751,9 +751,19 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             guard let cell = cells[project.id] else { continue }
             let pose = gridPose(index), key = portraitKey(project.id, pose)
             guard cell.portraitKey != key else { continue }
+            // Apps busy at once trade places as each moves on; a portrait
+            // already drawn for this column comes back without a render.
+            if let drawn = cell.drawn.first(where: { $0.key == key }) {
+                cell.portraitKey = key
+                cell.portrait.image = drawn.image
+                continue
+            }
             guard let image = stage.portrait(for: project.id, pose: pose, scale: displayScale) else { return false }
             cell.portraitKey = key
             cell.portrait.image = image
+            cell.drawn.removeAll { !$0.key.hasPrefix(key.prefix { $0 != ":" } + ":") }
+            cell.drawn.insert((key, image), at: 0)
+            if cell.drawn.count > 3 { cell.drawn.removeLast() }
             return true
         }
         return false
@@ -904,6 +914,8 @@ final class GridCell: UIControl {
     let id: String
     let portrait = UIImageView()
     var portraitKey = ""
+    /// Recent portraits by key, newest first, for the current screen.
+    var drawn: [(key: String, image: UIImage)] = []
     var phoneHeight: CGFloat = 0 { didSet { setNeedsLayout() } }
     var captionAlpha: CGFloat = 1 {
         didSet { if captionAlpha != oldValue { name.alpha = captionAlpha; dot.alpha = captionAlpha } }

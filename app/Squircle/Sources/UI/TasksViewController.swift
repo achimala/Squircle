@@ -72,6 +72,9 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        #if DEBUG
+        ScrollSweep.start(table)
+        #endif
         if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
         tabs.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.renderTab() }, for: .valueChanged)

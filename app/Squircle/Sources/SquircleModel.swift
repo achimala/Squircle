@@ -24,10 +24,10 @@ final class SquircleModel {
     var selectedSessionID: String? { if case .thread(let id) = open { return id }; return nil }
     /// The open draft is a first message to the app's agent.
     private var draftIsAgent: Bool { if case .draft(_, _, true) = open { return true }; return false }
-    private(set) var sessions: [ChatSession] = [] { didSet { changed() } }
+    private(set) var sessions: [ChatSession] = [] { didSet { if sessions != oldValue { changed() } } }
     private(set) var messages: [ChatMessage] = [] { didSet { changed() } }
     private(set) var builds: [AppBuild] = [] { didSet { changed() } }
-    private(set) var projects: [AppProject] = [] { didSet { changed() } }
+    private(set) var projects: [AppProject] = [] { didSet { if projects != oldValue { changed() } } }
     private(set) var appMetadata: [AppMetadata] = [] { didSet { changed() } }
     private(set) var selectedProjectID: String? { didSet { changed() } }
     private(set) var buildingProjectIDs = Set<String>() { didSet { changed() } }

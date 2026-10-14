@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 
 /// A finished turn's work, folded into one line.
 struct TurnSummary: Equatable {
@@ -123,8 +124,32 @@ enum ThreadItem: Equatable {
     /// Steps kept in view while a turn is running.
     static let liveWindow = 4
 
+    /// The conversation's rows. Views re-render on every model change (any
+    /// thread's), so the last few results are kept and reused while their
+    /// inputs are unchanged.
     static func items(messages: [ChatMessage], running: Bool, expanded: Set<String> = [], builds: [AppBuild] = [],
-                      changes: [TurnChanges] = [], simulators: [SimulatorUse] = [], now: Date = .now) -> [ThreadItem] {
+                      changes: [TurnChanges] = [], simulators: [SimulatorUse] = []) -> [ThreadItem] {
+        let inputs = TimelineInputs(messages: messages, running: running, expanded: expanded, builds: builds,
+                                    changes: changes, simulators: simulators)
+        if let hit = recent.withLock({ $0.first { $0.inputs == inputs }?.items }) { return hit }
+        let made = build(inputs)
+        recent.withLock { cache in
+            cache.removeAll { $0.inputs == inputs }
+            cache.insert((inputs, made), at: 0)
+            if cache.count > 3 { cache.removeLast() }
+        }
+        return made
+    }
+
+    private struct TimelineInputs: Equatable {
+        let messages: [ChatMessage], running: Bool, expanded: Set<String>, builds: [AppBuild]
+        let changes: [TurnChanges], simulators: [SimulatorUse]
+    }
+    private static let recent = Mutex<[(inputs: TimelineInputs, items: [ThreadItem])]>([])
+
+    private static func build(_ inputs: TimelineInputs) -> [ThreadItem] {
+        let (messages, running, expanded, builds, changes, simulators) =
+            (inputs.messages, inputs.running, inputs.expanded, inputs.builds, inputs.changes, inputs.simulators)
         // Split into turns at each of your messages.
         var turns: [(user: ChatMessage?, rest: [ChatMessage])] = []
         for message in messages {
@@ -299,17 +324,41 @@ enum ThreadItem: Equatable {
         guard !builds.isEmpty else { return [] }
         let known = Dictionary(builds.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
         var seen = Set<String>(), found: [AppBuild] = []
-        for message in messages {
-            let text = message.content + "\n" + message.detail + "\n" + (message.step?.actions.compactMap(\.build).joined(separator: " ") ?? "")
-            var range = text.startIndex..<text.endIndex
-            while let match = text.range(of: #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"#,
-                                          options: .regularExpression, range: range) {
-                let id = text[match].lowercased()
+        func scan(_ text: String) {
+            for id in uuids(in: text) {
                 if let build = known[id], seen.insert(id).inserted { found.append(build) }
-                range = match.upperBound..<text.endIndex
             }
         }
+        for message in messages {
+            scan(message.content); scan(message.detail)
+            message.step?.actions.compactMap(\.build).forEach(scan)
+        }
         return found
+    }
+
+    /// Lowercased UUIDs in `text`, in order. A byte scan: a regular
+    /// expression over every step's output cost the timeline most of its time.
+    static func uuids(in text: String) -> [String] {
+        var text = text
+        return text.withUTF8 { b -> [String] in
+            var found: [String] = []
+            guard b.count >= 36 else { return found }
+            func hex(_ c: UInt8) -> Bool { (48...57).contains(c) || (65...70).contains(c) || (97...102).contains(c) }
+            var i = 0
+            while i <= b.count - 36 {
+                var ok = true
+                for j in 0..<36 {
+                    let c = b[i + j]
+                    if j == 8 || j == 13 || j == 18 || j == 23 { if c != 45 { ok = false; break } }
+                    else if !hex(c) { ok = false; break }
+                }
+                if ok {
+                    found.append(String(decoding: UnsafeBufferPointer(rebasing: b[i..<i + 36]), as: UTF8.self).lowercased())
+                    i += 36
+                } else { i += 1 }
+            }
+            return found
+        }
     }
 
     private static func headline(work: [ChatMessage], answer: ChatMessage?) -> String {
@@ -335,12 +384,5 @@ enum ThreadItem: Equatable {
                            failed: steps.contains { $0.failed }, expanded: expanded)
     }
 
-    private static let iso: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    static func date(_ text: String) -> Date? {
-        iso.date(from: text) ?? ISO8601DateFormatter().date(from: text)
-    }
+    static func date(_ text: String) -> Date? { ISODate.parse(text) }
 }

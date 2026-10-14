@@ -135,6 +135,32 @@ pub async fn current_step(thread: &str) -> Result<Option<String>> {
     }))
 }
 
+/// Shell commands agents ran that may create or use simulators (`simctl`,
+/// `xcodebuild`), with their output, after `since` (T3's ISO `created_at`),
+/// oldest first, for the simulator pool.
+pub async fn simulator_commands(since: &str) -> Result<Vec<crate::simpool::Activity>> {
+    if !since.is_empty() && !valid(since, &[':', '.', 'T', 'Z']) {
+        bail!("invalid timestamp");
+    }
+    let text = |path: &str| format!("case when json_type(payload_json,'{path}')='text' then json_extract(payload_json,'{path}') end");
+    let rows = query(&format!(
+        "select thread_id as thread, created_at,
+                coalesce({}, {}, '') as command,
+                coalesce({}, '') as output
+         from projection_thread_activities
+         where created_at > '{since}'
+           and (payload_json like '%simctl %' or payload_json like '%xcodebuild%')
+         order by created_at limit 5000",
+        text("$.data.command"), text("$.data.input.command"), text("$.data.rawOutput.content"),
+    )).await?;
+    Ok(rows.into_iter().filter_map(|row| Some(crate::simpool::Activity {
+        thread: row["thread"].as_str()?.to_string(),
+        created_at: row["created_at"].as_str()?.to_string(),
+        command: row["command"].as_str().filter(|c| !c.is_empty())?.to_string(),
+        output: row["output"].as_str().unwrap_or("").to_string(),
+    })).collect())
+}
+
 fn describe(tool: &str, input: &Value) -> Option<String> {
     let text = |key: &str| input[key].as_str().map(str::trim).filter(|s| !s.is_empty());
     let file = |key: &str| text(key).and_then(|p| p.rsplit('/').next()).map(str::to_string);
