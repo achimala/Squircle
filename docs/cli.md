@@ -68,7 +68,8 @@ directory and adds the T3 instance; `--remove` takes it out).
 | `agent list`, `agent context [--hook]` | Agents; the per-turn note (thread ID, live workers) its hook injects |
 | `thread spawn --coordinator ID --title T --branch B --prompt P` | Worker thread in its own worktree, branched from the checkout's current branch |
 | `thread send ID TEXT`, `thread read ID`, `thread answer ID TEXT` | Message, inspect (last reply, diff stat, pending question), answer |
-| `thread status [--coordinator ID]`, `thread archive ID [--force]` | Worker states; archive after merge (worktree removed, branch kept) |
+| `thread status [--coordinator ID]`, `thread archive ID [--discard]` | Worker states; archive after merge removes the worktree and deletes the branch, refusing unmerged commits (`git cherry` against the base) or uncommitted changes unless `--discard` |
+| `thread cleanup --coordinator ID [--dry-run]` | Archive finished workers whose work is merged, delete merged branches of earlier archived workers, prune stale worktrees; lists what it leaves and why |
 
 The service wakes the agent with a `[worker update]` turn when a worker
 finishes, errors or needs input, once per turn outcome. Agents never poll.

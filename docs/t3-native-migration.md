@@ -1496,3 +1496,6 @@ per-turn note carried only the thread ID and workers.
 Verified: a scratch session with the new plugin, `/compact` forced, still
 answered that it coordinates and would `thread spawn` a worker, and saw the
 note re-injected after compaction.
+
+Squircle build `5f52e109-f73e-42c1-8946-ae7ca8675cf2` (0.3.0 45, main at
+`076d35e`); the Install card for another app's build is not yet checked on screen.

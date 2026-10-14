@@ -176,6 +176,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/workers/{id}/messages", post(message_worker))
         .route("/v1/workers/{id}/answer", post(answer_worker))
         .route("/v1/workers/{id}/archive", post(archive_worker))
+        .route("/v1/workers/cleanup", post(cleanup_workers))
         .route("/v1/import", post(import))
         .route("/v1/diagnostics", post(ingest))
         .route("/v1/install-links/{token}", get(link_status))
@@ -1853,8 +1854,8 @@ async fn answer_worker(
 
 #[derive(Deserialize)]
 struct ArchiveWorker {
-    #[serde(default)]
-    force: bool,
+    #[serde(default, alias = "force")]
+    discard: bool,
 }
 
 async fn archive_worker(
@@ -1864,6 +1865,23 @@ async fn archive_worker(
     payload: std::result::Result<Json<ArchiveWorker>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     auth(&state, &headers, false)?;
-    let force = body(payload)?.force;
-    Ok(Json(success(agents(&state)?.archive(&id, force).await.map_err(agent_error)?)))
+    let discard = body(payload)?.discard;
+    Ok(Json(success(agents(&state)?.archive(&id, discard).await.map_err(agent_error)?)))
+}
+
+#[derive(Deserialize)]
+struct CleanupWorkers {
+    coordinator: String,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+async fn cleanup_workers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: std::result::Result<Json<CleanupWorkers>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let request = body(payload)?;
+    Ok(Json(success(agents(&state)?.cleanup(&request.coordinator, request.dry_run).await.map_err(agent_error)?)))
 }
