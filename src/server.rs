@@ -2001,7 +2001,12 @@ async fn stop_sim(
     payload: std::result::Result<Json<StopSim>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
-    let session = sims(&state)?.stop(request.thread_id.as_deref(), request.id.as_deref()).await.map_err(sim_error)?;
+    let sims = sims(&state)?;
+    // Filing a long recording takes minutes. A caller that gives up first
+    // must not cancel it halfway: the session would stay "filing" until the
+    // service restarts.
+    let stop = tokio::spawn(async move { sims.stop(request.thread_id.as_deref(), request.id.as_deref()).await });
+    let session = stop.await.map_err(|e| sim_error(anyhow::anyhow!(e)))?.map_err(sim_error)?;
     let next = if session.media_id.is_some() { "The recording now shows in this turn on the phone." } else { "No recording was saved; see error." };
     Ok(Json(success(json!({"session": session, "next": next}))))
 }
