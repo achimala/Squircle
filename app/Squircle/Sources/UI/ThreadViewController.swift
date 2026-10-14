@@ -92,6 +92,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private static var heightCache: [String: [String: CGFloat]] = [:]
     private var items: [ThreadItem] = []
     private var itemsByID: [String: ThreadItem] = [:]
+    /// The turn the live line belonged to, so only that turn's own finish pulses.
+    private var liveTurn: String?
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
     private var rendered: [String: (source: String, text: NSAttributedString)] = [:]
     private var expanded = Set<String>()
@@ -591,7 +593,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private func renderItems(animated: Bool = false) {
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
-        let next = header + ThreadItem.items(messages: displayedMessages(), running: model.isRunning, expanded: expanded,
+        let messages = displayedMessages()
+        let next = header + ThreadItem.items(messages: messages, running: model.isRunning, expanded: expanded,
                                              builds: model.builds, changes: model.changes,
                                              simulators: model.threadSimulators)
         guard next != items else { return }
@@ -630,8 +633,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
         updateSticky()
         reportVisibleSimulators()
-        if previous["live"] != nil, itemsByID["live"] == nil, let finished = next.last(where: { if case .summary = $0 { return true }; return false }) {
-            celebrate(finished.id)
+        // Only the turn that was live pulses, when it folds into its own
+        // summary; a quick reply with no steps must not light up an older one.
+        let wasLive = liveTurn
+        liveTurn = itemsByID["live"] == nil ? nil : messages.last(where: { $0.role == "user" })?.id ?? "start"
+        if previous["live"] != nil, liveTurn == nil, let turn = wasLive, itemsByID["summary:" + turn] != nil {
+            celebrate("summary:" + turn)
         }
     }
 
@@ -913,7 +920,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func tappable(_ item: ThreadItem?) -> Bool {
         switch item {
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
-        case .earlier, .summary, .note, .thought, .changes: return true
+        case .earlier, .summary, .note, .changes: return true
         case .update(let message): return !message.threadIDs.isEmpty && onOpenThread != nil
         default: return false
         }
@@ -969,7 +976,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .earlier(let turn, _): toggle(turn)
         case .summary(let summary): toggle(summary.turn)
         case .changes(let changes, _): showChanges(changes)
-        case .note(let message), .thought(let message): toggle(message.id)
+        case .note(let message): toggle(message.id)
         case .update(let message): if let id = message.threadIDs.first { onOpenThread?(id) }
         default: break
         }
@@ -981,6 +988,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let keepBottom = pinToBottom
         pinToBottom = false
         renderItems(animated: true)
+        // A note's fold isn't part of its item, so its row refreshes itself.
+        if case .note = itemsByID[id] {
+            var snapshot = dataSource.snapshot()
+            snapshot.reconfigureItems([id])
+            dataSource.apply(snapshot, animatingDifferences: true)
+        }
         pinToBottom = keepBottom
     }
 

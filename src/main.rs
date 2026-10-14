@@ -218,8 +218,12 @@ enum ThreadCommand {
         base: Option<String>,
         #[arg(long)]
         prompt: String,
-        #[arg(long, help = "Claude model slug; default: the app agent's model")]
+        #[arg(long, help = "T3 provider instance, e.g. codex; default: claudeAgent")]
+        provider: Option<String>,
+        #[arg(long, help = "Model slug; default: the app agent's model for Claude, else the provider's default")]
         model: Option<String>,
+        #[arg(long, help = "Reasoning effort, e.g. high; default: the provider's")]
+        effort: Option<String>,
     },
     /// Message a thread; folds into its turn if it is mid-turn.
     Send { id: String, text: String },
@@ -979,8 +983,8 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             }
         },
         Commands::Thread { command } => match command {
-            ThreadCommand::Spawn { coordinator, title, branch, base, prompt, model } => post(cli, "/v1/workers",
-                json!({"coordinator":coordinator,"title":title,"branch":branch,"base":base,"prompt":prompt,"model":model})).await?,
+            ThreadCommand::Spawn { coordinator, title, branch, base, prompt, provider, model, effort } => post(cli, "/v1/workers",
+                json!({"coordinator":coordinator,"title":title,"branch":branch,"base":base,"prompt":prompt,"provider":provider,"model":model,"effort":effort})).await?,
             ThreadCommand::Send { id, text } => post(cli, &format!("/v1/workers/{}/messages", thread_id(id)?), json!({"text":text})).await?,
             ThreadCommand::Status { coordinator } => {
                 let query = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(coordinator.as_ref().map(|c| ("coordinator", c))).finish();
