@@ -530,7 +530,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // Open: the creature rises above the panel's top edge as a head.
         let creatureClosed = CGPoint(x: right ? w - cell / 2 : cell / 2, y: lower ? h - 22 : 22)
         let pill = hasLine
-            ? CGRect(x: right ? 0 : cell, y: (lower ? h - 44 : 0) + 2, width: max(1, w - cell), height: 40)
+            // Its end runs under the cube, so they read as one piece of jelly.
+            ? CGRect(x: right ? 0 : cell - 12, y: (lower ? h - 44 : 0) + 4, width: max(1, w - cell + 12), height: 36)
             : CGRect(x: creatureClosed.x - 12, y: creatureClosed.y - 12, width: 24, height: 24)
         let eased = opened * opened * (3 - 2 * opened)
         let creatureOpen = CGPoint(x: w / 2, y: -21)
@@ -542,7 +543,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         glass.opened = opened
         glass.fill = Theme.paper
         // A little translucent: the app shows through, faintly blurred.
-        glass.fillAmount = .lerp(0.3, .lerp(0.84, 0.92, fullness), opened)
+        glass.fillAmount = .lerp(0.15, .lerp(0.84, 0.92, fullness), opened)
         glass.tone = bubble.tone
         glass.typing = route.open && keyboardTop < view.bounds.maxY
         headHandle.frame = glass.creatureFrame.insetBy(dx: -8, dy: -8)

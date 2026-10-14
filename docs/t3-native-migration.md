@@ -1022,6 +1022,16 @@ Verified the same way (real touches including head tap, full screen and pull
 down; light and dark). Clips: `attachments/overlay-bubble/jelly3-*.mp4`.
 Not on the phone.
 
+Fourth round (user: "the outer glass casing and inner jelly thing is too
+distracting. i just want one morphing jelly cube dude … a bit too much"): one
+body, one material. A single Metal layer draws the pill or panel, the neck and
+the cube with the same translucent tinted jelly (deeper toward its edges, one
+soft rim, one soft highlight); the caustics, edge line, double highlights and
+the cube's separate layer, shadow and blur box are gone. The pill's end runs
+under the cube, so the cube reads as the head of one piece of jelly. The blur
+is masked to the jelly's exact coverage (the same shader, drawn at 1×), and
+nothing redraws while nothing moves. Clips: `jelly4-*.mp4`. Not on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
