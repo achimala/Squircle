@@ -168,6 +168,20 @@ enum AgentCommand {
     },
     /// List app agents and the service's T3 connection.
     List,
+    /// Relaunch the agent's Claude session on the same thread: its next message starts with the current instructions and the same history.
+    #[command(after_help = "Happens now if the agent is between turns, otherwise when its current turn ends (an agent asking to restart itself just ends its turn).")]
+    Restart {
+        #[command(flatten)]
+        target: AgentTarget,
+    },
+    /// Replace the agent with a new thread seeded by a short handoff; the old conversation stays readable and its workers move to the new agent.
+    #[command(after_help = "The handoff has the app, recent commits, open workers, the user's recent messages, your last reply and your --handoff note. Happens now if the agent is between turns, otherwise when its current turn ends.")]
+    Fresh {
+        #[command(flatten)]
+        target: AgentTarget,
+        #[arg(long, help = "What the new agent must know that git and the workers don't show: what the user asked to remember, plans in flight")]
+        handoff: Option<String>,
+    },
     /// The note an app agent gets at the start of each turn (rules and live workers).
     Context {
         #[arg(long, help = "Read a Claude Code hook event on stdin and answer in hook JSON")]
@@ -175,6 +189,14 @@ enum AgentCommand {
         #[arg(long, help = "Worktree directory; default: current directory")]
         cwd: Option<PathBuf>,
     },
+}
+#[derive(clap::Args)]
+#[group(required = true, multiple = false)]
+struct AgentTarget {
+    #[arg(long, help = "T3 project ID")]
+    project: Option<String>,
+    #[arg(long, help = "The app agent's thread ID")]
+    thread: Option<String>,
 }
 #[derive(Subcommand)]
 enum ThreadCommand {
@@ -579,7 +601,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             return Ok(None);
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","logs","crashes","symbolicate","diagnostics.send"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"}}),
         ),
         Commands::App { command } => match command {
             AppCommand::Browse { path } => {
@@ -893,6 +915,12 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 post(cli, "/v1/agents", json!({"project_id":project,"message":message,"model":model})).await?
             }
             AgentCommand::List => get(cli, "/v1/agents").await?,
+            AgentCommand::Restart { target } => {
+                post(cli, "/v1/agents/restart", json!({"project_id":target.project,"thread_id":target.thread})).await?
+            }
+            AgentCommand::Fresh { target, handoff } => {
+                post(cli, "/v1/agents/fresh", json!({"project_id":target.project,"thread_id":target.thread,"handoff":handoff})).await?
+            }
             AgentCommand::Context { hook, cwd } => {
                 let mut event = Value::Null;
                 if *hook {

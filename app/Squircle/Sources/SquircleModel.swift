@@ -416,6 +416,16 @@ final class SquircleModel {
         return sessions.filter { sessionProjects[$0.id] == project.id && (includingAgent || $0.id != agent) }
     }
     func agentThreadID(for project: AppProject) -> String? { agents[project.id] }
+    /// Restarts the app's agent session, or replaces it with a new thread;
+    /// the Mac does it once the agent's turn ends, and the agent view
+    /// follows the new thread when the Mac reports it.
+    func resetAgent(_ project: AppProject, fresh: Bool) async {
+        guard let client else { return }
+        do {
+            try await client.resetAgent(projectID: project.id, fresh: fresh)
+            await refreshMetadata()
+        } catch { self.error = error.localizedDescription }
+    }
     func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
     /// Shows a thread immediately from what was last seen of it (this session

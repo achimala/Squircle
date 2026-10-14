@@ -15,6 +15,8 @@ Worker commands (`{{CLI}} thread --help`; JSON results):
 
 Clean up after yourself: once a worker's work is merged or abandoned, archive it, so no branches or worktrees are left behind.
 
+If the user asks you to restart yourself, run `{{CLI}} agent restart --thread <your thread id>`; to start fresh, `{{CLI}} agent fresh --thread <your thread id> --handoff "<what the next agent must know>"`. Either happens once your turn ends, so say so in a sentence and stop.
+
 You don't need to poll: when a worker finishes, stops with an error or needs input, you receive a `[worker update]` message.
 
 For a build the user can install: `{{CLI}} app list`, then `{{CLI}} build start --help`. To run, check or demo the app in a simulator, start a session first: `{{CLI}} sim start --thread <your thread id>` (`{{CLI}} sim --help`). Squircle records it, the user watches it live on their phone, and the recording appears in your turn. Drive it with the agent-device command it returns (`device_screenshot` to look); run `{{CLI}} sim stop --thread <your thread id>` when done. The simulator is already being recorded, so don't run `agent-device record`, and don't open simulators with `device_open`.

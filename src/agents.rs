@@ -28,6 +28,24 @@ pub struct Agent {
     pub project_id: String,
     pub thread_id: String,
     pub created_at: u64,
+    /// A restart or fresh start asked for mid-turn, done when the turn ends
+    /// (an agent cannot stop its own session while it runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<Reset>,
+    /// After a restart: the next turn's note carries the current instructions,
+    /// because Claude restores a resumed session's original system prompt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refresh: bool,
+}
+
+/// `restart` relaunches the agent's Claude session on the same thread, so the
+/// next message starts with the current plugin instructions and the same
+/// history. `fresh` replaces the thread with a new one seeded by a handoff.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Reset {
+    Restart,
+    Fresh { note: Option<String> },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -260,6 +278,7 @@ impl Agents {
                     let Some(item) = item else { break };
                     self.consume_shell(&item);
                     self.schedule_flush();
+                    self.run_due_resets();
                 }
                 _ = client.closed() => break,
             }
@@ -458,7 +477,7 @@ impl Agents {
             "runtimeMode": "full-access", "interactionMode": "default",
             "branch": null, "worktreePath": null,
         })).await?;
-        let agent = Agent { project_id: project_id.into(), thread_id, created_at: crate::model::now() };
+        let agent = Agent { project_id: project_id.into(), thread_id, created_at: crate::model::now(), pending: None, refresh: false };
         let mut registry = self.registry.lock().unwrap();
         registry.agents.insert(project_id.into(), agent.clone());
         self.save(&registry)?;
@@ -467,6 +486,161 @@ impl Agents {
 
     fn agent_for_thread(&self, thread_id: &str) -> Option<Agent> {
         self.registry.lock().unwrap().agents.values().find(|a| a.thread_id == thread_id).cloned()
+    }
+
+    // MARK: Restart and fresh start
+
+    /// The agent named by its project or its thread.
+    fn find_agent(&self, project_id: Option<&str>, thread_id: Option<&str>) -> Result<Agent> {
+        let registry = self.registry.lock().unwrap();
+        match (project_id, thread_id) {
+            (Some(project), _) => registry.agents.get(project).cloned()
+                .with_context(|| format!("The app {project} has no agent yet")),
+            (None, Some(thread)) => registry.agents.values().find(|a| a.thread_id == thread).cloned()
+                .with_context(|| format!("{thread} is not an app agent's thread")),
+            (None, None) => bail!("Name the app (--project) or the agent's thread (--thread)"),
+        }
+    }
+
+    /// Restarts or replaces an app's agent: now if it is between turns,
+    /// otherwise as soon as its turn ends.
+    pub async fn reset(self: &Arc<Self>, project_id: Option<&str>, thread_id: Option<&str>, reset: Reset) -> Result<Value> {
+        self.ready().await?;
+        let agent = self.find_agent(project_id, thread_id)?;
+        let row = self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
+        let kind = match reset { Reset::Restart => "restart", Reset::Fresh { .. } => "fresh" };
+        if worker_state(&row) == "working" {
+            let mut registry = self.registry.lock().unwrap();
+            if let Some(agent) = registry.agents.get_mut(&agent.project_id) {
+                agent.pending = Some(reset);
+            }
+            self.save(&registry)?;
+            return Ok(json!({"project_id": agent.project_id, "thread_id": agent.thread_id, "action": kind, "when": "after-turn",
+                             "next": "Happens when the agent's current turn ends. If that is you: end your turn now, telling the user in a sentence."}));
+        }
+        self.perform(&agent, reset).await
+    }
+
+    /// Starts the resets whose agent turn has ended.
+    fn run_due_resets(self: &Arc<Self>) {
+        let due: Vec<(Agent, Reset)> = {
+            let mut registry = self.registry.lock().unwrap();
+            let shell = self.shell.lock().unwrap();
+            if !shell.ready { return }
+            let due: Vec<(Agent, Reset)> = registry.agents.values_mut().filter_map(|agent| {
+                let row = shell.threads.get(&agent.thread_id)?;
+                if agent.pending.is_none() || worker_state(row) == "working" { return None }
+                let reset = agent.pending.take()?;
+                Some((agent.clone(), reset))
+            }).collect();
+            if !due.is_empty() && let Err(error) = self.save(&registry) {
+                eprintln!("Agent reset not saved: {error:#}");
+            }
+            due
+        };
+        for (agent, reset) in due {
+            let this = self.clone();
+            tokio::spawn(async move {
+                if let Err(error) = this.perform(&agent, reset).await {
+                    eprintln!("Agent reset failed: {error:#}");
+                }
+            });
+        }
+    }
+
+    async fn perform(&self, agent: &Agent, reset: Reset) -> Result<Value> {
+        let client = self.ready().await?;
+        let row = self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
+        let stop = || client.dispatch(json!({"type": "thread.session.stop", "threadId": agent.thread_id}));
+        let live = !row["session"].is_null() && row["session"]["status"] != "stopped";
+        match reset {
+            Reset::Restart => {
+                if live { stop().await?; }
+                {
+                    let mut registry = self.registry.lock().unwrap();
+                    if let Some(agent) = registry.agents.get_mut(&agent.project_id) { agent.refresh = true; }
+                    self.save(&registry)?;
+                }
+                Ok(json!({"project_id": agent.project_id, "thread_id": agent.thread_id, "action": "restart", "when": "now",
+                          "next": "The agent's next message starts a new session with the same history and gets the current instructions."}))
+            }
+            Reset::Fresh { note } => {
+                let handoff = self.handoff(&client, agent, note.as_deref()).await?;
+                if live { stop().await?; }
+                let app = self.shell.lock().unwrap().projects.get(&agent.project_id)
+                    .and_then(|p| p["title"].as_str().map(str::to_string)).unwrap_or_else(|| "App".into());
+                let day = Command::new("date").arg("+%b %-d").output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+                client.dispatch(json!({"type": "thread.meta.update", "threadId": agent.thread_id,
+                                       "title": format!("{app} agent (until {day})")})).await?;
+                let model = row["modelSelection"]["model"].as_str().map(str::to_string);
+                let new = self.create(&client, &agent.project_id, model.as_deref()).await?;
+                {
+                    let mut registry = self.registry.lock().unwrap();
+                    for worker in registry.workers.values_mut().filter(|w| w.coordinator == agent.thread_id) {
+                        worker.coordinator = new.thread_id.clone();
+                    }
+                    self.save(&registry)?;
+                }
+                let record = json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Handoff",
+                                    "kind": "squircle-handoff", "payload": {"previous": agent.thread_id}});
+                self.wait_thread(&new.thread_id).await?;
+                client.dispatch(json!({
+                    "type": "thread.turn.start", "threadId": new.thread_id,
+                    "message": {"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": handoff, "attachments": [],
+                                "context": {"version": 1, "records": [record]}},
+                    "runtimeMode": "full-access", "interactionMode": "default",
+                })).await?;
+                Ok(json!({"project_id": agent.project_id, "thread_id": new.thread_id, "previous_thread_id": agent.thread_id,
+                          "action": "fresh", "when": "now",
+                          "next": "The new agent has the handoff and is replying; the old conversation stays readable in the app's Threads."}))
+            }
+        }
+    }
+
+    /// What a new agent needs from the old one, gathered without a model:
+    /// the app, recent commits, open workers, what the user said lately, the
+    /// old agent's last reply and its own note.
+    async fn handoff(&self, client: &T3, agent: &Agent, note: Option<&str>) -> Result<String> {
+        let project = self.shell.lock().unwrap().projects.get(&agent.project_id).cloned().context("The app's T3 project is gone")?;
+        let app = project["title"].as_str().unwrap_or("this app");
+        let root = project["workspaceRoot"].as_str().map(PathBuf::from);
+        let commits = match &root {
+            Some(root) => git(root, &["log", "--oneline", "--no-decorate", "-8"]).await.unwrap_or_default(),
+            None => String::new(),
+        };
+        let workers = self.workers(Some(&agent.thread_id));
+        let workers = if workers.is_empty() { "none".to_string() } else {
+            workers.iter().map(|w| format!("\n- {} ({})", w["title"].as_str().unwrap_or(""), w["state"].as_str().unwrap_or(""))).collect()
+        };
+        let old = self.thread_detail(client, &agent.thread_id).await?;
+        let said: Vec<String> = old["messages"].as_array().into_iter().flatten()
+            .filter(|m| m["role"] == "user" && m["context"]["records"].as_array().is_none_or(|r| r.is_empty()))
+            .filter_map(|m| m["text"].as_str())
+            .map(|t| t.split("\n\n---\n").next().unwrap_or(t).trim())
+            .filter(|t| !t.is_empty() && !t.starts_with('['))
+            .map(|t| if t.chars().count() > 300 { format!("{}…", t.chars().take(300).collect::<String>()) } else { t.to_string() })
+            .collect();
+        let said = said[said.len().saturating_sub(8)..].iter().map(|t| format!("\n- {}", t.replace('\n', " "))).collect::<String>();
+        let mut text = format!(
+            "[handoff] You are taking over as {app}'s app agent; the user started a fresh conversation. \
+             The previous one stays readable in the app's Threads; `{cli} thread read {old}` gives its last reply.\n\n\
+             Recent commits:\n{commits}\n\nYour workers: {workers}\n\nWhat the user said lately, oldest first:{said}",
+            cli = self.cli, old = agent.thread_id,
+            commits = if commits.is_empty() { "none".into() } else { commits },
+            said = if said.is_empty() { "\nnothing".into() } else { said },
+        );
+        let last = old["messages"].as_array().into_iter().flatten().rev()
+            .find(|m| m["role"] == "assistant").and_then(|m| m["text"].as_str()).unwrap_or("").trim();
+        if !last.is_empty() {
+            let last = if last.chars().count() > 1500 { format!("{}…", last.chars().take(1500).collect::<String>()) } else { last.to_string() };
+            text += &format!("\n\nThe previous agent's last reply:\n{last}");
+        }
+        if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
+            text += &format!("\n\nThe previous agent's note:\n{note}");
+        }
+        text += "\n\nReply to the user in a sentence or two: you're ready, and what is open. Don't start work until they ask.";
+        Ok(text)
     }
 
     /// The note at the start of each agent turn and after compaction: its
@@ -485,6 +659,17 @@ impl Agents {
         let Some((agent, app)) = found else {
             return "[squircle] No app agent works in this folder.".into();
         };
+        // Claude keeps a resumed session's first system prompt; a restarted
+        // agent gets the current one here, once.
+        let refreshed = if agent.refresh {
+            let mut registry = self.registry.lock().unwrap();
+            if let Some(agent) = registry.agents.get_mut(&agent.project_id) { agent.refresh = false; }
+            let _ = self.save(&registry);
+            std::fs::read_to_string(self.root.join("plugin/squircle/agents/app-agent.md")).ok()
+                .and_then(|t| t.splitn(3, "---\n").nth(2).map(|body| format!(
+                    "\n[squircle] You were restarted. Your instructions are now the following; they replace any earlier version:\n{}", body.trim())))
+                .unwrap_or_default()
+        } else { String::new() };
         let workers = self.workers(Some(&agent.thread_id));
         let board = if workers.is_empty() {
             "none".to_string()
@@ -498,7 +683,7 @@ impl Agents {
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
              copied out of /tmp into ~/.t3/userdata/attachments; a build you start or check this turn shows as an Install card. \
-             No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.",
+             No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.{refreshed}",
             cli = self.cli, id = agent.thread_id,
         )
     }

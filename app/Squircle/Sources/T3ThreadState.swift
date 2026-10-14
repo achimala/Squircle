@@ -118,11 +118,13 @@ struct T3ThreadState: Codable {
         return .object(a)
     }
     /// "Dark mode finished · Launch crash needs you" for Squircle's wake-up
-    /// message to an app agent; nil for anything else.
+    /// message to an app agent, "Started fresh" for its handoff; nil for
+    /// anything else.
     static func workerUpdate(_ message: JSONValue) -> String? {
-        guard message["role"].string == "user",
-              let record = message["context"]["records"].array.first(where: { $0["kind"].string == "squircle-worker-update" })
-        else { return nil }
+        guard message["role"].string == "user" else { return nil }
+        let records = message["context"]["records"].array
+        if records.contains(where: { $0["kind"].string == "squircle-handoff" }) { return "Started fresh" }
+        guard let record = records.first(where: { $0["kind"].string == "squircle-worker-update" }) else { return nil }
         let lines = record["payload"]["workers"].array.map { worker -> String in
             let title = worker["title"].string ?? "A worker"
             switch worker["state"].string {
