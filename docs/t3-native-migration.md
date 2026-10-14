@@ -929,7 +929,9 @@ places as the glass widens, with no picture and no blur. Per frame only
 constraint constants change. Cross blur remains for bubble ↔ panel and for the
 panel's shortest layout morphing into the bubble. Verified from real-touch
 recordings: drag up into full screen and back, handle tap to full and back,
-continuous with nothing re-wrapping and nothing changing at rest.
+continuous with nothing re-wrapping and nothing changing at rest. Letters
+Abroad build: job `0a62e459-3211-4a01-bbe0-50bc96595e55` (overlay key
+`bca1c588…`, main at `c29b0b4`); not yet on the phone.
 
 **Fluid bubble, launch in place (user, 2026-10-14):** "as the agent changes
 what it's doing the bubble resizes and text changes kinda abruptly and often
