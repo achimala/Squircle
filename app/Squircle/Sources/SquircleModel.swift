@@ -104,6 +104,11 @@ final class SquircleModel {
     let gateway: T3Gateway?
     private let client: SquircleClient?
     private var shell: JSONValue = .null
+    /// Reading the last Home from disk; the first connection waits for it so
+    /// T3 can resume the shell from its sequence instead of resending it.
+    private var homeLoad: Task<Void, Never>?
+    /// Reading the open thread from disk; its subscription resumes from it.
+    private var diskLoad: (id: String, task: Task<Void, Never>)?
     private var state = T3ThreadState()
     private var threadSubscription: String?
     private var refreshing = false
@@ -273,7 +278,7 @@ final class SquircleModel {
         }
         // Home shows the last known apps and threads; T3 then replaces them.
         if configuration != nil {
-            Task { [weak self, disk] in
+            homeLoad = Task { [weak self, disk] in
                 guard let home = await disk.loadHome(), let self, shell == .null else { return }
                 shell = home.shell; if appMetadata.isEmpty { appMetadata = home.metadata }; shellChanged()
             }
@@ -281,7 +286,7 @@ final class SquircleModel {
         gateway?.onDisconnect = { [weak self] in
             guard let self else { return }
             connected = false; status = "Reconnecting"; threadSubscription = nil; connectedAt = nil
-            log("T3 socket dropped; reconnecting")
+            log("T3 socket dropped; reconnecting"); ConnectionTrace.mark("disconnected")
             keepConnected()
         }
         if gateway != nil { watchNetwork() }
@@ -321,7 +326,8 @@ final class SquircleModel {
     }
     func refresh() async {
         guard gateway != nil, client != nil else { error = ClientError.configuration.localizedDescription; return }
-        guard connected else { failingSince = nil; keepConnected(); nap?.cancel(); return }
+        // The service doesn't depend on T3: both load at once.
+        if !connected { failingSince = nil; keepConnected(); nap?.cancel() }
         await refreshServices()
     }
     /// Builds, app metadata and agents come from the Squircle service, not T3.
@@ -329,11 +335,10 @@ final class SquircleModel {
         guard !refreshing, let client else { return }; refreshing = true
         defer { refreshing = false }
         do {
-            async let listed = client.builds()
-            async let metadata = client.fetchAppMetadata()
-            builds = try await listed; appMetadata = try await metadata; reconcileProjects(); scheduleHomeWrite()
-            if let known = try? await client.agents() { adopt(known) }
-            await ensureScopedProject()
+            if let failure = await refreshMetadata() { throw failure }
+            scheduleHomeWrite()
+            ConnectionTrace.mark("services.builds+apps")
+            if connected { await ensureScopedProject() }
             if !launchReported, let id = Bundle.main.object(forInfoDictionaryKey:"SquircleBuildID") as? String, UUID(uuidString:id) != nil {
                 try await client.reportLaunch(buildID:id,eventID:UUID().uuidString,timestamp:Int(Date.now.timeIntervalSince1970)); launchReported = true
             }
@@ -391,7 +396,7 @@ final class SquircleModel {
             }
             guard let self else { return }
             connector = nil; isLoading = false
-            if connected { await refreshServices() }
+            if connected { await ensureScopedProject() }
         }
     }
     /// Reconnect, tapped: a fresh attempt now, without the backoff or an
@@ -412,22 +417,29 @@ final class SquircleModel {
     /// service, which trims T3's 1 MB config.
     private func openConnection() async throws {
         guard let gateway else { throw ClientError.configuration }
+        ConnectionTrace.mark("connect.start")
+        await homeLoad?.value; homeLoad = nil
         try await gateway.connect()
         do {
-            try await gateway.subscribe("orchestration.subscribeShell", receive: { [weak self] in self?.consumeShell($0) },
+            // With a shell already held, T3 sends only what changed since
+            // (or a fresh snapshot when it can't).
+            var shellRequest: [String: Any] = [:]
+            if let sequence = shell["snapshotSequence"].int { shellRequest["afterSequence"] = sequence }
+            try await gateway.subscribe("orchestration.subscribeShell", .from(shellRequest), receive: { [weak self] in self?.consumeShell($0, batched: true) },
                                         ended: { [weak self] in self?.connectionSubscriptionEnded("shell", $0) })
-            try await gateway.subscribe("subscribeDeviceState", receive: { [weak self] in self?.devices = $0 },
+            // Its first value is the whole device state.
+            try await gateway.subscribe("subscribeDeviceState", receive: { [weak self] in self?.consumeDevices($0) },
                                         ended: { [weak self] in self?.connectionSubscriptionEnded("devices", $0) })
             threadSubscription = nil
             if let id = selectedSessionID { try await subscribeThread(id) }
-            devices = try await gateway.call("device.list")
+            ConnectionTrace.mark("connect.subscribed")
             // The socket may have failed while subscribing; then try again.
             guard gateway.isOpen, !suspended else { throw ClientError.connection("T3") }
         } catch { gateway.disconnect(notify: false); throw gateway.rejection ?? error }
         connected = true; status = isRunning ? "Working" : "Connected"; failingSince = nil; connectedAt = .now
         // An unstable connection keeps saying so until it holds.
         if unstableCount == 0 || error != Self.subscriptionLost { error = nil }
-        log("T3 connected")
+        log("T3 connected"); ConnectionTrace.mark("connected")
         loadConfig()
         // A thread opened while this attempt was under way.
         if let id = selectedSessionID, threadSubscription == nil { await selectSession(id) }
@@ -524,10 +536,24 @@ final class SquircleModel {
             }
         }
     }
-    private func consumeShell(_ item: JSONValue) {
-        if item["kind"].string == "snapshot" { shell = item["snapshot"] }
+    /// T3 bumps the device state's `revision` every few seconds with nothing
+    /// else changed; only a real change reaches the screen and the Mac.
+    private func consumeDevices(_ value: JSONValue) {
+        func content(_ v: JSONValue) -> JSONValue { var o = v.object; o["revision"] = nil; return .object(o) }
+        guard content(value) != content(devices) else { return }
+        devices = value
+    }
+    private func consumeShell(_ item: JSONValue, batched: Bool = false) {
+        liveShell = true
+        if item["kind"].string == "snapshot" { shell = item["snapshot"]; ConnectionTrace.mark("shell.snapshot") }
+        else if item["kind"].string == "synchronized" { ConnectionTrace.mark("shell.synchronized"); return }
         else {
+            // Replayed and live events overlap; each applies once, and the
+            // shell remembers how far it got for the next resume.
+            let sequence = item["sequence"].int
+            if let sequence, let held = shell["snapshotSequence"].int, sequence <= held { return }
             var s = shell.object
+            if let sequence { s["snapshotSequence"] = .number(Double(sequence)) }
             switch item["kind"].string {
             case "project-upserted", "thread-upserted":
                 let key = item["kind"].string == "project-upserted" ? "projects" : "threads"
@@ -542,9 +568,17 @@ final class SquircleModel {
             }
             shell = .object(s)
         }
-        shellChanged()
-        scheduleHomeWrite()
+        guard batched else { shellChanged(); scheduleHomeWrite(); return }
+        // A resumed shell arrives as many events at once: Home follows
+        // once they're all in.
+        guard !shellPending else { return }
+        shellPending = true
+        Task { [weak self] in
+            guard let self, shellPending else { return }
+            shellPending = false; shellChanged(); scheduleHomeWrite()
+        }
     }
+    private var shellPending = false
     private func shellChanged() {
         sessions = shell["threads"].array.filter { $0["deletedAt"] == .null && $0["archivedAt"] == .null }.map { t in
             if let id = t["id"].string { sessionProjects[id] = t["projectId"].string }
@@ -554,7 +588,11 @@ final class SquircleModel {
                                phase:phase,modelSelection:t["modelSelection"])
         }.sorted { $0.updatedAt > $1.updatedAt }
         reconcileProjects()
+        if ConnectionTrace.enabled, liveShell, !tracedHome, !projects.isEmpty {
+            tracedHome = true; ConnectionTrace.mark("home.live", "projects=\(projects.count) threads=\(sessions.count)")
+        }
     }
+    private var tracedHome = false, liveShell = false
     private func reconcileProjects() {
         projects = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
             .filter { scopeBundleID == nil || $0.bundleID == scopeBundleID }
@@ -581,7 +619,7 @@ final class SquircleModel {
         guard let client else { return }
         do {
             try await client.resetAgent(projectID: project.id, fresh: fresh)
-            await refreshMetadata()
+            await refreshMetadata(fresh: true)
         } catch { self.error = error.localizedDescription }
     }
     func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }
@@ -590,27 +628,29 @@ final class SquircleModel {
     /// session; a copy on disk follows a moment later, read off the main
     /// actor. The live subscription then brings it up to date.
     func prepareSession(_ id: String) {
-        guard selectedSessionID != id || state.sequence < 0 else { return }
+        guard selectedSessionID != id || (state.sequence < 0 && diskLoad?.id != id) else { return }
         saveCurrentThread()
         threadResubscribe?.cancel(); threadResubscribe = nil
         open = .thread(id); requests = []; isRunning = false
+        ConnectionTrace.mark("thread.open", id); tracedRows = false
         stepDetails?.cancel(); stepDetailsCount = -1
         if let cached = threadCache.value(for: id) {
             show(cached.state, messages: cached.messages)
         } else {
             show(T3ThreadState(), messages: [])
             guard configuration != nil else { return }
-            Task { [weak self, disk] in
+            diskLoad = (id, Task { [weak self, disk] in
                 guard let loaded = await disk.loadThread(id), let self,
                       selectedSessionID == id, state.sequence < 0 else { return }
                 show(loaded, messages: nil)
-            }
+            })
         }
     }
     /// Puts `restored` on screen as the open thread's state; `messages` nil
     /// derives them.
     private func show(_ restored: T3ThreadState, messages derived: [ChatMessage]?) {
         guard let id = selectedSessionID else { return }
+        ConnectionTrace.mark("thread.cached", "seq=\(restored.sequence) memory=\(derived != nil)")
         state = restored
         if state.sequence >= 0 { state.fromCache = true }
         if let derived { conversationBuild?.cancel(); conversationBuild = nil; conversationDirty = false; messages = derived }
@@ -632,14 +672,31 @@ final class SquircleModel {
         catch where Self.isTransient(error) {}
         catch { self.error = error.localizedDescription }
     }
-    private func subscribeThread(_ id: String) async throws {
+    private func subscribeThread(_ id: String, fresh: Bool = false) async throws {
         guard let gateway else { return }
-        let subscription = try await gateway.subscribe("orchestration.subscribeThread", .from(["threadId":id]), receive: { [weak self] item in
+        if let load = diskLoad, load.id == id { await load.task.value }
+        if diskLoad?.id == id { diskLoad = nil }
+        guard selectedSessionID == id else { return }
+        // Holding the thread up to some point (this session or on disk), T3
+        // sends only the events since, or a snapshot when it can't: a long
+        // agent thread's snapshot is over half a megabyte.
+        var request: [String: Any] = ["threadId": id, "requestCompletionMarker": true]
+        if !fresh, state.sequence >= 0 { request["afterSequence"] = state.sequence }
+        let subscription = try await gateway.subscribe("orchestration.subscribeThread", .from(request), receive: { [weak self] item in
             guard let self, selectedSessionID == id else { return }
             consumeThread(item)
         }, ended: { [weak self] failure in self?.threadSubscriptionEnded(id, failure) })
         guard selectedSessionID == id else { await gateway.unsubscribe(subscription); return }
         threadSubscription = subscription
+    }
+    private func resubscribeFresh(_ id: String) {
+        threadResubscribe?.cancel()
+        threadResubscribe = Task { [weak self] in
+            guard let self, selectedSessionID == id, connected else { return }
+            let previous = threadSubscription; threadSubscription = nil
+            await gateway?.unsubscribe(previous)
+            try? await subscribeThread(id, fresh: true)
+        }
     }
     /// T3 ended the open thread's subscription with the socket still up.
     /// Subscribe again, waiting longer each time; after a few tries say so.
@@ -768,6 +825,7 @@ final class SquircleModel {
                 guard !Task.isCancelled else { return }
                 if model.selectedSessionID == id {
                     model.messages = rows
+                    if ConnectionTrace.enabled { model.traceRows(rows.count) }
                     if let id, model.threadCache.peek(id) != nil {
                         model.threadCache.set(CachedThread(state: model.state, messages: rows), for: id)
                     }
@@ -777,8 +835,29 @@ final class SquircleModel {
         }
     }
 
+    private var tracedRows = false
+    private var tracedEventAt: String?
+    private func traceRows(_ count: Int) {
+        if !tracedRows, state.sequence >= 0, !state.fromCache {
+            tracedRows = true; ConnectionTrace.mark("thread.rows", "rows=\(count) seq=\(state.sequence)")
+        }
+        if let at = tracedEventAt {
+            tracedEventAt = nil
+            ConnectionTrace.mark("event.onScreen", String(format: "%.0fms", Date().timeIntervalSince(JSONValue.string(at).date) * 1000))
+        }
+    }
     func consumeThread(_ item: JSONValue) {
+        if item["kind"].string == "synchronized" { ConnectionTrace.mark("thread.synchronized"); tracedRows = true; return }
+        if ConnectionTrace.enabled {
+            switch item["kind"].string {
+            case "snapshot": ConnectionTrace.mark("thread.snapshot", "seq=\(item["snapshot"]["snapshotSequence"].int ?? -1)")
+            default: if tracedRows, let at = item["event"]["occurredAt"].string { tracedEventAt = at }
+            }
+        }
+        let held = state.sequence
         state.consume(item); rebuildConversation(); requests = state.pendingRequests
+        // A revert rewrote history the phone can't replay: start from a snapshot.
+        if held >= 0, state.sequence < 0, let id = selectedSessionID { resubscribeFresh(id) }
         scheduleCacheWrite()
         let turnChanges = state.changes
         if turnChanges != changes { changes = turnChanges }
@@ -974,6 +1053,8 @@ final class SquircleModel {
     private func fetchStepDetails(_ id: String) async -> Bool {
         guard let client, selectedSessionID == id else { return true }
         let since = state.detailsVersion == 2 ? state.detailsSince : nil
+        let stepsStart = ContinuousClock.now
+        defer { ConnectionTrace.mark("steps", "since=\(since != nil) \(stepsStart.duration(to: .now))") }
         let steps: [JSONValue], workers: [JSONValue]?, published: [JSONValue]
         do {
             async let media = client.threadMedia(threadID: id)
@@ -1003,10 +1084,8 @@ final class SquircleModel {
     }
     /// `squircle media add` writes on the Mac without any T3 activity, so the
     /// open thread's media is checked on the regular refresh too.
-    private func refreshOpenMedia() async {
-        guard let client, let id = selectedSessionID,
-              let published = try? await client.threadMedia(threadID: id),
-              selectedSessionID == id, published != media else { return }
+    private func adoptMedia(_ published: [JSONValue], for id: String) {
+        guard selectedSessionID == id, published != media else { return }
         state.media = published
         rebuildConversation(); scheduleCacheWrite()
     }
@@ -1239,12 +1318,17 @@ final class SquircleModel {
 
     func refreshSimulators() async {
         guard let client, let active = try? await client.simulatorSessions() else { return }
+        adoptSimulators(active)
+    }
+    private func adoptSimulators(_ active: [JSONValue]) {
+        guard active != recording else { return }
         let ended = Set(recording.compactMap { $0["thread_id"].string }).subtracting(active.compactMap { $0["thread_id"].string })
         recording = active
         // A recording just filed belongs in the conversation on screen.
         if let id = selectedSessionID, ended.contains(id) { scheduleStepDetails() }
     }
     func startMetadataUpdates() {
+        ConnectionTrace.mark("metadata.start", "running=\(monitor != nil)")
         guard monitor == nil else { return }
         monitor = Task { [weak self] in
             while !Task.isCancelled {
@@ -1252,17 +1336,48 @@ final class SquircleModel {
             }
         }
     }
-    func stopMetadataUpdates() { monitor?.cancel(); monitor = nil }
-    func refreshMetadata() async {
-        guard let client else { return }
-        do { async let b = client.builds(); async let m = client.fetchAppMetadata(); async let a = client.agents()
-            builds = try await b; appMetadata = try await m; reconcileProjects()
-            if let known = try? await a { adopt(known) }
-            await refreshSimulators()
-            await refreshTasks()
-            await refreshOpenMedia()
-            noteStability()
-        } catch { /* T3 chat remains usable if the build service is temporarily offline. */ }
+    func stopMetadataUpdates() { ConnectionTrace.mark("metadata.stop"); monitor?.cancel(); monitor = nil }
+    /// Everything the phone keeps from the Mac's service, fetched at once:
+    /// one round trip per poll, and an unchanged reply is an empty 304.
+    /// A refresh already under way is joined; `fresh` waits for it and then
+    /// asks again, for callers that just changed something. Returns why the
+    /// builds or apps couldn't be fetched, if they couldn't.
+    @discardableResult
+    func refreshMetadata(fresh: Bool = false) async -> Error? {
+        if let running = metadataRefresh {
+            let error = await running.value
+            if !fresh { return error }
+        }
+        let refresh = Task { await fetchMetadata() }
+        metadataRefresh = refresh
+        let error = await refresh.value
+        if metadataRefresh == refresh { metadataRefresh = nil }
+        return error
+    }
+    private var metadataRefresh: Task<Error?, Never>?
+    private func fetchMetadata() async -> Error? {
+        guard let client else { return nil }
+        let pollStart = ContinuousClock.now
+        defer { ConnectionTrace.mark("poll", "\(pollStart.duration(to: .now))") }
+        noteStability()
+        let project = selectedProjectID, thread = selectedSessionID
+        async let b = client.builds(); async let m = client.fetchAppMetadata(); async let a = try? client.agents()
+        async let sims = try? client.simulatorSessions()
+        async let list: AppTasks? = { guard let project else { return nil }; return try? await client.tasks(projectID: project) }()
+        async let published: [JSONValue]? = { guard let thread else { return nil }; return try? await client.threadMedia(threadID: thread) }()
+        let failure: Error?
+        do {
+            let (newBuilds, newMetadata) = try await (b, m)
+            if newBuilds != builds { builds = newBuilds }
+            if newMetadata != appMetadata { appMetadata = newMetadata }
+            reconcileProjects()
+            failure = nil
+        } catch { failure = error }  // T3 chat remains usable if the build service is temporarily offline.
+        if let known = await a { adopt(known) }
+        if let active = await sims { adoptSimulators(active) }
+        if let project, let tasks = await list { self.tasks[project] = tasks }
+        if let thread, let media = await published { adoptMedia(media, for: thread) }
+        return failure
     }
     func tasks(for project: AppProject) -> AppTasks { tasks[project.id] ?? AppTasks() }
     func refreshTasks() async {
@@ -1321,7 +1436,7 @@ final class SquircleModel {
     func startBuild(for project: AppProject) async -> AppBuild? {
         guard let client, let request = project.buildRequest else { error = "Import this app’s Xcode build recipe first."; return nil }
         buildingProjectIDs.insert(project.id); defer { buildingProjectIDs.remove(project.id) }
-        do { let build = try await client.startBuild(request.freshSubmission()); await refreshMetadata(); return build }
+        do { let build = try await client.startBuild(request.freshSubmission()); await refreshMetadata(fresh: true); return build }
         catch { self.error = error.localizedDescription; return nil }
     }
     /// Opens iOS's install prompt. For a build of this very app, watches the
