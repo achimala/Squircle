@@ -30,7 +30,7 @@ final class GlassJelly: UIView {
             switch tone {
             case .done: creatureSquash.velocity -= 1.6
             case .needsYou: hop.velocity -= 70
-            case .working, .idle: break
+            case .working, .idle, .recording: break
             }
         }
     }
@@ -406,7 +406,8 @@ final class GlassJelly: UIView {
 
     private func stepFace(_ dt: CGFloat) {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        let color: UIColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success : Theme.accent
+        let color: UIColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success
+            : tone == .recording ? Theme.failure : Theme.accent
         color.resolvedColor(with: traitCollection).getRed(&r, green: &g, blue: &b, alpha: &a)
         let strength: CGFloat = tone == .idle ? 0.5 : 0.85
         (tint.r.target, tint.g.target, tint.b.target, tint.a.target) = (r, g, b, strength)

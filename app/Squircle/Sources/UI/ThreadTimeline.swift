@@ -116,10 +116,20 @@ enum ThreadItem: Equatable {
             if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 items.append(user.isUpdate ? .update(user) : .user(user))
             }
-            if let user = turn.user, !user.attachments.isEmpty {
-                items.append(.gallery(id: "gallery:sent:" + user.id, shots: user.attachments.enumerated().map {
+            if let user = turn.user, !user.attachments.isEmpty || user.captures.contains(where: \.isVideo) {
+                let images = user.attachments.enumerated().map {
                     Shot(step: user.id, index: $0.offset, title: "Your image", attachment: $0.element)
-                }))
+                }
+                let clips = user.captures.filter(\.isVideo).map {
+                    Shot(step: "file:" + $0.path, index: 0, title: "Your recording", video: true, path: $0.path)
+                }
+                items.append(.gallery(id: "gallery:sent:" + user.id, shots: images + clips))
+            }
+            // A performance capture is for the agent; you see that it went.
+            for (index, capture) in (turn.user?.captures ?? []).enumerated() where !capture.isVideo {
+                var line = ChatMessage(id: "capture:\(id)#\(index)", role: "user", content: capture.label)
+                line.symbol = "waveform.path.ecg"
+                items.append(.update(line))
             }
             let rest = turn.rest.filter { $0.role == "tool" || !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             // The answer is the last thing the agent wrote, once nothing follows it.

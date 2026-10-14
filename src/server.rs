@@ -181,6 +181,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/workers/cleanup", post(cleanup_workers))
         .route("/v1/import", post(import))
         .route("/v1/diagnostics", post(ingest))
+        .route(
+            "/v1/captures",
+            post(upload_capture).layer(DefaultBodyLimit::max(crate::perf::MAX_UPLOAD_BYTES)),
+        )
         .route("/v1/install-links/{token}", get(link_status))
         .route("/install/{token}", get(install_page))
         .route("/install/{token}/manifest.plist", get(download_manifest))
@@ -1329,6 +1333,28 @@ async fn diagnostics(
         .map_err(ApiError::bad)?;
     Ok(Json(success(data)))
 }
+#[derive(Deserialize)]
+struct CaptureQuery {
+    kind: String,
+}
+
+/// A screen or performance recording from the phone; the message that sends
+/// it links the returned path.
+async fn upload_capture(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<CaptureQuery>,
+    bytes: axum::body::Bytes,
+) -> ApiResult<Json<Value>> {
+    auth(&state, &headers, false)?;
+    let root = state.store.lock().unwrap().root.clone();
+    let path = tokio::task::spawn_blocking(move || crate::perf::store(&root, &query.kind, &bytes))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::bad)?;
+    Ok(Json(success(json!({"path": path}))))
+}
+
 async fn ingest(
     State(state): State<AppState>,
     headers: HeaderMap,

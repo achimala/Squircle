@@ -174,6 +174,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.layoutIfNeeded()
     }
 
+    /// More ways to attach, below the photo ones: the debug overlay's
+    /// screenshot and recordings of the app under it.
+    var appAttachments: [UIMenuElement] = [] {
+        didSet { if isViewLoaded { composer.attachMenu = attachMenu() } }
+    }
+
+    private func attachMenu() -> UIMenu {
+        let photos = picker.menu
+        guard !appAttachments.isEmpty else { return photos }
+        return UIMenu(children: [UIMenu(options: .displayInline, children: photos.children),
+                                 UIMenu(options: .displayInline, children: appAttachments)])
+    }
+
     /// The debug overlay's capture is flying into the field: keep its
     /// thumbnail hidden until it lands (nil: show it).
     func holdAttachment(_ id: String?) {
@@ -312,7 +325,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         notice.accessibilityIdentifier = "thread.error"
         composer.onSend = { [weak self] in self?.send() }
         composer.onChange = { [weak self] in self?.renderSend() }
-        composer.attachMenu = picker.menu
+        composer.attachMenu = attachMenu()
         composer.onRemoveAttachment = { [weak self] id in self?.model.removeAttachment(id) }
         jump.alpha = 0
         jump.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
@@ -884,7 +897,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .update:
             let font = Theme.font(.footnote, 13, .medium)
             let line = NSMutableAttributedString()
-            if let symbol = UIImage(systemName: "arrow.triangle.merge", withConfiguration: UIImage.SymbolConfiguration(font: font))?
+            if let symbol = UIImage(systemName: message.symbol.isEmpty ? "arrow.triangle.merge" : message.symbol, withConfiguration: UIImage.SymbolConfiguration(font: font))?
                 .withTintColor(.secondaryLabel, renderingMode: .alwaysOriginal) {
                 line.append(NSAttributedString(attachment: NSTextAttachment(image: symbol)))
                 line.append(NSAttributedString(string: "  "))

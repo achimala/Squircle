@@ -20,6 +20,8 @@ struct ChatSession: Identifiable, Equatable {
 
 struct ChatMessage: Identifiable, Equatable {
     var id: String
+    /// Recordings sent with a message of yours, by path on the Mac.
+    var captures: [SentCapture] = []
     /// "user", "assistant", "thinking" (reasoning summary) or "tool".
     let role: String
     var content: String
@@ -47,12 +49,65 @@ struct ChatMessage: Identifiable, Equatable {
     var attachments: [String] = []
 }
 
+/// A screen or performance recording a message links to.
+struct SentCapture: Equatable {
+    let label: String
+    let path: String
+    var isVideo: Bool { MediaFiles.isVideo("file:" + path) }
+
+    /// Starts the recordings block after what you typed; the conversation
+    /// shows it as the recordings themselves.
+    static let marker = "\n\nRecorded in the app:"
+
+    /// The lines a message carries for `captures`, after `marker`.
+    static func block(_ captures: [(label: String, path: String, video: Bool)]) -> String {
+        guard !captures.isEmpty else { return "" }
+        return marker + captures.map { capture in
+            let link = "\n[\(capture.label)](\(capture.path))"
+            return capture.video ? link
+                : link + " (performance capture: run `squircle perf show \(capture.path)` for hitches, symbolicated main-thread stacks and a timeline)"
+        }.joined()
+    }
+
+    /// The recordings in a message's block.
+    static func parse(_ text: String) -> [SentCapture] {
+        guard let start = text.range(of: marker) else { return [] }
+        var block = text[start.upperBound...]
+        if let end = block.range(of: AppProject.contextMarker) { block = block[..<end.lowerBound] }
+        return block.split(separator: "\n").compactMap { line in
+            guard line.hasPrefix("["), let close = line.range(of: "]("),
+                  let end = line[close.upperBound...].firstIndex(of: ")") else { return nil }
+            let path = String(line[close.upperBound..<end])
+            guard path.hasPrefix("/") else { return nil }
+            return SentCapture(label: String(line[line.index(after: line.startIndex)..<close.lowerBound]), path: path)
+        }
+    }
+}
+
 /// A picture waiting in the message field, sent with the next message.
 struct ImageAttachment: Identifiable, Equatable {
     let id: String
     /// JPEG, small enough for T3's 10 MB per-image limit.
     let data: Data
     let thumbnail: UIImage
+    /// Set for a screen or performance recording: it goes to the Mac through
+    /// Squircle, and the message links it, instead of going to T3 as a picture.
+    var capture: Capture?
+
+    struct Capture: Equatable {
+        enum Kind: String { case video, performance }
+        let kind: Kind
+        let file: URL
+        /// Its length (and, for performance, its hitches), e.g. "0:12 · 3 hitches".
+        let label: String
+    }
+
+    init(capture: Capture, thumbnail: UIImage, id: String = UUID().uuidString) {
+        self.id = id
+        self.capture = capture
+        self.thumbnail = thumbnail
+        data = thumbnail.jpegData(compressionQuality: 0.8) ?? Data()
+    }
 
     /// Scales `image` so its long side is at most 2000 pixels.
     init?(_ image: UIImage, id: String = UUID().uuidString) {

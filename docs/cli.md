@@ -47,6 +47,8 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
 | `symbolicate --report PATH --dsym PATH` | Local Xcode symbolication attempt for Apple-text reports |
 | `diagnostics send --file PATH` | Upload one diagnostic JSON fixture |
+| `perf show PATH\|ID [--dsym PATH]` | A performance recording from the phone's overlay: worst hitches with symbolicated main-thread stacks, heaviest functions, per-second timeline, app log; text, or `--json` |
+| `perf list` | Performance captures and screen recordings uploaded from the phone (`POST /v1/captures`) |
 
 `install-link` does not install or remotely launch an app. A `launch_observed`
 flag reflects an authenticated diagnostic event, not independent OS attestation.
@@ -65,6 +67,8 @@ directory and adds the T3 instance; `--remove` takes it out).
 | --- | --- |
 | `t3 connect --url URL`, `t3 status` | Service's own T3 session; connection state |
 | `agent start --project T3_ID [--message TEXT]` | Create or find the app's agent and send it a message |
+| `agent restart --project ID\|--thread ID` | Relaunch the agent's Claude session on the same thread; its next turn gets the current instructions (once, in the turn note) with history kept. Runs when the agent's turn ends |
+| `agent fresh --project ID\|--thread ID [--handoff TEXT]` | Replace the agent with a new thread seeded by a handoff (app, recent commits, workers, recent user messages, last reply, the note); the old thread is renamed "… (until DATE)" and stays in Threads; workers move over. Runs when the agent's turn ends |
 | `agent list`, `agent context [--hook]` | Agents; the per-turn note (thread ID, live workers) its hook injects |
 | `thread spawn --coordinator ID --title T --branch B --prompt P` | Worker thread in its own worktree, branched from the checkout's current branch |
 | `thread send ID TEXT`, `thread read ID`, `thread answer ID TEXT` | Message, inspect (last reply, diff stat, pending question), answer |

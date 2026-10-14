@@ -237,6 +237,23 @@ final class SquircleClient: NSObject, URLSessionTaskDelegate {
         catch { if Task.isCancelled { throw CancellationError() }; throw ClientError.connection("Squircle") }
     }
 
+    /// Puts a recording made in the app on the Mac; returns its path there.
+    func uploadCapture(_ file: URL, kind: String) async throws -> String {
+        var request = try request(["v1", "captures"], query: [URLQueryItem(name: "kind", value: kind)])
+        request.httpMethod = "POST"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 600
+        struct Reply: Decodable { struct Data: Decodable { let path: String }; let ok: Bool; let data: Data }
+        do {
+            let (data, response) = try await session.upload(for: request, fromFile: file)
+            try validate(response, service: "Squircle")
+            guard let reply = try? JSONDecoder().decode(Reply.self, from: data), reply.ok else { throw ClientError.response("Squircle") }
+            return reply.data.path
+        } catch is CancellationError { throw CancellationError() }
+        catch let error as ClientError { throw error }
+        catch { if Task.isCancelled { throw CancellationError() }; throw ClientError.connection("Squircle") }
+    }
+
     func reportLaunch(buildID: String, eventID: String, timestamp: Int) async throws {
         guard UUID(uuidString: buildID) != nil else { return }
         var request = try request(["v1", "diagnostics"])

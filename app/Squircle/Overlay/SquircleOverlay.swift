@@ -193,6 +193,15 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private let shutter = UIImpactFeedbackGenerator(style: .rigid)
     private var movePan: UIPanGestureRecognizer!
     private var backPan: UIPanGestureRecognizer!
+    /// Where the flying picture starts and the attachment it lands as.
+    private var flightStart = CGRect.zero
+    private var flightID = HostCapture.attachmentID
+    /// A screen or performance recording from the + menu: while it runs the
+    /// bubble is its stop button.
+    private let capture = CaptureSession()
+    private var stopping = false
+    /// Tints the bubble's glass while it records.
+    private let recordingTint = UIView()
 
     init(model: SquircleModel) {
         self.model = model
@@ -223,6 +232,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubble.accessibilityLabel = "Squircle"
         bubbleStage.isUserInteractionEnabled = false
         bubbleStage.addSubview(bubble)
+        recordingTint.isUserInteractionEnabled = false
+        recordingTint.backgroundColor = Theme.failure.withAlphaComponent(0.16)
+        // The jelly itself takes the recording colour (its tone), so the
+        // tint stays hidden.
+        recordingTint.alpha = 0
+        glass.content.addSubview(recordingTint)
+        capture.onLimit = { [weak self] in self?.stopRecording() }
         glass.content.addSubview(bubbleStage)
         let pill = UIView()
         pill.backgroundColor = .tertiaryLabel
@@ -357,7 +373,12 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         #if DEBUG
         if let demo = demoStatus { (headline, tone, started) = (demo.headline, demo.tone, nil) }
         #endif
+        if let recording = capture.recording {
+            (headline, tone, started) = (recording.kind == .screen ? "Recording screen" : "Recording performance", .recording, recording.started)
+        }
+        bubble.showsTime = capture.recording != nil
         bubble.configure(headline: headline, started: started, tone: tone)
+        bubble.accessibilityLabel = capture.recording == nil ? "Squircle" : "Stop recording"
         bubble.accessibilityValue = headline ?? "Idle"
         if let build = model.updatingTo {
             UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
@@ -568,6 +589,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubbleStage.frame = pill
         if bubble.frame.size != bubbleStage.bounds.size { bubble.frame = bubbleStage.bounds }
         bubbleStage.alpha = (1 - opened * 5).clamped()
+        recordingTint.frame = local
+        recordingTint.alpha = 0
         if let clip = clipLayout {
             // Revealed from the bottom by the glass, at its laid-out size.
             page.transform = .identity
@@ -723,10 +746,20 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Captures the app under the overlay and opens with it in the field:
     /// a flash, then the picture flies from full screen into its slot.
     private func captureAndOpen() {
-        guard !route.open, project != nil, let window = view.window,
+        guard capture.recording == nil, project != nil, let window = view.window,
               let image = HostCapture.image(below: window),
               let attachment = ImageAttachment(image, id: HostCapture.attachmentID) else { return open() }
         shutter.impactOccurred(intensity: 1)
+        flash.frame = view.bounds
+        view.addSubview(flash)
+        flashFade.set(1)
+        flashFade.animate(to: 0)
+        land(attachment, picture: image, from: view.bounds)
+    }
+
+    /// Opens (if closed) with `attachment` in the field: `image` flies from
+    /// `start` into the attachment's slot as the panel opens around it.
+    private func land(_ attachment: ImageAttachment, picture image: UIImage, from start: CGRect) {
         flyer?.lift.removeFromSuperview()
         let lift = UIView(), picture = UIImageView(image: image)
         lift.isUserInteractionEnabled = false
@@ -739,18 +772,51 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         picture.layer.borderColor = UIColor.separator.cgColor
         lift.addSubview(picture)
         view.addSubview(lift)
-        flash.frame = view.bounds
-        view.addSubview(flash)
         flyer = (lift, picture)
-        activeController?.holdAttachment(HostCapture.attachmentID)
+        flightStart = start
+        flightID = attachment.id
+        activeController?.holdAttachment(attachment.id)
         model.attach(attachment)
         route.open = true
         makeKey()
         sync()
-        flashFade.set(1)
-        flashFade.animate(to: 0)
         flight.set(0)
         flight.animate(to: 1)
+    }
+
+    // MARK: Recording
+
+    private var appAttachments: [UIMenuElement] {
+        [UIAction(title: "App Screenshot", image: UIImage(systemName: "camera.viewfinder")) { [weak self] _ in self?.captureAndOpen() },
+         UIAction(title: "Record Screen", image: UIImage(systemName: "record.circle")) { [weak self] _ in self?.startRecording(.screen) },
+         UIAction(title: "Record Performance", image: UIImage(systemName: "waveform.path.ecg")) { [weak self] _ in self?.startRecording(.performance) }]
+    }
+
+    /// Docks into the recording bubble and starts; tapping it stops.
+    private func startRecording(_ kind: CaptureSession.Kind) {
+        guard let window = view.window, capture.start(kind, below: window) else { return }
+        Theme.openHaptic()
+        view.endEditing(true)
+        route.open = false
+        sync()
+        render()
+    }
+
+    /// Stops the recording and opens with it in the field: a screen
+    /// recording flies in from the screen, a performance one from the bubble.
+    private func stopRecording() {
+        guard let recording = capture.recording, !stopping, let window = view.window else { return }
+        stopping = true
+        shutter.impactOccurred(intensity: 0.7)
+        let screen = recording.kind == .screen ? HostCapture.image(below: window) : nil
+        Task { [weak self] in
+            guard let self else { return }
+            let attachment = await capture.stop(snapshot: screen)
+            stopping = false
+            render()
+            guard let attachment else { return open() }
+            land(attachment, picture: screen ?? attachment.thumbnail, from: screen == nil ? frame.value : view.bounds)
+        }
     }
 
     /// The conversation on top: the field the capture lands in.
@@ -763,13 +829,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private func applyFlight() {
         guard let (lift, picture) = flyer else { return }
         let t = flight.value
-        let target = route.open ? activeController?.attachmentFrame(HostCapture.attachmentID, in: view) ?? bubbleFrame : frame.value
-        let start = view.bounds
+        let target = route.open ? activeController?.attachmentFrame(flightID, in: view) ?? bubbleFrame : frame.value
+        let start = flightStart
         lift.frame = CGRect(x: .lerp(start.minX, target.minX, t), y: .lerp(start.minY, target.minY, t),
                             width: .lerp(start.width, target.width, t), height: .lerp(start.height, target.height, t))
         picture.frame = lift.bounds
         // Full screen it hides under the display's own corners.
-        let radius = CGFloat.lerp(44, 12, t.clamped())
+        let radius = CGFloat.lerp(flightStart == view.bounds ? 44 : min(22, flightStart.height / 2), 12, t.clamped())
         picture.layer.cornerRadius = radius
         picture.layer.borderWidth = 1
         lift.layer.shadowPath = UIBezierPath(roundedRect: lift.bounds, cornerRadius: radius).cgPath
@@ -873,6 +939,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         controller.feeds = feeds
         controller.onToggleFull = { [weak self] in self?.toggleFull() }
         controller.isFull = { [weak self] in self?.route.full ?? false }
+        controller.appAttachments = appAttachments
         let host = UIView()
         host.clipsToBounds = true
         addChild(controller)
@@ -932,7 +999,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     // MARK: Gestures
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        if gesture === bubbleTap || gesture === bubblePan || gesture === bubblePress { return !route.open }
+        if gesture === bubblePress { return !route.open && capture.recording == nil }
+        if gesture === bubbleTap || gesture === bubblePan { return !route.open }
         // Where the finger went down, not where it is once the pan is
         // recognized: a quick drag has already left the strip by then.
         var point = gesture.location(in: body)
@@ -958,7 +1026,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ gesture: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { false }
 
-    @objc private func openTapped() { open() }
+    @objc private func openTapped() {
+        if capture.recording != nil { stopRecording() } else { open() }
+    }
 
     @objc private func bubblePressed(_ gesture: UILongPressGestureRecognizer) {
         if gesture.state == .began { captureAndOpen() }
@@ -1156,6 +1226,19 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// → mini → bubble for recordings (`SQUIRCLE_SLOW` slows the springs).
     private var demoStatus: (headline: String?, tone: LiveCapsule.Tone)?
 
+    /// `SQUIRCLE_OVERLAY_OPEN=record-screen|record-performance`: records for
+    /// `SQUIRCLE_RECORD_SECONDS` (default 8), stops as a tap does, and with
+    /// `SQUIRCLE_OVERLAY_SEND` sends that message with the recording.
+    private func debugRecord(_ mode: String, environment: [String: String]) async {
+        startRecording(mode == "record-screen" ? .screen : .performance)
+        let seconds = environment["SQUIRCLE_RECORD_SECONDS"].flatMap(Double.init) ?? 8
+        try? await Task.sleep(for: .seconds(seconds))
+        stopRecording()
+        guard let text = environment["SQUIRCLE_OVERLAY_SEND"] else { return }
+        try? await Task.sleep(for: .seconds(4))
+        activeController?.debugSend(text)
+    }
+
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
         // `SQUIRCLE_BUBBLE_DEMO=1`: the bubble loops through made-up statuses
@@ -1189,6 +1272,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(4))
                 if mode == "capture" { self?.captureAndOpen(); return }
+                if mode.hasPrefix("record-") { await self?.debugRecord(mode, environment: environment); return }
                 self?.open()
                 if mode == "full" { self?.toggleFull() }
             }

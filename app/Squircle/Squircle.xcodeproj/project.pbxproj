@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		01B7E72409266156BB49C33E /* CaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B031C12FA385E38F95AAF587 /* CaptureSession.swift */; };
 		01C183AE5505BED2A14E3B72 /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF796323376B17E9A5610B5 /* Markdown.swift */; };
 		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
 		12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
@@ -23,16 +24,19 @@
 		3814E7D8EC5D2C43775913BD /* ThreadsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A9104B7F53D24F7A87D8327 /* ThreadsViewController.swift */; };
 		38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
 		398A5CE176B0173261406D64 /* SpringDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */; };
+		3A3E16EA445BF69E2C979A4F /* ScreenRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A692004605868DC5DD94E0A /* ScreenRecorder.swift */; };
 		3B375023CFEB927A141C090E /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF796323376B17E9A5610B5 /* Markdown.swift */; };
 		3B9BE6F5A38660FAB6765472 /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
 		3C7DE78ED76461B8ADDDA8AE /* ThreadsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A9104B7F53D24F7A87D8327 /* ThreadsViewController.swift */; };
 		418A84EAC572BD0535B5A81B /* T3DeviceStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */; };
 		41B1C50BF1A995CD85DD2FFC /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
 		45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
+		462A9D97A5F00E2C5438DDF7 /* ScreenRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A692004605868DC5DD94E0A /* ScreenRecorder.swift */; };
 		4799E1F4447FF279740AD98A /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
 		4B0F162145780C3662E872B0 /* HostCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C2A80FAC707271FB5E24DAF /* HostCapture.swift */; };
 		4D5A0C54F52464D0DC7E6B0B /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
 		4DDFD13E3021EAE8FBD50E7D /* T3RuntimeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */; };
+		540C9A566D7E624B05F3C475 /* CaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B031C12FA385E38F95AAF587 /* CaptureSession.swift */; };
 		5437154D48528C4055384701 /* SimulatorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */; };
 		55761DBC82306849B3DD6026 /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
 		59C2E7027B55B03E5809A83B /* ScreenshotBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */; };
@@ -52,8 +56,10 @@
 		96D8D7C221734472B9BF0B8F /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
 		97B0E27B68EBBED4F0D63633 /* DiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */; };
 		97C1E54012EDF05F226B3682 /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
+		9D1F202195C47DF92993790B /* PerfRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F9E05172DC12D427E2C642 /* PerfRecorder.swift */; };
 		9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
 		A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */; };
+		A3A54C0479DF84AA96EE8A82 /* PerfRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F9E05172DC12D427E2C642 /* PerfRecorder.swift */; };
 		A3E8C16A2A67B25E7C0C3B83 /* ThreadTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */; };
 		A431923743BEEBFEA90B97E2 /* T3RuntimeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */; };
 		A48E1FCA693DC85CC567D780 /* ThreadViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */; };
@@ -94,6 +100,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		04F9E05172DC12D427E2C642 /* PerfRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfRecorder.swift; sourceTree = "<group>"; };
 		0882163016B1D5C885051FAD /* AppProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProject.swift; sourceTree = "<group>"; };
 		0D5F85DA67966D2090740EE5 /* StageLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageLayout.swift; sourceTree = "<group>"; };
 		1AE56C52866D21AD27A18697 /* DeviceStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStage.swift; sourceTree = "<group>"; };
@@ -118,10 +125,12 @@
 		70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleClient.swift; sourceTree = "<group>"; };
 		7A74125807E9A3E968F73119 /* SquircleTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SquircleTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7CA4496328C7FF8D8B604A0A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		8A692004605868DC5DD94E0A /* ScreenRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenRecorder.swift; sourceTree = "<group>"; };
 		8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildsViewController.swift; sourceTree = "<group>"; };
 		9685CE2D9A277E148073C169 /* MotionAudit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionAudit.swift; sourceTree = "<group>"; };
 		9AA8EBB035561F94C3724C6D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadTimeline.swift; sourceTree = "<group>"; };
+		B031C12FA385E38F95AAF587 /* CaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSession.swift; sourceTree = "<group>"; };
 		C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorViews.swift; sourceTree = "<group>"; };
 		C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Gateway.swift; sourceTree = "<group>"; };
 		CA04F2B838066131F83E73E4 /* ThreadCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadCells.swift; sourceTree = "<group>"; };
@@ -164,9 +173,12 @@
 		4910BC6CADEA4B125D88BB76 /* Overlay */ = {
 			isa = PBXGroup;
 			children = (
+				B031C12FA385E38F95AAF587 /* CaptureSession.swift */,
 				CD5E21CCB017A11F8E69752C /* GlassJelly.swift */,
 				5C2A80FAC707271FB5E24DAF /* HostCapture.swift */,
 				27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */,
+				04F9E05172DC12D427E2C642 /* PerfRecorder.swift */,
+				8A692004605868DC5DD94E0A /* ScreenRecorder.swift */,
 				CC31297102176DC07450ECF1 /* SquircleOverlay.swift */,
 			);
 			path = Overlay;
@@ -401,6 +413,7 @@
 				2A27507EC33506F4D8562F49 /* AttachmentPicker.swift in Sources */,
 				137F5D691337ACCA68558014 /* BuildDetailViewController.swift in Sources */,
 				6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */,
+				01B7E72409266156BB49C33E /* CaptureSession.swift in Sources */,
 				B33D4A9C782619416B5ABFD7 /* ClientModels.swift in Sources */,
 				C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */,
 				93827AAA4A823E5BCDF41C05 /* DiffViewer.swift in Sources */,
@@ -408,6 +421,8 @@
 				FB3FA377C1D0CCED56B5215F /* HostCapture.swift in Sources */,
 				3B375023CFEB927A141C090E /* Markdown.swift in Sources */,
 				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
+				9D1F202195C47DF92993790B /* PerfRecorder.swift in Sources */,
+				3A3E16EA445BF69E2C979A4F /* ScreenRecorder.swift in Sources */,
 				261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */,
 				5437154D48528C4055384701 /* SimulatorViews.swift in Sources */,
 				2FBB59AD4C1AE916730CEA4C /* SpringDriver.swift in Sources */,
@@ -453,6 +468,7 @@
 				ED14D13BF4DEA33CADAEEEEC /* AttachmentPicker.swift in Sources */,
 				D3823161D75D25966F363568 /* BuildDetailViewController.swift in Sources */,
 				DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */,
+				540C9A566D7E624B05F3C475 /* CaptureSession.swift in Sources */,
 				8ECBFCDE794CEEE7DA10B1CB /* ClientModels.swift in Sources */,
 				B9EF10730486FE81421DC60F /* DeviceStage.swift in Sources */,
 				97B0E27B68EBBED4F0D63633 /* DiffViewer.swift in Sources */,
@@ -461,6 +477,8 @@
 				01C183AE5505BED2A14E3B72 /* Markdown.swift in Sources */,
 				B2B96A36977324FDBFA7E8F7 /* MotionAudit.swift in Sources */,
 				2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */,
+				A3A54C0479DF84AA96EE8A82 /* PerfRecorder.swift in Sources */,
+				462A9D97A5F00E2C5438DDF7 /* ScreenRecorder.swift in Sources */,
 				59C2E7027B55B03E5809A83B /* ScreenshotBinding.swift in Sources */,
 				856B0BA10D16A808D8A613D6 /* SimulatorViews.swift in Sources */,
 				398A5CE176B0173261406D64 /* SpringDriver.swift in Sources */,
@@ -580,7 +598,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 44;
+				CURRENT_PROJECT_VERSION = 46;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -689,7 +707,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 44;
+				CURRENT_PROJECT_VERSION = 46;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

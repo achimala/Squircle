@@ -36,6 +36,16 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         if let bundleID = ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_DEMO"], let configuration = model.configuration {
             DispatchQueue.main.async { OverlayHost.shared.start(bundleID: bundleID, configuration: configuration) }
         }
+        // Verification only: `SQUIRCLE_JANK=1` blocks the main thread for
+        // 250 ms every 1.5 s, so a performance recording has hitches to find.
+        if ProcessInfo.processInfo.environment["SQUIRCLE_JANK"] == "1" {
+            Task { @MainActor in
+                while true {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    Self.deliberateJank()
+                }
+            }
+        }
         // Verification only: the notice shown once an update of this app is confirmed.
         if ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_UPDATE"] == "1",
            let data = #"{"id":"demo","state":"succeeded","created_at":0,"output":{"version":"0.3.0","build_number":"26","ipa_path":"/x.ipa"}}"#.data(using: .utf8),
@@ -44,6 +54,15 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         }
         #endif
     }
+
+    #if DEBUG
+    @inline(never) private static func deliberateJank() {
+        let end = CACurrentMediaTime() + 0.25
+        var x = 0.0
+        while CACurrentMediaTime() < end { x += sin(x + 1) }
+        if x.isNaN { print(x) }
+    }
+    #endif
 
     func sceneDidBecomeActive(_ scene: UIScene) {
         model.startMetadataUpdates()
