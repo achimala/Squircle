@@ -1138,13 +1138,14 @@ final class SquircleModel {
     /// becomes the gallery picture.
     /// Cellular, a personal hotspot or Low Data Mode.
     private var metered = false
-    /// A turn's recording plays inline once downloaded; on a metered network
-    /// only a small one downloads by itself, a large one shows its poster
-    /// until tapped (a long session is well over 100 MB).
+    /// A turn's recording plays inline once downloaded. On a metered
+    /// network it shows its poster and downloads when tapped (a long session
+    /// is well over 100 MB); an older recording without a poster still
+    /// downloads by itself if it's small.
     func autoLoadsRecording(_ id: String) -> Bool {
         guard metered else { return true }
-        let bytes = media.first { $0["id"].string == id }?["bytes"].double ?? .infinity
-        return bytes <= 15_000_000
+        guard posterless.contains(id) else { return false }
+        return (media.first { $0["id"].string == id }?["bytes"].double ?? .infinity) <= 10_000_000
     }
     /// The poster Squircle took when it stopped recording, if any.
     func recordingPoster(_ id: String) async -> Data? {
@@ -1159,7 +1160,7 @@ final class SquircleModel {
         catch { return nil }
     }
     /// Recordings made before Squircle took posters.
-    private var posterless = Set<String>()
+    private(set) var posterless = Set<String>()
     func loadVideo(_ stepID: String) async -> URL? {
         if let url = StepVideos.url(for: stepID) { return url }
         if stepID.hasPrefix("file:") {

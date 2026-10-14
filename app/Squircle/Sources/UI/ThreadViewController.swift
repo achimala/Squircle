@@ -993,7 +993,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.showing = onScreen
             cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
             if let stepID, let id = use.recordingID, StepVideos.url(for: stepID) == nil {
-                if poster == nil { loadPoster(id, item: item.id) }
+                if poster == nil, !model.posterless.contains(id) { loadPoster(id, item: item.id) }
                 if model.autoLoadsRecording(id) { loadRecording(stepID, item: item.id) }
             }
         }
@@ -1005,7 +1005,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             guard let self else { return }
             let data = await model.recordingPoster(id)
             loadingRecordings.remove("poster:" + id)
-            guard data != nil, StepVideos.url(for: "media:" + id) == nil else { return }
+            // A poster to show, or none: then a small recording may load instead.
+            guard StepVideos.url(for: "media:" + id) == nil, data != nil || model.autoLoadsRecording(id) else { return }
             await reconfigure(item)
         }
     }
