@@ -1070,6 +1070,34 @@ Measured on a 60 fps recording of rapid status changes: the cube's edge moves
 only in smooth multi-frame eases (within one pixel otherwise). Clips:
 `jelly7-*.mp4`, still `jelly7-rest.png`. Not on the phone.
 
+**On the phone (2026-10-14, user on iPhone 17 Pro Max: "like 10fps … contents
+disappear while resizing … dead frozen … keeps showing shimmer text
+forever").** Causes found (the phone was not reachable from the Mac; fixes
+checked in the simulator and by GPU timing on the Mac):
+- The jelly set `presentsWithTransaction` but presented from the command
+  buffer (a Metal thread, outside any flushed transaction). Drawables stayed
+  held, so `nextDrawable` blocked the main thread up to a second per frame:
+  the 10 fps, the frozen creature, and the jelly blanking while drawables
+  were reallocated every frame of a resize. Now: commit, `waitUntilScheduled`,
+  `present()` on the main thread inside the layout's transaction; the Metal
+  layer grows and shrinks in 96-point steps instead of every frame.
+- The body is no longer ray-marched: its extruded outline is solved directly;
+  only fragments within 8 points of the cube or neck march. The blur's mask
+  is a shape layer, not a second Metal pass. Same image (old vs new differ
+  only along the one-pixel antialiased edge); Mac GPU time for a full-screen
+  panel 0.43 → 0.10 ms, and the 1x mask pass is gone.
+- The creature ticks on real time (springs stepped in ≤1/60 s pieces) on a
+  120 Hz display link; injection now sets `CADisableMinimumFrameDurationOnPhone`
+  in the app's Info.plist, without which iOS caps display links at 60 Hz.
+  Layout and tick draw once per frame between them.
+- The shimmer: the agent ended its turn after starting a worker, and the
+  bubble showed any working thread's title, shimmering, ahead of "Done". Now
+  only the agent's own work shimmers; when it finishes the bubble says Done,
+  then "Worker · title" (or "2 workers") plainly while workers run.
+  `SquircleModel.observe` is now a throttle, not a debounce, so constant
+  model changes can never hold an update back.
+Not yet verified on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was

@@ -155,6 +155,18 @@ pub async fn inject(app: &Path, framework: &Path, log_path: &Path) -> Result<()>
         .context("app Info.plist has no CFBundleExecutable")?;
     let binary = app.join(executable);
 
+    // The overlay's creature animates on a display link, which iOS caps at
+    // 60 Hz on ProMotion iPhones unless the app opts in.
+    const FRAME_RATE_KEY: &str = "CADisableMinimumFrameDurationOnPhone";
+    let mut info = info;
+    if let Some(dict) = info.as_dictionary_mut() {
+        if dict.get(FRAME_RATE_KEY).and_then(|v| v.as_boolean()) != Some(true) {
+            dict.insert(FRAME_RATE_KEY.into(), true.into());
+            info.to_file_binary(app.join("Info.plist"))?;
+            writeln!(log, "Allowed 120 Hz display links ({FRAME_RATE_KEY})")?;
+        }
+    }
+
     let destination = app.join("Frameworks").join(FRAMEWORK);
     if destination.exists() {
         fs::remove_dir_all(&destination)?;
