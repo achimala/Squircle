@@ -130,6 +130,79 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// A worker's branch and worktree as git sees them.
+#[derive(Debug, Default)]
+struct GitState {
+    branch: Option<String>,
+    branch_exists: bool,
+    /// Commits on the branch whose change is not in its base (`git cherry`,
+    /// so rebased or cherry-picked merges count as merged).
+    unmerged: usize,
+    /// The worktree, if it still exists, and its uncommitted files.
+    worktree: Option<PathBuf>,
+    dirty: usize,
+}
+
+impl GitState {
+    fn blocker(&self) -> Option<String> {
+        let mut reasons = vec![];
+        if self.unmerged > 0 {
+            reasons.push(format!("{} commit{} not merged", self.unmerged, if self.unmerged == 1 { "" } else { "s" }));
+        }
+        if self.dirty > 0 {
+            reasons.push(format!("{} uncommitted file{}", self.dirty, if self.dirty == 1 { "" } else { "s" }));
+        }
+        (!reasons.is_empty()).then(|| reasons.join(" and "))
+    }
+}
+
+async fn inspect(root: &Path, worktree: Option<&Path>, branch: Option<&str>, base: Option<&str>) -> Result<GitState> {
+    let mut state = GitState::default();
+    if let Some(path) = worktree.filter(|p| p.exists()) {
+        state.dirty = git(path, &["status", "--porcelain"]).await?.lines().count();
+        state.worktree = Some(path.to_path_buf());
+    }
+    let Some(branch) = branch.filter(|b| !b.is_empty()) else { return Ok(state) };
+    state.branch = Some(branch.into());
+    state.branch_exists = git(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).await.is_ok();
+    if state.branch_exists {
+        let base = base.context("The worker has no base branch to compare with")?;
+        ensure!(base != branch, "The worker's branch is its base");
+        state.unmerged = git(root, &["cherry", base, branch]).await
+            .with_context(|| format!("Cannot compare {branch} with {base}"))?
+            .lines().filter(|l| l.starts_with('+')).count();
+    }
+    Ok(state)
+}
+
+#[derive(Default)]
+struct Removed {
+    worktree: Option<PathBuf>,
+    branch: Option<String>,
+}
+
+/// Removes what `inspect` found. Without `discard`, git itself refuses to
+/// drop uncommitted changes or a branch that is not fully merged.
+async fn remove(root: &Path, state: &GitState, discard: bool) -> Result<Removed> {
+    let mut removed = Removed::default();
+    if let Some(path) = &state.worktree {
+        let path = path.to_string_lossy();
+        let mut args = vec!["worktree", "remove"];
+        if discard { args.push("--force"); }
+        args.push(&path);
+        git(root, &args).await?;
+        removed.worktree = state.worktree.clone();
+    }
+    git(root, &["worktree", "prune"]).await?;
+    if let Some(branch) = state.branch.as_deref().filter(|_| state.branch_exists) {
+        // Callers checked it is merged (`cherry`, which `branch -d` doesn't
+        // understand for rebased merges) or chose to discard it.
+        git(root, &["branch", "-D", branch]).await?;
+        removed.branch = Some(branch.into());
+    }
+    Ok(removed)
+}
+
 impl Agents {
     pub fn open(root: &Path, server: &str) -> Result<Arc<Self>> {
         let path = root.join("agents.json");
@@ -421,7 +494,8 @@ impl Agents {
         };
         format!(
             "[squircle] You are {app}'s app agent: you coordinate, and worker threads do the implementation \
-             (`{cli} thread --help`), unless the user says otherwise. Your thread id: {id}. Your workers: {board}\n\
+             (`{cli} thread --help`), unless the user says otherwise; archive a worker once its work is merged or abandoned, \
+             so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
              copied out of /tmp into ~/.t3/userdata/attachments; a build you start or check this turn shows as an Install card. \
              No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.",
@@ -464,7 +538,7 @@ impl Agents {
         let base = base.unwrap_or(&current);
         let id = uuid::Uuid::new_v4().to_string();
         let text = format!(
-            "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. \
+            "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. Remove anything else you create (scratch simulators, temp services or files) before you finish. \
              To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Drive it with the agent-device command it returns; run {cli} sim stop --thread {id} when done. Don't run agent-device record or device_open. \
              For signed builds: {cli} build start --help. \
              The user also reads your replies on their phone: keep them short and plain, show pictures as ![..](/absolute/path) and clips as [..](/absolute/path) \
@@ -571,30 +645,93 @@ impl Agents {
         Ok(())
     }
 
-    /// Archives a worker and removes its worktree; its branch stays.
-    pub async fn archive(&self, id: &str, force: bool) -> Result<Value> {
+    /// Archives a worker: removes its worktree and deletes its branch. Refuses
+    /// while the branch has commits not in its base or the worktree has
+    /// uncommitted changes, unless `discard` drops them.
+    pub async fn archive(&self, id: &str, discard: bool) -> Result<Value> {
         let client = self.ready().await?;
-        let thread = self.thread(id).with_context(|| format!("T3 has no thread {id}"))?;
-        let mut removed = Value::Null;
-        if let (Some(path), Some(project)) = (thread["worktreePath"].as_str(), thread["projectId"].as_str()) {
-            let is_agent = self.registry.lock().unwrap().agents.values().any(|a| a.thread_id == id);
-            ensure!(!is_agent, "That is an app agent's thread, not a worker");
-            let root = self.shell.lock().unwrap().projects.get(project).and_then(|p| p["workspaceRoot"].as_str().map(PathBuf::from));
-            if let Some(root) = root && Path::new(path).exists() {
-                let mut args = vec!["worktree", "remove"];
-                if force { args.push("--force"); }
-                args.push(path);
-                git(&root, &args).await.context("The worktree has uncommitted changes; commit them or pass --force")?;
-                removed = json!(path);
+        let is_agent = self.registry.lock().unwrap().agents.values().any(|a| a.thread_id == id);
+        ensure!(!is_agent, "That is an app agent's thread, not a worker");
+        let thread = self.thread(id);
+        let worker = self.registry.lock().unwrap().workers.get(id).cloned();
+        ensure!(thread.is_some() || worker.is_some(), "T3 has no thread {id}");
+        let row = thread.clone().unwrap_or(Value::Null);
+        ensure!(discard || row.is_null() || worker_state(&row) != "working",
+            "That worker is still working; wait for it, or pass --discard to stop tracking it and drop its work");
+        let branch = worker.as_ref().map(|w| w.branch.clone()).or_else(|| row["branch"].as_str().map(str::to_string));
+        let base = worker.as_ref().map(|w| w.base.clone());
+        let project = worker.as_ref().map(|w| w.project_id.clone()).or_else(|| row["projectId"].as_str().map(str::to_string));
+        let root = project.and_then(|p| self.shell.lock().unwrap().projects.get(&p).and_then(|p| p["workspaceRoot"].as_str().map(PathBuf::from)));
+        let worktree = row["worktreePath"].as_str().map(PathBuf::from);
+        let mut result = json!({"archived": id, "title": worker.as_ref().map(|w| w.title.clone()).or_else(|| row["title"].as_str().map(str::to_string))});
+        if let Some(root) = &root {
+            let base = match base {
+                Some(base) => base,
+                None => git(root, &["symbolic-ref", "--short", "HEAD"]).await?,
+            };
+            let state = inspect(root, worktree.as_deref(), branch.as_deref(), Some(&base)).await?;
+            if let Some(reason) = state.blocker().filter(|_| !discard) {
+                bail!("Not archived: {reason}. Merge it first, or pass --discard to drop that work");
             }
+            let cleaned = remove(root, &state, discard).await?;
+            result["removed_worktree"] = json!(cleaned.worktree);
+            result["deleted_branch"] = json!(cleaned.branch);
+            result["discarded"] = json!(discard && state.blocker().is_some());
         }
-        client.dispatch(json!({"type": "thread.archive", "threadId": id})).await?;
+        if thread.is_some_and(|t| t["archivedAt"].is_null()) {
+            client.dispatch(json!({"type": "thread.archive", "threadId": id})).await?;
+        }
         let mut registry = self.registry.lock().unwrap();
         if let Some(worker) = registry.workers.get_mut(id) {
             worker.archived = true;
         }
         self.save(&registry)?;
-        Ok(json!({"archived": id, "removed_worktree": removed, "branch": thread["branch"]}))
+        Ok(result)
+    }
+
+    /// Archives the coordinator's finished workers whose work is merged,
+    /// deletes merged branches of workers archived earlier, prunes stale
+    /// worktree entries, and reports what it leaves and why.
+    pub async fn cleanup(&self, coordinator: &str, dry_run: bool) -> Result<Value> {
+        self.ready().await?;
+        let agent = self.agent_for_thread(coordinator)
+            .with_context(|| format!("{coordinator} is not an app agent's thread"))?;
+        let root = self.shell.lock().unwrap().projects.get(&agent.project_id)
+            .and_then(|p| p["workspaceRoot"].as_str().map(PathBuf::from)).context("The app's T3 project is gone")?;
+        let workers: Vec<(String, Worker)> = self.registry.lock().unwrap().workers.iter()
+            .filter(|(_, w)| w.coordinator == coordinator).map(|(id, w)| (id.clone(), w.clone())).collect();
+        let (mut archived, mut deleted, mut left) = (vec![], vec![], vec![]);
+        for (id, worker) in workers {
+            let row = self.thread(&id);
+            let state = row.as_ref().map_or("missing", worker_state);
+            let worktree = row.as_ref().and_then(|t| t["worktreePath"].as_str().map(PathBuf::from));
+            let entry = json!({"id": id, "title": worker.title, "branch": worker.branch});
+            if !worker.archived && matches!(state, "working" | "needs-you") {
+                left.push(json!({"worker": entry, "reason": format!("still {state}")}));
+                continue;
+            }
+            let git = inspect(&root, worktree.as_deref(), Some(&worker.branch), Some(&worker.base)).await?;
+            if let Some(reason) = git.blocker() {
+                left.push(json!({"worker": entry, "reason": reason}));
+                continue;
+            }
+            if worker.archived {
+                if git.branch_exists || git.worktree.is_some() {
+                    if !dry_run { remove(&root, &git, false).await?; }
+                    deleted.push(entry);
+                }
+            } else {
+                if !dry_run { self.archive(&id, false).await?; }
+                archived.push(entry);
+            }
+        }
+        let pruned = git(&root, &["worktree", "prune", "--dry-run", "-v"]).await?;
+        if !dry_run { git(&root, &["worktree", "prune"]).await?; }
+        Ok(json!({
+            "dry_run": dry_run, "archived": archived, "branches_deleted": deleted,
+            "stale_worktrees_pruned": pruned.lines().filter(|l| !l.is_empty()).collect::<Vec<_>>(),
+            "left": left,
+        }))
     }
 
     pub fn status(&self) -> String {
@@ -624,6 +761,50 @@ mod tests {
         // A session that stopped between turns is still the same outcome.
         assert_eq!(wake_key(&thread(Some("a"), "completed", "stopped", false)).as_deref(), Some("a:done"));
         assert_eq!(wake_key(&thread(Some("b"), "error", "error", false)).as_deref(), Some("b:error"));
+    }
+
+    async fn run(dir: &Path, args: &[&str]) {
+        git(dir, args).await.unwrap();
+    }
+
+    async fn commit(dir: &Path, file: &str) {
+        std::fs::write(dir.join(file), file).unwrap();
+        run(dir, &["add", file]).await;
+        run(dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", file]).await;
+    }
+
+    #[tokio::test]
+    async fn archives_only_merged_clean_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = &temp.path().join("repo");
+        std::fs::create_dir(root).unwrap();
+        run(root, &["init", "-q", "-b", "main"]).await;
+        commit(root, "a").await;
+        let tree = |name: &str| temp.path().join(name);
+        for name in ["merged", "rebased", "open", "dirty"] {
+            run(root, &["worktree", "add", "-q", "-b", name, tree(name).to_str().unwrap()]).await;
+            commit(&tree(name), name).await;
+        }
+        // Fast-forward merge, and a rebase-style merge (same change, new commit).
+        run(root, &["merge", "-q", "--ff-only", "merged"]).await;
+        run(root, &["-c", "user.name=t", "-c", "user.email=t@t", "cherry-pick", "rebased"]).await;
+        std::fs::write(tree("dirty").join("scratch"), "x").unwrap();
+
+        let state = |name: &'static str| { let t = tree(name); async move { inspect(root, Some(&t), Some(name), Some("main")).await.unwrap() } };
+        for name in ["merged", "rebased"] {
+            let s = state(name).await;
+            assert_eq!(s.blocker(), None, "{name}");
+            remove(root, &s, false).await.unwrap();
+            assert!(!tree(name).exists() && !state(name).await.branch_exists, "{name}");
+        }
+        assert_eq!(state("open").await.blocker().as_deref(), Some("1 commit not merged"));
+        assert_eq!(state("dirty").await.blocker().as_deref(), Some("1 commit not merged and 1 uncommitted file"));
+        // Discarding drops unmerged commits and uncommitted changes.
+        remove(root, &state("dirty").await, true).await.unwrap();
+        assert!(!tree("dirty").exists() && !state("dirty").await.branch_exists);
+        // A branch already gone with no worktree leaves nothing to do.
+        let gone = inspect(root, None, Some("merged"), Some("main")).await.unwrap();
+        assert!(gone.blocker().is_none() && !gone.branch_exists && gone.worktree.is_none());
     }
 }
 
