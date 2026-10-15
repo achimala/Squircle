@@ -159,7 +159,8 @@ final class T3Tests: XCTestCase {
         for (id, _) in marked {
             let message = messages[id]!
             XCTAssertTrue(message.isUpdate || message.agent != nil, id)
-            XCTAssertFalse(message.content.contains("instructions"), id)
+            // A worker's task is the agent's words, shown as its message.
+            if id != "task" { XCTAssertFalse(message.content.contains("instructions"), id) }
         }
         XCTAssertEqual(messages["build"]?.build?.reason, "No signing")
         XCTAssertEqual(messages["workers"]?.news.first?.state, .needsYou)
