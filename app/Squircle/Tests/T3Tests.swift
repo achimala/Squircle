@@ -133,6 +133,40 @@ final class T3Tests: XCTestCase {
         state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":39,"thread":["messages":[]]]]))
         XCTAssertEqual(state.messages.count,2)
     }
+    /// Everything Squircle sends in your place (any `squircle-` record, even a
+    /// kind this build doesn't know, or an early worker update's text) is
+    /// Squircle's line, never your bubble or the agent's instructions.
+    func testServiceMessagesNeverShowAsYours() {
+        let build = "b2a5d37d-721e-4047-b60f-94f8c3cd6288"
+        func record(_ kind: String, _ payload: [String: Any] = [:]) -> [String: Any] {
+            ["context": ["version": 1, "records": [["kind": kind, "label": "Later news", "payload": payload]]]]
+        }
+        let marked: [(String, [String: Any])] = [
+            ("build", record("squircle-build-update", ["build": build, "app": "App", "state": "failed", "reason": "No signing"])),
+            ("workers", record("squircle-worker-update", ["workers": [["id": build, "title": "Dark mode", "state": "needs-you"]]])),
+            ("handoff", record("squircle-handoff")),
+            ("task", record("squircle-task", ["from": "agent"])),
+            ("later", record("squircle-later")),
+            ("old", [:]),
+        ]
+        let rows: [[String: Any]] = marked.map { id, extra in
+            let text = id == "old" ? "[worker update]\n- \"Dark mode\" (\(build), dark) finished its turn.\nRun it." : "[x] instructions for the agent"
+            return ["id": id, "role": "user", "text": text, "createdAt": "2026-10-15T10:00:00.000Z"].merging(extra) { a, _ in a }
+        } + [["id": "you", "role": "user", "text": "Make it blue", "createdAt": "2026-10-15T10:00:00.000Z"]]
+        var state = T3ThreadState()
+        state.consume(.from(["kind": "snapshot", "snapshot": ["snapshotSequence": 1, "thread": ["messages": rows, "activities": []]]]))
+        let messages = Dictionary(uniqueKeysWithValues: state.messages.map { ($0.id, $0) })
+        for (id, _) in marked {
+            let message = messages[id]!
+            XCTAssertTrue(message.isUpdate || message.agent != nil, id)
+            XCTAssertFalse(message.content.contains("instructions"), id)
+        }
+        XCTAssertEqual(messages["build"]?.build?.reason, "No signing")
+        XCTAssertEqual(messages["workers"]?.news.first?.state, .needsYou)
+        XCTAssertEqual(messages["old"]?.news.first?.title, "Dark mode")
+        XCTAssertEqual(messages["later"]?.content, "Later news")
+        XCTAssertFalse(messages["you"]!.isUpdate); XCTAssertNil(messages["you"]!.agent)
+    }
     /// After a reconnect T3 resends a snapshot and may replay events the
     /// thread already has; neither may lose or duplicate the transcript.
     func testResubscribeAfterReconnectKeepsTranscript() {

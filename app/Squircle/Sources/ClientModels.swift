@@ -130,6 +130,14 @@ struct WorkerNews: Equatable {
     let id: String
     let title: String
     let state: WorkerState
+    /// "Dark mode finished", "Launch crash needs input".
+    var summary: String {
+        switch state {
+        case .needsYou: return title + " needs input"
+        case .error: return title + " stopped with an error"
+        default: return title + " finished"
+        }
+    }
 }
 
 /// A user message Squircle sent for an agent, marked by the service.

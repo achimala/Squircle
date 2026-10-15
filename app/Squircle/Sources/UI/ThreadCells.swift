@@ -864,7 +864,9 @@ final class BuildCell: TimelineCell {
         case "queued": detail = "Queued"; icon.image = UIImage(systemName: "clock"); icon.tintColor = .secondaryLabel
         case "running": detail = "Building"; icon.image = nil
         case "succeeded": detail = "Ready to install"; icon.image = UIImage(systemName: "app.badge.checkmark"); icon.tintColor = Theme.accent
-        case "failed": detail = "Build failed"; icon.image = UIImage(systemName: "xmark.octagon"); icon.tintColor = Theme.failure
+        case "failed":
+            detail = build.error?.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Build failed"
+            icon.image = UIImage(systemName: "xmark.octagon"); icon.tintColor = Theme.failure
         default: detail = BuildRow.statusText(for: build); icon.image = UIImage(systemName: "hammer"); icon.tintColor = .secondaryLabel
         }
         detailLabel.text = detail
