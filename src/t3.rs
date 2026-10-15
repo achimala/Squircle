@@ -85,7 +85,11 @@ pub fn iso_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = now.as_secs() as i64;
+    format!("{}.{:03}Z", iso_seconds(now.as_secs() as i64), now.subsec_millis())
+}
+
+/// `YYYY-MM-DDTHH:MM:SS` (UTC) for Unix seconds.
+pub fn iso_seconds(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
     // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
     let z = days + 719468;
@@ -97,13 +101,7 @@ pub fn iso_now() -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        rem / 3600,
-        rem % 3600 / 60,
-        rem % 60,
-        now.subsec_millis()
-    )
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
 type Waiter = oneshot::Sender<Result<Value>>;

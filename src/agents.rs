@@ -381,10 +381,12 @@ pub enum Note {
     AgentMessage,
     /// The service's news that a simulator is held for a thread in line.
     SimReady,
+    /// The service compacting an idle agent's context.
+    Upkeep,
 }
 
 impl Note {
-    pub const ALL: [Note; 6] = [Note::WorkerUpdate, Note::BuildUpdate, Note::Handoff, Note::Task, Note::AgentMessage, Note::SimReady];
+    pub const ALL: [Note; 7] = [Note::WorkerUpdate, Note::BuildUpdate, Note::Handoff, Note::Task, Note::AgentMessage, Note::SimReady, Note::Upkeep];
 
     fn kind(self) -> &'static str {
         match self {
@@ -394,6 +396,7 @@ impl Note {
             Note::Task => "squircle-task",
             Note::AgentMessage => "squircle-agent-message",
             Note::SimReady => "squircle-sim-ready",
+            Note::Upkeep => "squircle-upkeep",
         }
     }
 
@@ -404,19 +407,35 @@ impl Note {
             Note::Handoff => "Handoff",
             Note::Task | Note::AgentMessage => "Agent message",
             Note::SimReady => "Simulator ready",
+            Note::Upkeep => "Tidied up",
         }
     }
 
     /// The context record that marks a message as this note.
     pub fn record(self, payload: Value) -> Value {
-        json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": self.label(),
+        self.labeled(self.label(), payload)
+    }
+
+    /// The record with its own label, which the app shows as the line.
+    fn labeled(self, label: &str, payload: Value) -> Value {
+        json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": label,
                "kind": self.kind(), "payload": payload})
     }
 
     /// The user message T3 is sent for this note.
     pub fn message(self, id: &str, text: &str, payload: Value) -> Value {
+        Self::with_record(id, text, self.record(payload))
+    }
+
+    fn with_record(id: &str, text: &str, record: Value) -> Value {
         json!({"messageId": id, "role": "user", "text": text, "attachments": [],
-               "context": {"version": 1, "records": [self.record(payload)]}})
+               "context": {"version": 1, "records": [record]}})
+    }
+
+    /// The note marking a T3 message, if any.
+    fn of(message: &Value) -> Option<Note> {
+        let records = message["context"]["records"].as_array()?;
+        records.iter().find_map(|r| Note::ALL.into_iter().find(|n| r["kind"] == n.kind()))
     }
 }
 
@@ -511,6 +530,14 @@ impl crate::push::Threads for Agents {
     }
     fn current_step<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, Option<String>> {
         Box::pin(async move { crate::t3steps::current_step(thread).await.ok().flatten() })
+    }
+    fn quiet<'a>(&'a self, thread: &'a str) -> crate::push::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            let Ok(client) = self.client().await else { return false };
+            let Ok(detail) = self.thread_detail(&*client, thread).await else { return false };
+            detail["messages"].as_array().into_iter().flatten().rev().find(|m| m["role"] == "user" || m["role"] == "assistant")
+                .is_some_and(|m| Note::of(m) == Some(Note::Upkeep))
+        })
     }
 }
 
@@ -734,6 +761,9 @@ pub struct Agents {
     resets: Mutex<std::collections::HashSet<String>>,
     push: std::sync::OnceLock<Arc<crate::push::Push>>,
     tasks: Arc<Tasks>,
+    /// Per agent thread, the context reading upkeep last acted on, so one
+    /// reading is acted on once.
+    upkept: Mutex<HashMap<String, String>>,
 }
 
 fn quote(path: &Path) -> String {
@@ -764,7 +794,7 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String> {
 /// The project root that contains `cwd` most closely, comparing resolved
 /// paths so symlinked aliases match. Two projects with the same root are
 /// ambiguous: all of their indexes.
-fn deepest_root(roots: &[&Path], cwd: &Path) -> std::result::Result<Option<usize>, Vec<usize>> {
+pub(crate) fn deepest_root(roots: &[&Path], cwd: &Path) -> std::result::Result<Option<usize>, Vec<usize>> {
     let resolve = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let cwd = resolve(cwd);
     let mut matches: Vec<(usize, usize)> = roots.iter().enumerate()
@@ -906,6 +936,7 @@ impl Agents {
             resets: Mutex::default(),
             push: std::sync::OnceLock::new(),
             tasks,
+            upkept: Mutex::default(),
         }))
     }
 
@@ -1701,6 +1732,91 @@ impl Agents {
                   "next": "The new agent has the handoff and is replying; the old conversation stays readable in the app's Threads."}))
     }
 
+    // MARK: Upkeep
+
+    /// Every five minutes, compacts or starts fresh the idle agents whose
+    /// context grew large (`crate::upkeep`). Never touches a running turn.
+    pub async fn upkeep(self: Arc<Self>) {
+        let config = match crate::upkeep::Upkeep::from_env() {
+            Ok(config) => config,
+            Err(error) => return eprintln!("Agent upkeep is off: {error:#}"),
+        };
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            for agent in self.list() {
+                if let Err(error) = self.upkeep_agent(&config, &agent).await {
+                    eprintln!("Agent upkeep of {}: {error:#}", agent.project_id);
+                }
+            }
+        }
+    }
+
+    async fn upkeep_agent(self: &Arc<Self>, config: &crate::upkeep::Upkeep, agent: &Agent) -> Result<()> {
+        use crate::upkeep::{Tidy, tokens};
+        let thread = &agent.thread_id;
+        if !matches!(agent.lifecycle, Lifecycle::Ready { .. }) || !crate::t3steps::valid(thread, &[]) { return Ok(()); }
+        // Only on what T3 shows now: no turn that may be running, no worker working.
+        if !matches!(self.observe(thread), Observed::Current { value: Some(ref o), .. } if !o.busy()) { return Ok(()); }
+        if self.workers(Some(thread)).iter().any(|w| matches!(w["state"].as_str(), Some("working" | "starting" | "archiving"))) { return Ok(()); }
+        let latest = |column: &str| format!("(select {column} from projection_thread_activities where thread_id='{thread}' \
+            and kind='context-window.updated' order by created_at desc limit 1)");
+        let rows = crate::t3steps::query(&format!("select {} reading_at, {} used, max(\
+            coalesce((select max(created_at) from projection_thread_messages where thread_id='{thread}'),''), \
+            coalesce((select max(created_at) from projection_thread_activities where thread_id='{thread}'),'')) last_at",
+            latest("created_at"), latest("json_extract(payload_json,'$.usedTokens')")), crate::t3steps::DETAIL_READ).await?;
+        let row = rows.first().context("no reading")?;
+        let (Some(reading), Some(used), Some(last)) = (row["reading_at"].as_str(), row["used"].as_u64(),
+            row["last_at"].as_str().and_then(crate::simpool::iso_seconds)) else { return Ok(()) };
+        if self.upkept.lock().unwrap().get(thread).is_some_and(|r| r == reading) { return Ok(()); }
+        let idle = (crate::model::now() as f64 - last).max(0.0) as u64;
+        let Some(tidy) = config.decide(used, idle, crate::upkeep::local_hour()) else { return Ok(()) };
+        self.upkept.lock().unwrap().insert(thread.clone(), reading.to_string());
+        match tidy {
+            Tidy::Compact => {
+                self.send_compact(thread, &format!("Compacted while idle ({} tokens)", tokens(used)), used).await?;
+                eprintln!("Agent upkeep: compacting {thread} at {} tokens, idle {} min", tokens(used), idle / 60);
+            }
+            Tidy::Fresh { nightly } => {
+                let note = format!("Squircle started this conversation fresh{} because the previous one had grown to {} tokens \
+                    while the user was away. Ask the history subagent about anything earlier.", if nightly { " overnight" } else { "" }, tokens(used));
+                self.reset(Some(&agent.project_id), None, Reset::Fresh { note: Some(note) }).await?;
+                eprintln!("Agent upkeep: fresh start of {thread} at {} tokens, idle {} min", tokens(used), idle / 60);
+            }
+        }
+        Ok(())
+    }
+
+    /// `agent compact`: the same compaction upkeep sends, now, if the
+    /// agent has no turn running.
+    pub async fn compact(&self, project_id: Option<&str>, thread_id: Option<&str>) -> Result<Value> {
+        self.ready().await?;
+        let agent = self.find_agent(project_id, thread_id)?;
+        ensure!(matches!(agent.lifecycle, Lifecycle::Ready { .. }), "The app's agent is being created or reset");
+        ensure!(!self.observe_now(&agent.thread_id)?.busy(), "The agent is working; compact it once its turn ends");
+        self.send_compact(&agent.thread_id, "Compacted", 0).await?;
+        Ok(json!({"project_id": agent.project_id, "thread_id": agent.thread_id, "action": "compact",
+                  "next": "The agent's context is being compacted; T3 shows the sizes before and after."}))
+    }
+
+    /// Asks Claude to compact the agent's context, keeping what the agent
+    /// needs; `line` is what the conversation shows for it.
+    async fn send_compact(&self, thread: &str, line: &str, tokens: u64) -> Result<()> {
+        let client = self.ready().await?;
+        let row = self.thread(thread).context("The app agent's thread is gone")?;
+        let text = "/compact Keep: the user's open tasks and where each stands, decisions and preferences they stated, \
+            workers still running or waiting and their branches, and the last few exchanges. Drop tool output and finished detail.";
+        let record = Note::Upkeep.labeled(line, json!({"action": "compact", "tokens": tokens}));
+        client.dispatch(json!({
+            "type": "thread.turn.start", "threadId": thread,
+            "message": Note::with_record(&uuid::Uuid::new_v4().to_string(), text, record),
+            "runtimeMode": row["runtimeMode"].as_str().unwrap_or(AGENT_MODE),
+            "interactionMode": row["interactionMode"].as_str().unwrap_or("default"),
+        })).await?;
+        Ok(())
+    }
+
     fn update_agent(&self, project: &str, change: impl FnOnce(&mut Agent)) -> Result<()> {
         let mut registry = self.registry.lock().unwrap();
         if let Some(agent) = registry.agents.get_mut(project) { change(agent); }
@@ -1732,7 +1848,7 @@ impl Agents {
             .collect();
         let said = said[said.len().saturating_sub(8)..].iter().map(|t| format!("\n- {}", t.replace('\n', " "))).collect::<String>();
         let mut text = format!(
-            "[handoff] You are taking over as {app}'s app agent; the user started a fresh conversation. \
+            "[handoff] You are taking over as {app}'s app agent in a fresh conversation. \
              The previous one stays readable in the app's Threads; `{cli} thread read {old}` gives its last reply.\n\n\
              Recent commits:\n{commits}\n\nYour workers: {workers}\n\nWhat the user said lately, oldest first:{said}",
             cli = self.cli, old = agent.thread_id,
@@ -1800,13 +1916,20 @@ impl Agents {
             open.iter().take(40).map(|t| format!("\n- [{}] {}{} ({})", t.status.label(), t.ask.replace('\n', " "),
                 if t.note.is_empty() { String::new() } else { format!(" — {}", t.note) }, t.id)).collect()
         };
+        let notes = match crate::notes::load(&self.root, &agent.project_id) {
+            Ok(notes) if notes.notes.is_empty() => " none yet; add the user's preferences, decisions and gotchas as you learn them".to_string(),
+            Ok(notes) => notes.notes.iter().map(|n| format!("\n- {}", n.text)).collect(),
+            Err(error) => format!(" unreadable ({error:#})"),
+        };
         format!(
             "[squircle] You are {app}'s app agent: you coordinate, and worker threads do the implementation \
              (`{cli} thread --help`), unless the user says otherwise. Every piece of delegated work, reviews and research included, \
              runs as a T3 worker via `thread spawn` (`--provider codex --model <slug> --effort <level>` for Codex), never by running the codex \
-             or claude CLIs yourself or through subagents or workflows, so the user can see it. Archive a worker once its work is merged or abandoned, \
+             or claude CLIs yourself or through subagents or workflows, so the user can see it; the one subagent is `squircle:history`, \
+             cheap and read-only: ask it before answering anything about past work or decisions. Archive a worker once its work is merged or abandoned, \
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
              Your tasks, the user's open asks (`{cli} task --help`):{tasks}\n\
+             Your notes (`{cli} notes --help`; keep them current):{notes}\n\
              Add a task for each new ask, in the user's words; link its workers (`thread spawn --task`) and builds (`build start --task`), \
              attach screenshots or clips worth seeing, and set its status and note when that changes (linked workers and builds move it too).\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
@@ -2790,9 +2913,10 @@ mod tests {
     }
 }
 
-const PLUGIN_FILES: [(&str, &str); 3] = [
+const PLUGIN_FILES: [(&str, &str); 4] = [
     (".claude-plugin/plugin.json", include_str!("../plugin/squircle/.claude-plugin/plugin.json")),
     ("agents/app-agent.md", include_str!("../plugin/squircle/agents/app-agent.md")),
+    ("agents/history.md", include_str!("../plugin/squircle/agents/history.md")),
     ("hooks/hooks.json", include_str!("../plugin/squircle/hooks/hooks.json")),
 ];
 

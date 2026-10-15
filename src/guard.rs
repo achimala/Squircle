@@ -1,15 +1,29 @@
 //! The app agent's PreToolUse guard: delegated work must run as T3 worker
 //! threads the user can see, never as model runs the agent starts itself
-//! (`codex exec`, `claude -p`, subagents, workflows). Only the app agent's
-//! Claude instance carries this hook; workers are unaffected.
+//! (`codex exec`, `claude -p`, subagents, workflows). The one exception is
+//! the plugin's history subagent, a cheap read-only lookup of the app's
+//! past: the agent may start it freely, and inside it only reading tools
+//! and read-only commands run. Only the app agent's Claude instance carries
+//! this hook; workers are unaffected.
 
 use serde_json::Value;
+
+/// The plugin's history subagent, as Claude Code names plugin agents.
+pub const HISTORY_AGENT: &str = "squircle:history";
 
 /// Why a tool call is denied, or `None` to let it run. `cli` is how the
 /// agent invokes Squircle, for the command the message points to.
 pub fn check(event: &Value, cli: &str) -> Option<String> {
     let input = &event["tool_input"];
-    let what = match event["tool_name"].as_str()? {
+    let tool = event["tool_name"].as_str()?;
+    // Claude Code marks a subagent's own tool calls with its id and type.
+    if event["agent_id"].is_string() && event["agent_type"] == HISTORY_AGENT {
+        return history_tool(tool, input, cli);
+    }
+    let what = match tool {
+        "Agent" | "Task" if input["subagent_type"] == HISTORY_AGENT
+            && input["model"].as_str().is_none_or(|m| m == "haiku")
+            && input["isolation"].is_null() => return None,
         "Agent" | "Task" => "Subagents",
         "Workflow" => "Workflows",
         _ => {
@@ -17,7 +31,84 @@ pub fn check(event: &Value, cli: &str) -> Option<String> {
             return Some(format!("`{runs}` runs a model outside T3, where the user can't see it. {}", spawn_hint(cli)));
         }
     };
-    Some(format!("{what} run outside T3, where the user can't see them. {}", spawn_hint(cli)))
+    Some(format!("{what} run outside T3, where the user can't see them (the history subagent, `subagent_type: \"{HISTORY_AGENT}\"`, \
+        is the one exception, for questions about the app's past). {}", spawn_hint(cli)))
+}
+
+/// Inside the history subagent: reading tools, and shell commands that only read.
+fn history_tool(tool: &str, input: &Value, cli: &str) -> Option<String> {
+    let deny = |what: String| Some(format!("The history subagent only reads: {what}. \
+        Use `{cli} history search WORDS` and `{cli} history show REF`, `notes show`, `task list|show`, `thread read|status`, \
+        `build list|status|log`, read-only git (log, show, diff, grep, blame) and Read/Grep/Glob."));
+    match tool {
+        "Read" | "Grep" | "Glob" => None,
+        "Bash" => {
+            let command = input["command"].as_str().unwrap_or("");
+            let scripts: Vec<String> = substitutions(command).into_iter().chain(std::iter::once(command.to_string())).collect();
+            for script in &scripts {
+                for words in simple_commands(script) {
+                    if let Some(why) = read_only(&words) { return deny(why); }
+                }
+            }
+            None
+        }
+        other => deny(format!("{other} is not available")),
+    }
+}
+
+/// Why a simple command might change something, or `None` if it only reads.
+fn read_only(words: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < words.len() && is_assignment(&words[i]) { i += 1; }
+    let Some(program) = words.get(i) else { return None };
+    let name = program_name(program);
+    let args = &words[i + 1..];
+    let shown = || words[i..].iter().take(4).cloned().collect::<Vec<_>>().join(" ");
+    // Output may go to /dev/null or another descriptor (`2>&1` splits at
+    // `&`, leaving `2>` last and `1` as a "command"), never to a file.
+    for (index, word) in words.iter().enumerate() {
+        let Some((_, target)) = word.rsplit_once('>') else { continue };
+        let target = if target.is_empty() { words.get(index + 1).map_or("", String::as_str) } else { target };
+        if !(target.is_empty() || target == "/dev/null" || target.starts_with('&')) {
+            return Some(format!("`{}` writes a file", shown()));
+        }
+    }
+    if words[i..].len() == 1 && name.chars().all(|c| c.is_ascii_digit()) { return None; }
+    let ok = match name.as_str() {
+        "squircle" => {
+            let mut rest = args.iter();
+            let mut sub = Vec::new();
+            while let Some(word) = rest.next() {
+                match word.as_str() {
+                    "--data-dir" | "--server" => { rest.next(); }
+                    w if w == "--json" || w.starts_with("--data-dir=") || w.starts_with("--server=") => {}
+                    w => { sub.push(w); if sub.len() == 2 { break; } }
+                }
+            }
+            matches!(sub.as_slice(),
+                ["history", _] | ["notes", "show"] | ["task", "list" | "show"] | ["thread", "read" | "status"]
+                | ["build", "list" | "status" | "log"] | ["app", "list" | "show"] | ["agent", "list"] | [_, "--help" | "-h"] | ["--help" | "-h", ..])
+        }
+        "git" => {
+            let mut rest = args.iter();
+            let mut sub = None;
+            let mut safe = true;
+            while let Some(word) = rest.next() {
+                match word.as_str() {
+                    "-C" => { rest.next(); }
+                    "--no-pager" => {}
+                    w if w.starts_with('-') => { safe = false; break; }
+                    w => { sub = Some(w); break; }
+                }
+            }
+            safe && matches!(sub, Some("log" | "show" | "diff" | "grep" | "blame" | "status" | "rev-parse" | "ls-files" | "shortlog"))
+                && !rest.any(|w| w.starts_with("--output") || w == "--ext-diff" || w.starts_with("-O") || w.starts_with("--open-files-in-pager"))
+        }
+        "rg" => !args.iter().any(|w| w.starts_with("--pre")),
+        "cat" | "head" | "tail" | "wc" | "ls" | "grep" | "jq" | "echo" | "pwd" | "true" => true,
+        _ => false,
+    };
+    (!ok).then(|| format!("`{}` is not a read-only lookup", shown()))
 }
 
 fn spawn_hint(cli: &str) -> String {
@@ -276,6 +367,54 @@ mod tests {
         ] {
             assert_eq!(runs_model(command), None, "flagged: {command}");
         }
+    }
+
+    #[test]
+    fn allows_only_the_history_subagent_and_only_reading_inside_it() {
+        let call = |tool: &str, input: Value| json!({"hook_event_name": "PreToolUse", "agent_type": "squircle:app-agent", "tool_name": tool, "tool_input": input});
+        assert_eq!(check(&call("Agent", json!({"subagent_type": "squircle:history", "prompt": "why no tilt?"})), "sq"), None);
+        assert_eq!(check(&call("Task", json!({"subagent_type": "squircle:history", "model": "haiku", "prompt": "x"})), "sq"), None);
+        for input in [json!({"subagent_type": "general-purpose", "prompt": "x"}), json!({"subagent_type": "squircle:history", "model": "opus", "prompt": "x"}),
+                      json!({"subagent_type": "squircle:history", "isolation": "worktree", "prompt": "x"}), json!({"subagent_type": "history", "prompt": "x"})] {
+            assert!(check(&call("Agent", input.clone()), "sq").is_some(), "allowed {input}");
+        }
+        // The app agent itself (`--agent`, no agent_id) keeps its usual rules.
+        assert_eq!(check(&call("Edit", json!({"file_path": "/x"})), "sq"), None);
+
+        let inside = |tool: &str, input: Value| json!({"hook_event_name": "PreToolUse", "agent_id": "a1", "agent_type": "squircle:history", "tool_name": tool, "tool_input": input});
+        let cli = "\"/Users/me/RemoteAppDev/target/release/squircle\" --data-dir /Users/me/.squircle --server http://127.0.0.1:8787";
+        for command in [
+            format!("{cli} history search simulator deck --since 14d"),
+            format!("{cli} --json history show msg:assistant:4e17 2>&1 | head -40"),
+            format!("{cli} notes show && {cli} task list --thread t; {cli} thread read abc"),
+            format!("{cli} build status b 2>/dev/null"),
+            "git log --oneline -20 -- src/guard.rs".into(),
+            "git -C /repo show --stat abc123".into(),
+            "rg -n 'tilt' docs | head".into(),
+            "cat AGENTS.md | grep -n Tasks".into(),
+        ] {
+            assert_eq!(check(&inside("Bash", json!({"command": command})), "sq"), None, "denied: {command}");
+        }
+        for command in [
+            format!("{cli} notes add 'x'"),
+            format!("{cli} thread spawn --coordinator t --title x --branch b --prompt p"),
+            format!("{cli} task update t --status done"),
+            format!("{cli} history search x > /tmp/out"),
+            "git -c core.pager='sh -c touch' log".into(),
+            "git log --output=/tmp/x".into(),
+            "git checkout main".into(),
+            "rg --pre ./run x".into(),
+            "echo $(rm -rf build)".into(),
+            "cat x; rm -rf y".into(),
+            "codex exec 'summarize'".into(),
+            "sqlite3 ~/.t3/userdata/state.sqlite 'delete from x'".into(),
+        ] {
+            assert!(check(&inside("Bash", json!({"command": command})), "sq").is_some(), "allowed: {command}");
+        }
+        for tool in ["Edit", "Write", "NotebookEdit", "Agent", "Workflow", "Monitor"] {
+            assert!(check(&inside(tool, json!({})), "sq").is_some(), "allowed {tool}");
+        }
+        assert_eq!(check(&inside("Read", json!({"file_path": "/x"})), "sq"), None);
     }
 
     #[test]

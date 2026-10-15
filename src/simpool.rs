@@ -550,7 +550,7 @@ impl Pool {
 }
 
 /// T3's ISO-8601 UTC times (`2026-10-14T22:23:14.016Z`) as Unix seconds.
-fn iso_seconds(text: &str) -> Option<f64> {
+pub(crate) fn iso_seconds(text: &str) -> Option<f64> {
     let (date, time) = text.trim_end_matches('Z').split_once('T')?;
     let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
     let (y, m, day) = (d.next()??, d.next()??, d.next()??);

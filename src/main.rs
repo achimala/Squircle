@@ -157,6 +157,18 @@ enum Commands {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Search an app's past where it lives (T3 conversations and tool activity, tasks, builds, git, docs); read-only, no copied store.
+    #[command(after_help = "Results are short ranked snippets with a reference; show expands one.\n  squircle history search \"why did we drop the 3D tilt\" --thread YOUR_THREAD_ID\n  squircle history search simulator deck --in messages,commits --since 14d\n  squircle history show msg:ID | thread:ID | act:ID | task:ID | build:ID | commit:SHA | doc:PATH#L12\nThe app is the project of --thread or --project, else of the current folder. Text unless --json. Nothing is indexed: each search reads T3's state.sqlite (read-only), Squircle's tasks and builds, git log and the project's Markdown files.")]
+    History {
+        #[command(subcommand)]
+        command: HistoryCommand,
+    },
+    /// The app agent's durable notes (preferences, decisions, gotchas), shown in each turn's note.
+    #[command(after_help = "Keep a few lines worth knowing every turn, not a log: what happened stays searchable with squircle history.\n  squircle notes show --thread YOUR_THREAD_ID\n  squircle notes add --thread YOUR_THREAD_ID \"User wants builds only on request\"\n  squircle notes edit 2 --thread YOUR_THREAD_ID \"...\"\n  squircle notes remove 2 --thread YOUR_THREAD_ID\nA note is at most 300 characters, all of them at most 4000.")]
+    Notes {
+        #[command(subcommand)]
+        command: NotesCommand,
+    },
     /// Worker threads of an app agent: spawn, message, read, answer, archive.
     #[command(after_help = "Workers are ordinary T3 threads, each in its own worktree on a new branch. Do not poll: the app agent receives a [worker update] message when a worker finishes, errors or needs input.")]
     Thread {
@@ -209,6 +221,12 @@ enum AgentCommand {
         target: AgentTarget,
         #[arg(long, help = "What the new agent must know that git and the workers don't show: what the user asked to remember, plans in flight")]
         handoff: Option<String>,
+    },
+    /// Compact the agent's context now (Claude's /compact, keeping tasks, decisions, running work and recent exchanges).
+    #[command(after_help = "Refused while the agent's turn runs. The service also does this by itself when an agent sits idle with a large context; see docs/cli.md (agent upkeep).")]
+    Compact {
+        #[command(flatten)]
+        target: AgentTarget,
     },
     /// The note an app agent gets at the start of each turn (rules and live workers).
     Context {
@@ -389,6 +407,67 @@ enum SimCommand {
     Cleanup {
         #[arg(long, help = "Report what would be shut down or deleted; change nothing")]
         dry_run: bool,
+    },
+}
+#[derive(clap::Args)]
+struct AppScope {
+    #[arg(long, help = "A thread of the app (yours); its T3 project is the app")]
+    thread: Option<String>,
+    #[arg(long, help = "T3 project ID")]
+    project: Option<String>,
+}
+#[derive(Subcommand)]
+enum HistoryCommand {
+    /// Ranked snippets matching the words, each with a reference for show.
+    Search {
+        #[arg(required = true, num_args = 1.., help = "Words to look for")]
+        query: Vec<String>,
+        #[command(flatten)]
+        scope: AppScope,
+        #[arg(long = "in", value_delimiter = ',', help = "Only these sources: messages, threads, activities, tasks, builds, commits, docs")]
+        sources: Vec<String>,
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+        #[arg(long, help = "Only newer than 7d, 12h, 30m or YYYY-MM-DD")]
+        since: Option<String>,
+    },
+    /// One item in full: a message with its neighbours, a thread's latest messages, an activity, task, build, commit or doc section.
+    Show {
+        #[arg(help = "msg:ID, thread:ID, act:ID, task:ID, build:ID, commit:SHA or doc:PATH#L12")]
+        reference: String,
+        #[command(flatten)]
+        scope: AppScope,
+        #[arg(long, default_value_t = 4000, help = "Cap on the text shown")]
+        max_chars: usize,
+        #[arg(long, default_value_t = 30, help = "Messages of a thread, changes of a task")]
+        limit: usize,
+    },
+}
+#[derive(Subcommand)]
+enum NotesCommand {
+    /// The app's notes, numbered.
+    Show {
+        #[command(flatten)]
+        scope: AppScope,
+    },
+    /// Add one note.
+    Add {
+        text: String,
+        #[command(flatten)]
+        scope: AppScope,
+    },
+    /// Replace note N.
+    Edit {
+        number: usize,
+        text: String,
+        #[command(flatten)]
+        scope: AppScope,
+    },
+    /// Remove note N.
+    Remove {
+        number: usize,
+        #[command(flatten)]
+        scope: AppScope,
     },
 }
 #[derive(Subcommand)]
@@ -1131,6 +1210,9 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             AgentCommand::Fresh { target, handoff } => {
                 post(cli, "/v1/agents/fresh", json!({"project_id":target.project,"thread_id":target.thread,"handoff":handoff})).await?
             }
+            AgentCommand::Compact { target } => {
+                post(cli, "/v1/agents/compact", json!({"project_id":target.project,"thread_id":target.thread})).await?
+            }
             AgentCommand::Context { hook, cwd } => {
                 let mut event = Value::Null;
                 if *hook {
@@ -1166,6 +1248,56 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 return Ok(None);
             }
         },
+        Commands::History { command } => {
+            let root = root(cli)?;
+            let cwd = std::env::current_dir()?;
+            let resolve = |scope: &AppScope| {
+                let (thread, project) = (scope.thread.clone(), scope.project.clone());
+                let cwd = cwd.clone();
+                async move { squircle::history::scope(thread.as_deref(), project.as_deref(), &cwd).await }
+            };
+            let (text, data) = match command {
+                HistoryCommand::Search { query, scope, sources, limit, since } => {
+                    let kinds = sources.iter().map(|s| squircle::history::Kind::parse(s)).collect::<Result<Vec<_>>>()?;
+                    let scope = resolve(scope).await?;
+                    squircle::history::search(&root, &scope, squircle::history::Search {
+                        query: &query.join(" "), kinds, limit: *limit, since: since.as_deref() }).await?
+                }
+                HistoryCommand::Show { reference, scope, max_chars, limit } => {
+                    // Messages, threads, tasks and builds are found by ID alone.
+                    let needs_scope = reference.starts_with("commit:") || reference.starts_with("doc:");
+                    let scope = if needs_scope { Some(resolve(scope).await?) } else { None };
+                    squircle::history::show(&root, scope.as_ref(), reference, *max_chars, *limit).await?
+                }
+            };
+            if !cli.json {
+                print!("{text}");
+                return Ok(None);
+            }
+            success(data)
+        }
+        Commands::Notes { command } => {
+            let root = root(cli)?;
+            ensure!(local_server(&cli.server), "notes live in this Mac's data directory; run it on the service's Mac with its --data-dir");
+            let cwd = std::env::current_dir()?;
+            let scope = match command {
+                NotesCommand::Show { scope } | NotesCommand::Add { scope, .. } | NotesCommand::Edit { scope, .. } | NotesCommand::Remove { scope, .. } => scope,
+            };
+            let app = squircle::history::scope(scope.thread.as_deref(), scope.project.as_deref(), &cwd).await?;
+            use squircle::notes::{Change, change, load, listing};
+            let notes = match command {
+                NotesCommand::Show { .. } => load(&root, &app.project_id)?,
+                NotesCommand::Add { text, .. } => change(&root, &app.project_id, Change::Add(text))?,
+                NotesCommand::Edit { number, text, .. } => change(&root, &app.project_id, Change::Edit(*number, text))?,
+                NotesCommand::Remove { number, .. } => change(&root, &app.project_id, Change::Remove(*number))?,
+            };
+            if !cli.json {
+                let list = listing(&notes);
+                print!("{}", if list.is_empty() { format!("{} has no notes yet.\n", app.title) } else { list });
+                return Ok(None);
+            }
+            success(json!({"app": app.title, "project_id": app.project_id, "notes": notes.notes}))
+        }
         Commands::Task { command } => match command {
             TaskCommand::Add { thread, project, ask, status, note } => post(cli, "/v1/tasks",
                 json!({"thread":thread,"project":project,"ask":ask,"status":status,"note":note})).await?,

@@ -19,7 +19,7 @@ pub fn state_path() -> PathBuf {
         })
 }
 
-fn valid(id: &str, extra: &[char]) -> bool {
+pub(crate) fn valid(id: &str, extra: &[char]) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id
@@ -36,13 +36,13 @@ const IS_IMAGE: &str = "(case when type='object' then json_extract(value,'$.type
 /// How long a read may take. A Live Activity's step is worth little once
 /// late; a thread's details are read on request.
 const STEP_READ: std::time::Duration = std::time::Duration::from_secs(3);
-const DETAIL_READ: std::time::Duration = std::time::Duration::from_secs(15);
+pub(crate) const DETAIL_READ: std::time::Duration = std::time::Duration::from_secs(15);
 /// Screenshots arrive as base64 rows; anything larger is not a step detail.
 const MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
 /// One read-only query, supervised like every helper: bounded by `limit` and
 /// `MAX_OUTPUT`, and dropping the future kills `sqlite3`.
-async fn query(sql: &str, limit: std::time::Duration) -> Result<Vec<Value>> {
+pub(crate) async fn query(sql: &str, limit: std::time::Duration) -> Result<Vec<Value>> {
     let path = state_path();
     if !path.exists() {
         bail!("T3 state database not found at {}", path.display());

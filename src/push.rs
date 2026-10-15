@@ -626,6 +626,9 @@ pub trait Threads: Send + Sync {
     fn last_reply<'a>(&'a self, thread: &'a str) -> BoxFuture<'a, Option<String>>;
     fn question<'a>(&'a self, thread: &'a str) -> BoxFuture<'a, Option<String>>;
     fn current_step<'a>(&'a self, thread: &'a str) -> BoxFuture<'a, Option<String>>;
+    /// Whether the turn that just ended was Squircle's own upkeep (a
+    /// compaction while idle), which has nothing to tell the user.
+    fn quiet<'a>(&'a self, thread: &'a str) -> BoxFuture<'a, bool>;
 }
 
 /// How long things wait; shorter in tests.
@@ -1044,6 +1047,9 @@ impl Push {
             let this = self.clone();
             tokio::spawn(async move {
                 let threads = this.threads.lock().unwrap().clone();
+                if worker.is_none() && change == Change::Replied && let Some(t) = &threads && t.quiet(&thread).await {
+                    return;
+                }
                 let line = match (&worker, change) {
                     (Some(title), Change::Replied) => format!("“{title}” finished"),
                     (Some(title), Change::Asks) => format!("“{title}” needs you"),
@@ -1499,6 +1505,7 @@ mod tests {
 
     impl Threads for SlowSteps {
         fn last_reply<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> { Box::pin(async { None }) }
+        fn quiet<'a>(&'a self, _: &'a str) -> BoxFuture<'a, bool> { Box::pin(async { false }) }
         fn question<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> { Box::pin(async { None }) }
         fn current_step<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> {
             let first = { let mut calls = self.calls.lock().unwrap(); calls.push("step".into()); calls.len() == 1 };

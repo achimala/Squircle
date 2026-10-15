@@ -287,6 +287,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/t3/providers", get(t3_providers))
         .route("/v1/agents/restart", post(restart_agent))
         .route("/v1/agents/fresh", post(fresh_agent))
+        .route("/v1/agents/compact", post(compact_agent))
         .route("/v1/workers", get(list_workers).post(spawn_worker))
         .route("/v1/workers/{id}", get(read_worker))
         .route("/v1/workers/{id}/messages", post(message_worker))
@@ -390,6 +391,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     );
     // After the announcement, which is the first line supervisors read.
     background.push(tokio::spawn(agents.clone().run()));
+    background.push(tokio::spawn(agents.clone().upkeep()));
     background.push(tokio::spawn(push.clone().run()));
     background.push(tokio::spawn(sims.clone().run()));
     background.push(tokio::spawn(pool.clone().run(sims.clone())));
@@ -2162,6 +2164,17 @@ async fn fresh_agent(
     let request = body(payload)?;
     let result = agents(&state)?
         .reset(request.project_id.as_deref(), request.thread_id.as_deref(), crate::agents::Reset::Fresh { note: request.handoff })
+        .await.map_err(agent_error)?;
+    Ok(Json(success(result)))
+}
+
+async fn compact_agent(
+    State(state): State<AppState>,
+    payload: std::result::Result<Json<ResetAgent>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let request = body(payload)?;
+    let result = agents(&state)?
+        .compact(request.project_id.as_deref(), request.thread_id.as_deref())
         .await.map_err(agent_error)?;
     Ok(Json(success(result)))
 }
