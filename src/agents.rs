@@ -379,10 +379,12 @@ pub enum Note {
     Task,
     /// `thread send` from another agent.
     AgentMessage,
+    /// The service's news that a simulator is held for a thread in line.
+    SimReady,
 }
 
 impl Note {
-    pub const ALL: [Note; 5] = [Note::WorkerUpdate, Note::BuildUpdate, Note::Handoff, Note::Task, Note::AgentMessage];
+    pub const ALL: [Note; 6] = [Note::WorkerUpdate, Note::BuildUpdate, Note::Handoff, Note::Task, Note::AgentMessage, Note::SimReady];
 
     fn kind(self) -> &'static str {
         match self {
@@ -391,6 +393,7 @@ impl Note {
             Note::Handoff => "squircle-handoff",
             Note::Task => "squircle-task",
             Note::AgentMessage => "squircle-agent-message",
+            Note::SimReady => "squircle-sim-ready",
         }
     }
 
@@ -400,6 +403,7 @@ impl Note {
             Note::BuildUpdate => "Build update",
             Note::Handoff => "Handoff",
             Note::Task | Note::AgentMessage => "Agent message",
+            Note::SimReady => "Simulator ready",
         }
     }
 
@@ -719,6 +723,9 @@ pub struct Agents {
     /// One flush at a time, so overlapping triggers cannot send twice.
     flush_lock: tokio::sync::Mutex<()>,
     flush_failures: Mutex<u32>,
+    /// Threads in line for a simulator: a worker that ends its turn to wait
+    /// wakes nobody; the service wakes it when its simulator is held.
+    sim_waiting: Mutex<std::collections::HashSet<String>>,
     /// One operation at a time per project (create, reset) and per worker
     /// (archive), so concurrent requests see each other's result.
     ops: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -892,6 +899,7 @@ impl Agents {
             status: Mutex::new("Not connected to T3".into()),
             fake: std::sync::OnceLock::new(),
             flush_scheduled: Mutex::new(false),
+            sim_waiting: Mutex::default(),
             flush_lock: tokio::sync::Mutex::new(()),
             flush_failures: Mutex::new(0),
             ops: Mutex::default(),
@@ -1177,8 +1185,12 @@ impl Agents {
         if !shell.current() {
             return vec![];
         }
+        let waiting = self.sim_waiting.lock().unwrap();
         registry.workers.iter().filter(|(_, w)| w.stage.live()).filter_map(|(id, worker)| {
             let event = ThreadObservation::decode(shell.threads.get(id)?).wake()?;
+            if event.kind == EventKind::Done && waiting.contains(id) {
+                return None;
+            }
             let queued = registry.outbox.iter().any(|w| w.workers.iter().any(|(queued, _)| queued == id));
             (!queued && !worker.notified.as_ref().is_some_and(|n| n.covers(&event)))
                 .then(|| (id.clone(), worker.clone(), event))
@@ -1272,6 +1284,28 @@ impl Agents {
             });
         }
         self.save(&registry)
+    }
+
+    /// Queues a service message that starts a turn in `thread`; `id` is its
+    /// message ID, so queuing it again changes nothing.
+    pub fn notify(self: &Arc<Self>, thread: &str, id: &str, text: String, note: Note, payload: Value) -> Result<()> {
+        {
+            let mut registry = self.registry.lock().unwrap();
+            if registry.outbox.iter().any(|w| w.message_id == id) {
+                return Ok(());
+            }
+            registry.outbox.push(Wake {
+                coordinator: thread.into(), message_id: id.into(), workers: vec![], text, record: note.record(payload),
+                delivery: Delivery::Queued, build: None,
+            });
+            self.save(&registry)?;
+        }
+        self.schedule_flush();
+        Ok(())
+    }
+
+    pub fn set_sim_waiting(&self, threads: Vec<String>) {
+        *self.sim_waiting.lock().unwrap() = threads.into_iter().collect();
     }
 
     /// T3 has the update: drop it from the outbox and advance its workers'
@@ -1853,7 +1887,7 @@ impl Agents {
         let id = uuid::Uuid::new_v4().to_string();
         let text = format!(
             "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. Remove anything else you create (scratch simulators, temp services or files) before you finish. \
-             To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Drive it with the agent-device command it returns; run {cli} sim stop --thread {id} when done (it shuts the simulator down). Use sim start for every simulator: don't boot or create simulators with simctl or xcodebuild, and don't run agent-device record or device_open. \
+             To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Drive it with the agent-device command it returns; run {cli} sim stop --thread {id} when done (it shuts the simulator down). If it says you're queued, end your turn: a [simulator ready] message wakes you when one is held for you; run sim start again then. Use sim start for every simulator: don't boot or create simulators with simctl or xcodebuild, and don't run agent-device record or device_open. \
              For signed builds: {cli} build start --thread {id} ... (see build start --help); the user gets it in their chat when it finishes. \
              A performance recording the user sends from the phone is a linked .perf.json: {cli} perf show PATH summarizes it (hitches with symbolicated main-thread stacks, timeline). \
              The user also reads your replies on their phone: keep them short and plain, show pictures as ![..](/absolute/path) and clips as [..](/absolute/path) \
