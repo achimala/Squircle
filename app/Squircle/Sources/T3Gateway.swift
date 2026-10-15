@@ -112,6 +112,10 @@ final class T3HTTP {
     let configuration: AppConfiguration
     let token: String
     let session: URLSession
+    /// The RPC socket's session. URLSession's request timeout would fail a
+    /// socket write still queued after 45 s (a Ping behind a picture on a
+    /// slow uplink); the gateway's heartbeat judges the socket instead.
+    let socketSession: URLSession
     init(configuration: AppConfiguration) {
         self.configuration = configuration
         token = configuration.t3Token
@@ -127,13 +131,16 @@ final class T3HTTP {
         }
         #endif
         session = URLSession(configuration: c, delegate: RefuseRedirects(), delegateQueue: nil)
+        let socket = c.copy() as! URLSessionConfiguration
+        socket.timeoutIntervalForRequest = .infinity
+        socketSession = URLSession(configuration: socket, delegate: RefuseRedirects(), delegateQueue: nil)
         // Earlier builds kept a copy of the T3 credential that nothing reads.
         SecItemDelete([kSecClass as String: kSecClassGenericPassword,
                        kSecAttrService as String: "ai.dreamslate.Squircle.T3"] as CFDictionary)
     }
-    deinit { session.invalidateAndCancel() }
-    /// Cancels everything under way; the session can't be used again.
-    func invalidate() { session.invalidateAndCancel() }
+    deinit { session.invalidateAndCancel(); socketSession.invalidateAndCancel() }
+    /// Cancels everything under way; the sessions can't be used again.
+    func invalidate() { session.invalidateAndCancel(); socketSession.invalidateAndCancel() }
     func request(_ path: String, query: [URLQueryItem] = []) throws -> URLRequest {
         guard path.hasPrefix("/"), !path.contains(".."), !path.contains("?") else { throw ClientError.configuration }
         var parts = URLComponents(url: configuration.t3URL, resolvingAgainstBaseURL: false)!
@@ -225,10 +232,23 @@ final class T3Gateway {
     /// when the last one finished.
     private var requestsWriting = 0
     private var requestsWritten = ContinuousClock.now
+    /// Request bytes T3 hasn't shown it has read. A finished write may still
+    /// sit in the send buffer (megabytes on a slow uplink), so T3 gets as
+    /// long as the slowest link it should work on needs to receive them.
+    /// T3 answers Pings in order, so a Pong covers every byte queued before
+    /// its Ping; other frames prove nothing about what T3 has read.
+    private var queuedBytes = 0
+    private var readBytes = 0
+    /// `queuedBytes` when each unanswered Ping was queued, oldest first.
+    private var pings: [Int] = []
+    private var unanswered: Int { queuedBytes - readBytes }
+    private static let slowestLink = 16_000.0 // bytes/s: 128 kbit/s
     private let silenceAllowed: Duration = .seconds(40)
-    /// How long T3 has been silent with nothing of ours in the way.
-    private func silence(since asked: ContinuousClock.Instant) -> Duration? {
-        requestsWriting > 0 ? nil : max(lastFrame, requestsWritten, asked).duration(to: .now)
+    /// T3 has said nothing for longer than `limit` with nothing of ours in the way.
+    private func silent(beyond limit: Duration, since asked: ContinuousClock.Instant) -> Bool {
+        guard requestsWriting == 0 else { return false }
+        let allowed = limit + .seconds(Double(unanswered) / Self.slowestLink)
+        return max(lastFrame, requestsWritten, asked).duration(to: .now) > allowed
     }
     var onDisconnect: (() -> Void)?
     /// Why T3 refused the last socket's upgrade, if it did.
@@ -240,7 +260,7 @@ final class T3Gateway {
     func connect() async throws {
         disconnect(notify: false)
         ConnectionTrace.mark("socket.start")
-        let ws = http.session.webSocketTask(with: try http.bearerSocketRequest("/ws"))
+        let ws = http.socketSession.webSocketTask(with: try http.bearerSocketRequest("/ws"))
         disconnect(notify: false); rejection = nil
         socket = ws; ws.maximumMessageSize = 32 * 1024 * 1024; ws.resume(); lastFrame = .now; requestsWritten = .now
         receiver = Task { [weak self] in
@@ -261,6 +281,9 @@ final class T3Gateway {
                     }
                 }
             } catch {
+                #if DEBUG
+                if self?.socket === ws { NSLog("SQUIRCLE-CONN T3 socket failed: %@", String(describing: error)) }
+                #endif
                 // A refused upgrade is not a network blip: say why.
                 let status = (ws.response as? HTTPURLResponse)?.statusCode ?? 101
                 self?.drop(ws, error: status == 101 ? nil : ClientError.http("T3", status))
@@ -272,8 +295,8 @@ final class T3Gateway {
                 guard !Task.isCancelled, let self else { return }
                 // A half-open socket (a network change, a suspended app) never
                 // errors on its own; no reply to two pings means it's gone.
-                if let quiet = silence(since: lastFrame), quiet > silenceAllowed { drop(ws); return }
-                do { try await write(.from(["_tag":"Ping"])) } catch { drop(ws); return }
+                if silent(beyond: silenceAllowed, since: lastFrame) { drop(ws); return }
+                do { try await ping() } catch { drop(ws); return }
             }
         }
     }
@@ -281,8 +304,8 @@ final class T3Gateway {
     func probe(timeout: Duration = .seconds(8)) async -> Bool {
         guard let ws = socket else { return false }
         let asked = ContinuousClock.now
-        Task { try? await write(.from(["_tag":"Ping"])) }
-        while silence(since: asked).map({ $0 < timeout }) ?? true {
+        Task { try? await ping() }
+        while !silent(beyond: timeout, since: asked) {
             if lastFrame > asked { return true }
             guard socket === ws else { return false }
             try? await Task.sleep(for: .milliseconds(100))
@@ -297,6 +320,7 @@ final class T3Gateway {
     func disconnect(notify: Bool = false, error: Error? = nil) {
         receiver?.cancel(); heartbeat?.cancel(); socket?.cancel(with: .goingAway, reason: nil); socket = nil
         receiver = nil; heartbeat = nil; requestsWriting = 0
+        queuedBytes = 0; readBytes = 0; pings.removeAll()
         let waiting = pending; pending.removeAll(); subscriptions.removeAll()
         for p in waiting.values { p.resume(throwing: error ?? ClientError.connection("T3")) }
         if notify { onDisconnect?() }
@@ -350,11 +374,16 @@ final class T3Gateway {
         guard let socket else { throw ClientError.connection("T3") }
         let text = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
         guard request else { return try await socket.send(.string(text)) }
-        requestsWriting += 1
+        requestsWriting += 1; queuedBytes += text.utf8.count
         defer {
             if self.socket === socket { requestsWriting -= 1; requestsWritten = .now }
         }
         try await socket.send(.string(text))
+    }
+    private func ping() async throws {
+        guard socket != nil else { throw ClientError.connection("T3") }
+        pings.append(queuedBytes)
+        try await write(.from(["_tag":"Ping"]))
     }
     func receive(_ frame: JSONValue) {
         let id = frame["requestId"].identifier ?? ""
@@ -370,6 +399,7 @@ final class T3Gateway {
             else { pending.removeValue(forKey:id)?.resume(returning:exit["value"]) }
             subscriptions.removeValue(forKey:id)?.ended(failure)
         case "Ping": Task { try? await write(.from(["_tag":"Pong"])) }
+        case "Pong": if !pings.isEmpty { readBytes = max(readBytes, pings.removeFirst()) }
         default: break
         }
     }

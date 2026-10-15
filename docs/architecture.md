@@ -253,9 +253,11 @@ dropped, or the request never got out) is not an outcome: the same command
 goes again on T3's next connection, and T3 answers a command ID it already
 took from its receipt without running it twice. The open thread showing the
 message settles it too. Requests have no answer deadline; a dead socket
-fails them (heartbeat, probe). Silence only counts while no request is
-being written, so a picture taking a minute on a slow uplink isn't
-mistaken for a dead link. Recording uploads are `uploading / uploaded /
+fails them (heartbeat, probe). The socket's own URLSession has no request
+timeout, and T3's silence is allowed 40 s plus the time the request bytes
+T3 hasn't yet acknowledged need at 128 kbit/s (a Pong covers everything
+queued before its Ping; other frames don't), so a picture taking a minute
+on a slow uplink isn't mistaken for a dead link. Recording uploads are `uploading / uploaded /
 failed` per attachment, and a failed one is tried again on the next send.
 The composer and echo bubble are projections of the pending send.
 
