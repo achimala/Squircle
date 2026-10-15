@@ -135,6 +135,32 @@ final class T3Tests: XCTestCase {
     }
     /// After a reconnect T3 resends a snapshot and may replay events the
     /// thread already has; neither may lose or duplicate the transcript.
+    func testQuestionsShowOnlyWhileOpenInTheRunningTurn() {
+        func activity(_ id: String, _ kind: String, _ request: String?, turn: String, at second: Int) -> [String: Any] {
+            (["id": id, "kind": kind, "turnId": turn, "createdAt": String(format: "2026-10-15T07:%02d:%02d.000Z", second / 60, second % 60),
+                   "payload": request.map { ["requestId": $0] } ?? [String: String]()])
+        }
+        var state = T3ThreadState()
+        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[],
+            "session":["status":"running","activeTurnId":"old"],
+            "activities":[activity("q", "user-input.requested", "r1", turn: "old", at: 0),
+                          activity("a", "user-input.resolved", "r1", turn: "old", at: 1)]]]]))
+        XCTAssertTrue(state.pendingRequests.isEmpty)
+        // 600 later activities push the resolution out; the answered question must not come back.
+        for i in 0..<620 {
+            state.consume(.from(["kind":"event","event":["sequence":2 + i,"type":"thread.activity-appended",
+                "payload":["activity":activity("s\(i)", "tool.completed", nil, turn: "old", at: 2 + i)]]]))
+        }
+        XCTAssertTrue(state.pendingRequests.isEmpty)
+        XCTAssertFalse(state.thread["activities"].array.contains { $0["id"].string == "q" })
+        // Open in the running turn: shown. A later turn makes it unanswerable.
+        state.consume(.from(["kind":"event","event":["sequence":700,"type":"thread.activity-appended",
+            "payload":["activity":activity("q2", "user-input.requested", "r2", turn: "old", at: 700)]]]))
+        XCTAssertEqual(state.pendingRequests.map { $0["id"].string }, ["q2"])
+        state.consume(.from(["kind":"event","event":["sequence":701,"type":"thread.session-set",
+            "payload":["session":["status":"running","activeTurnId":"new"]]]]))
+        XCTAssertTrue(state.pendingRequests.isEmpty)
+    }
     func testResubscribeAfterReconnectKeepsTranscript() {
         func message(_ id: String, _ text: String, _ seq: Int) -> JSONValue {
             .from(["kind":"event","event":["sequence":seq,"type":"thread.message-sent","payload":["messageId":id,"role":"assistant","text":text,"streaming":false,"createdAt":"2026-10-14T10:00:0\(seq % 10).000Z"]]])

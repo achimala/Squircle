@@ -64,10 +64,11 @@ struct T3ThreadState: Codable {
         case "thread.activity-appended":
             var rows = t["activities"]?.array ?? []
             if !rows.contains(where: { $0["id"] == p["activity"]["id"] }) { rows.append(p["activity"]) }
-            // Like T3's own snapshot: the newest 500, and open requests.
+            // The newest 500, like T3's snapshot, and still-open requests
+            // (a resolved one's request must go with its resolution).
             if rows.count > 600 {
-                let cut = rows.count - 500
-                rows = rows.enumerated().filter { $0.offset >= cut || ($0.element["kind"].string ?? "").hasSuffix(".requested") }.map(\.element)
+                let cut = rows.count - 500, open = Self.openRequestIDs(rows)
+                rows = rows.enumerated().filter { $0.offset >= cut || $0.element["payload"]["requestId"].string.map(open.contains) == true && Self.isRequest($0.element) }.map(\.element)
             }
             t["activities"] = .array(rows)
         case "thread.turn-diff-completed":
@@ -264,16 +265,37 @@ struct T3ThreadState: Codable {
     }
     /// Whether T3 has the user message with this ID.
     func hasMessage(_ id: String) -> Bool { thread["messages"].array.contains { $0["id"].string == id || $0["messageId"].string == id } }
+    /// Questions and approvals T3 has open for the turn now running. An
+    /// AskUserQuestion or approval blocks its turn, so one from an earlier
+    /// turn, or left open by a session that stopped without resolving it,
+    /// can never be answered and never shows.
     var pendingRequests: [JSONValue] {
-        let activities = thread["activities"].array
-        let finished = Set(activities.filter {
-            let kind = $0["kind"].string ?? ""
-            return kind.contains("resolved") || kind.contains("responded") || kind.contains("completed") || kind.contains("cancelled") || kind == "user-input.answer-submitted"
-        }.compactMap { $0["payload"]["requestId"].string })
+        guard isRunning else { return [] }
+        let activities = thread["activities"].array, open = Self.openRequestIDs(activities)
+        let turn = thread["session"]["activeTurnId"].string
         return activities.filter {
-            let kind = $0["kind"].string ?? ""
-            guard let id = $0["payload"]["requestId"].string else { return false }
-            return (kind.contains("approval") || kind.contains("user-input")) && (kind.contains("requested") || kind.contains("opened")) && !finished.contains(id)
+            guard Self.isRequest($0), let id = $0["payload"]["requestId"].string, open.contains(id) else { return false }
+            return $0["turnId"].string.map { $0 == turn } ?? true
         }
+    }
+    static func isRequest(_ a: JSONValue) -> Bool { ["approval.requested", "user-input.requested"].contains(a["kind"].string ?? "") }
+    /// T3's own rule: a request opens with its `.requested` activity and
+    /// closes with `.resolved`, or with a failed response T3 reports as
+    /// stale or unknown (the provider no longer has it).
+    static func openRequestIDs(_ activities: [JSONValue]) -> Set<String> {
+        var open = Set<String>()
+        let ordered = activities.sorted { ($0["createdAt"].string ?? "", $0["id"].string ?? "") < ($1["createdAt"].string ?? "", $1["id"].string ?? "") }
+        for a in ordered {
+            guard let id = a["payload"]["requestId"].string else { continue }
+            switch a["kind"].string ?? "" {
+            case "approval.requested", "user-input.requested": open.insert(id)
+            case "approval.resolved", "user-input.resolved", "user-input.answer-submitted": open.remove(id)
+            case "provider.approval.respond.failed", "provider.user-input.respond.failed":
+                let detail = (a["payload"]["detail"].string ?? "").lowercased()
+                if detail.contains("stale pending") || detail.contains("unknown pending") { open.remove(id) }
+            default: break
+            }
+        }
+        return open
     }
 }
