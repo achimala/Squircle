@@ -2228,3 +2228,12 @@ silence is a still screen. The seed is drawn once per connection, until H.264
 starts, so a still simulator shows its picture and joins the deck; it is never
 JPEG playback.
 
+
+Measured in the simulator against real T3 (debug build, the Squircle app's
+conversation open with the dock hidden, two of its simulators idle; per-second
+nettop deltas of every socket over 300 s): before, 6.94 MB in, 26 sockets, 24
+seed downloads (two streams reconnecting about every 25 s); after, 1.35 MB in,
+no stream reconnects. The one ~316 KB seed in that window came from a third
+agent's simulator that started mid-run. The rest is the conversation and
+service traffic (one 717 KB burst on a T3 socket in the after-run was not
+identified). On screen, both idle simulators show their stills in the deck.
