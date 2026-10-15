@@ -225,7 +225,8 @@ final class SimulatorFeeds {
 /// collapse there into a deck (the most recently started on top, the rest
 /// peeking behind it, a count badge) that fans out into a labelled row when
 /// tapped. Tapping a picture brings it large and touchable; it shrinks back
-/// with a swipe down or a tap outside. Only pictures that can be seen decode.
+/// with a swipe down or a tap outside. Only pictures that can be seen
+/// decode, and one still waiting for its first.
 /// Everything shown is derived from `uses`, the corner, and four springs.
 @MainActor
 final class SimulatorDock: UIView {
@@ -465,7 +466,10 @@ final class SimulatorDock: UIView {
     private static let gap: CGFloat = 10
     private static let captionHeight: CGFloat = 16
 
-    private var shown: [SimulatorUse] { uses.filter { !docked.contains($0.id) || $0.id == presented } }
+    /// Only a simulator whose feed has drawn a picture joins the dock: a
+    /// session whose video never starts would be an empty black card.
+    private var shown: [SimulatorUse] { uses.filter { $0.id == presented || (!docked.contains($0.id) && pictured($0)) } }
+    private func pictured(_ use: SimulatorUse) -> Bool { (pips[use.id]?.screen.pictureSize.width ?? 0) > 0 }
     /// Most recently started first: the deck's top picture and the row's corner end.
     private var deck: [SimulatorUse] { shown.reversed() }
 
@@ -573,7 +577,9 @@ final class SimulatorDock: UIView {
         let reachable = index == 0 || (index != nil && route == .fanned)
         // Behind the deck's top only an edge peeks out: it keeps its last picture.
         let spread = route == .fanned || f > 0.001
+        // One not yet pictured streams unseen until its first picture.
         let decodes = alpha > 0.001 && (isPresented || ownsInput || index == 0 || (index != nil && spread))
+            || (!pictured(use) && !docked.contains(use.id))
         return FrameProjection(frame: frame, alpha: alpha, shade: shade, cornerRadius: .lerp(12, 30, isPresented ? e : 0),
                                caption: caption, touchable: ownsInput || (isPresented && e > 0.01) || (reachable && e < 0.01 && route.expanded == nil),
                                ownsInput: ownsInput, feed: decodes ? use.target : nil)
@@ -588,7 +594,7 @@ final class SimulatorDock: UIView {
         #if DEBUG
         var decoding = Set<String>()
         defer {
-            let state = "\(route) input \(uses.filter { pips[$0.id]?.interactive == true }.map { $0.id.suffix(2) }) decoding \(deck.filter { decoding.contains($0.id) }.map { $0.id.suffix(2) })"
+            let state = "\(route) input \(uses.filter { pips[$0.id]?.interactive == true }.map { $0.id.suffix(2) }) decoding \(uses.filter { decoding.contains($0.id) }.map { $0.id.suffix(2) }) shown \(deck.map { $0.id.suffix(2) })"
             if state != loggedDock {
                 loggedDock = state
                 print("Simulator dock: e=\(String(format: "%.2f", e)) " + state)
