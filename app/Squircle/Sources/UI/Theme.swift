@@ -168,6 +168,9 @@ enum Theme {
     private static let impact = UIImpactFeedbackGenerator(style: .soft)
     static func selectionHaptic() { selection.selectionChanged() }
     static func openHaptic() { impact.impactOccurred(intensity: 0.7) }
+    private static let tick = UIImpactFeedbackGenerator(style: .rigid)
+    /// A firm tick for checking something off.
+    static func checkHaptic() { tick.impactOccurred(intensity: 0.8) }
 }
 
 enum Motion {

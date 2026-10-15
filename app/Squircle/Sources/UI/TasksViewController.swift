@@ -33,6 +33,14 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     /// finger and catches up when they close.
     private var swiping = false
     private var behind = false
+    /// Tasks ticked off here that haven't moved yet. The list holds still
+    /// while you tick down it; they go to Done together a beat after the last.
+    private var checking: [AppTask] = []
+    private var settle: Task<Void, Never>?
+    /// What the last ticks moved to Done, and what each was, for Undo.
+    private var undoable: [(task: AppTask, was: AppTask.Status)] = []
+    private var undoExpiry: Task<Void, Never>?
+    private let undo = UndoToast()
     private var observation: Task<Void, Never>?
     /// Keeps the app's tasks fresh while the sheet is up.
     private var freshness: RefreshLease?
@@ -106,6 +114,7 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             guard let row = rows[id] else { return cell }
             cell.configure(row)
             cell.onThread = { [weak self] thread in self?.onOpen?(thread) }
+            cell.onCheck = { [weak self] in self?.toggleCheck(id) }
             cell.onMedia = { [weak self] media in self?.task(id).map { self?.openMedia(media, of: $0) } }
             cell.onInstall = { [weak self] in
                 guard let self, let task = task(id), let build = installable(task).build else { return }
@@ -123,6 +132,7 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
         notice.textAlignment = .center
         [table, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        undo.onUndo = { [weak self] in self?.undoLast() }
         addChild(threads)
         threads.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(threads.view)
@@ -172,16 +182,48 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
             notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32)
         ])
-        let refresh = UIRefreshControl()
-        refresh.addAction(UIAction { [weak self, weak refresh] _ in
-            Task { await self?.model.refreshTasks(); refresh?.endRefreshing() }
-        }, for: .valueChanged)
-        table.refreshControl = refresh
+        undo.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(undo)
+        NSLayoutConstraint.activate([
+            undo.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            undo.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12)
+        ])
+        // No pull to refresh: the lease keeps the list current while it's up,
+        // so pulling down at the top dismisses the sheet like any other.
         observation = model.observe(by: self, after: .milliseconds(100)) { $0.render() }
         freshness = model.keepFresh(.tasks(appID: project.id))
         Task { await model.refreshTasks() }
         renderTab()
         render()
+        renderUndo(animated: false)
+    }
+
+    #if DEBUG
+    /// `SQUIRCLE_DEMO_TICKS=1`: presses the first five circles a fifth of a
+    /// second apart, then Undo, as a hurried thumb would.
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_TICKS"] == "1" else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            for row in 0..<5 {
+                guard let self else { return }
+                let cells = table.visibleCells.compactMap { $0 as? TaskCell }
+                guard row < cells.count else { return }
+                let cell = cells[row]
+                cell.debugPressCheck()
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            try? await Task.sleep(for: .seconds(2))
+            self?.undo.debugPress()
+        }
+    }
+    #endif
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // Ticks still waiting for their beat are sent before the sheet goes.
+        finishChecks()
     }
 
     override func accessibilityPerformEscape() -> Bool {
@@ -232,7 +274,8 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     private func row(_ task: AppTask) -> TaskRow {
         let (build, shipped) = installable(task)
-        return TaskRow(ask: task.ask, status: task.status, faded: task.archivedAt != nil, note: task.note, shipped: shipped,
+        return TaskRow(ask: task.ask, status: task.status, checked: !task.status.open || checking.contains { $0.id == task.id },
+                       faded: task.archivedAt != nil, note: task.note, shipped: shipped,
                        install: build.map { _ in installing == task.id ? "Opening…" : "Install" },
                        // Archived threads can't be opened any more.
                        threads: task.threads.filter { $0.state != "missing" }, media: task.media)
@@ -241,7 +284,7 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     /// `now` is for the swipe actions themselves, which move their row
     /// while UIKit closes the swipe.
     private func render(now: Bool = false) {
-        guard now || !swiping else { behind = true; return }
+        guard now || (!swiping && checking.isEmpty) else { behind = true; return }
         behind = false
         if let current = model.projects.first(where: { $0.id == project.id }) { project = current }
         list = model.tasks(for: project)
@@ -299,6 +342,74 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         model.markTask(task, status: status, toTop: toTop)
         render(now: true)
         Task { await model.updateTask(task, status: status, toTop: toTop) }
+    }
+
+    /// One tap ticks an open task off (or back on before it moves). Rapid
+    /// ticks down the list all land: rows stay put until a beat after the
+    /// last, then move to Done together.
+    private func toggleCheck(_ id: String) {
+        guard let task = task(id), task.status.open else { return }
+        Theme.checkHaptic()
+        if let index = checking.firstIndex(where: { $0.id == id }) { checking.remove(at: index) } else { checking.append(task) }
+        let row = row(task)
+        rows[id] = row
+        if let path = dataSource.indexPath(for: id), let cell = table.cellForRow(at: path) as? TaskCell { cell.configure(row) }
+        settle?.cancel()
+        settle = nil
+        if checking.isEmpty {
+            if behind { render() }
+            return
+        }
+        settle = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(650))
+            guard !Task.isCancelled else { return }
+            self?.finishChecks()
+        }
+    }
+
+    private func finishChecks() {
+        settle?.cancel()
+        settle = nil
+        let batch = checking
+        guard !batch.isEmpty else { return }
+        checking = []
+        batch.forEach { model.markTask($0, status: .done) }
+        render(now: true)
+        for task in batch { Task { await model.updateTask(task, status: .done) } }
+        undoable += batch.map { ($0, $0.status) }
+        renderUndo(animated: true)
+        undoExpiry?.cancel()
+        undoExpiry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled, let self else { return }
+            undoable = []
+            renderUndo(animated: true)
+        }
+    }
+
+    /// Puts the last ticked tasks back where they were.
+    private func undoLast() {
+        let batch = undoable
+        guard !batch.isEmpty else { return }
+        undoExpiry?.cancel()
+        undoable = []
+        renderUndo(animated: true)
+        Theme.selectionHaptic()
+        batch.forEach { model.markTask($0.task, status: $0.was) }
+        render(now: true)
+        for (task, was) in batch { Task { await model.updateTask(task, status: was) } }
+    }
+
+    private func renderUndo(animated: Bool) {
+        undo.configure(count: undoable.count)
+        let shown = !undoable.isEmpty
+        undo.isUserInteractionEnabled = shown
+        let apply = { [undo] in
+            undo.alpha = shown ? 1 : 0
+            undo.transform = shown ? .identity : CGAffineTransform(translationX: 0, y: 16).scaledBy(x: 0.9, y: 0.9)
+        }
+        guard animated, view.window != nil else { apply(); return }
+        UIView.animate(springDuration: 0.4, bounce: 0.2, options: [.beginFromCurrentState, .allowUserInteraction], animations: apply)
     }
 
     private func install(_ build: AppBuild, for task: AppTask) {
@@ -450,7 +561,7 @@ private final class TaskGroupHeader: UITableViewHeaderFooterView {
         NSLayoutConstraint.activate([
             line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
             line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
-            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28),
+            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22),
             line.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24)
         ])
     }
@@ -501,6 +612,8 @@ private final class TaskSearchCell: UITableViewCell {
 private struct TaskRow: Equatable {
     let ask: String
     let status: AppTask.Status
+    /// Shows a tick: done, or ticked here and about to move.
+    let checked: Bool
     let faded: Bool
     let note: String
     let shipped: String?
@@ -515,6 +628,7 @@ private final class TaskCell: UITableViewCell {
     var onThread: ((String) -> Void)?
     var onMedia: ((AppTask.Media) -> Void)?
     var onInstall: (() -> Void)?
+    var onCheck: (() -> Void)?
     var loadThumbnail: ((AppTask.Media) async -> UIImage?)?
     private let ask = Theme.label("", Theme.font(.body, 17), lines: 3)
     private let note = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel, lines: 2)
@@ -524,6 +638,10 @@ private final class TaskCell: UITableViewCell {
     private let thumbScroll = UIScrollView()
     private let install = UIButton(configuration: .filled())
     private let rule = UIView()
+    /// The round tick at the leading edge; one tap marks the task done.
+    private let check = UIButton(type: .custom)
+    private let mark = UIImageView()
+    private var shownSymbol: String?
     private var loads: [Task<Void, Never>] = []
     private var shown: TaskRow?
 
@@ -548,6 +666,11 @@ private final class TaskCell: UITableViewCell {
         install.setContentHuggingPriority(.required, for: .horizontal)
         install.setContentCompressionResistancePriority(.required, for: .horizontal)
         install.addAction(UIAction { [weak self] _ in self?.onInstall?() }, for: .touchUpInside)
+        mark.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 22, weight: .light)
+        mark.isUserInteractionEnabled = false
+        mark.translatesAutoresizingMaskIntoConstraints = false
+        check.addSubview(mark)
+        check.addAction(UIAction { [weak self] _ in self?.onCheck?() }, for: .touchUpInside)
 
         for (stack, scroll) in [(chips, chipScroll), (thumbs, thumbScroll)] {
             stack.spacing = 8
@@ -577,11 +700,18 @@ private final class TaskCell: UITableViewCell {
         column.axis = .vertical
         column.spacing = 8
         rule.backgroundColor = .separator
-        [column, rule].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
+        [column, rule, check].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         NSLayoutConstraint.activate([
             column.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 11),
             column.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -11),
-            column.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28),
+            column.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 54),
+            // A generous target, its circle centred on the ask's first line.
+            check.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
+            check.widthAnchor.constraint(equalToConstant: 46),
+            check.heightAnchor.constraint(equalToConstant: 46),
+            check.centerYAnchor.constraint(equalTo: ask.topAnchor, constant: 11),
+            mark.centerXAnchor.constraint(equalTo: check.centerXAnchor),
+            mark.centerYAnchor.constraint(equalTo: check.centerYAnchor),
             column.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
             rule.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             rule.trailingAnchor.constraint(equalTo: column.trailingAnchor),
@@ -602,7 +732,21 @@ private final class TaskCell: UITableViewCell {
 
     func configure(_ row: TaskRow) {
         ask.text = row.ask
-        ask.textColor = row.faded || !row.status.open ? .secondaryLabel : .label
+        ask.textColor = row.faded || row.checked ? .secondaryLabel : .label
+        let symbol = row.status == .dropped ? "xmark.circle.fill" : row.checked ? "checkmark.circle.fill" : "circle"
+        if symbol != shownSymbol, let image = UIImage(systemName: symbol) {
+            shownSymbol = symbol
+            // Ticking animates; a reused cell just shows its state.
+            if shown != nil, shown?.checked != row.checked {
+                mark.setSymbolImage(image, contentTransition: .replace.downUp)
+            } else {
+                mark.image = image
+            }
+        }
+        mark.tintColor = row.status == .dropped ? .tertiaryLabel : row.checked ? Theme.success : .tertiaryLabel
+        check.isEnabled = row.status.open
+        check.accessibilityLabel = row.checked ? "Done" : "Mark done"
+        check.accessibilityTraits = row.checked ? [.button, .selected] : .button
         let detail = [row.faded ? Self.statusName(row.status) : nil, row.note.isEmpty ? nil : row.note, row.shipped].compactMap { $0 }
         note.text = detail.joined(separator: " · ")
         note.isHidden = detail.isEmpty
@@ -630,6 +774,14 @@ private final class TaskCell: UITableViewCell {
         shown = row
         accessibilityLabel = [row.ask, note.text].compactMap { $0 }.joined(separator: ", ")
     }
+
+    #if DEBUG
+    func debugPressCheck() {
+        check.isHighlighted = true
+        check.sendActions(for: .touchUpInside)
+        check.isHighlighted = false
+    }
+    #endif
 
     private static func statusName(_ status: AppTask.Status) -> String {
         switch status {
@@ -706,9 +858,55 @@ private final class TaskCell: UITableViewCell {
     }
 }
 
-/// Open tasks at a glance: one glass line of counts above the field.
+/// Undo for the last ticks: a small glass capsule at the sheet's foot.
+private final class UndoToast: UIView {
+    var onUndo: (() -> Void)?
+    private let surface = Theme.glassSurface(cornerRadius: 20, interactive: true)
+    private let text = Theme.label("", Theme.font(.subheadline, 15, .medium), color: .secondaryLabel)
+    private let button = UIButton(type: .system)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        button.setTitle("Undo", for: .normal)
+        button.titleLabel?.font = Theme.font(.subheadline, 15, .semibold)
+        button.tintColor = Theme.accent
+        button.addAction(UIAction { [weak self] _ in self?.onUndo?() }, for: .touchUpInside)
+        let line = UIStackView(arrangedSubviews: [text, button])
+        line.spacing = 14
+        line.alignment = .center
+        [surface, line].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        addSubview(surface)
+        surface.contentView.addSubview(line)
+        NSLayoutConstraint.activate([
+            surface.topAnchor.constraint(equalTo: topAnchor),
+            surface.bottomAnchor.constraint(equalTo: bottomAnchor),
+            surface.leadingAnchor.constraint(equalTo: leadingAnchor),
+            surface.trailingAnchor.constraint(equalTo: trailingAnchor),
+            surface.heightAnchor.constraint(equalToConstant: 40),
+            line.centerYAnchor.constraint(equalTo: surface.contentView.centerYAnchor),
+            line.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: 18),
+            line.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -16)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(count: Int) {
+        // Keeps its words while fading out.
+        guard count > 0 else { return }
+        text.text = count == 1 ? "Marked done" : "\(count) marked done"
+    }
+
+    #if DEBUG
+    func debugPress() { button.sendActions(for: .touchUpInside) }
+    #endif
+}
+
+/// Open tasks at a glance: a small glass capsule of counts above the field,
+/// as wide as what it says.
 final class TaskStrip: UIControl {
-    private let surface = Theme.glassSurface(cornerRadius: 21, interactive: true)
+    private let surface = Theme.glassSurface(cornerRadius: 15, interactive: true)
     private let parts = UIStackView()
 
     override init(frame: CGRect) {
@@ -717,18 +915,12 @@ final class TaskStrip: UIControl {
         isAccessibilityElement = true
         accessibilityTraits = .button
         clipsToBounds = true
-        let chevron = UIImageView(image: UIImage(systemName: "chevron.up"))
-        chevron.tintColor = .secondaryLabel
-        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .footnote, scale: .small)
-        let line = UIStackView(arrangedSubviews: [parts, UIView(), chevron])
-        line.alignment = .center
-        line.spacing = 8
-        parts.spacing = 14
+        parts.spacing = 10
         parts.alignment = .center
-        [surface, line].forEach { $0.isUserInteractionEnabled = false; $0.translatesAutoresizingMaskIntoConstraints = false }
+        [surface, parts].forEach { $0.isUserInteractionEnabled = false; $0.translatesAutoresizingMaskIntoConstraints = false }
         addSubview(surface)
-        surface.contentView.addSubview(line)
-        let height = surface.heightAnchor.constraint(equalToConstant: 42)
+        surface.contentView.addSubview(parts)
+        let height = surface.heightAnchor.constraint(equalToConstant: 30)
         height.priority = .defaultHigh
         NSLayoutConstraint.activate([
             surface.topAnchor.constraint(equalTo: topAnchor),
@@ -736,14 +928,19 @@ final class TaskStrip: UIControl {
             surface.leadingAnchor.constraint(equalTo: leadingAnchor),
             surface.trailingAnchor.constraint(equalTo: trailingAnchor),
             height,
-            line.centerYAnchor.constraint(equalTo: surface.contentView.centerYAnchor),
-            line.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: 16),
-            line.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -14)
+            parts.centerYAnchor.constraint(equalTo: surface.contentView.centerYAnchor),
+            parts.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: 12),
+            parts.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -12)
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    // A larger touch than it looks.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -8, dy: -8).contains(point)
+    }
 
     override var isHighlighted: Bool {
         didSet { surface.alpha = isHighlighted ? 0.7 : 1 }
@@ -766,12 +963,12 @@ final class TaskStrip: UIControl {
         for (index, item) in items.enumerated() {
             let dot = UIView()
             dot.backgroundColor = item.2
-            dot.layer.cornerRadius = 3.5
+            dot.layer.cornerRadius = 3
             dot.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([dot.widthAnchor.constraint(equalToConstant: 7), dot.heightAnchor.constraint(equalToConstant: 7)])
-            let label = Theme.label(texts[index], Theme.font(.subheadline, 15, .medium), color: item.3 ? .label : .secondaryLabel)
+            NSLayoutConstraint.activate([dot.widthAnchor.constraint(equalToConstant: 6), dot.heightAnchor.constraint(equalToConstant: 6)])
+            let label = Theme.label(texts[index], Theme.font(.footnote, 13, .medium), color: item.3 ? .label : .secondaryLabel)
             let part = UIStackView(arrangedSubviews: [dot, label])
-            part.spacing = 6
+            part.spacing = 5
             part.alignment = .center
             parts.addArrangedSubview(part)
         }

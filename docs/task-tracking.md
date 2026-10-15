@@ -77,7 +77,13 @@ instructions say the same.
   Done (today's). Rows show the ask, the note, linked threads as chips (tap
   opens the thread), thumbnails (tap opens the picture or plays the clip) and
   Install when a linked build is ready. Tapping a row opens its most relevant
-  thread. Swipe (UIKit's own actions): Done / Drop (the row moves at once
+  thread. **One-tap Done (2026-10-15, user-requested):** a round circle at
+  each open row's leading edge (like Reminders) ticks it with a haptic; the
+  list holds still while you tick down it and the ticked rows move to Done
+  together 0.65 s after the last tick (tap again before then to untick). A
+  small glass "N marked done · Undo" capsule stays 4 s and puts them back.
+  No pull to refresh: the sheet's lease keeps the list current, so pulling
+  down at the top dismisses the sheet. Swipe (UIKit's own actions): Done / Drop (the row moves at once
   and holds until the Mac confirms), or Top; the list holds still while a
   swipe is open and catches up when it closes; long press:
   any status, Move to Top. History folds at the bottom, with search; it
@@ -88,5 +94,7 @@ instructions say the same.
   header is the close button and the switch on glass over a soft scroll
   edge; group names are small labels that scroll with their rows.
 - **Strip** above the message field on the agent while tasks are open:
-  "1 needs you · 5 working · 3 to try"; tapping opens Tasks. The conversation
+  "1 needs you · 5 working · 3 to try" in a small glass capsule as wide as
+  its text, centred over the field (2026-10-15, was a full-width bar);
+  tapping opens Tasks. The conversation
   keeps clear of it (it counts as part of the field for the bottom inset).

@@ -1855,6 +1855,12 @@ final class SquircleModel {
     /// so far, and your edits it hasn't confirmed yet laid over them.
     func tasks(for project: AppProject) -> AppTasks { tasks(app: project.id) }
     private func tasks(app: String) -> AppTasks {
+        #if DEBUG
+        if var list = demoTasks {
+            for (id, edit) in taskEdits { list = Self.apply(edit, to: id, in: list) }
+            return list
+        }
+        #endif
         guard var list = observedTasks[app] else { return AppTasks() }
         if let older = olderHistory[app] {
             let seen = Set(list.tasks.map(\.id) + list.history.map(\.id))
@@ -1864,7 +1870,7 @@ final class SquircleModel {
         for (id, edit) in taskEdits { list = Self.apply(edit, to: id, in: list) }
         return list
     }
-    /// Pull to refresh: the newest tasks, and History from its first page.
+    /// The newest tasks at once, and History from its first page.
     func refreshTasks() async {
         guard let client, let app = selectedProjectID, let list = try? await client.tasks(projectID: app) else { return }
         olderHistory[app] = nil
@@ -1920,6 +1926,13 @@ final class SquircleModel {
         return list
     }
     func updateTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) async {
+        #if DEBUG
+        if let demo = demoTasks {
+            demoTasks = Self.apply(PendingTaskEdit(generation: 0, status: status, toTop: toTop), to: task.id, in: demo)
+            taskEdits[task.id] = nil
+            return
+        }
+        #endif
         guard let client else { return }
         if let edit = taskEdits[task.id], edit.receipt == nil, edit.status == status, edit.toTop == toTop {} else {
             markTask(task, status: status, toTop: toTop)
@@ -1937,6 +1950,25 @@ final class SquircleModel {
         let app = observedTasks.first { _, list in (list.tasks + list.history).contains { $0.id == task.id } }?.key ?? selectedProjectID
         if let app, let list = try? await client.tasks(projectID: app) { adoptTasks(list, for: app) }
     }
+    #if DEBUG
+    /// `SQUIRCLE_DEMO_TASKS=1`: made-up tasks kept on the phone, so ticking
+    /// through them on a simulator touches nobody's real list.
+    private var demoTasks: AppTasks? = SquircleModel.makeDemoTasks() { didSet { changed() } }
+    private static func makeDemoTasks() -> AppTasks? {
+        guard ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_TASKS"] == "1" else { return nil }
+        let asks: [(String, String)] = [
+            ("Stack the sims and fan them out", "in_progress"), ("Make the send button smaller", "ready_to_try"),
+            ("Dark mode for the build sheet", "ready_to_try"), ("Swipe back from anywhere in a thread", "queued"),
+            ("Show the build number on cards", "queued"), ("Faster cold launch", "queued"),
+            ("Pin the newest build to the top", "queued"), ("Haptic when a turn finishes", "queued")]
+        let tasks = asks.enumerated().map { index, item in
+            ["id": "demo-\(index)", "ask": item.0, "status": item.1, "note": "", "order": Double(index),
+             "updated_at": 0, "threads": [], "builds": [], "media": []] as [String: Any]
+        }
+        let data = try? JSONSerialization.data(withJSONObject: ["tasks": tasks, "history": []])
+        return data.flatMap { try? JSONDecoder().decode(AppTasks.self, from: $0) }
+    }
+    #endif
     private var taskMedia = BoundedCache<String, Data>(budget: 16 << 20, cost: \.count)
     /// A picture attached to a task, downloaded once.
     func taskMediaData(task: String, media: String) async -> Data? {
