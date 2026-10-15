@@ -1900,7 +1900,7 @@ workers booted and created their own with `simctl`/`xcodebuild`.
 
 **Decision (user-requested).** A session is the simulator's lease, tied to
 the thread. When it ends (stop, the turn idle 8 s, archive, the 30-minute
-limit, service shutdown or restart recovery; `release_pending` in the
+limit, a service stop (not a restart, see below) or recovery; `release_pending` in the
 ledger), the simulator is shut down unless another session holds it or the
 policy below keeps it. `src/simpool.rs` decides the rest from plain facts
 (`plan`): a booted simulator is Squircle's when a session used it or an
@@ -2273,3 +2273,30 @@ olive, crimson), shape is who it is.
   with working agents peeking. `SQUIRCLE_STRESS=1`: violations=0 (two 30 s
   runs). Scrolling the long Squircle agent thread (`SQUIRCLE_SCROLL_SWEEP=1`,
   hitches = frames over 1.5 periods): before 7, 11, 11 hitches; after 8, 5, 6.
+
+## 2026-10-15 restarts hand simulator sessions over
+
+Deploying a new service binary needed a restart, and the graceful shutdown
+stopped every recorder and closed T3's device sessions, so workers lost their
+simulators mid-task; with agents always on simulators a restart waited 50
+minutes for an idle moment that never came.
+
+**Decision (user-requested).** A restart leaves live sessions running and the
+next process adopts them; only a real stop ends them. SIGTERM to
+`squircle serve` is a handover (`sims::Exit::Handover`): new starts are
+refused, ended sessions' owed closes and releases still run, but recordings
+continue (recorders are separate processes, now in their own process group),
+T3's device sessions stay open, and leases and the queue stay in the ledger.
+On startup a recording whose saved recorder PID is still provably its own
+(its command line names the session's file, as the R01 fix checks) is
+adopted: it is watched again for the recorder exiting, the 30-minute limit
+and the turn ending (the idle grace restarts), and a later stop SIGINTs it
+and files the whole movie. Anything else unfinished is finished as before.
+SIGINT (Ctrl-C) or `squircle service stop` is the real stop.
+`squircle service restart` builds nothing: it signals the running service
+(found through `service.lock`), waits for it to exit, starts the same command
+line, environment and working directory (read from the kernel, so a binary
+rebuilt at the same path takes over) with output appended to
+`DATA_DIR/serve.log`, and returns once the new process holds the lock and
+answers `/health`. Builds still in flight are cancelled by a restart, as
+before.

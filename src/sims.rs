@@ -23,6 +23,11 @@
 //! slot is held for that thread) and woken with a service message; its next
 //! `sim start` takes the slot. A grant the woken turn leaves unclaimed, or
 //! a thread T3 no longer has, gives its place up.
+//!
+//! A restart hands sessions over rather than ending them (`Exit::Handover`):
+//! recorders are separate processes and keep recording, T3's device sessions
+//! stay open, and the next run adopts every recording whose recorder is
+//! provably still its own. Only a real stop (`Exit::Stop`) ends them.
 
 use crate::agents::{Agents, Observed};
 use crate::media::{self, SimulatorClip};
@@ -417,8 +422,11 @@ impl Host for AgentsHost {
             .args(["simctl", "io", device, "recordVideo", "--codec=h264", "--force"])
             .arg(path)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(log)
-            // Outlives a crash so the next run can end it cleanly (SIGINT).
+            // Outlives a restart or crash so the next run can adopt it or end
+            // it cleanly (SIGINT), and a signal to the service's process group
+            // (a closed terminal) doesn't end it.
             .kill_on_drop(false)
+            .process_group(0)
             .spawn().context("Cannot start simctl recordVideo")
     }
 
@@ -572,11 +580,14 @@ impl Sims {
     pub fn with_host(root: &Path, host: Arc<dyn Host>) -> Result<Arc<Self>> {
         let path = root.join("sims.json");
         let ledger: Ledger = if path.try_exists()? { read_json(&path)? } else { Ledger::default() };
-        let orphans = ledger.sessions.iter().filter(|s| !s.ended()).map(|s| s.id.clone()).collect();
         // A recorder a previous run left is taken over only if it is provably this session's.
-        let recorders = ledger.sessions.iter()
+        let recorders: HashMap<String, Recorder> = ledger.sessions.iter()
             .filter_map(|s| Some((s.id.clone(), s.recorder_pid().filter(|pid| is_recorder(*pid, &s.id))?)))
             .map(|(id, pid)| (id, Recorder::Recovered { pid })).collect();
+        // A recording handed over with its recorder still running carries on,
+        // watched like any other; the rest a previous run left are finished.
+        let adopted = |s: &SimSession| s.active() && recorders.contains_key(&s.id);
+        let orphans = ledger.sessions.iter().filter(|s| !s.ended() && !adopted(s)).map(|s| s.id.clone()).collect();
         let sims = Arc::new(Self {
             root: root.to_path_buf(),
             host,
@@ -626,7 +637,7 @@ impl Sims {
     pub async fn start(self: &Arc<Self>, thread: &str, device: Option<&str>) -> Result<Value> {
         ensure!(media::valid_thread(thread) && uuid::Uuid::parse_str(thread).is_ok(), "Thread ID must be a T3 thread UUID");
         let _op = self.ops.lock().await;
-        ensure!(!*self.draining.borrow(), "Squircle is shutting down; start the simulator again once it is back");
+        ensure!(!*self.draining.borrow(), "Squircle is restarting or stopping; start the simulator again once it is back");
         let inventory = inventory(&*self.host).await?;
         ensure!(self.host.activity(thread) != Activity::Gone, "T3 has no thread {thread}");
         let simulators = local_simulators(&inventory);
@@ -1158,16 +1169,17 @@ impl Sims {
         due
     }
 
-    /// For the service's graceful shutdown: refuses new starts, stops the
-    /// watchdog, ends every recording (filed uncompressed, to be quick) and
-    /// closes T3's device sessions. Anything it can't finish stays in the
-    /// ledger for the next run.
-    pub async fn shutdown(&self) {
+    /// For the service's graceful exit: refuses new starts and stops the
+    /// watchdog. A stop ends every recording (filed uncompressed, to be
+    /// quick); a handover leaves them recording for the next run. Either way
+    /// T3's device sessions of ended sessions are closed and their simulators
+    /// released. Anything it can't finish stays in the ledger for the next run.
+    pub async fn shutdown(&self, exit: Exit) {
         // Not behind `ops`: a start booting a simulator could hold it for
         // minutes. One past its commit check is rolled back instead.
         self.draining.send_replace(true);
         let live: Vec<String> = self.state.lock().unwrap().ledger.sessions.iter()
-            .filter(|s| s.active()).map(|s| s.id.clone()).collect();
+            .filter(|s| s.active() && exit == Exit::Stop).map(|s| s.id.clone()).collect();
         futures_util::future::join_all(live.iter().map(|id| async move {
             if self.halt(id, "service stopped", SHUTDOWN_GRACE, false).await.is_some() {
                 let _ = self.file(id, false).await;
@@ -1184,6 +1196,15 @@ impl Sims {
             let _ = self.save(&mut state);
         }
     }
+}
+
+/// How the service is exiting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Exit {
+    /// A restart (SIGTERM): live sessions carry on into the next run.
+    Handover,
+    /// A real stop (SIGINT, `squircle service stop`): live sessions end.
+    Stop,
 }
 
 /// Owns a starting session's provisional resources: unless startup commits,
@@ -1324,7 +1345,7 @@ mod tests {
         fn record(&self, _: &str, path: &Path, log: std::fs::File) -> Result<Child> {
             Ok(Command::new("/bin/sh")
                 .args(["-c", "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done", "sh"])
-                .arg(path).stderr(log).kill_on_drop(true).spawn()?)
+                .arg(path).stderr(log).spawn()?)
         }
         fn compact<'a>(&'a self, _: &'a Path) -> Pending<'a, Option<PathBuf>> {
             Box::pin(async { None })
@@ -1443,12 +1464,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (sims, fake) = sims(dir.path(), Some(Ok(())));
         sims.start(THREAD, None).await.unwrap();
-        sims.shutdown().await;
+        sims.shutdown(Exit::Stop).await;
         let session = only(&sims);
         assert_eq!((state(&session).as_str(), session.device.owed()), ("finished", false));
         assert_eq!(fake.closes(), 1);
         assert!(sims.start(THREAD, None).await.is_err());
         assert!(sims.state.lock().unwrap().recorders.is_empty());
+    }
+
+    /// A restart hands a recording over: its recorder keeps running and T3's
+    /// device session stays open; the next run adopts it (no "service
+    /// restarted" stop), watches it, and a later stop files the whole movie.
+    /// One whose recorder died meanwhile is finished instead.
+    #[tokio::test]
+    async fn handover_keeps_recording_into_the_next_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sims, fake) = sims(dir.path(), Some(Ok(())));
+        let other = "0e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
+        fake.max.store(2, std::sync::atomic::Ordering::SeqCst);
+        sims.start(THREAD, None).await.unwrap();
+        sims.start(other, Some("SIM2")).await.unwrap();
+        let (ids, pids): (Vec<String>, Vec<u32>) = sims.state.lock().unwrap().ledger.sessions.iter()
+            .map(|s| (s.id.clone(), s.recorder_pid().unwrap())).unzip();
+        sims.shutdown(Exit::Handover).await;
+        assert!(sims.start(THREAD, None).await.is_err(), "started while handing over");
+        assert_eq!((fake.closes(), fake.count("release SIM1")), (0, 0));
+        assert!(sims.state.lock().unwrap().ledger.sessions.iter().all(|s| s.active() && s.device == DeviceLease::Open));
+        drop(sims);
+        assert!(pids.iter().all(|pid| alive(*pid)), "a recorder stopped with the old run");
+        // The second session's recorder dies between the runs.
+        unsafe { libc::kill(pids[1] as i32, libc::SIGKILL) };
+        while is_recorder(pids[1], &ids[1]) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let reopened = Sims::with_host(dir.path(), fake.clone()).unwrap();
+        let orphans = reopened.state.lock().unwrap().orphans.clone();
+        assert_eq!(orphans, [ids[1].clone()]);
+        // Watched again: only the one whose recorder died is due to end.
+        assert_eq!(reopened.due(), [(ids[1].clone(), "recorder stopped")]);
+        let receipt = reopened.stop(Some(THREAD), None).await.unwrap();
+        assert!(matches!(receipt.session.phase, SessionPhase::Finished { ref reason, .. } if reason == "stopped"));
+        assert_eq!(std::fs::read(&media::list(dir.path(), THREAD).unwrap()[0].file).unwrap(), b"movie");
+        assert_eq!(fake.closes(), 1);
     }
 
     /// A session's end shuts its simulator down once T3's device session is

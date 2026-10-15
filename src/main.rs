@@ -50,6 +50,12 @@ enum Commands {
         )]
         public_url: Option<String>,
     },
+    /// Restart or stop the running service for this data directory.
+    #[command(after_help = "restart: the running service hands its simulator sessions over (recordings keep going, T3's device sessions stay open) and the same command line starts again, picking up a binary rebuilt at the same path; returns once it answers. It builds nothing; its output goes to DATA_DIR/serve.log.\nstop: ends simulator sessions (recordings are filed) and exits.\nA plain SIGTERM to squircle serve is a restart's handover; SIGINT (Ctrl-C) is a stop.")]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Inspect Mac build prerequisites without changing configuration.
     Doctor,
     /// List implemented operations, output schema, and important limits.
@@ -593,6 +599,14 @@ enum AppCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Hand over to a new service process without ending simulator sessions.
+    Restart,
+    /// Stop the service, ending simulator sessions.
+    Stop,
+}
+
 /// Whether `server` is a service on this Mac, which local-only commands
 /// (`media`) can stand in for by writing its data directory.
 fn local_server(server: &str) -> bool {
@@ -750,8 +764,16 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             squircle::server::serve(root(cli)?, *listen, public_url.clone()).await?;
             return Ok(None);
         }
+        Commands::Service { command } => {
+            let root = root(cli)?;
+            ensure!(local_server(&cli.server), "service controls this Mac's service; --server must be on this Mac");
+            success(match command {
+                ServiceCommand::Restart => squircle::service::restart(&root, &cli.server).await?,
+                ServiceCommand::Stop => squircle::service::stop(&root).await?,
+            })
+        }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","sim.cleanup","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"},
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","sim.cleanup","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status","service.restart","service.stop"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"},
                 "invocation":squircle::agents::cli_invocation(&std::path::absolute(root(cli)?)?, &cli.server)}),
         ),
         Commands::App { command } => match command {
