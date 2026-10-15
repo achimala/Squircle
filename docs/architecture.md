@@ -393,10 +393,12 @@ live in `ThreadCells.swift`, the composer in `ThreadViews.swift`.
 
 `T3DeviceStream.Lifetime` is stopped or running(generation, task, phase). Connecting
 owns a partial attempt; interactive owns a nonoptional video/input pair; retrying
-owns neither. One authenticated H.264 AVCC request starts video, then its first decoded frame
-precedes the input WebSocket's screen-config handshake. Input remains disabled
-until both succeed. Either connection failing closes both, obtains a fresh ticket
-and retries with bounded backoff. Startup has a deadline; idle images are valid.
+owns neither. One authenticated H.264 AVCC request starts video; its response precedes the
+input WebSocket's screen-config handshake. Input remains disabled until both
+succeed. Either connection failing closes both, obtains a fresh ticket and
+retries with bounded backoff. The startup deadline covers the two handshakes,
+never pictures: a still screen sends serve-sim's JPEG seed and then nothing, and
+stays connected (the input socket's pings detect a dead path).
 Cancellation closes real resources and generation checks reject old callbacks.
 
 AVCC framing and VideoToolbox decode run on a serial background delegate queue.
@@ -404,7 +406,8 @@ Hardware decoding is required on the physical phone. Each decode completes befor
 the next starts, without temporal buffering; all encoded reference frames are
 preserved. Only the newest decoded picture waits for UIKit. The display drops
 pictures when busy instead of accumulating playback. The host's one-off JPEG seed
-is ignored. There is no MJPEG request, decoder, priming stream or fallback.
+(tag 4, first on every request) is drawn once, until H.264 starts: it is a still
+screen's only picture. There is no MJPEG request, playback, priming stream or fallback.
 Touch coordinates map into the letterboxed image. A channel owns its ordered
 gesture queue; gestures never replay into a replacement channel. Native pinch and
 an exclusive human/agent input lock are not implemented. Video uses T3's existing

@@ -2214,3 +2214,17 @@ screens weren't changing. serve-sim's `stream.avcc` then sends only its JPEG
 seed (which the phone never plays) and no H.264 until the screen changes, so
 the feed had no picture. A simulator now joins the deck only once its feed has
 drawn a picture; until then it streams unseen.
+
+## 2026-10-15 idle simulators stay connected
+
+A still simulator reconnected about every 30 s, re-downloading serve-sim's
+~490 KB JPEG seed each time (measured on real T3: one tag-4 packet of 485,703
+bytes, then nothing for 25 s). The phone's startup deadline waited for the
+first decoded H.264 picture, which a still screen never sends, so the attempt
+was cancelled after 20 s and retried. Startup now waits only for the video
+response and the input socket's screen config; afterwards the stream lives as
+long as its connections (the input socket's 20 s pings detect a dead path), and
+silence is a still screen. The seed is drawn once per connection, until H.264
+starts, so a still simulator shows its picture and joins the deck; it is never
+JPEG playback.
+

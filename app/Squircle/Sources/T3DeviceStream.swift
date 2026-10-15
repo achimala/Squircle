@@ -1,4 +1,5 @@
 import AVFoundation
+import ImageIO
 import Synchronization
 import UIKit
 import VideoToolbox
@@ -205,7 +206,7 @@ private final class SimulatorH264Decoder {
     private var sequence: Int64 = 0
     func consume(tag:UInt8,payload:Data) throws -> CVPixelBuffer? {
         if tag == 1 { phase = .awaitingKeyframe(try Configuration(avcC:payload)); return nil }
-        guard tag == 2 || tag == 3 else { return nil } // Ignore the host's one-off JPEG seed; never play JPEG.
+        guard tag == 2 || tag == 3 else { return nil } // The JPEG seed is `SimulatorSeed`'s; never play JPEG.
         let config: Configuration
         switch phase {
         case .waiting: throw ClientError.response("Simulator missing H.264 configuration")
@@ -236,24 +237,55 @@ private final class SimulatorH264Decoder {
     }
 }
 
+/// The one still serve-sim sends first on every `stream.avcc` request (tag 4,
+/// a JPEG of the current screen). A screen that doesn't change sends no H.264
+/// at all, so this is its only picture: it is drawn once, until H.264 starts.
+/// One picture per connection; never JPEG playback.
+private enum SimulatorSeed {
+    static func picture(_ jpeg: Data) -> CVPixelBuffer? {
+        guard let source = CGImageSourceCreateWithData(jpeg as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+        else { return nil }
+        let attributes: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:], kCVPixelBufferMetalCompatibilityKey as String: true]
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(nil, image.width, image.height, kCVPixelFormatType_32BGRA, attributes as CFDictionary, &buffer) == kCVReturnSuccess,
+              let buffer else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let context = CGContext(data: CVPixelBufferGetBaseAddress(buffer), width: image.width, height: image.height, bitsPerComponent: 8,
+                                      bytesPerRow: CVPixelBufferGetBytesPerRow(buffer), space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return buffer
+    }
+}
+
+/// What the video request delivers: its response (the feed is open), then
+/// pictures whenever the screen changes. A still screen sends none.
+private enum SimulatorEvent { case open, picture(CVPixelBuffer) }
+
 /// One authenticated H.264 request. Decoded pictures go to `output` at their
-/// paced times and, newest only, to `frames`. No codec fallback or priming
+/// paced times and, newest only, to `events`. No codec fallback or priming
 /// stream. URLSession delegates, decoding, pacing and presentation share a
-/// serial queue, off the main actor.
+/// serial queue, off the main actor. It lives as long as its connection:
+/// silence is a still screen, not a dead stream.
 private final class SimulatorVideo: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    let frames: AsyncThrowingStream<CVPixelBuffer, Error>
-    private let continuation: AsyncThrowingStream<CVPixelBuffer, Error>.Continuation
+    let events: AsyncThrowingStream<SimulatorEvent, Error>
+    private let continuation: AsyncThrowingStream<SimulatorEvent, Error>.Continuation
     private let output: SimulatorOutput
     private var session: URLSession!
     private var framer = AVCCFramer()
     private var decoder = SimulatorH264Decoder()
     private var pacer = SimulatorPacer()
+    /// Until H.264 draws, the seed may; afterwards it never replaces video.
+    private var decoded = false
     #if DEBUG
     private var stats = SimulatorPacingStats()
     #endif
     init(request: URLRequest, output: SimulatorOutput) {
         self.output = output
-        (frames, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy:.bufferingNewest(1))
+        (events, continuation) = AsyncThrowingStream.makeStream(bufferingPolicy:.bufferingNewest(1))
         super.init()
         let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1; queue.qualityOfService = .userInteractive
         let config = URLSessionConfiguration.ephemeral
@@ -274,6 +306,7 @@ private final class SimulatorVideo: NSObject, URLSessionDataDelegate, @unchecked
             completionHandler(.cancel); return
         }
         completionHandler(.allow)
+        continuation.yield(.open)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
@@ -285,14 +318,20 @@ private final class SimulatorVideo: NSObject, URLSessionDataDelegate, @unchecked
         let arrival = CACurrentMediaTime()
         do {
             try framer.consume(data) { tag, payload in
+                if tag == 4 {
+                    guard !decoded, let seed = SimulatorSeed.picture(payload) else { return }
+                    output.show(seed,at:CACurrentMediaTime())
+                    continuation.yield(.picture(seed)); return
+                }
                 guard let buffer = try decoder.consume(tag:tag,payload:payload) else { return }
+                decoded = true
                 let decoded = CACurrentMediaTime()
                 let time = pacer.time(arrival:arrival,earliest:decoded + 0.002)
                 #if DEBUG
                 stats.add(arrival:arrival,decoded:decoded,time:time,delay:pacer.delay(at:arrival))
                 #endif
                 output.show(buffer,at:time)
-                continuation.yield(buffer)
+                continuation.yield(.picture(buffer))
             }
         } catch { close(error) }
     }
@@ -426,8 +465,10 @@ final class T3DeviceStream {
     private func connect(_ id:UUID) async throws {
         let video = SimulatorVideo(request:try http.request(base + "/helper/\(target.deviceID)/stream.avcc",
             query:[URLQueryItem(name:"hostId",value:target.hostID)]),output:output)
-        // A failed input handshake also releases video. A startup timeout cancels
-        // the actual resources, so no orphan receive task can hold a retry open.
+        // A failed input handshake also releases video. The startup deadline
+        // covers the two handshakes only (video's response, input's config),
+        // never pictures: a still screen sends none. It cancels the actual
+        // resources, so no orphan receive task can hold a retry open.
         let attempt = SimulatorAttempt(video:video); set(.connecting(attempt),id:id)
         let deadline = Task {
             try? await Task.sleep(for:.seconds(20))
@@ -435,10 +476,10 @@ final class T3DeviceStream {
             attempt.close(ClientError.connection("Simulator startup"))
         }
         defer { deadline.cancel(); attempt.close() }
-        var frames = video.frames.makeAsyncIterator()
-        guard let first = try await frames.next() else { throw ClientError.connection("Simulator video") }
+        var events = video.events.makeAsyncIterator()
+        guard let first = try await events.next() else { throw ClientError.connection("Simulator video") }
         try Task.checkCancellation(); guard owns(id) else { throw CancellationError() }
-        onFrame?(first)
+        if case .picture(let picture) = first { onFrame?(picture) }
         let ws = http.session.webSocketTask(with:try await http.socketRequest(base + "/helper/ws",query:[
             URLQueryItem(name:"device",value:target.deviceID),URLQueryItem(name:"hostId",value:target.hostID)]))
         attempt.socket = ws; ws.resume()
@@ -467,8 +508,11 @@ final class T3DeviceStream {
             } catch { if !Task.isCancelled { video.close(error) } }
         }
         defer { input.cancel(); heartbeat.cancel(); channel.close() }
-        while let buffer = try await frames.next() {
-            try Task.checkCancellation(); guard owns(id) else { throw CancellationError() }; onFrame?(buffer)
+        // Connected until either connection fails (the input socket's pings
+        // detect a dead path); a quiet stream keeps its last picture.
+        while let event = try await events.next() {
+            try Task.checkCancellation(); guard owns(id) else { throw CancellationError() }
+            if case .picture(let picture) = event { onFrame?(picture) }
         }
         throw ClientError.connection("Simulator video")
     }
