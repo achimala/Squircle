@@ -211,10 +211,15 @@ enum ThreadItem: Equatable {
             }
             made.append(rows)
         }
-        // A build's card sits where it was last mentioned (Squircle's update
-        // when it finished, else the agent's words or its start), once.
+        // A build's card sits where it was last mentioned (Squircle's update,
+        // the agent's words or its start) or where it finished, whichever is
+        // later, once: a build that succeeds is posted by its card alone.
         var cardTurn: [String: Int] = [:]
         for (index, rows) in made.enumerated() { for buildID in rows.buildIDs { cardTurn[buildID] = index } }
+        func finished(_ build: AppBuild) -> Int? {
+            build.status == "queued" || build.status == "running" ? nil : starts.lastIndex { $0 <= build.updatedAt }
+        }
+        for (id, index) in cardTurn { if let build = known[id], let end = finished(build), end > index { cardTurn[id] = end } }
         // Builds this conversation's workers or tasks started get a line of
         // their own where they began, unless the agent's own command shows it.
         let startedHere = made.reduce(into: Set<String>()) { $0.formUnion($1.startedIDs) }
@@ -224,16 +229,24 @@ enum ThreadItem: Equatable {
                 let index = starts.lastIndex { $0 <= build.date } ?? 0
                 guard index < made.count else { continue }
                 startedLines[index, default: []].append(build)
-                if cardTurn[build.id.lowercased()] == nil, build.status != "queued", build.status != "running" { cardTurn[build.id.lowercased()] = index }
+                if cardTurn[build.id.lowercased()] == nil, let end = finished(build) { cardTurn[build.id.lowercased()] = max(index, end) }
             }
         }
         var items: [ThreadItem] = []
         for (index, rows) in made.enumerated() {
             let id = turns[index].user?.id ?? "start"
-            items += rows.body.map { item in
-                guard case .action(var line) = item, case .action(let action) = line.kind, let build = action.build?.raw else { return item }
-                line.buildStatus = known[build]?.status
-                return .action(line)
+            items += rows.body.compactMap { item in
+                guard case .action(var line) = item else { return item }
+                switch line.kind {
+                // Squircle's news of a build is its card; the line stands in
+                // only for a build the service no longer lists.
+                case .build(let news): return known[news.id] == nil ? item : nil
+                case .action(let action):
+                    guard let build = action.build?.raw else { return item }
+                    line.buildStatus = known[build]?.status
+                    return .action(line)
+                case .news: return item
+                }
             }
             for build in startedLines[index] ?? [] {
                 var line = ActionLine(id: "started:" + build.id.lowercased(),

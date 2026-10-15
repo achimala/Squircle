@@ -2183,4 +2183,18 @@ Squircle · App build ready/failed" line (with the failure's first error)
 followed by the card; a worker's or task's build shows a "Started build ·
 App" line with live status where it began; each build has one card, at its
 latest mention. The agent and worker instructions say finished builds
-appear by themselves. Rust test: `finished_builds_reach_their_agent_once`.
+appear by themselves. Rust test: `finished_builds_reach_their_agent_once` (since renamed).
+
+**2026-10-15 later (user: "why am I seeing these internal msgs"):** a build
+update showed on the phone as your bubble with the agent's instructions.
+Now every message the service sends in the user's place (worker and build
+updates, handoffs, worker tasks, `thread send`) is built by one `Note` type
+in `src/agents.rs` that marks it with a `squircle-*` record; the phone's one
+`ServiceNote` recogniser treats any such record, even an unknown kind, as
+Squircle's line, never a bubble, and never shows its text. A build update is
+the build card itself (Install, or the failure's first error line). A build
+that succeeds no longer wakes the agent (its reply only repeated the card):
+the card is placed in the turn where the build finished. A failure still
+wakes it, and the agent is told to end its turn without a reply when there
+is nothing for it to do. Tests: `service_messages_are_marked`,
+`failed_builds_reach_their_agent_once`, `testServiceMessagesNeverShowAsYours`.
