@@ -11,6 +11,7 @@ pub mod preview;
 pub mod projects;
 pub mod push;
 pub mod server;
+pub mod serving;
 pub mod simpool;
 pub mod sims;
 pub mod store;

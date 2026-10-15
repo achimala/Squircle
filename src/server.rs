@@ -1,5 +1,5 @@
 use crate::{agents::Agents, apps, push::Push, simpool::Pool, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::{AdmitError, Jobs, MAX_OPERATIONS, Store}, xcode};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::{
     Json, Router,
     body::Body,
@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs::OpenOptions,
+    io::Write,
     net::SocketAddr,
     path::PathBuf,
     sync::{
@@ -245,7 +246,6 @@ async fn compact_json(request: Request, next: Next) -> Response {
         return Response::from_parts(parts, Body::empty());
     }
     if gzip && bytes.len() >= 1024 {
-        use std::io::Write;
         let mut encoder = flate2::write::GzEncoder::new(Vec::with_capacity(bytes.len() / 4), flate2::Compression::fast());
         if encoder.write_all(&bytes).is_ok() && let Ok(compressed) = encoder.finish() {
             parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
@@ -341,8 +341,17 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         .truncate(false)
         .write(true)
         .open(store.root.join("service.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock)
-        .context("Another Squircle service owns this data directory")?;
+    // The kernel releases this lock when its holder exits, however it exits,
+    // so only a running service can refuse a start; its PID says which.
+    if let Err(error) = fs2::FileExt::try_lock_exclusive(&lock) {
+        let holder = std::fs::read_to_string(store.root.join("service.lock")).unwrap_or_default();
+        return Err(anyhow::Error::new(error).context(format!(
+            "Another Squircle service owns this data directory (process {})",
+            holder.trim()
+        )));
+    }
+    lock.set_len(0)?;
+    (&lock).write_all(std::process::id().to_string().as_bytes())?;
     let public_url = public_url
         .as_deref()
         .map(artifact::validate_public_url)
@@ -384,44 +393,40 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     background.push(tokio::spawn(push.clone().run()));
     background.push(tokio::spawn(sims.clone().run()));
     background.push(tokio::spawn(pool.clone().run(sims.clone())));
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let signal = async move {
+        #[cfg(unix)]
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+        #[cfg(not(unix))]
+        let _ = tokio::signal::ctrl_c().await;
+    };
     let shutdown = state.clone();
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async move {
-            #[cfg(unix)]
-            {
-                let mut terminate =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("signal handler");
-                tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+    crate::serving::serve(listener, router(state), signal, || async move {
+        // Serialize the admission cutoff with start's registration of a job.
+        {
+            let _store = shutdown.store.lock().unwrap();
+            shutdown.draining.store(true, Ordering::Release);
+        }
+        shutdown.jobs.cancel_all();
+        // Let cancelled runners reap their children and persist terminal state.
+        for _ in 0..100 {
+            if shutdown.jobs.operations() == 0 {
+                break;
             }
-            #[cfg(not(unix))]
-            {
-                let _ = tokio::signal::ctrl_c().await;
-            }
-            // Serialize the admission cutoff with start's registration of a job.
-            {
-                let _store = shutdown.store.lock().unwrap();
-                shutdown.draining.store(true, Ordering::Release);
-            }
-            shutdown.jobs.cancel_all();
-            // Let cancelled runners reap their children and persist terminal state.
-            for _ in 0..100 {
-                if shutdown.jobs.operations() == 0 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            // Refuses new simulator starts, then stops and files recordings and
-            // closes their T3 device sessions. Anything cut off here is left in
-            // the durable ledger for the next start to recover.
-            if tokio::time::timeout(std::time::Duration::from_secs(10), sims.shutdown())
-                .await
-                .is_err()
-            {
-                eprintln!("Simulator shutdown timed out; the next start recovers it.");
-            }
-        })
-        .await?;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Refuses new simulator starts, then stops and files recordings and
+        // closes their T3 device sessions. Anything cut off here is left in
+        // the durable ledger for the next start to recover.
+        if tokio::time::timeout(std::time::Duration::from_secs(10), sims.shutdown())
+            .await
+            .is_err()
+        {
+            eprintln!("Simulator shutdown timed out; the next start recovers it.");
+        }
+    })
+    .await;
     for task in background {
         task.abort();
     }
@@ -1779,7 +1784,6 @@ mod tests {
     }
 
     fn test_ipa(path: &std::path::Path) -> Result<()> {
-        use std::io::Write;
         let mut metadata = plist::Dictionary::new();
         metadata.insert("CFBundleIdentifier".into(), "dev.example.probe".into());
         metadata.insert("CFBundleVersion".into(), "1".into());
