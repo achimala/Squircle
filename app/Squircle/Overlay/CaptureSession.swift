@@ -1,9 +1,6 @@
 #if SQUIRCLE_OVERLAY || DEBUG
 import UIKit
 
-/// One screen or performance recording at a time, started from the message
-/// field's + menu while the overlay docks out of the way. `recording` is the
-/// whole state the bubble renders.
 /// What a recorder hands over when it stops.
 enum CaptureOutput {
     /// A video and, if it drew a frame, its first picture.

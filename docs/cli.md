@@ -28,7 +28,7 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `init`, `serve` | Private state/credentials; foreground HTTP service |
 | `auth show --scope diagnostics` | Explicitly reveal the phone upload credential |
 | `build start` | Durable job ID; archive/export or unsigned simulator mode. Non-App-Store device exports get the debug overlay injected unless `--no-overlay` |
-| `build list`, `build status ID` | Persisted job records and launch acknowledgement; `status` of a failed job adds `failure` (failing step, exit status, Xcode `error:` lines with file, line and source excerpt, failed commands) read from its log |
+| `build list`, `build status ID` | Job records (flat, as saved, plus `revision`, and `persistence_error` when a finished result couldn't be saved) and launch acknowledgement; `status` of a failed job adds `failure` (failing step, exit status, Xcode `error:` lines with file, line and source excerpt, failed commands) read from its log |
 | `build wait ID --timeout 60` | Completion or bounded timeout; no implicit cancellation |
 | `build cancel ID` | Cancel that queued/running job |
 | `build log ID --offset N --limit N` | Bounded compiler log, byte cursor |
@@ -44,7 +44,7 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `media add --thread T3_ID --file PATH --caption TEXT` | Publish an mp4/mov/png/jpg into a T3 thread; Squircle shows it inline. Writes this Mac's data directory (private whatever the umask) and refuses a non-loopback `--server`; the service's `POST /v1/t3/threads/{thread}/media` does the same remotely. Simulator flows use `sim start`/`sim stop`, which file their own recordings |
 | `media list --thread T3_ID` | Media published into that thread |
 | `sim start --thread T3_ID [--device NAME\|UDID]` | Open, boot and record a simulator for that thread; returns the agent-device command. The phone shows it live |
-| `sim stop --thread T3_ID`, `sim status [--thread T3_ID]`, `sim devices` | File the recording in the turn, close T3's device session and shut the simulator down (also when the turn ends); every booted simulator with its owner (session, T3 device session, agent outside a session, or unowned) plus sessions; simulators in use |
+| `sim stop --thread T3_ID`, `sim status [--thread T3_ID]`, `sim devices` | File the recording in the turn, close T3's device session and shut the simulator down (also when T3 currently shows the turn ended for 8 s; an unknown T3 state never ends it); every booted simulator with its owner (session, T3 device session, agent outside a session, or unowned) plus sessions; simulators in use. JSON keeps its flat session keys plus `device_session` (`{phase: opening\|open\|close_owed\|closed\|abandoned, …}`) |
 | `sim cleanup [--dry-run]` | Apply the simulator policy now: shut down simulators Squircle or its agents booted that nothing holds, delete agent-created ones unused for a day. The service applies it every minute (`SQUIRCLE_SIM_IDLE_MINUTES`, default 10); at most `SQUIRCLE_MAX_SIMULATORS` sessions (default 3) |
 | `logs ID --since N --limit N` | Persisted diagnostic events, record cursor |
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
@@ -76,15 +76,17 @@ directory and adds the T3 instance; `--remove` takes it out).
 | `agent restart --project ID\|--thread ID` | Relaunch the agent's Claude session on the same thread; its next turn gets the current instructions (once, in the turn note) with history kept. Runs when the agent's turn ends |
 | `agent fresh --project ID\|--thread ID [--handoff TEXT]` | Replace the agent with a new thread seeded by a handoff (app, recent commits, workers, recent user messages, last reply, the note); the old thread is renamed "… (until DATE)" and stays in Threads; workers move over. Runs when the agent's turn ends |
 | `agent list`, `agent context [--hook]` | Agents (with `cli`, the service's own invocation); the per-turn note (thread ID, live workers) its hook injects, for the deepest project root containing the folder |
-| `thread spawn --coordinator ID --title T --branch B --prompt P [--provider codex] [--model M] [--effort E] [--runtime-mode M]` | Worker thread in its own worktree, branched from the checkout's current branch; Claude by default, any ready T3 provider/model/effort (checked against T3's server config); runs in its agent's runtime mode unless overridden (`auto` stays auto on Claude, Codex, Cursor and Grok; Antigravity takes auto-edit), and the result's `permissions` says what that allows on the provider; an approval prompt makes it needs-you |
+| `thread spawn --coordinator ID --title T --branch B --prompt P [--provider codex] [--model M] [--effort E] [--runtime-mode M]` | Worker thread in its own worktree, branched from the checkout's current branch; Claude by default, any ready T3 provider/model/effort (checked against T3's server config); runs in its agent's runtime mode unless overridden (`auto` stays auto on Claude, Codex, Cursor and Grok; Antigravity takes auto-edit), and the result's `permissions` says what that allows on the provider; an approval prompt makes it needs-you. The worker is saved with its thread and message IDs before T3 is asked; if T3 doesn't confirm, running the same spawn again finishes that worker (`existing: true`) instead of starting another |
 | `thread send ID TEXT`, `thread read ID`, `thread answer ID TEXT` | Message, inspect (last reply, diff stat, pending question), answer |
-| `thread status [--coordinator ID]`, `thread archive ID [--discard]` | Worker states; archive after merge removes the worktree and deletes the branch, refusing unmerged work or uncommitted changes unless `--discard`. Merged means the base contains the tip, or `git cherry` matches every commit and the branch has no merge commits; only the inspected tip is deleted. `--discard` on a working worker stops it in T3 first |
+| `thread status [--coordinator ID]`, `thread archive ID [--discard]` | Worker states; archive after merge removes the worktree and deletes the branch, refusing unmerged work or uncommitted changes unless `--discard`. Merged means the base contains the tip, or `git cherry` matches every commit and the branch has no merge commits; only the inspected tip is deleted. A worker still working or waiting on a question needs `--discard`; an idle session is stopped first. Files go only after T3 shows the session stopped (30 s limit, otherwise nothing is removed), and only while the service's view of T3 is current ("try again" otherwise). `status` shows `starting` for a reserved worker T3 hasn't confirmed and `archiving` between file removal and T3's archive |
 | `thread cleanup --coordinator ID [--dry-run]` | Archive finished workers whose work is merged, delete merged branches of earlier archived workers, prune stale worktrees; lists what it leaves and why |
 
 The service wakes the agent with a `[worker update]` turn when a worker
 finishes, errors or needs input, once per turn outcome (a second question in
 the same turn wakes it again). Wake-ups and restart/fresh requests are saved
-and retried until T3 accepts them. Agents never poll.
+and retried until T3 accepts them, under the same message ID. `agent
+restart`/`fresh` run only while T3 currently shows the agent's turn ended;
+a turn that starts in the meantime defers them again. Agents never poll.
 
 ## Notifications
 
@@ -185,8 +187,13 @@ the new catalog/client flow is tracked in [validation evidence](validation.md).
   working tree is not snapshotted; queued builds may see later edits.
 - Jobs retain app identity, archive/IPA/app paths and associated dSYMs. The service
   reports unfinished jobs as interrupted after restart; it does not resume Xcode.
+- Saved job records are validated on load (origin, state, output and preview
+  must agree); a contradictory one is skipped with a stderr message, not
+  repaired. The service reads `jobs/` once at start and serves builds from
+  memory afterwards.
 - Log/diagnostic reads are bounded and paginated. `build list` currently returns
-  all records. There is no streaming CLI mode, retention deletion or log rotation.
+  all records. `task list --all` returns History a page at a time (see
+  [tasks](task-tracking.md#model)). There is no streaming CLI mode, retention deletion or log rotation.
 
 `SQUIRCLE_DATA_DIR`/`--data-dir` select the private store. `SQUIRCLE_SERVER`/
 `--server` select the API address. Credentials come from the local store; they are
