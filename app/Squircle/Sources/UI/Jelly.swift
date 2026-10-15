@@ -728,3 +728,23 @@ final class JellyHero: UIView {
     var debugLive: Bool { link != nil }
     #endif
 }
+
+/// One damped spring on a value.
+struct Wobble {
+    var value: CGFloat
+    var velocity: CGFloat = 0
+    var target: CGFloat
+    var parameters: SpringDriver.Parameters
+
+    init(_ value: CGFloat, response: CGFloat, damping: CGFloat) {
+        self.value = value
+        target = value
+        parameters = .init(response: response, damping: damping)
+    }
+
+    var isAtRest: Bool { abs(value - target) < 0.0005 && abs(velocity) < 0.005 }
+
+    mutating func step(_ dt: CGFloat) {
+        (value, velocity) = SpringDriver.step(value: value, velocity: velocity, target: target, dt: dt, parameters: parameters)
+    }
+}
