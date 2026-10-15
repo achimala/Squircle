@@ -754,6 +754,7 @@ mod tests {
             capture_preview: false,
             request_id: None,
             no_overlay: false,
+            thread: None,
         }
     }
 

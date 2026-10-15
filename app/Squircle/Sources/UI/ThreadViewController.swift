@@ -719,7 +719,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let messages = displayedMessages()
         let next = header + resolve(ThreadItem.items(messages: messages, running: model.isRunning, expanded: expanded,
                                                      builds: model.builds, changes: model.changes,
-                                                     simulators: model.threadSimulators))
+                                                     simulators: model.threadSimulators, thread: currentSessionID))
         guard next != items else { return }
         let previous = itemsByID
         let first = items.isEmpty
@@ -1130,6 +1130,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             symbol = news == .needsYou ? "questionmark.bubble" : news == .error ? "exclamationmark.bubble" : "checkmark.bubble"
             add("From ", bold); add(name, font)
             state = news == .needsYou ? ("needs you", Theme.warning) : news == .error ? ("stopped with an error", Theme.failure) : ("finished", Theme.success)
+        case .build(let news):
+            symbol = news.succeeded ? "shippingbox" : "xmark.octagon"
+            add("From ", bold); add("Squircle · " + news.app + " build", font)
+            state = news.succeeded ? ("ready", Theme.success) : ("failed", Theme.failure)
         case .action(let action):
             symbol = action.symbol
             switch action.kind {
@@ -1147,12 +1151,24 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 }
             case .read: add("Read ", bold); add(name + "’s reply", font)
             case .archive: add("Archived ", bold); add(name, font)
-            case .buildStart: add(action.verb, bold); if let app = action.app { add(" · " + app, font) }
+            case .buildStart:
+                add(action.verb, bold); if let app = action.app { add(" · " + app, font) }
+                switch line.buildStatus {
+                case "queued"?: state = ("queued", .tertiaryLabel)
+                case "running"?: state = ("building", Theme.accent)
+                case "succeeded"?: state = ("ready", Theme.success)
+                case "failed"?: state = ("failed", Theme.failure)
+                case "cancelled"?, "interrupted"?: state = ("stopped", .tertiaryLabel)
+                default: break
+                }
             default: add(action.verb, bold)
             }
         }
         if line.failed { state = ("failed", Theme.failure) }
         if let (word, color) = state { add("  " + word, Theme.font(.footnote, 13, .medium), color) }
+        if case .build(let news) = line.kind, !news.succeeded, let reason = news.reason, !reason.isEmpty {
+            add("\n" + reason, Theme.font(.footnote, 13), .secondaryLabel)
+        }
         if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: UIImage.SymbolConfiguration(font: Theme.font(.footnote, 13, .medium)))?
             .withTintColor(line.failed ? Theme.failure : line.running ? Theme.accent : .secondaryLabel, renderingMode: .alwaysOriginal) {
             text.insert(NSAttributedString(string: "  ", attributes: [.font: font]), at: 0)

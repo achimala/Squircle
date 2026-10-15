@@ -55,6 +55,8 @@ struct ActionLine: Equatable {
         case action(SquircleAction)
         /// A worker finished, stopped or needs you.
         case news(WorkerState)
+        /// Squircle telling the agent one of its builds finished.
+        case build(BuildNews)
     }
     let id: String
     let kind: Kind
@@ -67,6 +69,8 @@ struct ActionLine: Equatable {
     /// Resolved by the conversation.
     var name: String?
     var state: WorkerState?
+    /// For a build it started: where that build stands ("running", "succeeded", …).
+    var buildStatus: String?
 
     var text: String? {
         guard case .action(let action) = kind else { return nil }
@@ -132,10 +136,12 @@ enum ThreadItem: Equatable {
     /// thread's), so the last few results are kept and reused while their
     /// inputs are unchanged; otherwise only turns whose own content changed
     /// are built again (streaming touches just the last one).
+    /// `thread` is the conversation's own: builds its agent, workers or
+    /// tasks started show in it.
     static func items(messages: [ChatMessage], running: Bool, expanded: Set<String> = [], builds: [AppBuild] = [],
-                      changes: [TurnChanges] = [], simulators: [SimulatorUse] = []) -> [ThreadItem] {
+                      changes: [TurnChanges] = [], simulators: [SimulatorUse] = [], thread: String? = nil) -> [ThreadItem] {
         let inputs = TimelineInputs(messages: messages, running: running, expanded: expanded, builds: builds,
-                                    changes: changes, simulators: simulators)
+                                    changes: changes, simulators: simulators, thread: thread?.lowercased())
         if let hit = recent.withLock({ $0.first { $0.inputs == inputs }?.items }) { return hit }
         let made = build(inputs)
         recent.withLock { cache in
@@ -148,7 +154,7 @@ enum ThreadItem: Equatable {
 
     private struct TimelineInputs: Equatable {
         let messages: [ChatMessage], running: Bool, expanded: Set<String>, builds: [AppBuild]
-        let changes: [TurnChanges], simulators: [SimulatorUse]
+        let changes: [TurnChanges], simulators: [SimulatorUse], thread: String?
     }
     private static let recent = Mutex<[(inputs: TimelineInputs, items: [ThreadItem])]>([])
 
@@ -164,6 +170,8 @@ enum ThreadItem: Equatable {
         let answerID: String?
         /// Build IDs the turn's messages name, in order.
         let buildIDs: [String]
+        /// Builds the turn's own `build start` lines name.
+        let startedIDs: Set<String>
         let live: LiveStatus?
     }
     /// Built turns by turn ID, reused while their inputs are equal.
@@ -187,7 +195,7 @@ enum ThreadItem: Equatable {
             used[index, default: []].append(use)
         }
         let known = Dictionary(builds.map { ($0.id.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
-        var items: [ThreadItem] = []
+        var made: [TurnRows] = []
         for (index, turn) in turns.enumerated() {
             let id = turn.user?.id ?? "start"
             let key = TurnInputs(user: turn.user, rest: turn.rest, live: running && index == turns.count - 1,
@@ -201,12 +209,45 @@ enum ThreadItem: Equatable {
                     cache[id] = (key, rows)
                 }
             }
-            items += rows.body
-            if !key.live, let change = changes.last(where: { rows.turnIDs.contains($0.turnID) || ($0.assistantMessageID != nil && $0.assistantMessageID == rows.answerID) }) {
+            made.append(rows)
+        }
+        // A build's card sits where it was last mentioned (Squircle's update
+        // when it finished, else the agent's words or its start), once.
+        var cardTurn: [String: Int] = [:]
+        for (index, rows) in made.enumerated() { for buildID in rows.buildIDs { cardTurn[buildID] = index } }
+        // Builds this conversation's workers or tasks started get a line of
+        // their own where they began, unless the agent's own command shows it.
+        let startedHere = made.reduce(into: Set<String>()) { $0.formUnion($1.startedIDs) }
+        var startedLines: [Int: [AppBuild]] = [:]
+        if let thread = inputs.thread {
+            for build in builds.reversed() where build.agentThread == thread && !startedHere.contains(build.id.lowercased()) {
+                let index = starts.lastIndex { $0 <= build.date } ?? 0
+                guard index < made.count else { continue }
+                startedLines[index, default: []].append(build)
+                if cardTurn[build.id.lowercased()] == nil, build.status != "queued", build.status != "running" { cardTurn[build.id.lowercased()] = index }
+            }
+        }
+        var items: [ThreadItem] = []
+        for (index, rows) in made.enumerated() {
+            let id = turns[index].user?.id ?? "start"
+            items += rows.body.map { item in
+                guard case .action(var line) = item, case .action(let action) = line.kind, let build = action.build?.raw else { return item }
+                line.buildStatus = known[build]?.status
+                return .action(line)
+            }
+            for build in startedLines[index] ?? [] {
+                var line = ActionLine(id: "started:" + build.id.lowercased(),
+                                      kind: .action(SquircleAction(kind: .buildStart(BuildID(build.id)), app: build.title)))
+                line.buildStatus = build.status
+                items.append(.action(line))
+            }
+            let live = running && index == turns.count - 1
+            if !live, let change = changes.last(where: { rows.turnIDs.contains($0.turnID) || ($0.assistantMessageID != nil && $0.assistantMessageID == rows.answerID) }) {
                 items.append(.changes(change, turn: id))
             }
             var seen = Set<String>()
-            for buildID in rows.buildIDs where seen.insert(buildID).inserted {
+            for buildID in rows.buildIDs + (startedLines[index] ?? []).map({ $0.id.lowercased() })
+            where cardTurn[buildID] == index && seen.insert(buildID).inserted {
                 if let build = known[buildID] { items.append(.build(build, turn: id)) }
             }
             if let live = rows.live { items.append(.live(live)) }
@@ -227,7 +268,9 @@ enum ThreadItem: Equatable {
             }
             items.append(.gallery(id: "gallery:sent:" + user.id, shots: images + clips))
         }
-        if let user = turn.user, !user.news.isEmpty {
+        if let user = turn.user, let build = user.build {
+            items.append(.action(ActionLine(id: user.id, kind: .build(build))))
+        } else if let user = turn.user, !user.news.isEmpty {
             items += user.news.enumerated().map { index, news in
                 .action(ActionLine(id: "\(user.id)#\(index)", kind: .news(news.state), thread: WorkerID(news.id), title: news.title))
             }
@@ -259,7 +302,8 @@ enum ThreadItem: Equatable {
         items += turn.simulators.map { .simulator($0) }
         if let answer { items += withMedia(answer, ThreadItem.answer) }
         return TurnRows(body: items, turnIDs: Set(([turn.user] + rest).compactMap { $0?.turnID }), answerID: answer?.id,
-                        buildIDs: mentionedBuildIDs(in: rest),
+                        buildIDs: (turn.user?.build.map { [$0.id] } ?? []) + mentionedBuildIDs(in: rest),
+                        startedIDs: Set(rest.flatMap { $0.step?.actions.compactMap(\.build?.raw) ?? [] }),
                         live: live ? LiveStatus(headline: headline(work: work, answer: answer), started: turn.user.flatMap { date($0.createdAt) }) : nil)
     }
 

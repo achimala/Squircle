@@ -602,6 +602,7 @@ mod tests {
                 capture_preview: true,
                 request_id: None,
                 no_overlay: false,
+                thread: None,
             }},
             phase: JobPhase::Succeeded { preview: PreviewState::Absent, output: BuildOutput {
                 archive_path: None,

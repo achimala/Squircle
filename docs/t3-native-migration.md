@@ -2087,3 +2087,22 @@ native fixtures (four model tests, one parser test) are in the source; this
 record has no run of them. Not checked: anything in the simulator or on the
 phone, APNs with a real key, and the coordinated app/overlay inspection in
 the review's acceptance step.
+
+## 2026-10-15 builds reach the chat (0.3.0 66)
+
+Bug: an agent promised a build "will show up below", a worker's build
+finished, and no card appeared (cards only came from a build ID in the
+agent's own text). Now `build start` records the thread that started it
+(`--thread`, or the worker whose worktree holds the project). When a build
+of an agent's own, one of its workers' or one linked to its tasks succeeds
+or fails, the service queues a `[build update]` turn (record
+`squircle-build-update`) to that agent through the worker-update outbox:
+stable message ID, once per build (`agents.json` `builds`), and nothing
+when it finishes inside the agent turn that started it. A task link made
+after a build finished (within ten minutes) still sends it. `/v1/builds`
+carries each build's `agent_thread`. On the phone the update is a "From
+Squircle · App build ready/failed" line (with the failure's first error)
+followed by the card; a worker's or task's build shows a "Started build ·
+App" line with live status where it began; each build has one card, at its
+latest mention. The agent and worker instructions say finished builds
+appear by themselves. Rust test: `finished_builds_reach_their_agent_once`.

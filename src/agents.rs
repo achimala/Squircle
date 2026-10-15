@@ -283,6 +283,37 @@ pub struct Wake {
     pub record: Value,
     #[serde(default, alias = "attempted", deserialize_with = "delivery_or_legacy")]
     pub delivery: Delivery,
+    /// For a build update: the build it tells about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+}
+
+/// What an app agent has been told about one of its builds.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum BuildWatch {
+    /// The agent started it in this turn of its own: a build that finishes
+    /// while that turn still runs is already in its conversation.
+    Started { turn: Option<String>, at: u64 },
+    /// Its update is queued or delivered, or it needed none.
+    Told { at: u64 },
+}
+
+impl BuildWatch {
+    fn at(&self) -> u64 {
+        match self { BuildWatch::Started { at, .. } | BuildWatch::Told { at } => *at }
+    }
+}
+
+/// A build that finished, as its app agent is told.
+pub struct FinishedBuild {
+    pub id: String,
+    /// The thread that started it, if known.
+    pub thread: Option<String>,
+    pub app: String,
+    pub succeeded: bool,
+    /// Why it failed, in a line.
+    pub reason: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -293,7 +324,13 @@ pub struct Registry {
     pub workers: BTreeMap<String, Worker>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outbox: Vec<Wake>,
+    /// Builds by ID, from their start (an agent's own) or their update.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub builds: BTreeMap<String, BuildWatch>,
 }
+
+/// How long a build's watch is kept: past this, a build is long finished.
+const BUILD_WATCH_SECS: u64 = 14 * 24 * 3600;
 
 /// T3's runtime modes. A new app agent gets the one the user chose, or
 /// `full-access`; a fresh start keeps its predecessor's.
@@ -781,6 +818,15 @@ async fn remove(root: &Path, state: &GitState, discard: bool, _stopped: &StopRec
     Ok(removed)
 }
 
+/// See `Agents::build_owner`.
+fn owner<'a>(registry: &'a Registry, tasks: &[crate::tasks::Task], thread: Option<&str>, build: &str) -> Option<&'a Agent> {
+    let by_thread = thread.and_then(|t| {
+        let coordinator = registry.workers.get(t).map_or(t, |w| w.coordinator.as_str());
+        registry.agents.values().find(|a| a.thread_id == coordinator)
+    });
+    by_thread.or_else(|| tasks.iter().find(|t| t.builds.iter().any(|b| b == build)).and_then(|t| registry.agents.get(&t.project_id)))
+}
+
 impl Agents {
     pub fn open(root: &Path, server: &str, tasks: Arc<Tasks>) -> Result<Arc<Self>> {
         let path = root.join("agents.json");
@@ -1173,6 +1219,7 @@ impl Agents {
                     "payload": {"workers": notes.iter().map(|(id, w, event)| json!({"id": id, "title": w.title, "branch": w.branch, "state": label(event.kind)})).collect::<Vec<_>>()}
                 }),
                 delivery: Delivery::Queued,
+                build: None,
             });
         }
         self.save(&registry)
@@ -1194,6 +1241,93 @@ impl Agents {
         let detail = self.thread_detail(client, thread).await?;
         Ok(detail["messages"].as_array().into_iter().flatten()
             .any(|m| m["id"] == message || m["messageId"] == message))
+    }
+
+    // MARK: Builds
+
+    /// The app agent a build belongs to: the agent that started it, the
+    /// coordinator of the worker that did, or the agent of the app whose
+    /// task links it.
+    pub fn build_owner(&self, thread: Option<&str>, build: &str) -> Option<Agent> {
+        let tasks = self.tasks.all();
+        owner(&self.registry.lock().unwrap(), &tasks, thread, build).cloned()
+    }
+
+    /// Each build's app agent thread, for the phone, in order.
+    pub fn build_owners<'a>(&self, builds: impl IntoIterator<Item = (Option<&'a str>, &'a str)>) -> Vec<Option<String>> {
+        let tasks = self.tasks.all();
+        let registry = self.registry.lock().unwrap();
+        builds.into_iter().map(|(thread, build)| owner(&registry, &tasks, thread, build).map(|a| a.thread_id.clone())).collect()
+    }
+
+    /// The live worker whose worktree holds `path`, for a build started
+    /// there without naming its thread.
+    pub fn worker_at(&self, path: &Path) -> Option<String> {
+        let registry = self.registry.lock().unwrap();
+        let shell = self.shell.lock().unwrap();
+        registry.workers.iter().filter(|(_, w)| w.stage.live()).find(|(id, _)| {
+            shell.threads.get(*id).and_then(|t| t["worktreePath"].as_str()).is_some_and(|tree| path.starts_with(tree))
+        }).map(|(id, _)| id.clone())
+    }
+
+    /// Remembers the turn an app agent started a build in.
+    pub fn build_started(&self, build: &str, thread: Option<&str>) -> Result<()> {
+        let mut registry = self.registry.lock().unwrap();
+        let Some(thread) = thread.filter(|t| registry.agents.values().any(|a| a.thread_id == *t)) else { return Ok(()) };
+        let turn = self.shell.lock().unwrap().threads.get(thread).map(ThreadObservation::decode)
+            .filter(ThreadObservation::busy).and_then(|o| o.turn);
+        let now = crate::model::now();
+        registry.builds.retain(|_, w| now.saturating_sub(w.at()) < BUILD_WATCH_SECS);
+        registry.builds.insert(build.into(), BuildWatch::Started { turn, at: now });
+        self.save(&registry)
+    }
+
+    /// Queues one update to the build's app agent, which wakes it and shows
+    /// the build in its conversation, unless the agent is still in the turn
+    /// it started the build in (the build is already there).
+    pub fn build_finished(self: &Arc<Self>, build: &FinishedBuild) -> Result<()> {
+        let tasks = self.tasks.all();
+        {
+            let mut registry = self.registry.lock().unwrap();
+            let Some(agent) = owner(&registry, &tasks, build.thread.as_deref(), &build.id).cloned() else { return Ok(()) };
+            let now = crate::model::now();
+            match registry.builds.get(&build.id) {
+                Some(BuildWatch::Told { .. }) => return Ok(()),
+                Some(BuildWatch::Started { turn: Some(turn), .. }) if build.thread.as_deref() == Some(agent.thread_id.as_str()) => {
+                    let same = self.shell.lock().unwrap().threads.get(&agent.thread_id).map(ThreadObservation::decode)
+                        .is_some_and(|o| o.busy() && o.turn.as_ref() == Some(turn));
+                    if same {
+                        registry.builds.insert(build.id.clone(), BuildWatch::Told { at: now });
+                        return self.save(&registry);
+                    }
+                }
+                _ => {}
+            }
+            let outcome = if build.succeeded { "succeeded".to_string() } else {
+                format!("failed{}", build.reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default())
+            };
+            let shown = if build.succeeded { "with an Install button" } else { "with why it failed" };
+            registry.builds.retain(|_, w| now.saturating_sub(w.at()) < BUILD_WATCH_SECS);
+            registry.builds.insert(build.id.clone(), BuildWatch::Told { at: now });
+            registry.outbox.push(Wake {
+                coordinator: agent.thread_id.clone(),
+                message_id: uuid::Uuid::new_v4().to_string(),
+                workers: vec![],
+                text: format!("[build update]\n- The {} build ({}) {outcome}.\nThe user already sees it in this chat {shown}; don't repeat its ID. \
+                               Say something only if it changes what happens next.", build.app, build.id),
+                record: json!({
+                    "version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Build update",
+                    "kind": "squircle-build-update",
+                    "payload": {"build": build.id, "app": build.app, "state": if build.succeeded { "succeeded" } else { "failed" },
+                                "reason": build.reason, "thread": build.thread}
+                }),
+                delivery: Delivery::Queued,
+                build: Some(build.id.clone()),
+            });
+            self.save(&registry)?;
+        }
+        self.schedule_flush();
+        Ok(())
     }
 
     // MARK: Agents
@@ -1597,7 +1731,8 @@ impl Agents {
              Add a task for each new ask, in the user's words; link its workers (`thread spawn --task`) and builds (`build start --task`), \
              attach screenshots or clips worth seeing, and set its status and note when that changes (linked workers and builds move it too).\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
-             copied out of /tmp into ~/.t3/userdata/attachments; a build you start or check this turn shows as an Install card. \
+             copied out of /tmp into ~/.t3/userdata/attachments. Builds you or your workers start (`build start --thread {id}`) appear in the chat \
+             by themselves when they finish, with Install or why they failed: don't promise otherwise or paste build IDs. \
              No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.{refreshed}",
             cli = self.cli, id = agent.thread_id,
         )
@@ -1674,7 +1809,7 @@ impl Agents {
         let text = format!(
             "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. Remove anything else you create (scratch simulators, temp services or files) before you finish. \
              To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Drive it with the agent-device command it returns; run {cli} sim stop --thread {id} when done (it shuts the simulator down). Use sim start for every simulator: don't boot or create simulators with simctl or xcodebuild, and don't run agent-device record or device_open. \
-             For signed builds: {cli} build start --help. \
+             For signed builds: {cli} build start --thread {id} ... (see build start --help); the user gets it in their chat when it finishes. \
              A performance recording the user sends from the phone is a linked .perf.json: {cli} perf show PATH summarizes it (hitches with symbolicated main-thread stacks, timeline). \
              The user also reads your replies on their phone: keep them short and plain, show pictures as ![..](/absolute/path) and clips as [..](/absolute/path) \
              (copied out of /tmp into ~/.t3/userdata/attachments), and don't present bare paths or IDs as information.",
@@ -2317,6 +2452,46 @@ mod tests {
         agents.flush().await.unwrap();
         assert_eq!(fake.sent("thread.turn.start").len(), 4);
         assert_eq!(agents.registry.lock().unwrap().workers["w1"].notified, Some(event("t3:needs-you:B")));
+    }
+
+    #[tokio::test]
+    async fn finished_builds_reach_their_agent_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![
+            row("agent", "p", "full-access", "a1", "running", "running", false),
+            row("w1", "p", "full-access", "t", "running", "running", false)]);
+        registered(&agents, |r| { r.agents.insert("p".into(), agent("agent")); r.workers.insert("w1".into(), worker("agent")); });
+        let finished = |id: &str, thread: Option<&str>| FinishedBuild {
+            id: id.into(), thread: thread.map(str::to_string), app: "App".into(), succeeded: true, reason: None };
+        let updates = |fake: &Fake| fake.sent("thread.turn.start").into_iter()
+            .map(|c| c["message"]["context"]["records"][0]["payload"]["build"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let (by_worker, by_task, own, own_later, stranger) = ("b-worker", uuid::Uuid::new_v4().to_string(), "b-own", "b-own-later", "b-x");
+
+        // A worker's build, told twice (a link after it finished), goes once.
+        agents.build_started(by_worker, Some("w1")).unwrap();
+        agents.build_finished(&finished(by_worker, Some("w1"))).unwrap();
+        agents.build_finished(&finished(by_worker, Some("w1"))).unwrap();
+        // A build no thread claims, linked to one of the app's tasks.
+        let task = agents.tasks.add("p", "ship it", None, None, crate::tasks::By::Agent, None, vec![]).unwrap();
+        agents.tasks.link(&task.id, None, Some(&by_task), false).unwrap();
+        agents.build_finished(&finished(&by_task, None)).unwrap();
+        // Nobody's build.
+        agents.build_finished(&finished(stranger, Some("someone"))).unwrap();
+        // The agent's own build, finishing in the turn that started it: already in its chat.
+        agents.build_started(own, Some("agent")).unwrap();
+        agents.build_finished(&finished(own, Some("agent"))).unwrap();
+        // One it started, finishing after that turn ended.
+        agents.build_started(own_later, Some("agent")).unwrap();
+        agents.consume_shell(&json!({"kind": "thread-upserted", "thread": row("agent", "p", "full-access", "a1", "completed", "ready", false)}));
+        agents.build_finished(&finished(own_later, Some("agent"))).unwrap();
+        agents.flush().await.unwrap();
+        assert_eq!(updates(&fake), vec![by_worker.to_string(), by_task.clone(), own_later.to_string()]);
+
+        // A restart neither repeats nor loses them.
+        let reopened = Agents::open(temp.path(), "http://127.0.0.1:1", Arc::new(Tasks::open(temp.path()).unwrap())).unwrap();
+        reopened.build_finished(&finished(own_later, Some("agent"))).unwrap();
+        assert!(reopened.registry.lock().unwrap().outbox.is_empty());
+        assert_eq!(agents.build_owner(None, &by_task).map(|a| a.thread_id), Some("agent".into()));
     }
 
     #[tokio::test]

@@ -432,7 +432,15 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
 }
 
 async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    Ok(Json(success(state.jobs.list())))
+    let jobs = state.jobs.list();
+    let mut views = serde_json::to_value(&jobs).map_err(ApiError::internal)?;
+    if let (Some(agents), Some(views)) = (&state.agents, views.as_array_mut()) {
+        let owners = agents.build_owners(jobs.iter().map(|v| (v.job.request().and_then(|r| r.thread.as_deref()), v.job.id.as_str())));
+        for (view, owner) in views.iter_mut().zip(owners) {
+            if let Some(owner) = owner { view["agent_thread"] = json!(owner); }
+        }
+    }
+    Ok(Json(success(views)))
 }
 async fn status(
     State(state): State<AppState>,
@@ -463,6 +471,10 @@ async fn status(
         }
         _ => None,
     };
+    let mut view = serde_json::to_value(&view).map_err(ApiError::internal)?;
+    if let Some(owner) = state.agents.as_ref().and_then(|a| a.build_owner(job.request().and_then(|r| r.thread.as_deref()), &job.id)) {
+        view["agent_thread"] = json!(owner.thread_id);
+    }
     Ok(Json(success(
         json!({"job":view,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty()),"failure":failure}),
     )))
@@ -527,6 +539,15 @@ async fn start(
             "Request ID must contain 1–128 letters, digits, underscores or hyphens",
         ));
     }
+    if let Some(thread) = &request.thread
+        && (thread.is_empty() || thread.len() > 128)
+    {
+        return Err(ApiError::bad("Thread must be a T3 thread ID"));
+    }
+    // A worker that didn't say who it is is known by its worktree.
+    if request.thread.is_none() {
+        request.thread = state.agents.as_ref().and_then(|a| a.worker_at(&request.project));
+    }
     let (revision, dirty) = source_provenance(&request.project).await;
     let (job, lease, dir) = {
         let store = state.store.lock().unwrap();
@@ -553,6 +574,11 @@ async fn start(
         (job, lease, dir)
     };
     let response = state.jobs.get(&job.id);
+    if let Some(agents) = &state.agents
+        && let Err(error) = agents.build_started(&job.id, request.thread.as_deref())
+    {
+        eprintln!("Build {} start not recorded for its agent: {error:#}", job.id);
+    }
     tokio::spawn(async move {
         let mut job = job;
         let mut receiver = lease.cancelled.clone();
@@ -601,9 +627,37 @@ async fn start(
         if let Some(push) = &state.push {
             push.build_finished(&job, app.as_ref());
         }
+        tell_agent(&state, &job, app.as_ref()).await;
         drop(permit);
     });
     Ok(Json(success(json!({"job":response,"replayed":false}))))
+}
+
+/// A succeeded or failed build goes to its app agent's conversation.
+async fn tell_agent(state: &AppState, job: &Job, app: Option<&apps::AppRecord>) {
+    let (Some(agents), Some(request)) = (&state.agents, job.request()) else { return };
+    let succeeded = match job.state() {
+        BuildState::Succeeded => true,
+        BuildState::Failed => false,
+        _ => return,
+    };
+    let reason = if succeeded { None } else {
+        let log = state.files.job_dir(&job.id).ok().map(|dir| dir.join("build.log"));
+        let text = match log { Some(log) => log_tail(&log, FAILURE_LOG_TAIL_BYTES).await, None => vec![] };
+        let root = request.project.parent().map(|p| p.to_string_lossy().into_owned());
+        let failure = crate::buildlog::failure(&String::from_utf8_lossy(&text), root.as_deref());
+        let first = failure.errors.first().map(|e| e.message.clone())
+            .or_else(|| job.error().map(|e| e.rsplit_once("; see /").map_or(e, |(m, _)| m).to_string()));
+        first.map(|r| {
+            let line = r.lines().next().unwrap_or_default().trim().to_string();
+            if line.chars().count() > 200 { line.chars().take(199).collect::<String>() + "…" } else { line }
+        })
+    };
+    let title = app.map(|a| a.name.clone()).or_else(|| job.output().map(|o| o.title.clone())).unwrap_or_else(|| request.scheme.clone());
+    let build = crate::agents::FinishedBuild { id: job.id.clone(), thread: request.thread.clone(), app: title, succeeded, reason };
+    if let Err(error) = agents.build_finished(&build) {
+        eprintln!("Build {} not queued for its agent: {error:#}", job.id);
+    }
 }
 
 fn admit_error(error: AdmitError) -> ApiError {
@@ -1715,6 +1769,7 @@ mod tests {
             allow_provisioning_updates: false,
             capture_preview: false,
             no_overlay: false,
+            thread: None,
         }
     }
     fn headers(state: &AppState) -> HeaderMap {
@@ -2514,6 +2569,14 @@ async fn link_task(
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
     let task = tasks_of(&state)?.link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove).map_err(task_error)?;
+    // A build that finished before it was linked (a fast failure) still
+    // reaches the agent; one that finished long ago is no news.
+    if let Some(view) = r.build.as_deref().filter(|_| !r.remove).and_then(|b| state.jobs.get(b))
+        && view.job.state().terminal() && now().saturating_sub(view.job.updated_at) < 600
+    {
+        let app = apps::list(&state.store.lock().unwrap()).ok().and_then(|apps| apps::owner_of(&apps, &view.job).cloned());
+        tell_agent(&state, &view.job, app.as_ref()).await;
+    }
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
 }
 

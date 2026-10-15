@@ -103,7 +103,10 @@ struct T3ThreadState: Codable {
                 turnID: m["turnId"].string)
             message.attachments = m["attachments"].array.compactMap { $0["type"].string == "image" ? $0["id"].string : nil }
             if message.role == "user" { message.captures = SentCapture.parse(m["text"].string ?? "") }
-            if let update = Self.workerUpdate(m) {
+            if let news = Self.buildNews(m) {
+                message.isUpdate = true; message.build = news
+                message.content = news.app + (news.succeeded ? " build ready" : " build failed")
+            } else if let update = Self.workerUpdate(m) {
                 message.content = update; message.isUpdate = true
                 message.news = Self.workerNews(m)
                 message.threadIDs = message.news.map(\.id)
@@ -191,6 +194,14 @@ struct T3ThreadState: Codable {
             }
         }
         return lines.isEmpty ? "Workers moved on" : lines.joined(separator: " · ")
+    }
+    /// The build in Squircle's note to an app agent that a build finished.
+    static func buildNews(_ message: JSONValue) -> BuildNews? {
+        guard message["role"].string == "user",
+              let payload = message["context"]["records"].array.first(where: { $0["kind"].string == "squircle-build-update" })?["payload"],
+              let id = payload["build"].string.flatMap(SquircleAction.uuid) else { return nil }
+        return BuildNews(id: id, app: payload["app"].string ?? "App", succeeded: payload["state"].string == "succeeded",
+                         reason: payload["reason"].string)
     }
     /// Each worker in Squircle's wake-up message, from its record or, for
     /// early messages without one, its text.

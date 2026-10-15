@@ -463,6 +463,8 @@ enum BuildCommand {
         no_overlay: bool,
         #[arg(long, help = "Link the build to this task; it becomes ready to try when the build succeeds")]
         task: Option<String>,
+        #[arg(long, help = "Your T3 thread ID: when the build finishes, your app's agent and the user's chat get it (Install, or why it failed)")]
+        thread: Option<String>,
     },
     /// List persisted build records, newest first.
     List,
@@ -816,6 +818,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 preview,
                 no_overlay,
                 task,
+                thread,
             } => {
                 let request = BuildRequest {
                     project: project.canonicalize()?,
@@ -833,6 +836,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                     allow_provisioning_updates: *allow_provisioning_updates,
                     capture_preview: *preview,
                     no_overlay: *no_overlay,
+                    thread: thread.clone(),
                 };
                 let started = post(cli, "/v1/builds", serde_json::to_value(request)?).await?;
                 if let (Some(task), Some(build)) = (task, started["data"]["job"]["id"].as_str()) {

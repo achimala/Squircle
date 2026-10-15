@@ -26,6 +26,10 @@ pub struct BuildRequest {
     /// Device builds get the Squircle debug overlay unless this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_overlay: bool,
+    /// The T3 thread that started it (an app agent or a worker), so its app
+    /// agent hears when it finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
 }
 
 /// A finished product's artifacts and app metadata. Preview captures are a

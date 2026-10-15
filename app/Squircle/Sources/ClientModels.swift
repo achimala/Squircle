@@ -98,6 +98,17 @@ struct ChatMessage: Identifiable, Equatable {
     var agent: AgentAuthor?
     /// T3's IDs for the images sent with a message of yours.
     var attachments: [String] = []
+    /// Squircle telling an app agent that one of its builds finished.
+    var build: BuildNews?
+}
+
+/// A finished build in Squircle's update to its app agent.
+struct BuildNews: Equatable {
+    let id: String
+    let app: String
+    let succeeded: Bool
+    /// Why it failed, in a line.
+    let reason: String?
 }
 
 /// A worker's state as Squircle reports it.
@@ -239,6 +250,8 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     let error: String?
     let sourceRevision: String?
     let sourceDirty: Bool?
+    /// The app agent whose agent, worker or task started it.
+    let agentThread: String?
 
     var needsPolling: Bool {
         status == "queued" || status == "running" || previewState == "pending" || previewState == "running"
@@ -247,6 +260,7 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, state, output, request, error
         case createdAt = "created_at", updatedAt = "updated_at", sourceRevision = "source_revision", sourceDirty = "source_dirty"
+        case agentThread = "agent_thread"
     }
     private struct Output: Decodable {
         let title: String?
@@ -278,6 +292,7 @@ struct AppBuild: Identifiable, Decodable, Equatable {
         error = try values.decodeIfPresent(String.self, forKey: .error)
         sourceRevision = try values.decodeIfPresent(String.self, forKey: .sourceRevision)
         sourceDirty = try values.decodeIfPresent(Bool.self, forKey: .sourceDirty)
+        agentThread = try values.decodeIfPresent(String.self, forKey: .agentThread)?.lowercased()
     }
 }
 
