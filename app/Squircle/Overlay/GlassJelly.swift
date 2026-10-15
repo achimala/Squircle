@@ -116,14 +116,40 @@ final class GlassJelly: UIView {
 
     private var time: CGFloat = 0, toneTime: CGFloat = 0
     private var nextHop: CGFloat = 1.5
-    private var link: CADisplayLink?
     private var last: CFTimeInterval?
-    /// How often it needs a frame, decided after every tick from what moves.
-    private var cadence = Cadence.moving
-    /// When the link paused, and the task that resumes it for the next
-    /// blink, glance or hop.
-    private var sleptAt: CFTimeInterval?
-    private var alarm: Task<Void, Never>?
+    /// The display link and how it runs, decided after every tick from what
+    /// moves: one owner for the link, its rate and, while it sleeps, when it
+    /// paused and the alarm that wakes it.
+    private enum Ticker {
+        /// Off screen: no link.
+        case detached
+        /// Ticking at the cadence's rate (moving or breathing).
+        case running(CADisplayLink, Cadence)
+        /// Paused since `since`; `alarm` resumes it for the next blink,
+        /// glance or hop (nil: only a touch or move does).
+        case sleeping(CADisplayLink, since: CFTimeInterval, alarm: Task<Void, Never>?)
+
+        var link: CADisplayLink? {
+            switch self {
+            case .detached: nil
+            case .running(let link, _), .sleeping(let link, _, _): link
+            }
+        }
+        /// Lets go of the link and the alarm.
+        func end() {
+            link?.invalidate()
+            if case .sleeping(_, _, let alarm) = self { alarm?.cancel() }
+        }
+    }
+    private var ticker = Ticker.detached
+    private var link: CADisplayLink? { ticker.link }
+    private var cadence: Cadence {
+        switch ticker {
+        case .detached: .moving
+        case .running(_, let cadence): cadence
+        case .sleeping: .still(after: nil)
+        }
+    }
     private var observers: [Task<Void, Never>] = []
     /// What is on screen: set only once a frame was actually presented (a
     /// frame that found no drawable, or came in the background, isn't), so
@@ -177,7 +203,7 @@ final class GlassJelly: UIView {
         }
     }
 
-    deinit { alarm?.cancel(); observers.forEach { $0.cancel() } }
+    deinit { ticker.end(); observers.forEach { $0.cancel() } }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
@@ -226,13 +252,9 @@ final class GlassJelly: UIView {
     /// the app in the background, and it ends with the window.
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        link?.invalidate()
-        link = nil
+        ticker.end()
+        ticker = .detached
         last = nil
-        alarm?.cancel()
-        alarm = nil
-        sleptAt = nil
-        cadence = .moving
         presented = nil
         drewInLayout = false
         pressed = false
@@ -242,7 +264,7 @@ final class GlassJelly: UIView {
         let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick(_:)))
         link.preferredFrameRateRange = Cadence.moving.rate ?? .default
         link.add(to: .main, forMode: .common)
-        self.link = link
+        ticker = .running(link, .moving)
     }
 
     /// The owner moved or resized it: draw now, in the same transaction, so
@@ -275,32 +297,41 @@ final class GlassJelly: UIView {
     /// paused passes at once (blinks and glances come due), without
     /// stepping the springs, which were at rest.
     private func wake() {
-        guard let link else { return }
-        if let sleptAt {
-            let gap = CGFloat(max(0, CACurrentMediaTime() - sleptAt))
+        switch ticker {
+        case .detached:
+            return
+        case .sleeping(let link, let since, _):
+            let gap = CGFloat(max(0, CACurrentMediaTime() - since))
             time += gap
             toneTime += gap
-            self.sleptAt = nil
             last = nil
+            setCadence(.moving, link: link)
+        case .running(let link, _):
+            setCadence(.moving, link: link)
         }
-        setCadence(.moving, link: link)
     }
 
     private func setCadence(_ next: Cadence, link: CADisplayLink) {
-        guard next != cadence || link.isPaused != next.paused else { return }
-        cadence = next
-        alarm?.cancel()
-        alarm = nil
+        switch (ticker, next) {
+        case (.running(_, let current), _) where current == next: return
+        case (.sleeping, .still): return
+        default: break
+        }
+        if case .sleeping(_, _, let alarm) = ticker { alarm?.cancel() }
         if let rate = next.rate { link.preferredFrameRateRange = rate }
         link.isPaused = next.paused
-        guard case .still(let after) = next else { return }
-        sleptAt = CACurrentMediaTime()
-        guard let after else { return }
-        alarm = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Double(after)))
-            guard !Task.isCancelled else { return }
-            self?.wake()
+        guard case .still(let after) = next else {
+            ticker = .running(link, next)
+            return
         }
+        let alarm = after.map { after in
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(Double(after)))
+                guard !Task.isCancelled else { return }
+                self?.wake()
+            }
+        }
+        ticker = .sleeping(link, since: CACurrentMediaTime(), alarm: alarm)
     }
 
     private func tick(_ link: CADisplayLink) {
