@@ -259,6 +259,16 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             }
             if environment["SQUIRCLE_DEMO_LENS"] == "1" { later { [weak self] in self?.thread?.debugLens() } }
             if environment["SQUIRCLE_DEMO_PULSE"] == "1" { later { [weak self] in self?.thread?.debugPulse() } }
+            // `SQUIRCLE_SEND` here sends into the opened thread or draft, with
+            // `SQUIRCLE_ATTACH` (an image file) as its picture.
+            if let text = environment["SQUIRCLE_SEND"] {
+                later { [weak self] in
+                    if let path = environment["SQUIRCLE_ATTACH"], let image = UIImage(contentsOfFile: path).flatMap({ ImageAttachment($0) }) {
+                        self?.model.attach(image)
+                    }
+                    self?.thread?.debugSend(text)
+                }
+            }
             if scrub < 1 { hold(spring, at: scrub) }
             if environment["SQUIRCLE_THEN_BACK"] == "1" {
                 Task { [weak self] in try? await Task.sleep(for: .seconds(5)); self?.closeThread() }
