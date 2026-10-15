@@ -1,4 +1,4 @@
-use crate::{agents::Agents, apps, push::Push, simpool::Pool, sims::Sims, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::{AdmitError, Jobs, MAX_OPERATIONS, Store}, xcode};
+use crate::{agents::Agents, apps, push::Push, simpool::Pool, sims::{Exit, Sims}, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::{AdmitError, Jobs, MAX_OPERATIONS, Store}, xcode};
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -393,16 +393,23 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     background.push(tokio::spawn(push.clone().run()));
     background.push(tokio::spawn(sims.clone().run()));
     background.push(tokio::spawn(pool.clone().run(sims.clone())));
+    // SIGTERM is a restart (`squircle service restart`, or a supervisor
+    // replacing the binary): simulator sessions are handed to the next run.
+    // SIGINT (Ctrl-C, `squircle service stop`) is a real stop that ends them.
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let signal = async move {
         #[cfg(unix)]
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+        tokio::select! { _ = tokio::signal::ctrl_c() => Exit::Stop, _ = terminate.recv() => Exit::Handover }
         #[cfg(not(unix))]
-        let _ = tokio::signal::ctrl_c().await;
+        { let _ = tokio::signal::ctrl_c().await; Exit::Stop }
     };
     let shutdown = state.clone();
-    crate::serving::serve(listener, router(state), signal, || async move {
+    crate::serving::serve(listener, router(state), signal, |exit| async move {
+        eprintln!("{}", match exit {
+            Exit::Handover => "Restarting: simulator sessions keep running for the next start to adopt.",
+            Exit::Stop => "Stopping: simulator sessions end and their recordings are filed.",
+        });
         // Serialize the admission cutoff with start's registration of a job.
         {
             let _store = shutdown.store.lock().unwrap();
@@ -416,10 +423,10 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        // Refuses new simulator starts, then stops and files recordings and
-        // closes their T3 device sessions. Anything cut off here is left in
-        // the durable ledger for the next start to recover.
-        if tokio::time::timeout(std::time::Duration::from_secs(10), sims.shutdown())
+        // Refuses new simulator starts; on a stop, also stops and files
+        // recordings and closes their T3 device sessions. Anything cut off
+        // here is left in the durable ledger for the next start to recover.
+        if tokio::time::timeout(std::time::Duration::from_secs(10), sims.shutdown(exit))
             .await
             .is_err()
         {

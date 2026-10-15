@@ -32,12 +32,13 @@ use tokio_util::{
 use tower::ServiceExt;
 
 /// Serves `app` until `signal` resolves, then shuts down as described above;
-/// `wind_down` runs while in-flight handlers may still finish.
-pub async fn serve<F>(
+/// `wind_down` gets what the signal resolved to, and runs while in-flight
+/// handlers may still finish.
+pub async fn serve<S, F>(
     listener: TcpListener,
     app: Router,
-    signal: impl Future<Output = ()>,
-    wind_down: impl FnOnce() -> F,
+    signal: impl Future<Output = S>,
+    wind_down: impl FnOnce(S) -> F,
 ) where
     F: Future<Output = ()>,
 {
@@ -47,10 +48,10 @@ pub async fn serve<F>(
     let handlers = TaskTracker::new();
     let mut listener = listener;
     let mut signal = pin!(signal);
-    loop {
+    let reason = loop {
         let (stream, _) = tokio::select! {
             accepted = axum::serve::Listener::accept(&mut listener) => accepted,
-            () = &mut signal => break,
+            reason = &mut signal => break reason,
         };
         let (app, closing, cut, handlers) = (app.clone(), closing.clone(), cut.clone(), handlers.clone());
         connections.spawn(async move {
@@ -70,10 +71,10 @@ pub async fn serve<F>(
                 () = cut.cancelled() => {}
             }
         });
-    }
+    };
     drop(listener);
     closing.cancel();
-    wind_down().await;
+    wind_down(reason).await;
     handlers.close();
     handlers.wait().await;
     cut.cancel();
@@ -140,7 +141,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let stop = CancellationToken::new();
-        let server = tokio::spawn(serve(listener, app, stop.clone().cancelled_owned(), || async {}));
+        let server = tokio::spawn(serve(listener, app, stop.clone().cancelled_owned(), |()| async {}));
 
         let mut download = tokio::net::TcpStream::connect(address).await.unwrap();
         download.write_all(b"GET /movie HTTP/1.1\r\nhost: x\r\n\r\n").await.unwrap();

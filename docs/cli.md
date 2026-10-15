@@ -26,6 +26,7 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | Command | Result |
 | --- | --- |
 | `init`, `serve` | Private state/credentials; foreground HTTP service |
+| `service restart`, `service stop` | Restart hands simulator sessions over to a new process running the same command line (recorders keep going, T3 device sessions stay open), builds nothing and returns once it answers; stop ends them. SIGTERM to `serve` is the handover, SIGINT a stop |
 | `auth show --scope diagnostics` | Explicitly reveal the phone upload credential |
 | `build start` | Durable job ID; archive/export or unsigned simulator mode. Non-App-Store device exports get the debug overlay injected unless `--no-overlay` |
 | `build list`, `build status ID` | Job records (flat, as saved, plus `revision`, and `persistence_error` when a finished result couldn't be saved) and launch acknowledgement; `status` of a failed job adds `failure` (failing step, exit status, Xcode `error:` lines with file, line and source excerpt, failed commands) read from its log |
