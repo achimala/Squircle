@@ -47,28 +47,33 @@ private enum Tone {
         case .done: island ? Clay.islandSuccess : Clay.success
         }
     }
+    var glyph: String {
+        switch self {
+        case .working: "JellyWorking"
+        case .needsYou: "JellyNeedsYou"
+        case .done: "JellyDone"
+        }
+    }
 }
 
-/// A small jelly cube: a squircle of tinted gel with a soft highlight.
+/// The app's agent: the real jelly, drawn by the app's shader into this
+/// extension's asset catalog (a widget can't run Metal; regenerate with
+/// `SQUIRCLE_JELLY_GLYPHS`). Still: ActivityKit doesn't animate, the state
+/// changing is the motion. The island is always dark.
 private struct JellyCube: View {
-    var color: Color
+    var tone: Tone
     var size: CGFloat
+    var island = false
+
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
-        ZStack {
-            shape.fill(LinearGradient(colors: [color.opacity(0.75), color], startPoint: .topLeading, endPoint: .bottomTrailing))
-            // Light caught inside the gel.
-            Ellipse()
-                .fill(.white.opacity(0.45))
-                .frame(width: size * 0.42, height: size * 0.24)
-                .rotationEffect(.degrees(-20))
-                .offset(x: -size * 0.14, y: -size * 0.2)
-                .blur(radius: size * 0.05)
-            shape.strokeBorder(.white.opacity(0.35), lineWidth: max(0.5, size * 0.04))
-        }
-        .frame(width: size, height: size)
-        .clipShape(shape)
+        Image(tone.glyph)
+            .resizable()
+            .interpolation(.high)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: size * 1.2, height: size * 1.26)
+            .environment(\.colorScheme, island ? .dark : scheme)
     }
 }
 
@@ -85,7 +90,7 @@ struct AgentActivity: Widget {
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     HStack(spacing: 8) {
-                        JellyCube(color: tone, size: 22)
+                        JellyCube(tone: state.tone, size: 22, island: true)
                         Text(context.attributes.appName).font(.headline).lineLimit(1)
                     }
                     .padding(.leading, 4)
@@ -102,7 +107,7 @@ struct AgentActivity: Widget {
                         .padding(.horizontal, 4)
                 }
             } compactLeading: {
-                JellyCube(color: tone, size: 16)
+                JellyCube(tone: state.tone, size: 16, island: true)
             } compactTrailing: {
                 if state.needsYou {
                     Image(systemName: "hand.raised.fill").foregroundStyle(tone)
@@ -112,7 +117,7 @@ struct AgentActivity: Widget {
                     Image(systemName: "checkmark").foregroundStyle(tone)
                 }
             } minimal: {
-                JellyCube(color: tone, size: 16)
+                JellyCube(tone: state.tone, size: 16, island: true)
             }
             .widgetURL(link(context.attributes))
             .keylineTint(tone)
@@ -135,7 +140,7 @@ private struct LockScreenView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            JellyCube(color: state.tone.color(island: false), size: 34)
+            JellyCube(tone: state.tone, size: 34)
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text(app).font(.headline).lineLimit(1)

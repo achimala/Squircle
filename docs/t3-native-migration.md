@@ -1900,7 +1900,7 @@ workers booted and created their own with `simctl`/`xcodebuild`.
 
 **Decision (user-requested).** A session is the simulator's lease, tied to
 the thread. When it ends (stop, the turn idle 8 s, archive, the 30-minute
-limit, service shutdown or restart recovery; `release_pending` in the
+limit, a service stop (not a restart, see below) or recovery; `release_pending` in the
 ledger), the simulator is shut down unless another session holds it or the
 policy below keeps it. `src/simpool.rs` decides the rest from plain facts
 (`plan`): a booted simulator is Squircle's when a session used it or an
@@ -1913,8 +1913,16 @@ preview simulator; otherwise it is shut down after `SQUIRCLE_SIM_IDLE_MINUTES`
 (default 10) free. Simulators the user booted are never touched. Devices an
 agent created are deleted after a day unused. `sim start` without
 `--device` takes the thread's last simulator, a free booted one of
-Squircle's, then a shut-down one (never someone else's booted one) and
-refuses past `SQUIRCLE_MAX_SIMULATORS` (default 3) with the holders named.
+Squircle's, then a shut-down one (never someone else's booted one). Past
+`SQUIRCLE_MAX_SIMULATORS` (default 3) it puts the thread in a first-come
+line saved with the ledger and returns `queued` with its position; the
+agent ends its turn (a waiting worker's ended turn wakes nobody). When a
+lease frees, the head's slot is held for it and the service wakes the
+thread through the agents' outbox with a `[simulator ready]` service
+message (`squircle-sim-ready`); its next `sim start` takes the slot. The
+place is given up on `sim stop`, when T3 no longer has the thread, or when
+the woken turn ends without taking the slot. (2026-10-15, user-requested:
+workers stalled after a refused start.)
 `sim status` lists every booted simulator with its owner and its apps'
 CPU; `sim cleanup [--dry-run]` applies the policy without the idle wait.
 Agents are told to use `sim start/stop` for every simulator and not to boot
@@ -2214,6 +2222,84 @@ screens weren't changing. serve-sim's `stream.avcc` then sends only its JPEG
 seed (which the phone never plays) and no H.264 until the screen changes, so
 the feed had no picture. A simulator now joins the deck only once its feed has
 drawn a picture; until then it streams unseen.
+
+## 2026-10-15 jelly crew (0.3.0 71)
+
+User decision on the [jelly proposal](design-jelly-language.md): direction B,
+"little crew", with the app's agent clearly the main one. A jelly always means
+an agent (one T3 thread); colour is its state (Clay's terracotta, ochre,
+olive, crimson), shape is who it is.
+
+- **Main vs workers.** The app's agent is the plain full jelly. Workers are
+  chibi sprouts of it: smaller (16–22 pt), rounder corners and eyes 1.5× the
+  agent's for their body size ("less body, more eyes"). The alternative,
+  smaller beady eyes, read as lumps rather than helpers and was not chosen
+  (comparison in `attachments/jelly-crew/`). Each worker's look is stable,
+  from an FNV hash of its thread ID: three cube aspects × three eye spacings,
+  and its own blink and loop phase.
+- **One component** (`Sources/UI/JellyShader.swift`, `Jelly.swift`), compiled
+  into the app and the overlay: the shader (with identity knobs), a pose
+  function (`JellyPose`: per-state loops: working reads along a line,
+  needs-you hops, idle breathes; done gulps and failed shudders once, then
+  hold), `JellySprites` (offscreen renders to images, cached by look, size,
+  scale and appearance; loops render on a background task) and `JellyView`
+  (a sprite). `JellyHero` is the only live Metal jelly in the app: the
+  conversation's own agent by its live line. The overlay keeps `GlassJelly`
+  (its creature with the pill and neck) on the same shader.
+- **Restraint.** `JellyDirector` is one 15 fps display link that runs only
+  while a sprite could play: at most four play (needs-you first, then nearest
+  the top), none off screen, under a sheet, in the background, with Reduce
+  Motion or in Low Power Mode. Old chat lines, the capsule's to-try dot and
+  the Live Activity are stills. `SQUIRCLE_STRESS=1` audits it (no sprite
+  playing off screen or over budget for more than two ticks).
+- **Where.** Tasks rows: a live worker (working, needs you, stopped on an
+  error) is its jelly, title and state; finished threads keep the plain pill.
+  The counts capsule: needs-you and working are shown by who is on them (up to
+  three overlapping; the agent when no worker is). Worker lines in the chat
+  lead with that worker's still jelly in its current state. The live line has
+  the conversation's agent beside it (in a worker's thread, that worker; not
+  in the overlay, whose creature is already there). Home: while an app's
+  agent works or needs you it peeks over its device's top edge, eyes on the
+  screen, and sinks back behind it when idle (the green dot is gone). Sim deck
+  captions lead with the driving agent's jelly. The Live Activity uses the
+  agent's still jelly from the widget's asset catalog, rendered by the app's
+  shader (`SQUIRCLE_JELLY_GLYPHS=app/Squircle/Widgets/Assets.xcassets` in a
+  simulator run regenerates it).
+- **Not built.** The worker's current step under its title in Tasks (the
+  phone has no live step for threads it isn't showing), the Threads tab,
+  notification avatars (need Push signing).
+- **Checked (simulator, 2026-10-15).** Light and dark: Tasks
+  with several workers, the agent chat, a worker thread with its hero, Home
+  with working agents peeking. `SQUIRCLE_STRESS=1`: violations=0 (two 30 s
+  runs). Scrolling the long Squircle agent thread (`SQUIRCLE_SCROLL_SWEEP=1`,
+  hitches = frames over 1.5 periods): before 7, 11, 11 hitches; after 8, 5, 6.
+
+## 2026-10-15 restarts hand simulator sessions over
+
+Deploying a new service binary needed a restart, and the graceful shutdown
+stopped every recorder and closed T3's device sessions, so workers lost their
+simulators mid-task; with agents always on simulators a restart waited 50
+minutes for an idle moment that never came.
+
+**Decision (user-requested).** A restart leaves live sessions running and the
+next process adopts them; only a real stop ends them. SIGTERM to
+`squircle serve` is a handover (`sims::Exit::Handover`): new starts are
+refused, ended sessions' owed closes and releases still run, but recordings
+continue (recorders are separate processes, now in their own process group),
+T3's device sessions stay open, and leases and the queue stay in the ledger.
+On startup a recording whose saved recorder PID is still provably its own
+(its command line names the session's file, as the R01 fix checks) is
+adopted: it is watched again for the recorder exiting, the 30-minute limit
+and the turn ending (the idle grace restarts), and a later stop SIGINTs it
+and files the whole movie. Anything else unfinished is finished as before.
+SIGINT (Ctrl-C) or `squircle service stop` is the real stop.
+`squircle service restart` builds nothing: it signals the running service
+(found through `service.lock`), waits for it to exit, starts the same command
+line, environment and working directory (read from the kernel, so a binary
+rebuilt at the same path takes over) with output appended to
+`DATA_DIR/serve.log`, and returns once the new process holds the lock and
+answers `/health`. Builds still in flight are cancelled by a restart, as
+before.
 
 ## 2026-10-15 idle simulators stay connected
 

@@ -121,6 +121,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        JellyRenderer.warm()
         view.backgroundColor = Theme.paper
         view.addSubview(stage)
         view.addSubview(home)
@@ -276,6 +277,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
            let target = PushTarget(userInfo: ["squircle": payload]) {
             Task { [weak self] in try? await Task.sleep(for: .seconds(3)); self?.open(target) }
         }
+        // `SQUIRCLE_JELLY_GLYPHS=DIR`: the Live Activity's jellies, drawn by
+        // the shader into the widget's asset catalog (the widget can't run
+        // Metal): `DIR` is `app/Squircle/Widgets/Assets.xcassets`.
+        if let directory = environment["SQUIRCLE_JELLY_GLYPHS"] { renderJellyGlyphs(into: URL(fileURLWithPath: directory)) }
         if environment["SQUIRCLE_STRESS"] == "1" {
             let seconds = value("SQUIRCLE_STRESS_SECONDS").map(Double.init) ?? 30
             Task { [weak self] in await self?.stress(for: seconds) }
@@ -295,6 +300,28 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 }
             }
         }
+    }
+
+    private func renderJellyGlyphs(into directory: URL) {
+        let moods: [(String, JellyLook.Mood)] = [("Working", .working), ("NeedsYou", .needsYou), ("Done", .done)]
+        for (name, mood) in moods {
+            let set = directory.appendingPathComponent("Jelly\(name).imageset")
+            try? FileManager.default.createDirectory(at: set, withIntermediateDirectories: true)
+            var images: [[String: Any]] = []
+            for dark in [false, true] {
+                let traits = UITraitCollection { $0.userInterfaceStyle = dark ? .dark : .light; $0.displayScale = 3 }
+                guard let image = JellySprites.shared.image(.agent(mood), .tight(34), traits: traits), let png = image.pngData() else { continue }
+                let file = "jelly-\(name.lowercased())\(dark ? "-dark" : "")@3x.png"
+                try? png.write(to: set.appendingPathComponent(file))
+                var entry: [String: Any] = ["idiom": "universal", "filename": file, "scale": "3x"]
+                if dark { entry["appearances"] = [["appearance": "luminosity", "value": "dark"]] }
+                images.append(entry)
+            }
+            let contents: [String: Any] = ["images": images, "info": ["author": "xcode", "version": 1]]
+            try? JSONSerialization.data(withJSONObject: contents, options: [.prettyPrinted, .sortedKeys])
+                .write(to: set.appendingPathComponent("Contents.json"))
+        }
+        NSLog("JELLY glyphs written to %@", directory.path)
     }
 
     /// Holds one spring still at a value, as a finger would.
@@ -351,6 +378,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             NSLog("AUDIT %@ route=%@ a=%.3f t=%.3f", what, "\(route)", a, t)
         }
         if route == .grid, !appSpring.isAnimating, dragging == nil, dock.alpha > 0.001 { fail("simulators over Home") }
+        if let problem = JellyDirector.shared.debugViolation() { fail(problem) }
         guard !appSpring.isAnimating, !spring.isAnimating, dragging == nil else { return }
         switch route {
         case .grid: if home.isHidden || home.alpha < 0.99 { fail("grid not showing at rest") }
@@ -459,6 +487,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         for session in model.sessions(for: project, includingAgent: true) { titles[session.id] = session.displayTitle(in: project) }
         if let agent = model.agentThreadID(for: project) { titles[agent] = project.name }
         let front = route.thread != nil ? thread : agent
+        dock.agentThread = model.agentThreadID(for: project)
         dock.update(uses: model.activeSimulators(for: project), currentThread: front?.currentSessionID, titles: titles)
     }
 
@@ -939,6 +968,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 extension StudioViewController: ConversationHost {
     var simulatorFeeds: SimulatorFeeds { feeds }
     var expandsSimulators: Bool { true }
+    var showsAgentJelly: Bool { true }
     func expandSimulator(_ use: SimulatorUse) { dock.expand(use.id) }
     func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>) {
         guard conversation === (thread ?? agent) else { return }
@@ -959,7 +989,9 @@ final class PassthroughView: UIView {
 }
 
 /// One app in the grid: a still portrait of its device, which scrolls with
-/// the grid like any view, and its name.
+/// the grid like any view, and its name. While the app's agent works (or
+/// needs you) it peeks over the device's top edge, eyes on the screen; idle,
+/// it sinks back behind it.
 @MainActor
 final class GridCell: UIControl {
     let id: String
@@ -969,10 +1001,13 @@ final class GridCell: UIControl {
     var drawn: [(key: String, image: UIImage)] = []
     var phoneHeight: CGFloat = 0 { didSet { setNeedsLayout() } }
     var captionAlpha: CGFloat = 1 {
-        didSet { if captionAlpha != oldValue { name.alpha = captionAlpha; dot.alpha = captionAlpha } }
+        didSet { if captionAlpha != oldValue { name.alpha = captionAlpha; peek.alpha = captionAlpha } }
     }
     private let name = Theme.label("", Theme.appCaptionFont())
-    private let dot = UIView()
+    /// The app's agent, behind the portrait's top edge.
+    private let peek = JellyView(.agent(.working), canvas: .roomy(GridCell.peekSize))
+    private static let peekSize: CGFloat = 26
+    private var peeking = false
 
     init(id: String) {
         self.id = id
@@ -983,9 +1018,8 @@ final class GridCell: UIControl {
         accessibilityValue = id
         name.textAlignment = .center
         name.lineBreakMode = .byTruncatingTail
-        dot.layer.cornerRadius = 3.5
-        dot.isHidden = true
-        [portrait, name, dot].forEach {
+        peek.isHidden = true
+        [peek, portrait, name].forEach {
             $0.isUserInteractionEnabled = false
             addSubview($0)
         }
@@ -996,8 +1030,8 @@ final class GridCell: UIControl {
 
     func configure(name text: String, phase: ChatSession.Phase) {
         if name.text != text { name.text = text }
-        dot.isHidden = phase == .idle
-        dot.backgroundColor = phase == .needsYou ? Theme.warning : Theme.success
+        if phase != .idle { peek.look = .agent(JellyLook.Mood(phase)) }
+        setPeeking(phase != .idle)
         accessibilityLabel = text
         accessibilityValue = phase == .needsYou ? "Needs you" : (phase == .working ? "Working" : nil)
         setNeedsLayout()
@@ -1009,11 +1043,36 @@ final class GridCell: UIControl {
         portrait.bounds = CGRect(origin: .zero, size: size)
         portrait.center = CGPoint(x: bounds.midX, y: phoneHeight / 2)
         let top = phoneHeight + 12
-        let gap: CGFloat = dot.isHidden ? 0 : 12
-        let width = min(bounds.width - gap, ceil(name.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 21)).width))
-        let x = (bounds.width - width - gap) / 2
-        dot.frame = CGRect(x: x, y: top + 7, width: 7, height: 7)
-        name.frame = CGRect(x: x + gap, y: top, width: width, height: 21)
+        let width = min(bounds.width, ceil(name.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 21)).width))
+        name.frame = CGRect(x: (bounds.width - width) / 2, y: top, width: width, height: 21)
+        // Its body rests a little over half above the device's top edge (the
+        // portrait's picture has room around the device).
+        let s = Self.peekSize
+        peek.place(in: CGRect(x: bounds.midX - s / 2, y: portrait.center.y - phoneHeight / 2 - s * 0.58, width: s, height: s))
+    }
+
+    /// Rises over the edge, or sinks behind it, on one interruptible spring.
+    private func setPeeking(_ on: Bool) {
+        guard on != peeking else { return }
+        peeking = on
+        peek.animates = on
+        let down = CGAffineTransform(translationX: 0, y: Self.peekSize * 0.75)
+        if on, peek.isHidden {
+            peek.isHidden = false
+            peek.transform = down
+        }
+        let moves = window != nil && !Motion.reduced
+        let change = { self.peek.transform = on ? .identity : down }
+        guard moves else {
+            change()
+            peek.isHidden = !on
+            return
+        }
+        UIView.animate(springDuration: on ? 0.55 : 0.4, bounce: on ? 0.32 : 0, initialSpringVelocity: 0, delay: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState], animations: change) { _ in
+            // Sunk out of sight: hidden, so it never draws behind the screen.
+            if !self.peeking { self.peek.isHidden = true }
+        }
     }
 
     override var isHighlighted: Bool {

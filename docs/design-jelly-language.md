@@ -1,6 +1,15 @@
 # Proposal: the jelly as Squircle's design language
 
-**Status: proposal (2026-10-15), not built.** The user asked for it on
+**Status: direction B chosen and built (2026-10-15, 0.3.0 71); see
+[the crew as built](t3-native-migration.md#2026-10-15-jelly-crew-030-71).**
+The user's decision: "I like the crew but it'd be good if we could
+differentiate the main one from the sub ones. Should be smaller, like less
+body more eyes? Smaller eyes? … I like the animations. Peeking over the app
+seems cute, try it." Unanswered questions took this page's defaults (stable
+identities, failed = crimson slumped `> <`, no Claude/Codex difference). The
+rest of this page is the proposal as written.
+
+The user asked for it on
 2026-10-15: "In the task UI it's not so obvious that the little pill things
 are running agents. Can we make them look more alive, like agents. Maybe we
 should be aligning around these blobby dudes as our design language. Across
@@ -8,8 +17,8 @@ the board." Nothing here changes product code yet; open questions are at the
 end.
 
 Visuals are in `attachments/jelly-language/`. Every jelly in them was drawn by
-the overlay's real shader (`JellyRenderer.source` in
-`app/Squircle/Overlay/GlassJelly.swift`), compiled on the Mac and rendered
+the overlay's real shader (`JellyRenderer.source`, then in
+`app/Squircle/Overlay/GlassJelly.swift`, now `Sources/UI/JellyShader.swift`), compiled on the Mac and rendered
 offscreen. Two prototype knobs were patched into the scratch copy only (eye
 spacing and cube aspect for identities, a no-face flag for direction C); the
 surrounding screens are HTML mockups of the current UI (Clay palette, design A
