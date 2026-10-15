@@ -2381,6 +2381,18 @@ copies T3's or the providers' stores.
   chat). `0`/`off` turns a rule off. One reading is acted on once. An agent
   turn that ends on an upkeep message (no reply) sends no notification.
   `squircle agent compact` runs the same compaction now.
+- **Measured** on the scratch "Orchestration Test" agent (Claude Code 2.1.300,
+  Opus 5.5 main thread, 2026-10-15, after `agent setup` and a restart):
+  asked "when did we add sqrt, and what did I ask you about your job then?",
+  it ran `squircle:history` on its own; the subagent ran on Haiku 5.5 (8 tool
+  calls, 23K Haiku tokens, 40 s; the guard refused one `cd`, since allowed)
+  and the answer, with dates, the user's words and the commit, was right. It
+  ran in the background, so the agent replied twice (it resumed by itself
+  when the result came); the instructions now ask for the foreground.
+  `agent compact` at 163K tokens: compacted to 5.5K in 33 s, no reply in the
+  turn, shown as Squircle's line. `agent fresh` at 89K: the new thread
+  started at 29.5K (a new session's instructions and tools) and replied in
+  12 s. The upkeep timers themselves were not waited out on a real agent.
 - **Codex.** Codex 0.160 has subagents too (`multi_agent` is stable and on;
   roles are `[agents.<name>]` with `description` and a `config_file` that can
   set `model = "gpt-6-luna"` and a read-only sandbox; `spawn_agent` takes the
