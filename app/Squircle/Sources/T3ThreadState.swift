@@ -103,16 +103,20 @@ struct T3ThreadState: Codable {
                 turnID: m["turnId"].string)
             message.attachments = m["attachments"].array.compactMap { $0["type"].string == "image" ? $0["id"].string : nil }
             if message.role == "user" { message.captures = SentCapture.parse(m["text"].string ?? "") }
-            if let news = Self.buildNews(m) {
+            switch ServiceNote(m) {
+            case nil: break
+            case .build(let news):
                 message.isUpdate = true; message.build = news
                 message.content = news.app + (news.succeeded ? " build ready" : " build failed")
-            } else if let update = Self.workerUpdate(m) {
-                message.content = update; message.isUpdate = true
-                message.news = Self.workerNews(m)
-                message.threadIDs = message.news.map(\.id)
-            } else if message.role == "user", let author = Self.agentAuthor(m) {
-                message.agent = author
-                message.content = Self.task(message.content)
+            case .workers(let news):
+                message.isUpdate = true; message.news = news; message.threadIDs = news.map(\.id)
+                message.content = news.isEmpty ? "Workers moved on" : news.map(\.summary).joined(separator: " · ")
+            case .handoff:
+                message.isUpdate = true; message.content = "Started fresh"
+            case .agent(let author):
+                message.agent = author; message.content = Self.task(message.content)
+            case .other(let label):
+                message.isUpdate = true; message.content = label
             }
             return (m["createdAt"].string ?? "", message)
         }
@@ -176,65 +180,6 @@ struct T3ThreadState: Codable {
         payload["data"] = .object(data); a["payload"] = .object(payload)
         return .object(a)
     }
-    /// "Dark mode finished · Launch crash needs you" for Squircle's wake-up
-    /// message to an app agent, "Started fresh" for its handoff; nil for
-    /// anything else.
-    static func workerUpdate(_ message: JSONValue) -> String? {
-        guard message["role"].string == "user" else { return nil }
-        let records = message["context"]["records"].array
-        if records.contains(where: { $0["kind"].string == "squircle-handoff" }) { return "Started fresh" }
-        let record = records.first(where: { $0["kind"].string == "squircle-worker-update" })
-        guard record != nil || (message["text"].string ?? "").hasPrefix("[worker update]") else { return nil }
-        let lines = (record?["payload"]["workers"].array ?? []).map { worker -> String in
-            let title = worker["title"].string ?? "A worker"
-            switch worker["state"].string {
-            case "needs-you": return title + " needs input"
-            case "error": return title + " stopped with an error"
-            default: return title + " finished"
-            }
-        }
-        return lines.isEmpty ? "Workers moved on" : lines.joined(separator: " · ")
-    }
-    /// The build in Squircle's note to an app agent that a build finished.
-    static func buildNews(_ message: JSONValue) -> BuildNews? {
-        guard message["role"].string == "user",
-              let payload = message["context"]["records"].array.first(where: { $0["kind"].string == "squircle-build-update" })?["payload"],
-              let id = payload["build"].string.flatMap(SquircleAction.uuid) else { return nil }
-        return BuildNews(id: id, app: payload["app"].string ?? "App", succeeded: payload["state"].string == "succeeded",
-                         reason: payload["reason"].string)
-    }
-    /// Each worker in Squircle's wake-up message, from its record or, for
-    /// early messages without one, its text.
-    static func workerNews(_ message: JSONValue) -> [WorkerNews] {
-        let records = message["context"]["records"].array.filter { $0["kind"].string == "squircle-worker-update" }
-        let news = records.flatMap { $0["payload"]["workers"].array }.compactMap { worker -> WorkerNews? in
-            guard let id = worker["id"].string else { return nil }
-            return WorkerNews(id: id, title: worker["title"].string ?? "A worker", state: WorkerState(rawValue: worker["state"].string ?? "") ?? .done)
-        }
-        if !news.isEmpty || !records.isEmpty { return news }
-        // - "Title" (id, branch) finished its turn.
-        return (message["text"].string ?? "").split(separator: "\n").compactMap { line -> WorkerNews? in
-            guard line.hasPrefix("- \""), let close = line.range(of: "\" ("),
-                  let comma = line[close.upperBound...].firstIndex(where: { $0 == "," || $0 == ")" }) else { return nil }
-            let title = String(line[line.index(line.startIndex, offsetBy: 3)..<close.lowerBound])
-            let id = String(line[close.upperBound..<comma])
-            let state: WorkerState = line.contains("is waiting") ? .needsYou : line.contains("error") ? .error : .done
-            return SquircleAction.uuid(id).map { WorkerNews(id: $0, title: title, state: state) }
-        }
-    }
-
-    /// Squircle marks the messages it sends for an agent. A worker's task
-    /// from before the marks is known by the instructions Squircle appends.
-    static func agentAuthor(_ message: JSONValue) -> AgentAuthor? {
-        for record in message["context"]["records"].array {
-            switch record["kind"].string {
-            case "squircle-task": return AgentAuthor(kind: .task, from: record["payload"]["from"].string)
-            case "squircle-agent-message": return AgentAuthor(kind: .message, from: record["payload"]["from"].string)
-            default: continue
-            }
-        }
-        return (message["text"].string ?? "").contains(workerMarker) ? AgentAuthor(kind: .task, from: nil) : nil
-    }
     /// Where Squircle's instructions to a worker start, after its task.
     static let workerMarker = "\n\n---\nYou are a worker for this app's agent"
     /// A worker's task without the instructions Squircle appends.
@@ -274,6 +219,65 @@ struct T3ThreadState: Codable {
             let kind = $0["kind"].string ?? ""
             guard let id = $0["payload"]["requestId"].string else { return false }
             return (kind.contains("approval") || kind.contains("user-input")) && (kind.contains("requested") || kind.contains("opened")) && !finished.contains(id)
+        }
+    }
+}
+
+/// A message Squircle sent in the user's place: T3 sends every message as
+/// the user's, so the service marks each with a context record whose kind
+/// starts with `squircle-`. Any marked message is Squircle's, whatever its
+/// kind, so one this build doesn't know still never shows as yours or shows
+/// the agent's instructions. Worker updates and tasks from before the marks
+/// are known by their text.
+enum ServiceNote: Equatable {
+    case build(BuildNews)
+    case workers([WorkerNews])
+    /// A fresh agent's briefing.
+    case handoff
+    /// A worker's task or another agent's `thread send`.
+    case agent(AgentAuthor)
+    /// A kind this build doesn't know: Squircle's line, with its label.
+    case other(String)
+
+    static let prefix = "squircle-"
+
+    init?(_ message: JSONValue) {
+        guard message["role"].string == "user" else { return nil }
+        let text = message["text"].string ?? ""
+        guard let record = message["context"]["records"].array.first(where: { ($0["kind"].string ?? "").hasPrefix(Self.prefix) }) else {
+            if text.hasPrefix("[worker update]") { self = .workers(Self.workers(text: text)) }
+            else if text.contains(T3ThreadState.workerMarker) { self = .agent(AgentAuthor(kind: .task, from: nil)) }
+            else { return nil }
+            return
+        }
+        let payload = record["payload"]
+        switch record["kind"].string {
+        case "squircle-build-update":
+            guard let id = payload["build"].string.flatMap(SquircleAction.uuid) else { self = .other(record["label"].string ?? "Squircle"); return }
+            self = .build(BuildNews(id: id, app: payload["app"].string ?? "App", succeeded: payload["state"].string == "succeeded",
+                                    reason: payload["reason"].string))
+        case "squircle-worker-update":
+            self = .workers(payload["workers"].array.compactMap { worker in
+                worker["id"].string.map { WorkerNews(id: $0, title: worker["title"].string ?? "A worker",
+                                                     state: WorkerState(rawValue: worker["state"].string ?? "") ?? .done) }
+            })
+        case "squircle-handoff": self = .handoff
+        case "squircle-task": self = .agent(AgentAuthor(kind: .task, from: payload["from"].string))
+        case "squircle-agent-message": self = .agent(AgentAuthor(kind: .message, from: payload["from"].string))
+        default: self = .other(record["label"].string ?? "Squircle")
+        }
+    }
+
+    /// Each worker in an early update's text:
+    /// - "Title" (id, branch) finished its turn.
+    private static func workers(text: String) -> [WorkerNews] {
+        text.split(separator: "\n").compactMap { line -> WorkerNews? in
+            guard line.hasPrefix("- \""), let close = line.range(of: "\" ("),
+                  let comma = line[close.upperBound...].firstIndex(where: { $0 == "," || $0 == ")" }) else { return nil }
+            let title = String(line[line.index(line.startIndex, offsetBy: 3)..<close.lowerBound])
+            let id = String(line[close.upperBound..<comma])
+            let state: WorkerState = line.contains("is waiting") ? .needsYou : line.contains("error") ? .error : .done
+            return SquircleAction.uuid(id).map { WorkerNews(id: $0, title: title, state: state) }
         }
     }
 }

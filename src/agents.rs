@@ -362,12 +362,64 @@ impl Peer for T3 {
     }
 }
 
-/// Marks a message Squircle sends for an agent (`squircle-task`: a worker's
-/// prompt; `squircle-agent-message`: `thread send`), with the agent's thread.
-/// The app shows only unmarked user messages as the user's own.
-fn agent_message(kind: &str, from: Option<&str>) -> Value {
-    json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Agent message",
-           "kind": kind, "payload": {"from": from}})
+/// A message Squircle puts in a conversation in the user's place: T3 sends
+/// every message as the user's, so each one carries a context record whose
+/// kind starts with `squircle-`. The app shows any marked message as
+/// Squircle's line (whatever the kind, so a new one can't pass as the
+/// user's) and only unmarked ones as the user's own words.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Note {
+    /// The service's wake-up that workers moved on.
+    WorkerUpdate,
+    /// The service's news that a build failed.
+    BuildUpdate,
+    /// The briefing a fresh agent starts from.
+    Handoff,
+    /// A worker's prompt from its app agent.
+    Task,
+    /// `thread send` from another agent.
+    AgentMessage,
+}
+
+impl Note {
+    pub const ALL: [Note; 5] = [Note::WorkerUpdate, Note::BuildUpdate, Note::Handoff, Note::Task, Note::AgentMessage];
+
+    fn kind(self) -> &'static str {
+        match self {
+            Note::WorkerUpdate => "squircle-worker-update",
+            Note::BuildUpdate => "squircle-build-update",
+            Note::Handoff => "squircle-handoff",
+            Note::Task => "squircle-task",
+            Note::AgentMessage => "squircle-agent-message",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Note::WorkerUpdate => "Worker update",
+            Note::BuildUpdate => "Build update",
+            Note::Handoff => "Handoff",
+            Note::Task | Note::AgentMessage => "Agent message",
+        }
+    }
+
+    /// The context record that marks a message as this note.
+    pub fn record(self, payload: Value) -> Value {
+        json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": self.label(),
+               "kind": self.kind(), "payload": payload})
+    }
+
+    /// The user message T3 is sent for this note.
+    pub fn message(self, id: &str, text: &str, payload: Value) -> Value {
+        json!({"messageId": id, "role": "user", "text": text, "attachments": [],
+               "context": {"version": 1, "records": [self.record(payload)]}})
+    }
+}
+
+/// Whether the user wrote this T3 message: a user message no note marks.
+fn users_own(message: &Value) -> bool {
+    message["role"] == "user" && !message["context"]["records"].as_array().into_iter().flatten()
+        .any(|r| r["kind"].as_str().is_some_and(|k| k.starts_with("squircle-")))
 }
 
 /// A worker's runtime mode, and what T3 makes of it on the worker's provider
@@ -1028,8 +1080,7 @@ impl Agents {
         let client = self.ready().await.ok()?;
         let detail = self.thread_detail(&*client, thread).await.ok()?;
         detail["messages"].as_array()?.iter().rev()
-            .find(|m| m["role"] == "user" && m["context"]["records"].as_array().is_none_or(|r| r.is_empty())
-                && !m["text"].as_str().unwrap_or("").starts_with('['))
+            .find(|m| users_own(m) && !m["text"].as_str().unwrap_or("").starts_with('['))
             .and_then(|m| m["id"].as_str().or(m["messageId"].as_str()))
             .map(|id| Source { thread_id: thread.into(), message_id: id.into() })
     }
@@ -1213,11 +1264,9 @@ impl Agents {
                 message_id: uuid::Uuid::new_v4().to_string(),
                 workers: notes.iter().map(|(id, _, event)| (id.clone(), event.clone())).collect(),
                 text: format!("[worker update]\n{}\nRun `squircle thread read ID` for details, then decide what to do next.", lines.join("\n")),
-                record: json!({
-                    "version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Worker update",
-                    "kind": "squircle-worker-update",
-                    "payload": {"workers": notes.iter().map(|(id, w, event)| json!({"id": id, "title": w.title, "branch": w.branch, "state": label(event.kind)})).collect::<Vec<_>>()}
-                }),
+                record: Note::WorkerUpdate.record(json!({
+                    "workers": notes.iter().map(|(id, w, event)| json!({"id": id, "title": w.title, "branch": w.branch, "state": label(event.kind)})).collect::<Vec<_>>()
+                })),
                 delivery: Delivery::Queued,
                 build: None,
             });
@@ -1282,9 +1331,10 @@ impl Agents {
         self.save(&registry)
     }
 
-    /// Queues one update to the build's app agent, which wakes it and shows
-    /// the build in its conversation, unless the agent is still in the turn
-    /// it started the build in (the build is already there).
+    /// A failed build queues one update to its app agent, which wakes it to
+    /// act and shows the failure in its conversation. A build that succeeded
+    /// wakes nobody: the app shows its card where it finished, and a reply
+    /// to it would only repeat the card.
     pub fn build_finished(self: &Arc<Self>, build: &FinishedBuild) -> Result<()> {
         let tasks = self.tasks.all();
         {
@@ -1303,24 +1353,22 @@ impl Agents {
                 }
                 _ => {}
             }
-            let outcome = if build.succeeded { "succeeded".to_string() } else {
-                format!("failed{}", build.reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default())
-            };
-            let shown = if build.succeeded { "with an Install button" } else { "with why it failed" };
             registry.builds.retain(|_, w| now.saturating_sub(w.at()) < BUILD_WATCH_SECS);
             registry.builds.insert(build.id.clone(), BuildWatch::Told { at: now });
+            if build.succeeded {
+                return self.save(&registry);
+            }
+            let reason = build.reason.as_ref().map(|r| format!(": {r}")).unwrap_or_default();
             registry.outbox.push(Wake {
                 coordinator: agent.thread_id.clone(),
                 message_id: uuid::Uuid::new_v4().to_string(),
                 workers: vec![],
-                text: format!("[build update]\n- The {} build ({}) {outcome}.\nThe user already sees it in this chat {shown}; don't repeat its ID. \
-                               Say something only if it changes what happens next.", build.app, build.id),
-                record: json!({
-                    "version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Build update",
-                    "kind": "squircle-build-update",
-                    "payload": {"build": build.id, "app": build.app, "state": if build.succeeded { "succeeded" } else { "failed" },
-                                "reason": build.reason, "thread": build.thread}
-                }),
+                text: format!("[build update]\n- The {} build ({}) failed{reason}.\nThe user sees the failure in this chat. \
+                               If it is yours to fix, fix it (`squircle build log ID` has the details); \
+                               otherwise end your turn without a reply.", build.app, build.id),
+                record: Note::BuildUpdate.record(json!({
+                    "build": build.id, "app": build.app, "state": "failed", "reason": build.reason, "thread": build.thread
+                })),
                 delivery: Delivery::Queued,
                 build: Some(build.id.clone()),
             });
@@ -1607,12 +1655,9 @@ impl Agents {
             self.update_agent(project, |a| if let Lifecycle::Replacing { replacement, .. } = &mut a.lifecycle {
                 replacement.delivery = Delivery::OutcomeUnknown;
             })?;
-            let record = json!({"version": 1, "contextId": uuid::Uuid::new_v4().to_string(), "label": "Handoff",
-                                "kind": "squircle-handoff", "payload": {"previous": plan.previous}});
             client.dispatch(json!({
                 "type": "thread.turn.start", "threadId": plan.thread_id,
-                "message": {"messageId": plan.message_id, "role": "user", "text": plan.handoff, "attachments": [],
-                            "context": {"version": 1, "records": [record]}},
+                "message": Note::Handoff.message(&plan.message_id, &plan.handoff, json!({"previous": plan.previous})),
                 "runtimeMode": plan.runtime_mode, "interactionMode": "default",
             })).await?;
         }
@@ -1645,7 +1690,7 @@ impl Agents {
         };
         let old = self.thread_detail(client, &agent.thread_id).await?;
         let said: Vec<String> = old["messages"].as_array().into_iter().flatten()
-            .filter(|m| m["role"] == "user" && m["context"]["records"].as_array().is_none_or(|r| r.is_empty()))
+            .filter(|m| users_own(m))
             .filter_map(|m| m["text"].as_str())
             .map(|t| t.split("\n\n---\n").next().unwrap_or(t).trim())
             .filter(|t| !t.is_empty() && !t.starts_with('['))
@@ -1819,8 +1864,7 @@ impl Agents {
         let message_id = uuid::Uuid::new_v4().to_string();
         let command = json!({
             "type": "thread.turn.start", "threadId": id,
-            "message": {"messageId": message_id, "role": "user", "text": text, "attachments": [],
-                        "context": {"version": 1, "records": [agent_message("squircle-task", Some(coordinator))]}},
+            "message": Note::Task.message(&message_id, &text, json!({"from": coordinator})),
             "modelSelection": selection, "runtimeMode": mode, "interactionMode": "default",
             "bootstrap": {
                 "createThread": {"projectId": agent.project_id, "title": title, "modelSelection": selection,
@@ -1886,16 +1930,17 @@ impl Agents {
     /// app never shows it as something the user typed.
     pub async fn message(&self, thread_id: &str, text: &str) -> Result<()> {
         let from = self.registry.lock().unwrap().workers.get(thread_id).map(|w| w.coordinator.clone());
-        self.send_with(thread_id, text, Some(agent_message("squircle-agent-message", from.as_deref()))).await
+        self.send_with(thread_id, text, Some((Note::AgentMessage, json!({"from": from})))).await
     }
 
-    async fn send_with(&self, thread_id: &str, text: &str, record: Option<Value>) -> Result<()> {
+    async fn send_with(&self, thread_id: &str, text: &str, note: Option<(Note, Value)>) -> Result<()> {
         let client = self.ready().await?;
         let thread = self.wait_thread(thread_id).await?;
-        let mut message = json!({"messageId": uuid::Uuid::new_v4().to_string(), "role": "user", "text": text, "attachments": []});
-        if let Some(record) = record {
-            message["context"] = json!({"version": 1, "records": [record]});
-        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let message = match note {
+            Some((note, payload)) => note.message(&id, text, payload),
+            None => json!({"messageId": id, "role": "user", "text": text, "attachments": []}),
+        };
         client.dispatch(json!({
             "type": "thread.turn.start", "threadId": thread_id,
             "message": message,
@@ -2455,14 +2500,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finished_builds_reach_their_agent_once() {
+    async fn failed_builds_reach_their_agent_once() {
         let temp = tempfile::tempdir().unwrap();
         let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![
             row("agent", "p", "full-access", "a1", "running", "running", false),
             row("w1", "p", "full-access", "t", "running", "running", false)]);
         registered(&agents, |r| { r.agents.insert("p".into(), agent("agent")); r.workers.insert("w1".into(), worker("agent")); });
         let finished = |id: &str, thread: Option<&str>| FinishedBuild {
-            id: id.into(), thread: thread.map(str::to_string), app: "App".into(), succeeded: true, reason: None };
+            id: id.into(), thread: thread.map(str::to_string), app: "App".into(), succeeded: false, reason: Some("x".into()) };
         let updates = |fake: &Fake| fake.sent("thread.turn.start").into_iter()
             .map(|c| c["message"]["context"]["records"][0]["payload"]["build"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let (by_worker, by_task, own, own_later, stranger) = ("b-worker", uuid::Uuid::new_v4().to_string(), "b-own", "b-own-later", "b-x");
@@ -2492,6 +2537,27 @@ mod tests {
         reopened.build_finished(&finished(own_later, Some("agent"))).unwrap();
         assert!(reopened.registry.lock().unwrap().outbox.is_empty());
         assert_eq!(agents.build_owner(None, &by_task).map(|a| a.thread_id), Some("agent".into()));
+
+        // A build that succeeded only shows its card: it wakes nobody.
+        let done = FinishedBuild { id: "b-ok".into(), thread: Some("w1".into()), app: "App".into(), succeeded: true, reason: None };
+        agents.build_finished(&done).unwrap();
+        agents.flush().await.unwrap();
+        assert_eq!(updates(&fake).len(), 3);
+    }
+
+    /// Every message the service sends in the user's place is marked, and
+    /// the marked ones are never taken for the user's own words.
+    #[test]
+    fn service_messages_are_marked() {
+        for note in Note::ALL {
+            let message = note.message("m", "[x] for the agent", json!({}));
+            assert!(!users_own(&message), "{note:?}");
+        }
+        // A kind the service adds later is still Squircle's.
+        let later = json!({"role": "user", "text": "t", "context": {"records": [{"kind": "squircle-later"}]}});
+        assert!(!users_own(&later));
+        assert!(users_own(&json!({"role": "user", "text": "hi"})));
+        assert!(users_own(&json!({"role": "user", "text": "hi", "context": {"records": [{"kind": "file"}]}})));
     }
 
     #[tokio::test]
