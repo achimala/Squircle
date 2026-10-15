@@ -1163,7 +1163,7 @@ in the menu", "horizontal motion … displace it a little and jiggle").**
   cube's face, and the head has a little more body so its middle never reads
   as a dark disc.
 - The panel is the same jelly as the head: the app shows through, blurred,
-  under about 70% paper (66–84% by appearance and size) with a breath of the
+  under paper (84–92% by appearance and size since the gray-blob fix) with a breath of the
   jelly's tint, the head's rim and highlight running across the join. Text
   checked legible in light and dark over Squircle's Home.
 - Opening, the creature stays where it sat as the bubble and the panel grows
@@ -1192,6 +1192,23 @@ checking, not changed: the first frames of a handle drag show the
 conversation re-laid out at the drag's taller size (a blank, then an older
 scroll position for about 0.2 s). The offline doze was not seen (the
 simulator stayed connected). Not yet on the phone.
+
+**Gray blob inside the jelly fixed (user, 2026-10-15: "some misaligned gray
+blob inside the orange").** It was the backdrop blur (the system's
+ultra-thin material, grey) masked to a fixed rounded square and a stroked
+neck, while the shader draws a turned, squashed, scaled 3D cube: the square
+showed as a flatter grey face inside the warm rim, off whenever the cube
+leaned. The mask (and the shadow) is now the exact silhouette of what the
+shader draws, recomputed every frame from the same pose: the body's outline,
+the cube's rounded box projected (hull of its inner box's corners grown by its
+rounding radius) and the catenoid neck or its stubs. The material is tinted
+all through (about 0.42 of the tint in the middle, gently more at the edges),
+its rim and highlight are added premultiplied in a warm light rather than
+clamped toward grey, and the open panel's paper is 84–92% so host content
+only tints it. Checked in the simulator (Squircle Debug overlay over
+Squircle's Home, light and dark, collapsed, open and the jelly stress's
+flings over the device portraits); stills in
+`attachments/jelly-gray-blob/`. Not yet on the phone.
 
 **Resize flash fixed (2026-10-15).** Cause, from per-frame logs of the table
 on real-touch drags: rows are measured against their 60 pt estimates while

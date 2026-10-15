@@ -1,5 +1,6 @@
 #if SQUIRCLE_OVERLAY || DEBUG
 import Metal
+import simd
 import UIKit
 
 /// The overlay's jelly (user, 2026-10-14). Two bodies of frosted glass jelly
@@ -877,6 +878,107 @@ final class GlassJelly: UIView {
         return u.isFinite && canvas.width.isFinite && canvas.height.isFinite ? (u, canvas) : nil
     }
 
+    /// The cube as the shader draws it, seen from the front: its rounded
+    /// box (turned, squashed, scaled) projects to the convex hull of its
+    /// inner box's corners grown by the rounding radius.
+    private func cubeSilhouette(at center: CGPoint) -> CGPath {
+        let s = Self.creatureSize * cubeScale, squash = creatureSquash.value
+        let side = 1 / sqrt(max(0.4, 1 - squash))
+        let r = s * 0.28
+        let inner = SIMD3<Double>(max(0, s * 0.5 * side - r), max(0, s * 0.5 * (1 - squash) - r), max(0, s * 0.4 * side - r))
+        let turn = Self.turn(yaw: yaw.value, pitch: pitch.value, roll: roll.value)
+        var corners: [CGPoint] = []
+        for x in [-1.0, 1.0] { for y in [-1.0, 1.0] { for z in [-1.0, 1.0] {
+            let l = SIMD3<Double>(x * inner.x, s * 0.5 * squash + y * inner.y, z * inner.z)
+            let p = turn * l
+            corners.append(CGPoint(x: center.x + p.x, y: center.y + p.y))
+        } } }
+        return Self.grown(hull: Self.hull(corners), by: r)
+    }
+
+    /// The neck as the shader draws it (its axis lies in the screen's
+    /// plane, so its silhouette is its radius along the axis): the catenoid,
+    /// or after a pinch the two stubs.
+    private func neckSilhouette(from a: CGPoint, to cube: CGPoint) -> CGPath? {
+        let toward = CGPoint(x: cube.x - a.x, y: cube.y - a.y)
+        let n = max(1e-4, hypot(toward.x, toward.y))
+        let dir = CGPoint(x: toward.x / n, y: toward.y / n)
+        let reach = Self.creatureSize * cubeScale * 0.28
+        let b = CGPoint(x: cube.x - dir.x * reach, y: cube.y - dir.y * reach)
+        let L = max(0.001, hypot(b.x - a.x, b.y - a.y))
+        let R = Self.endRadius
+        func tube(from start: CGFloat, to end: CGFloat, radius: (CGFloat) -> CGFloat) -> CGPath {
+            let path = CGMutablePath()
+            let count = 24
+            for i in 0...count {
+                let t = start + (end - start) * CGFloat(i) / CGFloat(count)
+                path.addEllipse(in: CGRect(x: a.x + dir.x * t - radius(t), y: a.y + dir.y * t - radius(t),
+                                           width: 2 * radius(t), height: 2 * radius(t)))
+            }
+            return path
+        }
+        if bridgeConnected {
+            let c = max(0.01, catenary)
+            return tube(from: 0, to: L) { min(R, self.waist * cosh(($0 - L / 2) / c)) }
+        }
+        var stubs: CGPath?
+        let la = stubRoot.value, lb = stubCube.value
+        if la > 0.3 { stubs = tube(from: 0, to: la) { .lerp(R, 2.2, $0 / la) } }
+        if lb > 0.3 {
+            let stub = tube(from: L - lb, to: L) { .lerp(R, 2.2, (L - $0) / lb) }
+            stubs = stubs.map { $0.union(stub) } ?? stub
+        }
+        return stubs
+    }
+
+    /// The shader's `turn`: local cube coordinates to the screen's.
+    private static func turn(yaw: CGFloat, pitch: CGFloat, roll: CGFloat) -> simd_double3x3 {
+        let (cy, sy, cp, sp, cr, sr) = (cos(yaw), sin(yaw), cos(pitch), sin(pitch), cos(roll), sin(roll))
+        let ry = simd_double3x3(columns: (SIMD3(cy, 0, -sy), SIMD3(0, 1, 0), SIMD3(sy, 0, cy)))
+        let rx = simd_double3x3(columns: (SIMD3(1, 0, 0), SIMD3(0, cp, sp), SIMD3(0, -sp, cp)))
+        let rz = simd_double3x3(columns: (SIMD3(cr, sr, 0), SIMD3(-sr, cr, 0), SIMD3(0, 0, 1)))
+        return ry * rx * rz
+    }
+
+    /// Convex hull, counter-clockwise (monotone chain).
+    private static func hull(_ points: [CGPoint]) -> [CGPoint] {
+        let sorted = points.sorted { $0.x != $1.x ? $0.x < $1.x : $0.y < $1.y }
+        func cross(_ o: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat { (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x) }
+        var lower: [CGPoint] = [], upper: [CGPoint] = []
+        for p in sorted {
+            while lower.count >= 2, cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 { lower.removeLast() }
+            lower.append(p)
+        }
+        for p in sorted.reversed() {
+            while upper.count >= 2, cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 { upper.removeLast() }
+            upper.append(p)
+        }
+        return Array(lower.dropLast() + upper.dropLast())
+    }
+
+    /// A convex polygon grown by `r`: its edges pushed out, its corners arcs.
+    private static func grown(hull: [CGPoint], by r: CGFloat) -> CGPath {
+        let path = CGMutablePath()
+        guard hull.count > 1 else {
+            let c = hull.first ?? .zero
+            path.addEllipse(in: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r))
+            return path
+        }
+        let count = hull.count
+        for i in 0..<count {
+            let p = hull[i], prev = hull[(i + count - 1) % count], next = hull[(i + 1) % count]
+            // Outward normals of the edges into and out of this corner.
+            func normal(_ a: CGPoint, _ b: CGPoint) -> CGFloat { atan2(-(b.x - a.x), b.y - a.y) }
+            let from = normal(prev, p), to = normal(p, next)
+            var sweep = to - from
+            while sweep < 0 { sweep += 2 * .pi }
+            if i == 0 { path.move(to: CGPoint(x: p.x + r * cos(from), y: p.y + r * sin(from))) }
+            path.addArc(center: p, radius: r, startAngle: from, endAngle: from + sweep, clockwise: false)
+        }
+        path.closeSubpath()
+        return path
+    }
+
     private var bodyCenter: CGPoint { CGPoint(x: bodyRect.midX + lagX.value, y: bodyRect.midY + lagY.value) }
 
     /// Draws the pose unless the screen already shows it. False when a frame
@@ -889,7 +991,6 @@ final class GlassJelly: UIView {
         if let presented, presented.canvas == canvas, presented.uniforms.isClose(to: uniforms) { return true }
         guard !inBackground else { return false }
         var u = uniforms
-        let s = Self.creatureSize
         let half = CGSize(width: bodyRect.width / 2, height: bodyRect.height / 2)
         let radius = min(cornerRadius, half.width, half.height)
         let pillow = self.pillow
@@ -900,30 +1001,21 @@ final class GlassJelly: UIView {
         let rest = restPath(half: half, radius: radius, pillow: pillow)
         var toBounds = m.concatenating(CGAffineTransform(translationX: center.x, y: center.y))
         let onScreen = rest.copy(using: &toBounds) ?? rest
-        let outline = CGMutablePath()
-        outline.addPath(onScreen)
-        outline.addPath(UIBezierPath(roundedRect: CGRect(x: creature.x - s * 0.4, y: creature.y - s * 0.4, width: s * 0.8, height: s * 0.8),
-                                     cornerRadius: s * 0.28).cgPath)
+        // The blur and the shadow follow exactly what the shader draws: the
+        // body's outline, the turned and squashed cube's silhouette and the
+        // neck's. One union: overlapping pieces of opposite winding would
+        // cancel and punch a hole in the blur.
+        var covered = onScreen.union(cubeSilhouette(at: creature))
+        if let neck = neckSilhouette(from: rootNow, to: creature) { covered = covered.union(neck) }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         frost.frame = canvas
         frostMask.frame = frost.bounds
-        var toCanvasCopy = CGAffineTransform(translationX: -canvas.minX, y: -canvas.minY)
-        // One union: overlapping pieces of opposite winding would cancel and
-        // punch a hole in the blur (the ring that showed inside the head).
-        var covered = onScreen.union(UIBezierPath(roundedRect: CGRect(x: creature.x - s * 0.48, y: creature.y - s * 0.48,
-                                                                      width: s * 0.96, height: s * 0.96), cornerRadius: s * 0.3).cgPath)
-        if bridgeConnected {
-            let neck = CGMutablePath()
-            neck.move(to: rootNow)
-            neck.addLine(to: creature)
-            covered = covered.union(neck.copy(strokingWithWidth: 2 * min(Self.endRadius, waist + 3), lineCap: .round,
-                                              lineJoin: .round, miterLimit: 1))
-        }
-        frostMask.shape.path = covered.copy(using: &toCanvasCopy)
+        var toCanvas = CGAffineTransform(translationX: -canvas.minX, y: -canvas.minY)
+        frostMask.shape.path = covered.copy(using: &toCanvas)
         // One soft shadow in its colour.
         shadow.frame = bounds
-        shadow.shadowPath = outline
+        shadow.shadowPath = covered
         shadow.shadowColor = UIColor(red: tint.r.value, green: tint.g.value, blue: tint.b.value, alpha: 1).cgColor
         shadow.shadowOpacity = Float(.lerp(0.12 + 0.14 * tint.a.value, 0.16, opened))
         shadow.shadowRadius = .lerp(8, 18, opened)
@@ -1222,21 +1314,24 @@ enum JellyRenderer {
         return float4(col, clamp(a, 0.0, 1.0));
     }
 
-    // One material: translucent tinted jelly, deeper toward its edges, one
-    // soft rim of light, one soft highlight.
+    // One material: translucent jelly tinted all through, gently deeper
+    // toward its edges, one soft rim of light and one soft warm highlight.
+    // Everything added is premultiplied, so nothing is clamped grey.
     static float4 jelly(float3 n, float3 V, float shape, constant Uniforms& u) {
         float3 tint = u.tint.rgb;
         float s = u.tint.a;
         float3 L = normalize(float3(-0.45, -0.8, -0.9));
         float fres = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 2.0);
-        float a = s * (0.24 + 0.42 * fres);
-        float3 col = tint * a * shape;
-        float rim = fres * 0.22 * (0.5 + 0.5 * dot(normalize(n.xy + 1e-5), normalize(L.xy)));
-        col += mix(tint, float3(1.0), 0.6) * rim;
-        a += rim * 0.6;
-        float spec = pow(max(dot(reflect(-L, n), V), 0.0), 36.0) * 0.32;
-        col += float3(spec);
-        a += spec * 0.5;
+        float a = s * (0.42 + 0.22 * fres);
+        float3 light = mix(tint, float3(1.0), 0.65);
+        // Faces turned up are lighter, turned aside a little deeper.
+        float3 col = mix(tint, light, max(shape - 1.0, 0.0)) * a * min(shape, 1.0);
+        float rim = fres * 0.18 * (0.5 + 0.5 * dot(normalize(n.xy + 1e-5), normalize(L.xy)));
+        col += light * rim;
+        a += rim;
+        float spec = pow(max(dot(reflect(-L, n), V), 0.0), 14.0) * 0.22;
+        col += light * spec;
+        a += spec;
         return float4(col, a);
     }
 
@@ -1329,13 +1424,13 @@ enum JellyRenderer {
         float bodyness = smoothstep(2.0, -0.5, dBody);
         float f = u.fill.a * smoothstep(0.15, 0.9, depth) * smoothstep(0.75, 0.97, -n.z) * bodyness;
         // The paper is the same jelly, a breath of its tint in it.
-        float3 paper = mix(u.fill.rgb, u.tint.rgb, 0.08 * u.tint.a);
+        float3 paper = mix(u.fill.rgb, u.tint.rgb, 0.12 * u.tint.a);
         col = col * (1.0 - f) + paper * f;
         a = a * (1.0 - f) + f;
 
         // The head has more body than the slab, so its see-through middle
         // never reads as a dark disc over a dark app.
-        float head = smoothstep(3.0, 0.0, dHead) * u.tint.a * 0.22;
+        float head = smoothstep(3.0, 0.0, dHead) * u.tint.a * 0.14;
         col += mix(u.tint.rgb, float3(1.0), u.dark > 0.5 ? 0.15 : 0.35) * head;
         a += head;
 

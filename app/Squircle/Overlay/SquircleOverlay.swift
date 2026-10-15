@@ -640,10 +640,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         glass.cornerRadius = .lerp(hasLine ? 16 : 10, .lerp(Self.panelRadius, 40, fullness), opened)
         glass.opened = opened
         glass.fill = Theme.paper
-        // The panel is the same jelly as the head: the app shows through it,
-        // blurred, with enough paper behind the text to read over anything.
+        // The panel is the same jelly as the head: the app tints it through
+        // the blur, under enough paper that its shapes average out and the
+        // text reads over anything.
         let dark = traitCollection.userInterfaceStyle == .dark
-        glass.fillAmount = .lerp(0.15, .lerp(dark ? 0.66 : 0.7, dark ? 0.8 : 0.84, fullness), opened)
+        glass.fillAmount = .lerp(0.15, .lerp(dark ? 0.84 : 0.86, dark ? 0.9 : 0.92, fullness), opened)
         glass.tone = bubble.tone
         glass.typing = route.isOpen && keyboardTop < view.bounds.maxY
         glass.layoutChanged()
