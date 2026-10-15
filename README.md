@@ -7,6 +7,13 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-15: agent memory.** An app agent looks up the past through a
+read-only Haiku subagent backed by `squircle history` (T3's conversations,
+tasks, builds, git and docs, read where they live, nothing copied), keeps a
+few durable notes (`squircle notes`) that ride in every turn, and the Mac
+compacts or starts fresh idle agents whose context grew large. See
+[agent memory](docs/t3-native-migration.md#2026-10-15-agent-memory).
+
 **2026-10-15: second code review fixes (W1–W8).** The
 [second review](docs/code-review-2026-10-b.md)'s service and app fixes are
 merged: workers saved before they start and stopped before their files go,

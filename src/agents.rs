@@ -1926,7 +1926,7 @@ impl Agents {
              (`{cli} thread --help`), unless the user says otherwise. Every piece of delegated work, reviews and research included, \
              runs as a T3 worker via `thread spawn` (`--provider codex --model <slug> --effort <level>` for Codex), never by running the codex \
              or claude CLIs yourself or through subagents or workflows, so the user can see it; the one subagent is `squircle:history`, \
-             cheap and read-only: ask it before answering anything about past work or decisions. Archive a worker once its work is merged or abandoned, \
+             cheap and read-only: ask it, in the foreground, before answering anything about past work or decisions. Archive a worker once its work is merged or abandoned, \
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
              Your tasks, the user's open asks (`{cli} task --help`):{tasks}\n\
              Your notes (`{cli} notes --help`; keep them current):{notes}\n\

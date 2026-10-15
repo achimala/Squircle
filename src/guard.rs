@@ -105,7 +105,7 @@ fn read_only(words: &[String]) -> Option<String> {
                 && !rest.any(|w| w.starts_with("--output") || w == "--ext-diff" || w.starts_with("-O") || w.starts_with("--open-files-in-pager"))
         }
         "rg" => !args.iter().any(|w| w.starts_with("--pre")),
-        "cat" | "head" | "tail" | "wc" | "ls" | "grep" | "jq" | "echo" | "pwd" | "true" => true,
+        "cat" | "head" | "tail" | "wc" | "ls" | "grep" | "jq" | "echo" | "pwd" | "true" | "cd" => true,
         _ => false,
     };
     (!ok).then(|| format!("`{}` is not a read-only lookup", shown()))
@@ -391,7 +391,7 @@ mod tests {
             "git log --oneline -20 -- src/guard.rs".into(),
             "git -C /repo show --stat abc123".into(),
             "rg -n 'tilt' docs | head".into(),
-            "cat AGENTS.md | grep -n Tasks".into(),
+            "cd /repo && cat AGENTS.md | grep -n Tasks".into(),
         ] {
             assert_eq!(check(&inside("Bash", json!({"command": command})), "sq"), None, "denied: {command}");
         }

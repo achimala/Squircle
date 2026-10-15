@@ -2325,3 +2325,66 @@ no stream reconnects. The one ~316 KB seed in that window came from a third
 agent's simulator that started mid-run. The rest is the conversation and
 service traffic (one 717 KB burst on a T3 socket in the after-run was not
 identified). On screen, both idle simulators show their stills in the deck.
+
+## 2026-10-15 agent memory
+
+User decision: the app agent gets long-term memory and cheap context
+management from what already exists, with one source of truth. It uses its
+own subagent (Haiku) instead of Squircle running `claude`/`codex`; nothing
+copies T3's or the providers' stores.
+
+- **`squircle history search WORDS` / `history show REF`** (`src/history.rs`):
+  read-only, agent-neutral, text or `--json`. Sources: T3's messages, thread
+  titles and tool activity (`state.sqlite` through `sqlite3 -readonly`),
+  Squircle's tasks and builds, `git log` (3000 commits) and the project's
+  tracked Markdown, split by heading. **No index**: each search reads the
+  sources (about 30 ms for the Squircle project's 7,400 messages, about
+  0.2 s for its tool activity; about 1 s in all) and ranks in Rust: BM25 over
+  the matches, scaled by the share of terms present, a phrase bonus, a source
+  weight (tasks and thread titles above messages and commits, tool activity
+  and Squircle's own notes lowest) and a mild recency boost, with at most two
+  results per conversation. Each result is one line plus a 200-character
+  snippet and a reference (`msg:`, `thread:`, `act:`, `task:`, `build:`,
+  `commit:`, `doc:PATH#L12`); `show` expands one (a message with its
+  neighbours, a thread's latest messages, …) up to `--max-chars`.
+- **History subagent** (`plugin/squircle/agents/history.md`, `squircle:history`,
+  `model: haiku`, tools Bash/Read/Grep/Glob). The agent definition and turn
+  note tell the app agent to ask it before answering about past work or
+  decisions. The guard now allows exactly this subagent (no other
+  `subagent_type`, no model other than Haiku, no worktree isolation) and,
+  for calls inside it (Claude Code 2.1.300 sends `agent_id` and
+  `agent_type: "squircle:history"` with a subagent's tool calls; the
+  `--agent` main thread has `agent_type` but no `agent_id`, checked with a
+  probe plugin), allows only Read/Grep/Glob and Bash whose every command reads:
+  `squircle history|notes show|task list/show|thread read/status|build
+  list/status/log|app list/show`, git `log/show/diff/grep/blame/status/…`
+  without `-c` or `--output`, `rg` without `--pre`, `cat/head/tail/grep/wc/ls/jq`,
+  and no output to a file. Edit, Write and NotebookEdit joined the hook's
+  matcher for this.
+- **Notes** (`squircle notes show|add|edit|remove`, `src/notes.rs`): a few
+  durable lines per app (`<data>/notes/<project>.json`, at most 300 characters
+  each and 4000 in all) for preferences, decisions and gotchas, listed in each
+  turn's note. Not a log; history stays in its sources.
+- **Upkeep** (`src/upkeep.rs`, `Agents::upkeep`): every five minutes, for each
+  ready agent whose thread T3 currently shows between turns and none of whose
+  workers is working, the service reads its latest `context-window.updated`
+  reading and the thread's last message or activity. Past
+  `SQUIRCLE_COMPACT_TOKENS` (200000) after `SQUIRCLE_COMPACT_IDLE_MINUTES`
+  (30) idle it sends `/compact Keep: …` (T3 passes slash commands to Claude:
+  two earlier manual `/compact` messages produced `context-compaction`
+  activities with `trigger: manual`), marked `squircle-upkeep`, which the app
+  shows as the line "Compacted while idle (245K tokens)". Past
+  `SQUIRCLE_FRESH_TOKENS` (500000) after `SQUIRCLE_FRESH_IDLE_MINUTES` (120),
+  or during local hour `SQUIRCLE_NIGHTLY_FRESH_HOUR` (4) past
+  `SQUIRCLE_NIGHTLY_FRESH_TOKENS` (100000) after the same idle time, it runs
+  the existing fresh start, whose handoff says why ("Started fresh" in the
+  chat). `0`/`off` turns a rule off. One reading is acted on once. An agent
+  turn that ends on an upkeep message (no reply) sends no notification.
+  `squircle agent compact` runs the same compaction now.
+- **Codex.** Codex 0.160 has subagents too (`multi_agent` is stable and on;
+  roles are `[agents.<name>]` with `description` and a `config_file` that can
+  set `model = "gpt-6-luna"` and a read-only sandbox; `spawn_agent` takes the
+  role as `agent_type`, and Codex hooks receive `agent_type`). App agents run
+  only on the "squircle" Claude instance today, so nothing is built for Codex:
+  a Codex app agent would need that role installed in its Codex config and a
+  Codex `PreToolUse` hook equivalent to the guard. Not implemented.
