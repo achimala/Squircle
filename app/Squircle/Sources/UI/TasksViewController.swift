@@ -914,7 +914,8 @@ final class TaskStrip: UIControl {
         accessibilityIdentifier = "agent.taskStrip"
         isAccessibilityElement = true
         accessibilityTraits = .button
-        clipsToBounds = true
+        // Never clip: the glass draws its rim and shadow past its bounds.
+        if #available(iOS 26.0, *) { surface.cornerConfiguration = .capsule() }
         parts.spacing = 10
         parts.alignment = .center
         [surface, parts].forEach { $0.isUserInteractionEnabled = false; $0.translatesAutoresizingMaskIntoConstraints = false }
