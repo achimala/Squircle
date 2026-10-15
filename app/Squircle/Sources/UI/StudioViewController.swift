@@ -463,19 +463,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     private func renderControls() {
-        let offline = !model.connected && !model.isLoading
-        let state = model.connected ? "Connected" : (offline ? "Offline" : "Connecting")
-        if connection.accessibilityValue != state {
-            connection.accessibilityValue = state
-            let tint: UIColor = model.connected ? Theme.success : (offline ? Theme.warning : .secondaryLabel)
-            connection.configuration?.image = UIImage(systemName: "macbook")?.withTintColor(tint, renderingMode: .alwaysOriginal)
+        let summary = model.connectionSummary
+        if connection.accessibilityValue != summary.title {
+            connection.accessibilityValue = summary.title
+            connection.configuration?.image = UIImage(systemName: "macbook")?.withTintColor(summary.tint, renderingMode: .alwaysOriginal)
         }
-        let detail = model.error ?? (model.connected ? "Connected to \(model.hostName)" : model.status)
-        connection.menu = UIMenu(title: detail, children: [
-            UIAction(title: "Reconnect", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
-                Task { await self?.model.reconnect() }
-            }
-        ])
+        connection.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
+            done(self.map { [ConnectionMenu.section($0.model)] } ?? [])
+        }])
     }
 
     private func layoutGrid() {

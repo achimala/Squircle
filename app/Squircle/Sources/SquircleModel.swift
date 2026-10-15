@@ -169,6 +169,27 @@ final class SquircleModel {
         case .ready: isRunning ? "Working" : "Connected"
         }
     }
+    /// Not reaching the Mac, past the grace of a brief reconnect.
+    var isOffline: Bool {
+        switch connection {
+        case .stopped, .refused: true
+        case .connecting(let attempt): Self.offline(attempt)
+        case .ready, .suspended: false
+        }
+    }
+    /// The connection in words: a state, why, and the colour it shows in.
+    var connectionSummary: (title: String, detail: String, tint: UIColor) {
+        switch connection {
+        case .ready: ("Connected", "To \(hostName)", Theme.success)
+        case .suspended: ("Paused", "Reconnects when the app is back in front", .secondaryLabel)
+        case .stopped: ("Disconnected", error ?? "Not connected to \(hostName)", Theme.warning)
+        case .refused: ("Needs pairing again", error ?? "T3 no longer accepts this build’s session", Theme.failure)
+        case .connecting(let attempt):
+            if Self.offline(attempt) { ("Offline", error ?? "Can’t reach \(hostName)", Theme.warning) }
+            else if attempt.failingSince != nil { ("Reconnecting", error ?? "Lost \(hostName); trying again", .secondaryLabel) }
+            else { ("Connecting", "To \(hostName)", .secondaryLabel) }
+        }
+    }
     private static func offline(_ attempt: ConnectionPhase.Attempt) -> Bool {
         attempt.failingSince.map { $0.duration(to: .now) >= reconnectGrace } ?? false
     }

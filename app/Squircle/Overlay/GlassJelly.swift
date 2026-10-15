@@ -56,6 +56,10 @@ final class GlassJelly: UIView {
     var typing = false {
         didSet { if typing != oldValue { wake() } }
     }
+    /// Not connected to the Mac: it dozes (heavy lids, faded colour).
+    var drowsy = false {
+        didSet { if drowsy != oldValue { wake() } }
+    }
 
     /// The creature as drawn now, in the superview's coordinates.
     var creatureFrame: CGRect {
@@ -64,6 +68,7 @@ final class GlassJelly: UIView {
     }
 
     private let shadow = CAShapeLayer()
+    private let shadowMask = CAShapeLayer()
     private let frost = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
     /// The blur shows where the jelly is: its outline, as a path (a second
     /// Metal pass here cost a whole frame on the phone).
@@ -109,6 +114,10 @@ final class GlassJelly: UIView {
     private var squint = Wobble(0, response: 0.12, damping: 1)
     private var worry = Wobble(0, response: 0.35, damping: 1)
     private var squintUntil: CGFloat = 0
+    private var sleepy = Wobble(0, response: 0.6, damping: 1)
+    /// A finger dragging the panel sideways without moving it (resizing):
+    /// rubber-banded points the body and head lean toward.
+    private var pullX: CGFloat = 0
     private var finger: (point: CGPoint, at: CGFloat)?
     private var tint = (r: Wobble(0, response: 0.35, damping: 1), g: Wobble(0, response: 0.35, damping: 1),
                         b: Wobble(0, response: 0.35, damping: 1), a: Wobble(0, response: 0.35, damping: 1))
@@ -165,6 +174,8 @@ final class GlassJelly: UIView {
         super.init(frame: frame)
         shadow.fillColor = UIColor.clear.cgColor
         shadow.shadowOffset = CGSize(width: 0, height: 6)
+        shadowMask.fillRule = .evenOdd
+        shadow.mask = shadowMask
         layer.addSublayer(shadow)
         frostMask.shape.fillColor = UIColor.black.cgColor
         frost.mask = frostMask
@@ -213,6 +224,16 @@ final class GlassJelly: UIView {
     /// A finished task: the creature gulps it down.
     func gulp() {
         creatureSquash.velocity += 1.1
+        wake()
+    }
+
+    /// A finger drags sideways by `dx` points while the frame stays put (nil:
+    /// let go). The body and head lean a few rubber-banded points after it
+    /// and, let go, spring back with a small jiggle.
+    func pull(_ dx: CGFloat?) {
+        let next = dx.map { 7 * tanh($0 / 90) } ?? 0
+        guard abs(next - pullX) > 0.01 else { return }
+        pullX = next
         wake()
     }
 
@@ -390,7 +411,7 @@ final class GlassJelly: UIView {
               hypot(velocity.x, velocity.y) < 0.5, hypot(sizeVelocity.width, sizeVelocity.height) < 0.5,
               hypot(accel.x, accel.y) < 1, hypot(sizeAccel.width, sizeAccel.height) < 1 else { return false }
         let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, tint.r, tint.g, tint.b, tint.a]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, tint.r, tint.g, tint.b, tint.a]
         return modes.allSatisfy { $0.isAtRest } && wobbles.allSatisfy { $0.isAtRest }
     }
 
@@ -406,7 +427,7 @@ final class GlassJelly: UIView {
     /// Every value finite (a NaN anywhere would never settle and draw nothing).
     private var isValid: Bool {
         let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, tint.r, tint.g, tint.b, tint.a]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, tint.r, tint.g, tint.b, tint.a]
         let values = modes.flatMap { [$0.value, $0.velocity] } + wobbles.flatMap { [$0.value, $0.velocity] }
             + [velocity.x, velocity.y, sizeVelocity.width, sizeVelocity.height, accel.x, accel.y,
                sizeAccel.width, sizeAccel.height, creatureWorld.x, creatureWorld.y, waist, catenary, cubeScale, time, toneTime]
@@ -422,7 +443,7 @@ final class GlassJelly: UIView {
             (wobble.value, wobble.velocity) = (wobble.target, 0)
         }
         rest(&yaw); rest(&pitch); rest(&roll); rest(&gazeX); rest(&gazeY)
-        rest(&happy); rest(&squint); rest(&worry)
+        rest(&happy); rest(&squint); rest(&worry); rest(&sleepy)
         rest(&tint.r); rest(&tint.g); rest(&tint.b); rest(&tint.a)
         (velocity, sizeVelocity, accel, sizeAccel) = (.zero, .zero, .zero, .zero)
         (lastPosition, lastSize, gliding) = (nil, nil, false)
@@ -454,8 +475,8 @@ final class GlassJelly: UIView {
     var debugState: String {
         let names = ["squash", "shear", "lagX", "lagY", "offsetX", "offsetY", "creatureSquash", "hop", "stubRoot", "stubCube"]
         let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
-        let wobbleNames = ["yaw", "pitch", "roll", "gazeX", "gazeY", "happy", "squint", "worry", "r", "g", "b", "a"]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, tint.r, tint.g, tint.b, tint.a]
+        let wobbleNames = ["yaw", "pitch", "roll", "gazeX", "gazeY", "happy", "squint", "worry", "sleepy", "r", "g", "b", "a"]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, tint.r, tint.g, tint.b, tint.a]
         var moving = zip(names, modes).filter { !$0.1.isAtRest }.map { "\($0.0)=\($0.1.value)/\($0.1.velocity)" }
         moving += zip(wobbleNames, wobbles).filter { !$0.1.isAtRest }.map { "\($0.0)=\($0.1.value)→\($0.1.target) v\($0.1.velocity)" }
         return "cadence=\(cadence) paused=\(link?.isPaused ?? true) rest=\(isAtRest) shows=\(showsCurrentPose) pressed=\(pressed) "
@@ -547,6 +568,9 @@ final class GlassJelly: UIView {
         // Only the panel resizing squashes it; a pill fitting new text doesn't.
         squashForce += 0.06 * (sizeAccel.width - sizeAccel.height) * opened
         let shearForce = 0.12 * a.x
+        // A sideways pull leans the top after the finger and shifts the body.
+        lagX.target = reduced ? 0 : pullX
+        shear.target = reduced ? 0 : -0.6 * pullX
         let steps = 4, h = dt / CGFloat(steps)
         for _ in 0..<steps {
             squash.step(h, frequency: frequency, damping: damping, force: reduced ? 0 : squashForce)
@@ -578,6 +602,7 @@ final class GlassJelly: UIView {
             let steps = 4, h = dt / CGFloat(steps)
             for _ in 0..<steps {
                 offsetX.step(h, frequency: 4.5, damping: 0.72, force: -accel.x)
+                offsetX.target = 1.4 * pullX
                 offsetY.step(h, frequency: 4.5, damping: 0.72, force: -accel.y)
             }
             let n = hypot(offsetX.value, offsetY.value), reach: CGFloat = 46
@@ -706,7 +731,13 @@ final class GlassJelly: UIView {
         let color: UIColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success
             : tone == .recording ? Theme.failure : Theme.accent
         color.resolvedColor(with: traitCollection).getRed(&r, green: &g, blue: &b, alpha: &a)
-        let strength: CGFloat = tone == .idle ? 0.5 : 0.85
+        var strength: CGFloat = tone == .idle ? 0.5 : 0.85
+        if drowsy {
+            // Offline: greyed toward its own luminance, and fainter.
+            let grey = 0.3 * r + 0.59 * g + 0.11 * b
+            (r, g, b) = (.lerp(r, grey, 0.75), .lerp(g, grey, 0.75), .lerp(b, grey, 0.75))
+            strength *= 0.6
+        }
         (tint.r.target, tint.g.target, tint.b.target, tint.a.target) = (r, g, b, strength)
         if !tintSet {
             tintSet = true
@@ -769,7 +800,8 @@ final class GlassJelly: UIView {
         happy.target = tone == .done && toneTime < 4 ? 1 : 0
         squint.target = time < squintUntil ? 1 : 0
         worry.target = tone == .needsYou ? 1 : 0
-        happy.step(dt); squint.step(dt); worry.step(dt)
+        sleepy.target = drowsy ? 1 : 0
+        happy.step(dt); squint.step(dt); worry.step(dt); sleepy.step(dt)
     }
 
     // MARK: Shape
@@ -829,7 +861,7 @@ final class GlassJelly: UIView {
         let u = JellyUniforms(
             tint: SIMD4(Float(tint.r.value), Float(tint.g.value), Float(tint.b.value), Float(tint.a.value)),
             fill: fillVector,
-            face: SIMD4(Float(lid), Float(happy.value), Float(squint.value), Float(worry.value)),
+            face: SIMD4(Float(lid * (1 - 0.55 * sleepy.value)), Float(happy.value), Float(squint.value), Float(worry.value)),
             inverse: SIMD4(Float(inverse.a), Float(inverse.b), Float(inverse.c), Float(inverse.d)),
             creature: SIMD4(Float(creature.x), Float(creature.y), Float(s), Float(neckLength)),
             pose: SIMD4(Float(yaw.value), Float(pitch.value), Float(roll.value), Float(creatureSquash.value)),
@@ -876,23 +908,32 @@ final class GlassJelly: UIView {
         CATransaction.setDisableActions(true)
         frost.frame = canvas
         frostMask.frame = frost.bounds
-        let toCanvas = CGAffineTransform(translationX: -canvas.minX, y: -canvas.minY)
-        let covered = CGMutablePath()
-        covered.addPath(outline, transform: toCanvas)
+        var toCanvasCopy = CGAffineTransform(translationX: -canvas.minX, y: -canvas.minY)
+        // One union: overlapping pieces of opposite winding would cancel and
+        // punch a hole in the blur (the ring that showed inside the head).
+        var covered = onScreen.union(UIBezierPath(roundedRect: CGRect(x: creature.x - s * 0.48, y: creature.y - s * 0.48,
+                                                                      width: s * 0.96, height: s * 0.96), cornerRadius: s * 0.3).cgPath)
         if bridgeConnected {
             let neck = CGMutablePath()
             neck.move(to: rootNow)
             neck.addLine(to: creature)
-            covered.addPath(neck.copy(strokingWithWidth: 2 * min(Self.endRadius, waist + 3), lineCap: .round, lineJoin: .round,
-                                      miterLimit: 1, transform: toCanvas))
+            covered = covered.union(neck.copy(strokingWithWidth: 2 * min(Self.endRadius, waist + 3), lineCap: .round,
+                                              lineJoin: .round, miterLimit: 1))
         }
-        frostMask.shape.path = covered
+        frostMask.shape.path = covered.copy(using: &toCanvasCopy)
         // One soft shadow in its colour.
         shadow.frame = bounds
         shadow.shadowPath = outline
         shadow.shadowColor = UIColor(red: tint.r.value, green: tint.g.value, blue: tint.b.value, alpha: 1).cgColor
         shadow.shadowOpacity = Float(.lerp(0.12 + 0.14 * tint.a.value, 0.16, opened))
         shadow.shadowRadius = .lerp(8, 18, opened)
+        // Only outside the jelly: under its translucent body a shadow reads
+        // as a dark blob inside it.
+        let outside = CGMutablePath()
+        outside.addRect(bounds.insetBy(dx: -Self.margin, dy: -Self.margin))
+        outside.addPath(covered)
+        shadowMask.frame = bounds
+        shadowMask.path = outside
         content.transform = .identity
         content.bounds = CGRect(origin: .zero, size: bounds.size)
         content.center = CGPoint(x: bounds.midX + center.x - bodyRect.midX, y: bounds.midY + center.y - bodyRect.midY)
@@ -1236,6 +1277,9 @@ enum JellyRenderer {
     static float bridgeD(float3 P, Scene sc, constant Uniforms& u) {
         // It ends inside the cube's near side, not at its centre, so it never
         // pushes out the face.
+        // Flattened front to back, so its end inside the cube never bulges
+        // the cube's face (the smooth union would show it as a ring).
+        P.z *= 1.6;
         float3 a = float3(u.gaze.zw, 0.0);
         float3 toward = sc.cube - a;
         float3 b = sc.cube - normalize(toward + 1e-4) * sc.s * 0.28;
@@ -1247,7 +1291,7 @@ enum JellyRenderer {
         if (u.bridge.w > 0.5) {
             float tc = clamp(t, 0.0, L);
             float r = min(rEnd, u.bridge.x * cosh((tc - L * 0.5) / max(0.01, u.bridge.y)));
-            return (length(P - (a + dir * tc)) - r) * 0.8;
+            return (length(P - (a + dir * tc)) - r) * 0.5;
         }
         // Pinched off: each half is a stub drawn back into its body.
         float d = 1e4;
@@ -1255,12 +1299,12 @@ enum JellyRenderer {
         if (la > 0.3) {
             float tc = clamp(t, 0.0, la);
             float r = mix(rEnd, 2.2, tc / la);
-            d = min(d, (length(P - (a + dir * tc)) - r) * 0.8);
+            d = min(d, (length(P - (a + dir * tc)) - r) * 0.5);
         }
         if (lb > 0.3) {
             float tc = clamp(L - t, 0.0, lb);
             float r = mix(rEnd, 2.2, tc / lb);
-            d = min(d, (length(P - (b - dir * tc)) - r) * 0.8);
+            d = min(d, (length(P - (b - dir * tc)) - r) * 0.5);
         }
         return d;
     }
@@ -1284,8 +1328,16 @@ enum JellyRenderer {
         float depth = clamp(-blob(rested, u) / bevel, 0.0, 1.0);
         float bodyness = smoothstep(2.0, -0.5, dBody);
         float f = u.fill.a * smoothstep(0.15, 0.9, depth) * smoothstep(0.75, 0.97, -n.z) * bodyness;
-        col = col * (1.0 - f) + u.fill.rgb * f;
+        // The paper is the same jelly, a breath of its tint in it.
+        float3 paper = mix(u.fill.rgb, u.tint.rgb, 0.08 * u.tint.a);
+        col = col * (1.0 - f) + paper * f;
         a = a * (1.0 - f) + f;
+
+        // The head has more body than the slab, so its see-through middle
+        // never reads as a dark disc over a dark app.
+        float head = smoothstep(3.0, 0.0, dHead) * u.tint.a * 0.22;
+        col += mix(u.tint.rgb, float3(1.0), u.dark > 0.5 ? 0.15 : 0.35) * head;
+        a += head;
 
         // The face, on the cube's front.
         if (dHead < 3.0) {
