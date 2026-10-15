@@ -213,6 +213,7 @@ See the evidence page for the scope of rendered transition checks.
 | What was verified before the T3 replacement? | [Historical validation](docs/validation.md) |
 | What did the October 2026 review find, and what is fixed? | [Code review](docs/code-review-2026-10.md) |
 | What did the second review find, and what is fixed? | [Second code review](docs/code-review-2026-10-b.md) |
+| What is proposed for the jelly as the design language (not built)? | [Jelly design proposal](docs/design-jelly-language.md) |
 
 Start with [AGENTS.md](AGENTS.md). Historical Hermes validation describes earlier
 builds and is not evidence that this replacement passed those checks.
