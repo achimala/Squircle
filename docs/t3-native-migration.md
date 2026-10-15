@@ -1193,6 +1193,21 @@ conversation re-laid out at the drag's taller size (a blank, then an older
 scroll position for about 0.2 s). The offline doze was not seen (the
 simulator stayed connected). Not yet on the phone.
 
+**Resize flash fixed (2026-10-15).** Cause, from per-frame logs of the table
+on real-touch drags: rows are measured against their 60 pt estimates while
+scrolled past and the table applies the accumulated difference (here −3279
+or +1277 pt) to its content size in its own next layout pass, which the
+touch-down triggered. Shrinking left the offset past the end, and UIKit pulled
+it back with its own animated scroll (`_adjustContentOffsetIfNecessary`):
+blank, then a glide through older rows. Growing left the offset short of the
+end until the drag re-pinned it. Now `ConversationTable` makes that clamp
+immediate and reports each layout pass, and a pinned conversation that was at
+its end before the pass is put back at its end in the same pass. Verified
+from the session recordings of a throwaway UI test (iPhone 18 Pro Max,
+iOS 27.0; drag up from docked, drag down from full screen), light and dark:
+the conversation stays put, anchored at the bottom, from touch-down through
+release. Strip: `attachments/overlay-resize-flash/before-after.png`.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
