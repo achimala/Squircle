@@ -230,6 +230,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         recordingTint.alpha = 0
         glass.content.addSubview(recordingTint)
         capture.onLimit = { [weak self] in self?.stopRecording() }
+        capture.onStopping = { [weak self] in self?.render() }
         glass.content.addSubview(bubbleStage)
         let pill = UIView()
         pill.backgroundColor = .tertiaryLabel
@@ -366,12 +367,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         #if DEBUG
         if let demo = demoStatus { (headline, tone, started) = (demo.headline, demo.tone, nil) }
         #endif
-        if let recording = capture.recording {
+        if capture.isStopping {
+            (headline, tone, started) = ("Finishing recording", .recording, nil)
+        } else if let recording = capture.recording {
             (headline, tone, started) = (recording.kind == .screen ? "Recording screen" : "Recording performance", .recording, recording.started)
         }
         // Can't reach the Mac: it dozes until it can (the ⋯ menu says why).
         glass.drowsy = model.isOffline
-        bubble.showsTime = capture.recording != nil
+        bubble.showsTime = capture.recording != nil && !capture.isStopping
         bubble.configure(headline: headline, started: started, tone: tone)
         bubble.accessibilityLabel = capture.recording == nil ? "Squircle" : "Stop recording"
         bubble.accessibilityValue = headline ?? "Idle"

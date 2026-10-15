@@ -1,14 +1,15 @@
 #if SQUIRCLE_OVERLAY || DEBUG
 import Darwin
 import MachO
-import OSLog
 import Synchronization
 import UIKit
 
 /// Records how the host app performs, from inside its own process: every
 /// frame's timing, the main thread's stack about once a millisecond, CPU,
-/// memory, thermal state, touches and the app's log. The Mac names the app's
-/// frames from the build's dSYM (`squircle perf`).
+/// memory, thermal state and touches. The Mac names the app's frames from
+/// the build's dSYM (`squircle perf`). Not the app's log: `OSLogStore` reads
+/// the process's whole log to find a window of it, which took seconds in the
+/// simulator and longer on the phone, every time a recording stopped.
 @MainActor
 final class PerfRecorder: CaptureProducer {
     private let sampler: MainThreadSampler
@@ -129,7 +130,6 @@ final class PerfRecorder: CaptureProducer {
         return await Task.detached(priority: .userInitiated) {
             var json = header
             json.merge(raw.export(origin: origin)) { a, _ in a }
-            json["logs"] = Self.logs(since: Date(timeIntervalSince1970: (header["started_at"] as? Double) ?? 0))
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("perf-\(UUID().uuidString).perf.json")
             guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
                   (try? data.write(to: url)) != nil else { return nil }
@@ -164,28 +164,6 @@ final class PerfRecorder: CaptureProducer {
         var info = utsname()
         uname(&info)
         return withUnsafeBytes(of: &info.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
-    }
-
-    /// The app's own log lines while it recorded, newest 400.
-    nonisolated private static func logs(since start: Date) -> [[String: Any]] {
-        guard let store = try? OSLogStore(scope: .currentProcessIdentifier),
-              let entries = try? store.getEntries(at: store.position(date: start)) else { return [] }
-        var lines: [[String: Any]] = []
-        for case let entry as OSLogEntryLog in entries where entry.date >= start {
-            let level: String
-            switch entry.level {
-            case .debug: level = "debug"
-            case .info: level = "info"
-            case .notice: level = "notice"
-            case .error: level = "error"
-            case .fault: level = "fault"
-            default: level = "default"
-            }
-            lines.append(["t": entry.date.timeIntervalSince(start), "level": level,
-                          "subsystem": entry.subsystem, "category": entry.category,
-                          "message": String(entry.composedMessage.prefix(500))])
-        }
-        return Array(lines.suffix(400))
     }
 }
 

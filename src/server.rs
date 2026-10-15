@@ -40,7 +40,6 @@ pub struct AppState {
     jobs: Arc<Jobs>,
     slots: Arc<Semaphore>,
     inspection_slots: Arc<Semaphore>,
-    uploads: Arc<Semaphore>,
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
     agents: Option<Arc<Agents>>,
@@ -61,7 +60,6 @@ impl AppState {
             diagnostics: Arc::default(),
             slots: Arc::new(Semaphore::new(1)),
             inspection_slots: Arc::new(Semaphore::new(2)),
-            uploads: Arc::new(Semaphore::new(1)),
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
             agents: None,
@@ -1555,8 +1553,10 @@ struct CaptureQuery {
 
 /// A screen or performance recording from the phone; the message that sends
 /// it links the returned path. Authentication runs before this handler, the
-/// body streams into a private staging file (never memory), one upload at a
-/// time, and the staged file is removed on any failure or cancellation.
+/// body streams into its own private staging file (never memory), and the
+/// staged file is removed on any failure or cancellation. Uploads don't wait
+/// for each other: one that stalls (its app suspended mid-send) holds only
+/// its own file.
 async fn upload_capture(
     State(state): State<AppState>,
     query: std::result::Result<Query<CaptureQuery>, QueryRejection>,
@@ -1572,10 +1572,6 @@ async fn upload_capture(
     if declared.is_some_and(|length| length > max) {
         return Err(ApiError::too_large("A capture must be at most 300 MB"));
     }
-    let _permit = state.uploads.clone().try_acquire_owned().map_err(|_| ApiError {
-        retryable: true,
-        ..ApiError::new(StatusCode::TOO_MANY_REQUESTS, "upload_busy", "Another capture is uploading", "Wait for it to finish, then retry.")
-    })?;
     let root = state.files.root.clone();
     let staged = crate::perf::staging_path(&root).map_err(ApiError::internal)?;
     let file = crate::media::create_private(&staged).map_err(ApiError::internal)?;

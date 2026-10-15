@@ -48,6 +48,8 @@ struct PendingSend: Equatable {
     let messageID: String
     let text: String
     let images: Int
+    /// Its recordings, by their file on the phone until the Mac has them.
+    let captures: [SentCapture]
     let phase: Phase
 }
 
@@ -1251,7 +1253,7 @@ final class SquircleModel {
             let video = capture.kind == .video
             // Your own recording plays from the phone's copy.
             if video { StepVideos.set(capture.file, for: "file:" + path) }
-            sent.append(((video ? "Screen recording · " : "Performance recording · ") + capture.label, path, video))
+            sent.append((capture.sentLabel, path, video))
         }
         return SentCapture.block(sent)
     }
@@ -1286,7 +1288,9 @@ final class SquircleModel {
         var text: String?
         var phase: PendingSend.Phase
         var pending: PendingSend {
-            PendingSend(messageID: messageID, text: spoken, images: field.filter { $0.capture == nil }.count, phase: phase)
+            PendingSend(messageID: messageID, text: spoken, images: field.filter { $0.capture == nil }.count,
+                        captures: field.compactMap { $0.capture.map { SentCapture(label: $0.sentLabel, path: $0.file.path) } },
+                        phase: phase)
         }
     }
     func pendingSend(for id: ConversationID) -> PendingSend? { sends[id]?.pending }
@@ -1322,6 +1326,10 @@ final class SquircleModel {
             newThread: UUID().uuidString.lowercased(), createCommandID: UUID().uuidString.lowercased(),
             text: nil, phase: .preparing)
         drafts[id] = nil; error = nil
+        // Your recording plays in the pending message from the phone's copy.
+        for case let capture? in field.map(\.capture) where capture.kind == .video {
+            StepVideos.set(capture.file, for: "file:" + capture.file.path)
+        }
         sends[id] = operation
         return .started(messageID: operation.messageID, outcome: Task { await deliver(from: id) })
     }

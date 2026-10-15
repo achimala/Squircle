@@ -988,3 +988,31 @@ async fn install_evidence_requires_a_complete_transfer() {
     let (started, finished) = evidence(missing).await;
     assert!(started.is_null() && finished.is_null());
 }
+
+#[tokio::test]
+async fn a_stalled_capture_upload_does_not_hold_up_the_next() {
+    let fixture = Fixture::new();
+    // The phone's app suspended mid-send: headers came, the body never does.
+    let stalled = Request::post("/v1/captures?kind=performance")
+        .header(header::AUTHORIZATION, format!("Bearer {}", fixture.control))
+        .body(Body::from_stream(futures_util::stream::pending::<Result<Vec<u8>, std::io::Error>>()))
+        .unwrap();
+    let hung = tokio::spawn(fixture.app.clone().oneshot(stalled));
+    tokio::task::yield_now().await;
+
+    // A real recording is megabytes, over the service's 1 MB JSON limit.
+    let frames: Vec<f64> = (0..200_000).map(|i| i as f64 / 120.0).collect();
+    let perf = serde_json::to_vec(&json!({"format":"squircle-perf","version":1,"duration":8.0,"frames":frames})).unwrap();
+    assert!(perf.len() > 2 * 1024 * 1024);
+    let next = Request::post("/v1/captures?kind=performance")
+        .header(header::AUTHORIZATION, format!("Bearer {}", fixture.control))
+        .body(Body::from(perf.clone()))
+        .unwrap();
+    let response = fixture.app.clone().oneshot(next).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(fs::read(value["data"]["path"].as_str().unwrap()).unwrap(), perf);
+    assert!(!hung.is_finished());
+    hung.abort();
+}

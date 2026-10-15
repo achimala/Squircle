@@ -191,6 +191,8 @@ struct ImageAttachment: Identifiable, Equatable {
         let file: URL
         /// Its length (and, for performance, its hitches), e.g. "0:12 · 3 hitches".
         let label: String
+        /// How the sent message names it.
+        var sentLabel: String { (kind == .video ? "Screen recording · " : "Performance recording · ") + label }
     }
 
     init(capture: Capture, thumbnail: UIImage, id: String = UUID().uuidString) {

@@ -56,9 +56,11 @@ middleware before any body is read. Every refusal, Axum's own query, path,
 body, size and method rejections included, uses the versioned JSON envelope
 `{schema_version, ok: false, error: {code, message, retryable, next_step}}`.
 `retryable: true` only when the request was refused before any side effect
-(`service_draining`, `upload_busy`, `inspection_busy`); a mutation whose
-outcome is unknown is never retryable. Captures stream into a private staging
-file, one at a time, after a Content-Length check. Authentication and paths
+(`service_draining`, `inspection_busy`); a mutation whose
+outcome is unknown is never retryable. Captures each stream into their own private
+staging file after a Content-Length check; they never wait for each other
+(a single upload slot let one phone app suspended mid-send refuse every
+later upload, 2026-10-15). Authentication and paths
 use immutable settings; diagnostics have their own lock; slow file work runs
 on blocking workers. An app whose preview bytes are missing still lists, with
 `preview_unavailable`, and republishing repairs it.
