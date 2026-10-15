@@ -50,8 +50,8 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
 | `symbolicate --report PATH --dsym PATH` | Local Xcode symbolication attempt for Apple-text reports |
 | `diagnostics send --file PATH` | Upload one diagnostic JSON fixture |
-| `perf show PATH\|ID [--dsym PATH]` | A performance recording from the phone's overlay: worst hitches with symbolicated main-thread stacks, heaviest functions, per-second timeline, app log; text, or `--json` |
-| `perf list` | Performance captures and screen recordings uploaded from the phone (`POST /v1/captures`: authenticated before the body is read, streamed to a private file, one upload at a time) |
+| `perf show PATH\|ID [--dsym PATH]` | A performance recording from the phone's overlay: worst hitches with symbolicated main-thread stacks, heaviest functions, per-second timeline, app log (older captures only); text, or `--json` |
+| `perf list` | Performance captures and screen recordings uploaded from the phone (`POST /v1/captures`: authenticated before the body is read, each streamed to its own private file) |
 
 `install-link` does not install or remotely launch an app. Its ticket records
 `download_started_at` when the service opens the IPA and `downloaded_at` once
@@ -178,7 +178,7 @@ the new catalog/client flow is tracked in [validation evidence](validation.md).
 - Errors contain `code`, `message`, `retryable`, and `next_step`, from the CLI
   and from every service route (including malformed query, path, body, size
   and method). `retryable: true` means the request was refused before any side
-  effect and may be sent again unchanged (`service_draining`, `upload_busy`,
+  effect and may be sent again unchanged (`service_draining`,
   `inspection_busy`); a failed mutation whose outcome is unknown is not
   retryable. Build logs live in files rather than expanding tool-result context.
 - Stable request IDs deduplicate identical build submissions; changed arguments

@@ -807,6 +807,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         var message = ChatMessage(id: pending.messageID, role: "user", content: pending.text,
                                   createdAt: ISO8601DateFormatter().string(from: .now))
         message.attachments = (0..<pending.images).map { "local-\($0)" }
+        message.captures = pending.captures
         if case .outcomeUnknown = pending.phase { message.failed = true }
         messages.append(message)
         return messages
@@ -1364,8 +1365,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // A message whose fate is unknown is settled before another goes.
         if case .outcomeUnknown? = pendingSend?.phase { offerResend(); return }
         let text = composer.text
-        let images = model.attachments
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, images.isEmpty {
+        let field = model.attachments
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, field.isEmpty {
             if model.isRunning { Task { await model.stop() } }
             return
         }
@@ -1376,7 +1377,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .started(let messageID, let outcome):
             Theme.openHaptic()
             // Your pictures show in the conversation from the bytes on hand.
-            for (index, image) in images.enumerated() { StepImages.set(image.data, for: messageID, index: index) }
+            for (index, image) in field.filter({ $0.capture == nil }).enumerated() { StepImages.set(image.data, for: messageID, index: index) }
             flyingID = Motion.reduced ? nil : messageID
             composer.text = ""
             pinToBottom = true

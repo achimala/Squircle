@@ -47,6 +47,8 @@ final class CaptureSession {
     private let make: @MainActor (Kind, UIWindow) -> CaptureProducer?
     /// Called when a recording reaches `limit` and should stop.
     var onLimit: (() -> Void)?
+    /// Called when a stop begins: the bubble shows it finishing.
+    var onStopping: (() -> Void)?
 
     init(make: @escaping @MainActor (Kind, UIWindow) -> CaptureProducer? = CaptureSession.recorder) {
         self.make = make
@@ -86,6 +88,7 @@ final class CaptureSession {
         guard case .recording(let recording, let producer, let timeout) = state else { return nil }
         timeout.cancel()
         state = .stopping(recording, producer)
+        onStopping?()
         let output = await producer.finish()
         // Cancelled while it finished: the owner has gone.
         guard case .stopping(_, let current) = state, current === producer else {

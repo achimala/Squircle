@@ -329,7 +329,6 @@ final class SquircleClient {
         var request = try request(["v1", "captures"], query: [URLQueryItem(name: "kind", value: kind)])
         request.httpMethod = "POST"
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 600
         struct Reply: Decodable { struct Data: Decodable { let path: String }; let ok: Bool; let data: Data }
         do {
             let (data, response) = try await session.upload(for: request, fromFile: file)

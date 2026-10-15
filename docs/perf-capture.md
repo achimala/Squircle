@@ -27,10 +27,18 @@ in the same place.
   (suspend, `thread_get_state`, frame-pointer walk bounded to the main
   thread's stack, resume; nothing allocates or locks while suspended),
   CPU/memory/thermal every 250 ms, touches, screen name at each hitch,
-  `OSLogStore` lines, loaded images with UUIDs; `dladdr` names on the phone.
+  loaded images with UUIDs; `dladdr` names on the phone. No app log since
+  2026-10-15: `OSLogStore` reads the process's whole log to find the
+  recording's window, which was 2.1 s of a 2.4 s stop in the simulator and
+  far longer on the phone (the user saw stop "hang"). Without it the main
+  thread's part of a stop measured 2 ms and the rest (stacks, `dladdr`, JSON)
+  0.3 s off the main thread; the bubble reads "Finishing recording" meanwhile.
 - Upload: `POST /v1/captures?kind=video|performance` (control token, 300 MB
   route limit) into `<data>/captures/`, started as soon as the recording is
-  attached. The message gets a "Recorded in the app:" block of links (hidden
+  attached; uploads don't wait for each other. Until the message is sent its
+  pending bubble already shows the recording (the line, or the clip from the
+  phone's copy); a failed upload puts it back in the field with the error.
+  The message gets a "Recorded in the app:" block of links (hidden
   in the transcript): the video plays in your message's gallery; a
   performance recording shows as one line ("Performance recording · 0:08 · 11
   hitches"); the link tells the agent to run `squircle perf show PATH`.
@@ -75,7 +83,7 @@ What the agent receives: one line in the message pointing at the capture, and
 | Main-thread stacks | Background thread suspends the main thread ~1 kHz while recording (`thread_suspend`, `thread_get_state`, frame-pointer walk) | **Prototyped** (macOS arm64, same Mach calls as iOS): 752 samples in a 956 ms busy loop, app frames symbolicated offline from the dSYM with `atos -l <load address>`. Same technique Sentry and ETTrace ship on iOS. Keep only samples overlapping hitches to stay small. |
 | CPU, memory, thermal | `task_info`/`thread_basic_info`, `phys_footprint`, `ProcessInfo.thermalState`, every 250 ms | Cheap. |
 | Energy | None public per app | Not possible in-process. |
-| App log lines | `OSLogStore(scope: .currentProcessIdentifier)` | Researched, not tested on device. |
+| App log lines | `OSLogStore(scope: .currentProcessIdentifier)` | Dropped 2026-10-15: reading it made every stop take seconds. |
 | `os_signpost` intervals | Not reliably readable in-process | Signposts are generally kept only while a tool records. Unverified on iOS 27; don't depend on it. |
 | MetricKit hangs/CPU exceptions | `MXMetricManager` subscriber in the overlay, forwarded as diagnostics | Delivered after the fact (next launch / daily), never on demand. Useful passively, not for "record now". |
 
