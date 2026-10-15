@@ -2118,7 +2118,9 @@ decisions are unchanged. What changes for the client:
 - **Pending send.** A message has its ID from the moment you press send. If
   the answer from T3 is lost it shows as not delivered; Try Again checks
   with T3 first and resends under the same ID, so it can't start a second
-  turn. A recording whose upload failed uploads again on the next try.
+  turn. *(Superseded 2026-10-15: a lost answer is asked again automatically
+  under the same command ID on the next connection, which T3 deduplicates;
+  there is no "not delivered" state. See [architecture](architecture.md).)* A recording whose upload failed uploads again on the next try.
 - **Connection.** Each connection attempt owns its subscriptions; one ending
   during setup fails that attempt and reconnects instead of leaving the
   thread silently stale. Model choices load from the service with their own

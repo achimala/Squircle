@@ -844,7 +844,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                                   createdAt: ISO8601DateFormatter().string(from: .now))
         message.attachments = (0..<pending.images).map { "local-\($0)" }
         message.captures = pending.captures
-        if case .outcomeUnknown = pending.phase { message.failed = true }
         messages.append(message)
         return messages
     }
@@ -1237,7 +1236,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func tappable(_ item: ThreadItem?) -> Bool {
         switch item {
         case .agentMessage: return true
-        case .user(let message): return message.failed
         case .action(let line): return line.text?.isEmpty == false || (line.thread != nil && line.state != .archived && onOpenThread != nil)
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
         case .earlier, .summary, .note, .changes: return true
@@ -1301,7 +1299,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .note(let message): toggle(message.id)
         case .update(let message): if let id = message.threadIDs.first { onOpenThread?(id) }
         case .agentMessage(let message): toggle(message.id)
-        case .user(let message): if message.failed { offerResend() }
         case .action(let line):
             // T3 no longer lists an archived worker's thread.
             if line.text?.isEmpty == false { toggle(line.id) } else if let id = line.thread?.raw, line.state != .archived { onOpenThread?(id) }
@@ -1409,8 +1406,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private func send() {
         guard isActive else { return }
-        // A message whose fate is unknown is settled before another goes.
-        if case .outcomeUnknown? = pendingSend?.phase { offerResend(); return }
         let text = composer.text
         let field = model.attachments
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, field.isEmpty {
@@ -1434,8 +1429,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
     }
 
-    /// A message T3 refused goes back into the field; one it may have taken
-    /// stays as a failed bubble to send again or take back.
+    /// A message T3 refused goes back into the field.
     private func follow(_ outcome: Task<SendOutcome, Never>, text: String) {
         Task { [weak self] in
             let result = await outcome.value
@@ -1443,29 +1437,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             if case .rejected = result, composer.text.isEmpty { composer.text = text }
             render()
         }
-    }
-
-    /// Send again with the same identity (T3 is asked first whether it has
-    /// it), or take the words back into the field.
-    private func offerResend() {
-        guard presentedViewController == nil, case .outcomeUnknown(let reason)? = pendingSend?.phase else { return }
-        let sheet = UIAlertController(title: "Not delivered", message: reason, preferredStyle: .actionSheet)
-        sheet.addAction(UIAlertAction(title: "Try Again", style: .default) { [weak self] _ in
-            guard let self else { return }
-            switch model.startRetry(conversation) {
-            case .refused(let reason): model.error = reason
-            case .started(_, let outcome): follow(outcome, text: "")
-            }
-            render()
-        })
-        sheet.addAction(UIAlertAction(title: "Edit Message", style: .default) { [weak self] _ in
-            guard let self, let text = model.discard(conversation) else { return }
-            if composer.text.isEmpty { composer.text = text }
-            render()
-        })
-        sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        sheet.popoverPresentationController?.sourceView = composer
-        present(sheet, animated: true)
     }
 
     /// As in Messages: your words become their bubble right where you typed

@@ -276,32 +276,50 @@ final class NativeStateTests: XCTestCase {
         XCTAssertEqual(model.attachments.map(\.id), ["picture"])
     }
 
-    /// The answer to a turn is lost: the message stays pending, a retry
-    /// sends the very same message, and T3 showing it settles it (B-N05).
+    /// The socket drops before T3 answers: the message stays pending, never
+    /// failed, and goes again on its own under the same command and message
+    /// IDs (T3 answers a command it already took from its receipt) (B-N05).
     @MainActor
-    func testLostAnswerRetriesTheSameMessage() async throws {
+    func testLostAnswerIsAskedAgainAsTheSameCommand() async throws {
         let gate = GatedDispatch()
         let (model, _) = await draftWithPicture(gate)
         let thread = ConversationID.thread("t", appID: project.id)
         await model.open(thread)
         model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[],
                                    "modelSelection":["instanceId":"codex","model":"sol"]]]]))
-        let first = try start(model, "hello", from: thread)
+        let sending = try start(model, "hello", from: thread)
         await gate.until(1); gate.release(lost: true)
-        guard case .unknown(let messageID, _, _) = await first.value else { return XCTFail("Expected an unknown outcome") }
-        guard case .outcomeUnknown? = model.pendingSend(for: thread)?.phase else { return XCTFail("Still pending") }
-        guard case .refused = model.startSend("hello", in: project, from: thread) else { return XCTFail("No second message") }
-        guard case .refused = model.startRetry(thread) else { return XCTFail("Waits until T3 has caught up") }
-        model.consumeThread(.from(["kind":"synchronized"]))
-        guard case .started(_, let retry) = model.startRetry(thread) else { return XCTFail("Retry") }
         await gate.until(2)
-        XCTAssertEqual(gate.commands[1]["message"]["messageId"].string, messageID)
         XCTAssertEqual(gate.commands[1]["commandId"], gate.commands[0]["commandId"])
-        gate.release(lost: true)
-        _ = await retry.value
+        XCTAssertEqual(gate.commands[1]["message"]["messageId"], gate.commands[0]["message"]["messageId"])
+        XCTAssertEqual(model.pendingSend(for: thread)?.phase, .awaitingAcceptance)
+        XCTAssertNil(model.error)
+        guard case .refused = model.startSend("again", in: project, from: thread) else { return XCTFail("One message at a time") }
+        gate.release()
+        guard case .accepted = await sending.value else { return XCTFail("T3 took it") }
+        XCTAssertEqual(gate.commands.count, 2)
+    }
+
+    /// The thread shows the message while T3's answer is still out, then
+    /// the answer is lost: it was taken, and nothing is sent again.
+    @MainActor
+    func testMessageInTheThreadSettlesALostAnswer() async throws {
+        let gate = GatedDispatch()
+        let (model, _) = await draftWithPicture(gate)
+        let thread = ConversationID.thread("t", appID: project.id)
+        await model.open(thread)
+        model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[],
+                                   "modelSelection":["instanceId":"codex","model":"sol"]]]]))
+        let sending = try start(model, "hello", from: thread)
+        await gate.until(1)
+        let messageID = try XCTUnwrap(gate.commands[0]["message"]["messageId"].string)
         model.consumeThread(.from(["kind":"event","event":["sequence":2,"type":"thread.message-sent",
             "payload":["messageId":messageID,"role":"user","text":"hello","createdAt":"2026-10-15T10:00:00.000Z"]]]))
         XCTAssertNil(model.pendingSend(for: thread), "T3 has it: nothing pending")
+        gate.release(lost: true)
+        guard case .accepted = await sending.value else { return XCTFail("It landed") }
+        XCTAssertEqual(gate.commands.count, 1)
+        XCTAssertNil(model.error)
     }
 
     /// A recording's upload fails: sending again uploads it again, and an

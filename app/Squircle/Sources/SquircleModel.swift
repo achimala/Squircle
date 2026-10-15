@@ -29,21 +29,21 @@ enum ConversationID: Hashable {
 }
 
 /// A message on its way to T3, under the conversation that owns it (a
-/// draft's moves to its thread once T3 made it). Its message ID is chosen
-/// before the first attempt and kept for every retry, so a lost answer can
-/// never turn into a second message. A refused message is no longer pending.
+/// draft's moves to its thread once T3 made it). Its message and command
+/// IDs are chosen before the first attempt and kept for every resend, and
+/// T3 keeps a receipt per command ID, so a lost answer can never turn into
+/// a second message. A refused message is no longer pending.
 struct PendingSend: Equatable {
     enum Phase: Equatable {
         /// Recordings on their way to the Mac.
         case preparing
         /// T3 making the draft's thread.
         case creating
-        /// T3 asked to start the turn.
+        /// T3 asked to start the turn; asked again on the next connection
+        /// if this one drops before T3 answers.
         case awaitingAcceptance
         /// T3 took it; pending until the message shows in the thread.
         case accepted
-        /// The answer was lost: T3 may or may not have it.
-        case outcomeUnknown(String)
     }
     let messageID: String
     let text: String
@@ -60,11 +60,8 @@ enum SendOutcome: Equatable {
     /// T3 or the Mac refused it, or it never left: the pictures are back in
     /// the owner's field, the text is the caller's to put back.
     case rejected(messageID: String, reason: String, conversation: ConversationID)
-    /// It may have arrived; still pending as `outcomeUnknown` until T3
-    /// shows it or a retry sends the same message again.
-    case unknown(messageID: String, reason: String, conversation: ConversationID)
     var conversation: ConversationID {
-        switch self { case .accepted(_, let c), .rejected(_, _, let c), .unknown(_, _, let c): c }
+        switch self { case .accepted(_, let c), .rejected(_, _, let c): c }
     }
 }
 
@@ -155,7 +152,16 @@ final class SquircleModel {
     private(set) var appMetadata: [AppMetadata] = [] { didSet { changed() } }
     private(set) var selectedProjectID: String? { didSet { changed() } }
     private(set) var buildingProjectIDs = Set<String>() { didSet { changed() } }
-    private(set) var connection: ConnectionPhase { didSet { if connection != oldValue { changed() } } }
+    private(set) var connection: ConnectionPhase {
+        didSet {
+            guard connection != oldValue else { return }
+            changed()
+            let waiting = connectionWaiters; connectionWaiters.removeAll()
+            for waiter in waiting { waiter.resume() }
+        }
+    }
+    /// Sends waiting for T3's next connection.
+    private var connectionWaiters: [CheckedContinuation<Void, Never>] = []
     var connected: Bool { if case .ready = connection { return true }; return false }
     /// Trying to connect, and not yet long enough to call it offline.
     var isLoading: Bool {
@@ -290,9 +296,6 @@ final class SquircleModel {
     private var transcript = Transcript.empty { didSet { changed() } }
     var messages: [ChatMessage] { transcript.rows }
     private var threadSubscription: String?
-    /// The open thread whose subscription has caught up with T3 on this
-    /// connection: only then can a missing message be told from a late one.
-    private var threadSynced: String?
     private var refreshing = false
     private var monitor: Task<Void,Never>?
     private var connector: Task<Void,Never>?
@@ -489,7 +492,7 @@ final class SquircleModel {
         gateway?.onDisconnect = { [weak self] in
             guard let self else { return }
             if case .ready = connection { connection = .connecting(.init(id: attempts, failingSince: nil)) }
-            threadSubscription = nil; threadSynced = nil
+            threadSubscription = nil
             log("T3 socket dropped; reconnecting"); ConnectionTrace.mark("disconnected")
             keepConnected()
         }
@@ -657,7 +660,7 @@ final class SquircleModel {
             // Its first value is the whole device state.
             try await gateway.subscribe("subscribeDeviceState", receive: { [weak self] in self?.consumeDevices($0) },
                                         ended: { [weak self] in self?.connectionSubscriptionEnded("devices", $0, attempt: attempt) })
-            threadSubscription = nil; threadSynced = nil
+            threadSubscription = nil
             if let id = selectedSessionID { try await subscribeThread(id, attempt: attempt) }
             ConnectionTrace.mark("connect.subscribed")
             // The socket may have failed, or T3 ended a subscription, while
@@ -727,7 +730,7 @@ final class SquircleModel {
         if connection != .stopped { connection = .suspended }
         nap?.cancel()
         // Close cleanly rather than leave a socket that dies while suspended.
-        gateway?.disconnect(notify: false); threadSubscription = nil; threadSynced = nil
+        gateway?.disconnect(notify: false); threadSubscription = nil
         endBackgroundTask()
     }
     private func endBackgroundTask() {
@@ -903,7 +906,7 @@ final class SquircleModel {
         stepDetails?.cancel(); stepDetailsCount = -1
         // A message T3 took needs no echo once nobody looks at it.
         sends = sends.filter { $0.value.phase != .accepted || $0.key == id }
-        open = id; threadSynced = nil; error = nil
+        open = id; error = nil
         if let thread = id.threadID { sessionProjects[thread] = sessionProjects[thread] ?? id.appID }
         ConnectionTrace.mark("thread.open", id.threadID ?? "draft"); tracedRows = false
         guard let thread = id.threadID else {
@@ -964,7 +967,7 @@ final class SquircleModel {
         threadResubscribe?.cancel()
         threadResubscribe = Task { [weak self] in
             guard let self, selectedSessionID == id, case .ready(let session) = connection else { return }
-            let previous = threadSubscription; threadSubscription = nil; threadSynced = nil
+            let previous = threadSubscription; threadSubscription = nil
             await gateway?.unsubscribe(previous)
             try? await subscribeThread(id, fresh: true, attempt: session.attempt)
         }
@@ -979,7 +982,7 @@ final class SquircleModel {
             gateway?.disconnect(notify: false)
             return
         }
-        threadSubscription = nil; threadSynced = nil
+        threadSubscription = nil
         log("T3 ended thread \(id)'s subscription: \(failure?.localizedDescription ?? "completed")")
         threadResubscribe?.cancel()
         threadResubscribe = Task { [weak self] in
@@ -1130,7 +1133,6 @@ final class SquircleModel {
     func consumeThread(_ item: JSONValue) {
         if item["kind"].string == "synchronized" {
             ConnectionTrace.mark("thread.synchronized"); tracedRows = true
-            threadSynced = selectedSessionID
             return
         }
         if ConnectionTrace.enabled {
@@ -1169,8 +1171,37 @@ final class SquircleModel {
         else { throw ClientError.configuration }
         if result["status"].string == "rejected" { throw ClientError.backend("T3",0,result.formatted) }
     }
+    /// Dispatches `command` until T3 answers or `settled` says T3 already
+    /// shows its result. An answer lost with the socket (or a request that
+    /// never got out) is asked again on T3's next connection under the same
+    /// command ID: T3 answers a command it already took from its receipt
+    /// and never runs it twice. Throws only when T3 refuses it, or when T3
+    /// can't be reached again (this build's session refused).
+    private func deliver(_ command: [String:Any], commandID: String, settled: () -> Bool) async throws {
+        var lost: Int?
+        while !settled() {
+            guard let session = await connection(after: lost) else { throw ClientError.connection("T3") }
+            if settled() { return }
+            do { return try await dispatch(command, commandID: commandID) }
+            catch where Self.isRefusal(error) { throw error }
+            catch { lost = session; log("T3's answer to \(command["type"] ?? "") was lost (\(error.localizedDescription)); asking again on the next connection") }
+        }
+    }
+    /// The attempt of T3's ready connection, once there is one other than
+    /// `lost`'s; nil if T3 can't be reached again. Without a socket (an
+    /// injected dispatch) there is nothing to wait for.
+    private func connection(after lost: Int?) async -> Int? {
+        guard gateway != nil else { return 0 }
+        while true {
+            switch connection {
+            case .ready(let session) where session.attempt != lost: return session.attempt
+            case .refused, .stopped: return nil
+            default: await withCheckedContinuation { connectionWaiters.append($0) }
+            }
+        }
+    }
     /// T3 answered and refused: it didn't take the command. Anything else
-    /// (a dropped socket, no answer in time) leaves it unknown.
+    /// (a dropped socket) means asking again.
     nonisolated static func isRefusal(_ error: Error) -> Bool {
         switch error {
         case ClientError.backend("T3", 0, _), ClientError.configuration: true
@@ -1337,37 +1368,10 @@ final class SquircleModel {
         guard case .started(_, let outcome) = startSend(spoken, in: project, from: id) else { return nil }
         return await outcome.value
     }
-    /// Sends a message whose answer was lost again, as the same message.
-    /// If T3 already shows it, it was taken and nothing is sent.
-    func startRetry(_ id: ConversationID) -> SendStart {
-        guard var operation = sends[id], case .outcomeUnknown = operation.phase else { return .refused("Nothing to send again.") }
-        if let thread = id.threadID, open == id {
-            guard threadSynced == thread else { return .refused("Still checking with T3; try again in a moment.") }
-            if state.hasMessage(operation.messageID) {
-                sends[id] = nil
-                return .started(messageID: operation.messageID,
-                                outcome: Task { .accepted(messageID: operation.messageID, conversation: id) })
-            }
-        }
-        operation.phase = id.threadID == nil ? .creating : .awaitingAcceptance
-        sends[id] = operation; error = nil
-        return .started(messageID: operation.messageID, outcome: Task { await deliver(from: id) })
-    }
-    func retry(_ id: ConversationID) async -> SendOutcome? {
-        guard case .started(_, let outcome) = startRetry(id) else { return nil }
-        return await outcome.value
-    }
-    /// Gives up on a message whose answer was lost: its pictures go back in
-    /// the field; returns its text for the composer.
-    func discard(_ id: ConversationID) -> String? {
-        guard let operation = sends[id], case .outcomeUnknown = operation.phase else { return nil }
-        sends[id] = nil
-        restoreField(operation.field, to: id)
-        return operation.spoken
-    }
     /// Takes the send under `origin` as far as it goes: recordings, the
-    /// draft's thread, the turn. Each step is skipped when an earlier
-    /// attempt finished it, and every attempt uses the same IDs.
+    /// draft's thread, the turn. It ends only when T3 answers, refuses, or
+    /// shows the message; a connection lost on the way just means asking
+    /// again, with the same IDs, on the next one.
     private func deliver(from origin: ConversationID) async -> SendOutcome {
         guard var operation = sends[origin] else {
             return .rejected(messageID: "", reason: "Nothing to send.", conversation: origin)
@@ -1383,13 +1387,6 @@ final class SquircleModel {
             restoreField(operation.field, to: owner)
             if open == owner || open == origin { error = reason }
             return .rejected(messageID: messageID, reason: reason, conversation: owner)
-        }
-        func unknown(_ reason: String) -> SendOutcome {
-            // T3 showed it meanwhile: it was taken.
-            guard sends[owner] != nil else { return .accepted(messageID: messageID, conversation: owner) }
-            record(.outcomeUnknown(reason))
-            if open == owner || open == origin { error = reason }
-            return .unknown(messageID: messageID, reason: reason, conversation: owner)
         }
         let images = operation.field.filter { $0.capture == nil }, captures = operation.field.filter { $0.capture != nil }
         let text: String
@@ -1417,14 +1414,12 @@ final class SquircleModel {
         case .draft:
             record(.creating)
             threadID = operation.newThread
-            if !shell["threads"].array.contains(where: { $0["id"].string == threadID }) {
-                do {
-                    try await dispatch(["type":"thread.create","threadId":threadID,"projectId":project.id,"title":"New thread",
-                        "modelSelection":operation.selection.foundation,"runtimeMode":operation.mode.rawValue,"interactionMode":"default",
-                        "branch":NSNull(),"worktreePath":NSNull()], commandID: operation.createCommandID)
-                } catch where Self.isRefusal(error) { return reject(error.localizedDescription) }
-                catch { return unknown(error.localizedDescription) }
-            }
+            do {
+                try await deliver(["type":"thread.create","threadId":threadID,"projectId":project.id,"title":"New thread",
+                    "modelSelection":operation.selection.foundation,"runtimeMode":operation.mode.rawValue,"interactionMode":"default",
+                    "branch":NSNull(),"worktreePath":NSNull()], commandID: operation.createCommandID,
+                    settled: { shell["threads"].array.contains { $0["id"].string == threadID } })
+            } catch { return reject(error.localizedDescription) }
             owner = adopt(draft: origin, becomes: threadID)
         }
         record(.awaitingAcceptance)
@@ -1444,13 +1439,14 @@ final class SquircleModel {
         }
         let seed = operation.spoken.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            try await dispatch(["type":"thread.turn.start","threadId":threadID,
+            // The open thread showing it settles it as surely as T3's answer.
+            try await deliver(["type":"thread.turn.start","threadId":threadID,
                 "message":["messageId":messageID,"role":"user","text":message,"attachments":uploads],
                 "modelSelection":operation.selection.foundation,"runtimeMode":operation.mode.rawValue,
                 "interactionMode":"default","titleSeed":String((seed.isEmpty ? (captures.isEmpty ? "Image" : "Recording") : seed).prefix(120))],
-                commandID: operation.commandID)
-        } catch where Self.isRefusal(error) { return reject(error.localizedDescription) }
-        catch { return unknown(error.localizedDescription) }
+                commandID: operation.commandID,
+                settled: { sends[owner] == nil || (open == owner && state.hasMessage(messageID)) })
+        } catch { return reject(error.localizedDescription) }
         for attachment in captures { captureTransfers[attachment.id] = nil }
         // Pending until the thread shows it, while anyone may look; a
         // thread T3 already shows it in needs nothing more.

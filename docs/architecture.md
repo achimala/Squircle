@@ -247,14 +247,17 @@ becomes a thread. That adoption happens as soon as T3 creates the thread,
 before the first turn is sent, so a refused turn still belongs to the new
 thread. A send is a `PendingSend` with a message ID (and turn and create
 command IDs) fixed when it starts, phase `preparing / creating /
-awaitingAcceptance / accepted / outcomeUnknown`; a refusal removes it and
-returns the text and pictures to that conversation's field. Every attempt
-reuses the same IDs; Try Again works only from `outcomeUnknown` and first
-waits for the thread subscription's synchronized marker, completing without
-resending if T3 already has the message. Recording uploads are
-`uploading / uploaded / failed` per attachment, and a failed one is tried
-again on the next send. The composer, echo bubble and "Not delivered" sheet
-are projections of the pending send.
+awaitingAcceptance / accepted`; only T3's refusal removes it and returns the
+text and pictures to that conversation's field. A lost answer (the socket
+dropped, or the request never got out) is not an outcome: the same command
+goes again on T3's next connection, and T3 answers a command ID it already
+took from its receipt without running it twice. The open thread showing the
+message settles it too. Requests have no answer deadline; a dead socket
+fails them (heartbeat, probe). Silence only counts while no request is
+being written, so a picture taking a minute on a slow uplink isn't
+mistaken for a dead link. Recording uploads are `uploading / uploaded /
+failed` per attachment, and a failed one is tried again on the next send.
+The composer and echo bubble are projections of the pending send.
 
 **Connection (W6).** `ConnectionPhase` is `stopped / suspended / refused /
 connecting(attempt) / ready(session)`. Every subscription callback carries
@@ -367,9 +370,9 @@ polls get an empty 304) and gzip; the phone polls builds, apps, agents and
 simulators every 4 s, and tasks and the open thread's media only while a
 screen holds a refresh lease for them. Sequenced events deduplicate
 replay and append streaming text deltas; an empty final text event preserves the
-accumulated response. The client never resends a message by itself when an
-acknowledgement is missing: the message shows as not delivered, and Try
-Again reuses the same message ID once T3's view of the thread is current.
+accumulated response. A message whose acknowledgement is lost goes
+again by itself, as the same T3 command, on the next connection (T3
+deduplicates command IDs); the user never sees it fail unless T3 refused it.
 Native controls send T3's own approval/question/interrupt commands.
 
 **Presentation (current source; see AGENTS.md for the product decisions).**

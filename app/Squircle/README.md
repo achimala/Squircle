@@ -63,8 +63,9 @@ composer and thread rows, `Markdown.swift` agent text. DEBUG-only `SQUIRCLE_APP`
 states still for captures.
 
 `SquircleModel` owns the T3 connection, conversations and caches. Each
-conversation has a `ConversationID`; a send is a `PendingSend` with a stable
-message ID that Try Again reuses; connection callbacks carry their attempt;
+conversation has a `ConversationID`; a send is a `PendingSend` with stable
+message and command IDs, asked again on the next connection when T3's answer
+is lost; connection callbacks carry their attempt;
 tasks and media refresh only under a screen's `RefreshLease`; clips live in
 the `squircle-media` file cache; disk writes go through the `DiskCache`
 actor; `close()` tears the model down. See
