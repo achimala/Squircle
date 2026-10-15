@@ -2196,3 +2196,21 @@ the card is placed in the turn where the build finished. A failure still
 wakes it, and the agent is told to end its turn without a reply when there
 is nothing for it to do. Tests: `service_messages_are_marked`,
 `failed_builds_reach_their_agent_once`, `testServiceMessagesNeverShowAsYours`.
+
+## 2026-10-15 stale questions and black decks
+
+The user saw a LanguageApp agent question from 05:44 that T3 resolved at
+07:13 (`user-input.resolved` in `projection_thread_activities`; T3 had no open
+request). The phone's activity trim kept every `*.requested` row past 600 but
+dropped the resolution, so the cached thread showed it again. Now the phone
+follows T3's own rule (`.requested` opens, `.resolved` or a stale/unknown
+`respond.failed` closes), keeps only still-open requests when trimming, and
+shows a request only while the session runs the request's turn. T3 itself
+neither resolves nor expires a request a stopped session left open; the phone
+just never shows one from an earlier turn.
+
+The black deck with a 2: two LanguageApp workers held simulator sessions whose
+screens weren't changing. serve-sim's `stream.avcc` then sends only its JPEG
+seed (which the phone never plays) and no H.264 until the screen changes, so
+the feed had no picture. A simulator now joins the deck only once its feed has
+drawn a picture; until then it streams unseen.
