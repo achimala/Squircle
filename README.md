@@ -7,6 +7,16 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-15: second code review fixes (W1–W8).** The
+[second review](docs/code-review-2026-10-b.md)'s service and app fixes are
+merged: workers saved before they start and stopped before their files go,
+resets that never stop a newer turn, tasks that follow new turns and come
+back from History, retried notifications, messages with a stable ID and an
+honest "not delivered" with Try Again, a file cache for clips and one route
+for the simulator dock. Rust tests pass; not yet checked in the simulator or
+on the phone. See
+[contracts](docs/architecture.md#state-ownership-contracts-review-b-2026-10-15).
+
 **2026-10-14: code review fixes, source version 0.3.0 (56).** The October
 [code review](docs/code-review-2026-10.md)'s fixes are merged: authentication
 before uploads, one JSON error shape with `retryable`, honest install evidence
@@ -202,6 +212,7 @@ See the evidence page for the scope of rendered transition checks.
 | How does the phone record the screen or performance for the agent? | [Performance capture](docs/perf-capture.md) |
 | What was verified before the T3 replacement? | [Historical validation](docs/validation.md) |
 | What did the October 2026 review find, and what is fixed? | [Code review](docs/code-review-2026-10.md) |
+| What did the second review find, and what is fixed? | [Second code review](docs/code-review-2026-10-b.md) |
 
 Start with [AGENTS.md](AGENTS.md). Historical Hermes validation describes earlier
 builds and is not evidence that this replacement passed those checks.

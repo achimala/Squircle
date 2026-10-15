@@ -15,19 +15,50 @@ adds the task), linked worker threads and builds, an order within its group,
 attached screenshots and clips, and a history of status changes (by agent,
 user or auto).
 
-**Status follows linked work** (`tasks::derive`): a linked worker waiting on a
-question → needs you; a worker working or a build queued/running → in
+**Status follows linked work** (`Signals::implied`): a linked worker waiting
+on a question → needs you; a worker working or a build queued/running → in
 progress; the newest linked build succeeded → ready to try. An explicit
 status from the agent or the user holds until a linked worker's or build's
-state changes (the task remembers the states it last saw). A link going
-missing (an archived worker) doesn't count. Once done or dropped, a task
-reopens only for new work: a new linked worker or build, or a linked worker
-working or asking again; old work finishing leaves it closed (2026-10-14,
-after the user's Done kept reverting). The service checks every 3 s.
+state changes after the moment it was chosen. A link going missing (an
+archived worker, or a shell that isn't current) is no fact at all and
+doesn't count. Once done or dropped, a task reopens only for new work: a new
+linked worker or build, a new turn of a linked worker (T3's
+`latestTurn.turnId`), or a linked worker working or asking again; old work
+finishing leaves it closed (2026-10-14, after the user's Done kept
+reverting). The service checks every 3 s.
 
 **History:** done and dropped tasks leave the active list after a day, open
 ones that nothing touched for three days too. Nothing is deleted; any change
-brings a task back.
+to the task, or new linked work, brings it back. History tasks keep
+following their linked workers (and builds still running); only ones whose
+links are all finished builds are skipped.
+
+**Saved state (review B, 2026-10-15; `src/tasks.rs`).** Each record keeps:
+
+- `revision`, raised by every saved change, including what linked work was
+  seen doing.
+- `observed {revision, workers: {id: {turn, phase}}, builds: {id: phase}}`,
+  the last known state of each link. It always advances, whatever the
+  status, so a closed task still sees the next turn start; a link without a
+  current fact keeps its last known state.
+- `placement`: `active` or `history {since}`, independent of status (open
+  tasks age into History too).
+
+An explicit status records the observation the caller read with it
+(`hold`), unless a newer one was already recorded. A tick reads signals
+outside the lock and applies them only to tasks still at the revision it
+read; anything changed meanwhile waits for the next tick. Every change is
+saved to `tasks.json` first and becomes visible only once saved; a change
+that can't be saved is not seen. Older files with `seen` and `archived_at`
+are read and converted on load. The wire keeps `archived_at` (set while in
+History) and adds `revision`; `observed` stays internal.
+
+**Paging.** `GET /v1/tasks` returns all active tasks and one page of
+History, newest first (`history_limit`, 1–100, default 20;
+`history_before`, the previous reply's `history_next` cursor). Only the
+returned tasks are expanded with linked work and media. `squircle task list
+--all [--history-before CURSOR]` pages the same way; without `--all` History
+is not fetched.
 
 ## Agent
 
@@ -49,7 +80,10 @@ instructions say the same.
   thread. Swipe (UIKit's own actions): Done / Drop (the row moves at once
   and holds until the Mac confirms), or Top; the list holds still while a
   swipe is open and catches up when it closes; long press:
-  any status, Move to Top. History folds at the bottom, with search. No +:
+  any status, Move to Top. History folds at the bottom, with search; it
+  loads a page at a time as its last row shows, and search covers the pages
+  loaded so far. A swiped or chosen status is laid over the Mac's list until
+  a reply with that task's `revision` (or newer) arrives. No +:
   tasks come only from what you tell the agent (user, 2026-10-14). The
   header is the close button and the switch on glass over a soft scroll
   edge; group names are small labels that scroll with their rows.

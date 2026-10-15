@@ -1752,7 +1752,8 @@ App Store build may need a small relay, so sending sits behind one interface.
   push-to-start token, bundle ID, environment), `/v1/push/activities`
   (an activity's update token, or none when it ended), `/v1/push/presence`
   (foreground and the conversation on screen), the alert's `squircle` key
-  (`project`, `thread`, `build`, `bundle`) and the activity's content state.
+  (`project`, `thread`, `build`, `bundle`, and since 2026-10-15 `app`, the
+  catalog app of a finished build) and the activity's content state.
   Tokens Apple reports gone (410, `BadDeviceToken`) are forgotten.
 - **Key.** `squircle push setup --key-file … --key-id … --team-id …` checks
   the key and stores it in `<data>/push/apns.json` (0600); output and logs
@@ -2026,3 +2027,63 @@ frames dropped. On recorded traces through an order-preserving proxy with
 to 1–9% of frames, the delay rising to its 150 ms cap under those stalls
 (local feed: 20% → 1% at 44 ms). Not yet measured on the phone.
 
+## 2026-10-15 second review fixes
+
+The [second code review](code-review-2026-10-b.md) found 28 issues (4
+high). Packages W1–W8 are merged; the contracts are in
+[architecture](architecture.md#state-ownership-contracts-review-b-2026-10-15)
+and the review's status section says what each fix was checked with. Product
+decisions are unchanged. What changes for the client:
+
+- **Addressed conversations.** Each conversation carries its own identity
+  (a draft, or a thread in an app); a draft becomes its thread as soon as T3
+  creates it, so a first message T3 refuses stays in the new thread with its
+  text and pictures instead of being stranded.
+- **Pending send.** A message has its ID from the moment you press send. If
+  the answer from T3 is lost it shows as not delivered; Try Again checks
+  with T3 first and resends under the same ID, so it can't start a second
+  turn. A recording whose upload failed uploads again on the next try.
+- **Connection.** Each connection attempt owns its subscriptions; one ending
+  during setup fails that attempt and reconnects instead of leaving the
+  thread silently stale. Model choices load from the service with their own
+  retry, so a failed load no longer blocks sending until reconnect.
+- **Refresh.** Tasks and a thread's media refresh only while a screen shows
+  them; builds, apps, agents and simulators every 4 s in one coalesced pass.
+  History loads a page at a time. Task edits stay on screen until the Mac's
+  reply carries the edited revision.
+- **Media.** Clips (conversation and task) stream to files in
+  `Caches/squircle-media/`, bounded to 1 GiB and 14 days across launches.
+- **Chat.** Each Squircle command line takes only its own reply, so two
+  workers started in one call open their own threads; only changed turns are
+  rebuilt.
+- **Simulator dock.** One route (collapsed, fanned, expanded) drives frames,
+  visibility, touches and feeds: the expanding picture takes touches from the
+  first frame, the occluded deck picture stops decoding, and a tap on a
+  shrinking picture reverses it.
+- **Notifications.** Alerts and Live Activity updates retry transient APNs
+  failures; an activity keeps its token until its end is accepted; step text
+  is read only when a phone can receive it and never from an older turn. A
+  failed-build notification names its app and opens it once the catalog is
+  loaded.
+- **Service.** Archive removes a worker's files only after T3 shows it
+  stopped (a worker waiting on you needs `--discard`); resets never stop a
+  newer turn; a worker is saved before T3 starts it; tasks follow new turns,
+  come back from History for new work and never lose an explicit status to an
+  older read; build helpers can't leave descendants running.
+- **Overlay (W9).** The overlay holds one lease per scene (its window and
+  work end with it); its route is bubble or panel with the same thread
+  destination type as the app; the resize regimes (stretched, revealed by
+  the handle, live between docked and full screen) are one value; a capture
+  flight holds back and releases only its own conversation's thumbnail;
+  "Done · …" comes from T3's finished turn (Stopped/Failed for interrupted or
+  failed turns) instead of a row that stopped saying working; the jelly's
+  display link and wake alarm have one owner. It builds; it was not looked
+  at in the simulator (installing there was refused by the session's
+  permissions).
+
+Checked: 148 Rust tests pass offline (126 library, 6 CLI, 13 HTTP contract,
+3 service lifecycle), including new fixtures for these failure cases. The
+native fixtures (four model tests, one parser test) are in the source; this
+record has no run of them. Not checked: anything in the simulator or on the
+phone, APNs with a real key, and the coordinated app/overlay inspection in
+the review's acceptance step.

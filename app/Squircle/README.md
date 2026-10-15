@@ -27,7 +27,8 @@ pairing/refresh UI is not implemented yet. This personal build embeds private
 connection credentials; do not distribute its IPA to others.
 
 The paired session is stored in the iPhone Keychain. HTTPS requests reject
-redirects. RPC and input WebSockets use freshly minted short-lived tickets.
+redirects. The RPC WebSocket sends the session's bearer; the device input socket uses
+a short-lived ticket.
 Tailscale is external and user-managed; the app does not install or configure it.
 
 ## Build and validate
@@ -61,11 +62,13 @@ composer and thread rows, `Markdown.swift` agent text. DEBUG-only `SQUIRCLE_APP`
 `SQUIRCLE_SCRUB`, `SQUIRCLE_THREAD` and `SQUIRCLE_SIM_EXPAND` hold real
 states still for captures.
 
-`SquircleModel` owns the T3 connection, conversations and caches. Sends are
-addressed to the conversation that started them (`SendOutcome`); drafts are
-per conversation; caches are bounded and emptied on memory warnings; disk
-writes go through the `DiskCache` actor; `close()` tears the model down. See
-[architecture](../../docs/architecture.md#boundaries-after-the-october-2026-review).
+`SquircleModel` owns the T3 connection, conversations and caches. Each
+conversation has a `ConversationID`; a send is a `PendingSend` with a stable
+message ID that Try Again reuses; connection callbacks carry their attempt;
+tasks and media refresh only under a screen's `RefreshLease`; clips live in
+the `squircle-media` file cache; disk writes go through the `DiskCache`
+actor; `close()` tears the model down. See
+[architecture](../../docs/architecture.md#state-ownership-contracts-review-b-2026-10-15).
 
 `T3Gateway` implements Effect RPC; `T3ThreadState` reduces snapshots/events.
 `T3DeviceStream` owns one native H.264 connection and an input socket as a pair.

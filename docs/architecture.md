@@ -47,7 +47,9 @@ These describe the source after fix waves W1–W9 of the
 [code review](code-review-2026-10.md). The Rust suite (unit, CLI, HTTP
 contract and service lifecycle tests) passes; native changes are described
 from source and have not been checked on the phone. Open checks are listed in
-the review's status section.
+the review's status section. The second review's fixes refine several of
+these; [its contracts](#state-ownership-contracts-review-b-2026-10-15) take
+precedence where they differ.
 
 **HTTP service.** Control and diagnostic authentication run as route
 middleware before any body is read. Every refusal, Axum's own query, path,
@@ -77,9 +79,9 @@ invocation, which the phone uses in worker prompts. Wake-ups go through a
 persisted outbox with stable message IDs and retries; resets stay pending
 until they succeed. Worker cleanup deletes a branch only when its base
 contains it, or when `git cherry` finds every non-merge commit and the branch
-has no merge commits, and only at the tip it inspected. Discard stops a
-working worker and waits for T3 before removing files. Context goes to the
-deepest matching project root.
+has no merge commits, and only at the tip it inspected. Files are removed
+only after T3 confirms the session stopped (review B below). Context goes to
+the deepest matching project root.
 
 **T3 connection (Rust).** One supervised task per connection with
 connect/liveness deadlines; either half failing closes it; dropping the client
@@ -104,22 +106,242 @@ publishes through the service. Tool images are deduplicated by a hash of the
 whole payload; Home's thread fallback accepts only T3 `device_screenshot`
 captures; a supplied symbol file must carry the image's UUID.
 
-**Native model.** `SquircleModel` addresses conversations as `.thread(id)` or
-a per-conversation draft; a send captures its destination, model, mode and
-attachments and returns a `SendOutcome` to the conversation that sent it,
-which adopts only the thread its own send created. Step details commit to
-their own thread and retry. T3 ending a subscription reconnects or
-resubscribes with backoff. `close()` invalidates sessions and cancels watcher
-tasks. Caches are bounded (`BoundedCache`, `RecentCache`) and emptied on
-memory warnings; downloaded video files are deleted when evicted; disk writes
-go through one generation-checked `DiskCache` actor. Keychain items are
-updated in place. Asset URLs get the T3 bearer only on the configured origin.
+**Native model.** Conversations, sends, the connection and refresh are
+described under review B below. Step details commit to their own thread and
+retry. `close()` invalidates sessions and cancels watcher tasks. In-memory
+caches are bounded (`BoundedCache`, `RecentCache`) and emptied on memory
+warnings; disk writes go through one generation-checked `DiskCache` actor.
+Keychain items are updated in place. Asset URLs get the T3 bearer only on the
+configured origin.
 
 **Overlay.** Captures own their recorder (idle / recording / stopping); every
 stop finishes it, and a replaced or disconnected scene cancels it.
 Performance captures judge each frame against its own refresh period and skip
 inactive/background gaps. The jelly idles at a low rate and stays still under
 Reduce Motion.
+
+## State ownership contracts (review B, 2026-10-15)
+
+From fix packages W1–W8 of the [second review](code-review-2026-10-b.md);
+its status section says what is tested and what is only in code. The rule
+throughout: T3 owns execution, Squircle owns its records and operation
+journals; a replica carries where it came from, and only a *current*
+observation may stop, remove or close anything. Stale or unknown is shown,
+never acted on. Saved files keep their earlier keys or are read by an
+adapter; the wire shapes below are unchanged unless stated.
+
+**Shell observations (`src/agents.rs`).** `Agents::observe(id)` returns
+`Observed<Option<ThreadObservation>>`: `unavailable`, `stale{epoch}` (the
+service's T3 session is offline or resyncing) or `current{epoch}` (T3's
+snapshot arrived for this session; `None` means T3 has no such thread).
+`ThreadObservation {turn, execution, waiting, failed}` decodes T3's row
+once; `execution` is `stopped / idle / running / unknown` and a turn
+waiting on a question or approval counts as running. `busy()` is running or
+unknown. Tasks and simulator sessions act only on `current`; push and some
+display paths still read the row string (`worker_state`).
+
+**Worker operation identity (W1).** `thread spawn` reserves the worker
+before T3 hears of it: a new thread ID, message ID and the whole
+`thread.turn.start` command (with T3's create-thread and worktree bootstrap)
+are saved as `stage: {bootstrapping: {message_id, command}}` in
+`agents.json`, then sent. It becomes `active` when the dispatch succeeds, T3's
+shell shows the thread, or T3 already has that message. If none of these,
+the CLI says to run the same spawn again: a live worker with the same
+coordinator and branch is finished under the same IDs (`existing: true`),
+never started twice. Nothing re-sends a reservation on service restart; the
+shell or a repeated spawn finishes it. Archive of a reservation T3 never saw
+drops it (`never_started: true`).
+
+**Stop before removal (W1).** `thread archive` needs a current shell. A
+session that isn't stopped is stopped first; one that is running or waiting
+on the user needs `--discard`. Files are removed only with a `StopReceipt`,
+which only a current observation of a stopped (or absent) session can mint;
+`wait_stopped` gives up after 30 s and removes nothing. Order: stop → stopped
+→ remove files (`stage: files-removed`) → T3 `thread.archive` →
+`archived`. `thread cleanup` needs the same receipt.
+
+**Resets (W1).** `agent restart`/`fresh` queue `lifecycle: reset-queued`
+and run only when a current observation shows the agent not busy, read again
+immediately before stopping (twice for fresh, around the handoff). Any turn,
+including one started after the request, defers it; there is no turn-ID
+fence. Failures back off 8–256 s. The service's own T3 reconnect resets its
+1–30 s backoff only after a session that reached a current shell and lasted
+60 s.
+
+**Wakes (W1).** Worker events are `{turn, kind, request?}` (`kind`
+`done / error / needs-you / working`), not colon keys. A wake is `queued`,
+then `outcome-unknown` (saved) before dispatch with its stable message ID;
+on retry an `outcome-unknown` wake already in T3 counts as delivered.
+Delivery sets each worker's `notified` and removes the wake in one save.
+
+**Task revision and worker-turn signal (W2/W3).** See
+[tasks](task-tracking.md#model). The service passes `Signals {revision,
+workers: [{thread, turn, phase}], builds: [{build, phase}]}`, built from
+memory only: current shell observations (`turn` is T3's
+`latestTurn.turnId`) and the job index. Not current, or not known, is
+`missing`, never news. A tick applies only to a task still at the revision
+it read; an explicit status records the observation read with it. Changes
+are saved before they are visible.
+
+**Build jobs (W3/W5).** A `Job` is an origin (`project{request,
+provenance}` or `imported`) and a phase (`queued / running /
+succeeded{output, preview} / failed / cancelled / interrupted`);
+`PreviewState` (`absent / queued / capturing / ready / failed`, keeping the
+prior image) and install `TransferEvidence` (`not-started / opened /
+completed`, forward only) replace optional-field combinations.
+`jobs/<id>/job.json` keeps its flat keys; a validating adapter reads it and
+a contradictory record is skipped with a message on stderr, not defaulted.
+`Jobs` (`src/store.rs`) loads the directory once at start (marking
+unfinished jobs interrupted), then owns records, revisions and live
+build/preview leases (at most 16); list, status and task signals read it.
+If saving a finished job fails, the result is still served as
+`persistence_error` and the service drains. `xcode::build` returns
+`BuildArtifacts` (`archive{archive, ipa, app, dsyms}` or `simulator{app,
+dsyms}`), adapted to the saved `BuildOutput`.
+
+**Helper processes (W5).** `run_bounded` keeps the helper's leader
+unreaped (`waitid(WNOWAIT)`) so its process group ID can't be reused, and
+kills the whole group on leader exit, timeout, cancellation or drop before
+reaping. T3 database reads go through it read-only with deadlines (3 s for
+the current step, 15 s for details) and a 64 MiB output cap. The symbol
+tool runner follows the same order within its deadline.
+
+**Build notification app identity (W3/W4).** When a build finishes the
+service resolves its catalog app (project + scheme, or an import's bundle
+ID) and the alert's `squircle` payload carries `app` (catalog ID) with
+`build` and `bundle`. The phone's `PushTarget` is `app(project | bundle |
+catalog, thread?)` or `build(id, app?)`. A target it can't resolve yet
+waits for a fresh catalog; "not found" shows only when connected with a
+loaded catalog. DEBUG `SQUIRCLE_OPEN_TARGET` opens a payload as if tapped.
+
+**Push delivery (W4).** Per phone and app a `Link` has a `Stage`
+(`absent / starting / running{activity, acked}`) and a `Flight` (`idle /
+sending(generation) / waiting{until, failures}`): one send at a time, and a
+reply for an older generation is ignored. What the service wants per app
+is `show / pausing / hide`. 429, 5xx and network errors retry (an alert
+gets four attempts, 2, 8 and 32 s apart, under one collapse ID; activity
+sends back off up to 5 minutes). An activity's token is kept, and saved, until its End is
+accepted or Apple says the token is gone. The current-step read is keyed by
+agent thread and turn, runs only when some phone can receive it, one at a
+time, and a result for an older turn is dropped. The phone registers tokens
+as `unsent / sending / acknowledged` and sends presence in order (newest
+wins), renewed every 4 minutes while in the foreground.
+
+**Simulator sessions (W8).** A session's `SessionPhase` carries each
+phase's data (`starting / recording / stopping / filing / finished(media) /
+failed`); the recorder PID exists only while one may run, and a PID from a
+saved ledger is adopted only when its command line names that session's
+file. Its T3 device session is a `DeviceLease` (`opening / open /
+close_owed(retry) / closed / abandoned` after 20 tries). A turn ends a
+session only when T3 currently shows it idle or gone for 8 s; unknown never
+does. `sims.json` and `/v1/sims` keep their flat keys (`state`,
+`recorder_pid`, `media_id`, …) plus `device_session`; older ledgers convert
+from `close_pending`/`close_error`.
+
+**Conversations and sends on the phone (W6/W7).** A conversation is
+`ConversationID` = `draft(UUID, app, agent)` or `thread(ID, app)`; the
+controller holds its own and follows the model's successor when its draft
+becomes a thread. That adoption happens as soon as T3 creates the thread,
+before the first turn is sent, so a refused turn still belongs to the new
+thread. A send is a `PendingSend` with a message ID (and turn and create
+command IDs) fixed when it starts, phase `preparing / creating /
+awaitingAcceptance / accepted / outcomeUnknown`; a refusal removes it and
+returns the text and pictures to that conversation's field. Every attempt
+reuses the same IDs; Try Again works only from `outcomeUnknown` and first
+waits for the thread subscription's synchronized marker, completing without
+resending if T3 already has the message. Recording uploads are
+`uploading / uploaded / failed` per attachment, and a failed one is tried
+again on the next send. The composer, echo bubble and "Not delivered" sheet
+are projections of the pending send.
+
+**Connection (W6).** `ConnectionPhase` is `stopped / suspended / refused /
+connecting(attempt) / ready(session)`. Every subscription callback carries
+its attempt ID; one from an older attempt is ignored, and a subscription
+ending during setup fails that attempt instead of being lost. Status text
+derives from the phase ("Offline" after 8 s). Provider configuration is a
+`ResourceState` (`absent / loading / ready(fetchedAt) / failed(retryAt)`),
+reloaded from the service every metadata pass when failed (5 s retry) or
+older than 10 minutes, on connect and on a send that lacks it; T3's socket
+is not torn down for it.
+
+**Refresh and transcripts (W6/W7).** Screens take a `RefreshLease` for
+`.tasks(app)` or `.conversation(id)`; one coalesced metadata pass every 4 s
+fetches builds, apps, agents and simulators, plus tasks and media only for
+held leases. A thread's state records `provenance` (`none / cached(seq) /
+live(seq)`); rows are cached only as a `Transcript` built from one state, so
+cached rows and state can't come from different revisions. The timeline
+reuses each turn's rows while its inputs are unchanged. Chat action lines
+take only their own command's reply (`WorkerID`/`BuildID`; several commands
+share output only when it splits into one JSON reply each); otherwise the ID
+is left unknown. `StudioViewController`'s route is `grid / app(id) /
+thread(app, existing(id) | draft(UUID))`, each mount one `Mounted<Key>`.
+
+**Simulator dock (W8).** `SimulatorDock` has one `Route` (`collapsed /
+fanned / expanded(id)`) and a separately presented picture that changes only
+when the expansion is at rest. One `FrameProjection` per picture derives its
+frame, visibility, touchability, input owner and feed: the route's picture
+owns input from the first frame, an occluded deck picture stops decoding at
+full expansion, a tap on a shrinking picture reverses it, and losing input
+mid-touch ends that touch. A use's content is `live / recording /
+unavailable`.
+
+**Phone files.** Caches directory: `squircle-home.json`,
+`squircle-threads/<thread>.json` (a `T3ThreadState` with `provenance`; files
+written before it fail to decode and are refetched — inferred from Codable,
+not tested), and `squircle-media/` for downloaded clips (conversation and
+task videos alike, streamed to file). The media store rebuilds its index by
+scanning the directory at launch and evicts by a 1 GiB budget and 14-day age,
+never a file used in the last 15 minutes or a recording the user handed in.
+Pictures stay in memory. UserDefaults keys are unchanged.
+
+**Saved service files.** `agents.json`: per agent `lifecycle` (`creating /
+ready{refresh} / reset-queued{reset} / replacing{replacement}`, with
+`error`/`failures`), per worker `stage` and object `notified`, `outbox`
+wakes with `delivery`. It still reads the earlier `creating`, `pending`,
+`replacing`, `reset_error`, `archived`, `attempted`, `handoff_sent` and
+colon-key forms and writes the new ones. `tasks.json`: see
+[tasks](task-tracking.md#model). `push/devices.json` keeps `activities`
+(`{project: {id, token}}`) for running activities only; starts and flights
+are memory only.
+
+**Overlay (W9, `app/Squircle/Overlay/`).** Compiled and read, not yet
+looked at in a simulator or on the phone.
+
+- *Scene lease.* `OverlayHost.State` is `unconfigured / detached(model) /
+  attached(SceneLease)`. A lease owns its scene's window, controller and
+  refresh task. Only the leased scene's deactivate, background and
+  foreground notifications reach the model; ending the lease tears the
+  controller down and cancels its work (`OverlayHost.swift`).
+- *Route and mounts.* `OverlayRoute` is `bubble(resume: Panel) /
+  panel(Panel)`, `Panel {full, thread: ThreadDestination?}` (W7's type; no
+  `draft:` string). Closed keeps the panel it reopens to. The agent and the
+  thread over it are each one `Mounted(key, controller, host)`; the thread
+  changes only while the push spring is at 0.
+- *Resize regimes.* `PanelLayout` is `stretched(outgoing: Snapshot?) /
+  revealed(size) / live`, changed only through `setLayout`, which removes a
+  picture the regime leaves. Stretched: laid out at the resting size, the
+  previous size's picture fading out until the frame rests. Revealed: laid
+  out once while the handle resizes the docked panel. Live: laid out at the
+  glass's frame every frame between docked and full screen. Rest returns to
+  stretched.
+- *Attachment flight* (contract with the shared composer). One
+  `Flight(attachmentID, conversation, start, lift, picture)` from takeoff to
+  landing. The overlay holds back only that conversation's thumbnail
+  (`holdAttachment(id)`), flies toward that conversation's
+  `attachmentFrame(id, in:)` (into the bubble if it is gone) and releases
+  only that hold when the flight lands, is replaced or the overlay is torn
+  down. The flash's visibility derives from its fade spring.
+- *Completion notice.* "Done · …" comes from `ChatSession.latestTurn`'s
+  `TurnCompletion`: a turn newly reported finished (for a thread seen for
+  the first time, only one that ended in the last 6 s) shows Done, Stopped
+  or Failed for 6 s; one cancellable deadline renders again. Rendered
+  "working" rows are no longer diffed.
+- *Capture* keeps its `idle / recording / stopping` producer ownership. The
+  panel stays closed while recording, so a recording lands in the
+  conversation that was on top when it started.
+- *Jelly cadence.* `GlassJelly.Ticker` is `detached / running(link, cadence)
+  / sleeping(link, since, alarm)`: one owner for the display link, its rate
+  and the wake-up alarm. Reduce Motion stays an input to the next cadence.
 
 ## Native transport and presentation
 
@@ -139,13 +361,14 @@ phone already holds (this session or the disk cache), so T3 replays only
 the events since, or sends a snapshot when the gap is too large (2026-10-15:
 a long agent thread's snapshot is about 600 KB). A revert falls back to a
 snapshot. The Squircle service answers GET JSON with an ETag (unchanged
-polls get an empty 304) and gzip; the phone polls builds, apps, agents,
-simulators, tasks and the open thread's media in one parallel round every
-4 s. Sequenced events deduplicate
+polls get an empty 304) and gzip; the phone polls builds, apps, agents and
+simulators every 4 s, and tasks and the open thread's media only while a
+screen holds a refresh lease for them. Sequenced events deduplicate
 replay and append streaming text deltas; an empty final text event preserves the
-accumulated response. The client does not retry a message command automatically
-when an acknowledgement is missing. It presents a retry error and refreshes
-state instead. Native controls send T3's own approval/question/interrupt commands.
+accumulated response. The client never resends a message by itself when an
+acknowledgement is missing: the message shows as not delivered, and Try
+Again reuses the same message ID once T3's view of the thread is current.
+Native controls send T3's own approval/question/interrupt commands.
 
 **Presentation (current source; see AGENTS.md for the product decisions).**
 `StudioViewController` holds one `Route` (`grid`, `app`, `thread`) and derives
