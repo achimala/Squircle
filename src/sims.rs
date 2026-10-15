@@ -17,6 +17,12 @@
 //! the simulator is shut down unless another session holds it or the pool's
 //! policy keeps it (`simpool`). Starts reuse a free booted simulator of
 //! Squircle's before booting another, and at most `max_leases` run at once.
+//!
+//! Past that, a start joins a first-come queue (saved with the ledger) and
+//! the agent ends its turn. When a lease frees, the head is granted it (the
+//! slot is held for that thread) and woken with a service message; its next
+//! `sim start` takes the slot. A grant the woken turn leaves unclaimed, or
+//! a thread T3 no longer has, gives its place up.
 
 use crate::agents::{Agents, Observed};
 use crate::media::{self, SimulatorClip};
@@ -238,6 +244,65 @@ pub struct StopReceipt {
 struct Ledger {
     #[serde(default)]
     sessions: Vec<SimSession>,
+    /// Threads waiting for a lease, first come first served.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    queue: Vec<Waiter>,
+}
+
+/// A thread in line for a simulator.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Waiter {
+    /// Also the wake message's ID, so a re-sent wake is the same message.
+    id: String,
+    thread_id: String,
+    queued_at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant: Option<Grant>,
+}
+
+/// A lease held for a waiter until its thread takes it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Grant {
+    at: f64,
+    /// The thread's latest turn when granted: once a later turn has ended
+    /// without taking the slot, the woken agent didn't want it.
+    turn: Option<String>,
+    /// The wake message is in the agents' outbox.
+    woken: bool,
+}
+
+impl Ledger {
+    /// Leases in use apart from `thread`'s: simulators sessions hold, and
+    /// slots granted to waiters.
+    fn used_by_others(&self, thread: Option<&str>) -> usize {
+        let devices: std::collections::BTreeSet<String> = self.sessions.iter()
+            .filter(|s| s.holds_device() && thread != Some(s.thread_id.as_str()))
+            .map(|s| s.device_id.to_ascii_uppercase()).collect();
+        devices.len() + self.queue.iter().filter(|w| w.grant.is_some() && thread != Some(w.thread_id.as_str())).count()
+    }
+
+    /// Grants free leases to the waiters at the head of the line; returns
+    /// whether any was granted.
+    fn promote(&mut self, max: usize, turn: impl Fn(&str) -> Option<String>) -> bool {
+        let mut granted = false;
+        while self.used_by_others(None) < max {
+            let Some(next) = self.queue.iter_mut().find(|w| w.grant.is_none()) else { break };
+            next.grant = Some(Grant { at: now(), turn: turn(&next.thread_id), woken: false });
+            granted = true;
+        }
+        granted
+    }
+
+    /// Whether `thread` may take a lease now: one is held for it, or one is
+    /// free and nobody waits ahead of it.
+    fn admits(&self, thread: &str, max: usize) -> bool {
+        let mine = self.queue.iter().position(|w| w.thread_id == thread);
+        if mine.is_some_and(|i| self.queue[i].grant.is_some()) {
+            return true;
+        }
+        let ahead = self.queue.iter().take(mine.unwrap_or(self.queue.len())).any(|w| w.grant.is_none());
+        !ahead && self.used_by_others(Some(thread)) < max
+    }
 }
 
 /// Who may signal a session's recorder. Only a process this run started is
@@ -302,6 +367,12 @@ pub trait Host: Send + Sync {
     /// How many sessions may hold simulators at once.
     fn max_leases(&self) -> usize;
     fn title(&self, thread: &str) -> Option<String>;
+    /// The thread's latest turn, as T3 last said.
+    fn turn(&self, thread: &str) -> Option<String>;
+    /// Queues a service message that starts a turn in `thread` (once per `id`).
+    fn wake(&self, thread: &str, id: &str, text: String) -> Result<()>;
+    /// The threads now waiting in line for a simulator (their ended turns wake nobody).
+    fn waiting(&self, threads: Vec<String>);
 
     /// Saves the device's screen as a small JPEG at `path`, best effort:
     /// the recording's poster, so the phone needn't download the movie to
@@ -372,6 +443,21 @@ impl Host for AgentsHost {
 
     fn title(&self, thread: &str) -> Option<String> {
         self.0.worker_title(thread)
+    }
+
+    fn turn(&self, thread: &str) -> Option<String> {
+        match self.0.observe(thread) {
+            Observed::Current { value: Some(thread), .. } | Observed::Stale { value: Some(thread), .. } => thread.turn,
+            _ => None,
+        }
+    }
+
+    fn wake(&self, thread: &str, id: &str, text: String) -> Result<()> {
+        self.0.notify(thread, id, text, crate::agents::Note::SimReady, json!({"thread": thread}))
+    }
+
+    fn waiting(&self, threads: Vec<String>) {
+        self.0.set_sim_waiting(threads);
     }
 
     fn poster<'a>(&'a self, device: &'a str, path: &'a Path) -> Pending<'a, ()> {
@@ -491,13 +577,15 @@ impl Sims {
         let recorders = ledger.sessions.iter()
             .filter_map(|s| Some((s.id.clone(), s.recorder_pid().filter(|pid| is_recorder(*pid, &s.id))?)))
             .map(|(id, pid)| (id, Recorder::Recovered { pid })).collect();
-        Ok(Arc::new(Self {
+        let sims = Arc::new(Self {
             root: root.to_path_buf(),
             host,
             state: Mutex::new(State { ledger, orphans, recorders, ..State::default() }),
             ops: tokio::sync::Mutex::new(()),
             draining: tokio::sync::watch::channel(false).0,
-        }))
+        });
+        sims.announce_waiting();
+        Ok(sims)
     }
 
     /// Saves the ledger; a failure is retried on the next tick.
@@ -526,7 +614,11 @@ impl Sims {
         let mine = |s: &&SimSession| thread.is_none_or(|t| s.thread_id == t);
         let active: Vec<&SimSession> = state.ledger.sessions.iter().filter(mine).filter(|s| s.active()).collect();
         let recent: Vec<&SimSession> = state.ledger.sessions.iter().rev().filter(mine).filter(|s| !s.active()).take(50).collect();
-        json!({"active": active, "recent": recent})
+        let queue: Vec<Value> = state.ledger.queue.iter().enumerate().map(|(i, w)| json!({
+            "position": i + 1, "thread_id": w.thread_id, "title": self.host.title(&w.thread_id), "queued_at": w.queued_at,
+            "state": if w.grant.is_some() { "held for it" } else { "waiting" },
+        })).collect();
+        json!({"active": active, "recent": recent, "queue": queue, "limit": self.host.max_leases()})
     }
 
     // MARK: Start
@@ -539,6 +631,12 @@ impl Sims {
         ensure!(self.host.activity(thread) != Activity::Gone, "T3 has no thread {thread}");
         let simulators = local_simulators(&inventory);
         ensure!(!simulators.is_empty(), "{}", no_simulators(&inventory));
+
+        // At most `max_leases` sessions at once; past that, the thread waits its turn.
+        let max = self.host.max_leases();
+        if let Some(queued) = self.queue(thread, max)? {
+            return Ok(queued);
+        }
 
         let held: Vec<SimSession> = self.state.lock().unwrap().ledger.sessions.iter().filter(|s| s.holds_device()).cloned().collect();
         let chosen = match device {
@@ -566,18 +664,6 @@ impl Sims {
                     .context("No free simulator: the booted ones are the user's or other agents'; pass --device (squircle sim devices)")?
             }
         };
-        // At most `max_leases` simulators run for agents; reusing a free
-        // booted one adds none.
-        let max = self.host.max_leases();
-        let others: std::collections::BTreeSet<String> = held.iter().filter(|s| s.thread_id != thread)
-            .map(|s| s.device_id.to_ascii_uppercase()).collect();
-        let reusing = chosen["booted"] == true && device.is_none() && !others.contains(&chosen["id"].as_str().unwrap_or("").to_ascii_uppercase());
-        if others.len() >= max && !reusing {
-            let users: Vec<String> = held.iter().filter(|s| s.thread_id != thread)
-                .map(|s| format!("{} ({})", s.device_name, self.host.title(&s.thread_id).unwrap_or_else(|| s.thread_id.clone()))).collect();
-            bail!("{} simulators already run for other agents: {}. The limit is {max} (SQUIRCLE_MAX_SIMULATORS). \
-                   Try again when one stops (squircle sim status).", others.len(), users.join(", "));
-        }
         let device_id = chosen["id"].as_str().context("Simulator without an ID")?.to_string();
         let device_name = chosen["name"].as_str().unwrap_or("Simulator").to_string();
         let host_id = "local".to_string();
@@ -619,12 +705,19 @@ impl Sims {
                 old.device = DeviceLease::Closed;
             }
             state.ledger.sessions.push(session.clone());
+            // The session takes its place in line (and any slot held for it).
+            let place = state.ledger.queue.iter().position(|w| w.thread_id == thread);
+            let waiter = place.map(|i| state.ledger.queue.remove(i));
             trim(&mut state.ledger);
             if let Err(error) = self.save(&mut state) {
                 state.ledger.sessions.retain(|s| s.id != id);
+                if let Some(waiter) = waiter {
+                    state.ledger.queue.insert(place.unwrap_or(0), waiter);
+                }
                 return Err(error);
             }
         }
+        self.announce_waiting();
         let mut startup = Startup { sims: self, id: id.clone(), child: None, error: None, committed: false };
         match self.begin(&session, &mut startup).await {
             Ok(session) => Ok(self.started(&session, "Recording. The user watches it live on their phone.")),
@@ -670,6 +763,108 @@ impl Sims {
         // Recording either way; an unsaved state is saved on the next tick.
         let _ = self.save(&mut state);
         Ok(committed)
+    }
+
+    /// Puts `thread` in line unless it may take a lease now; what to tell
+    /// the agent if it waits.
+    fn queue(&self, thread: &str, max: usize) -> Result<Option<Value>> {
+        let mut state = self.state.lock().unwrap();
+        if state.ledger.admits(thread, max) {
+            return Ok(None);
+        }
+        if !state.ledger.queue.iter().any(|w| w.thread_id == thread) {
+            state.ledger.queue.push(Waiter { id: uuid::Uuid::new_v4().to_string(), thread_id: thread.into(), queued_at: now(), grant: None });
+            if let Err(error) = self.save(&mut state) {
+                state.ledger.queue.retain(|w| w.thread_id != thread);
+                return Err(error);
+            }
+        }
+        let position = state.ledger.queue.iter().filter(|w| w.grant.is_none()).position(|w| w.thread_id == thread).unwrap_or(0) + 1;
+        let holders: Vec<String> = state.ledger.sessions.iter().filter(|s| s.holds_device())
+            .map(|s| format!("{} ({})", s.device_name, self.host.title(&s.thread_id).unwrap_or_else(|| s.thread_id.clone()))).collect();
+        drop(state);
+        self.announce_waiting();
+        let cli = self.host.cli();
+        Ok(Some(json!({
+            "status": "queued",
+            "position": position,
+            "in_use": holders,
+            "limit": max,
+            "next": format!("All {max} simulators are in use; this thread is number {position} in line and keeps its place. \
+                End your turn now. When a simulator is free, Squircle holds it for this thread and wakes it with a \
+                [simulator ready] message; then run {cli} sim start --thread {thread} again. \
+                To leave the line: {cli} sim stop --thread {thread}."),
+        })))
+    }
+
+    /// Whether `thread` has a session recording.
+    pub fn running(&self, thread: &str) -> bool {
+        self.state.lock().unwrap().ledger.sessions.iter().any(|s| s.thread_id == thread && s.active())
+    }
+
+    /// Takes `thread` out of the line (a held slot frees for the next).
+    pub fn leave(&self, thread: &str) -> Result<bool> {
+        let mut state = self.state.lock().unwrap();
+        let before = state.ledger.queue.len();
+        state.ledger.queue.retain(|w| w.thread_id != thread);
+        let left = state.ledger.queue.len() != before;
+        if left {
+            self.save(&mut state)?;
+            drop(state);
+            self.announce_waiting();
+        }
+        Ok(left)
+    }
+
+    fn announce_waiting(&self) {
+        let threads = self.state.lock().unwrap().ledger.queue.iter().map(|w| w.thread_id.clone()).collect();
+        self.host.waiting(threads);
+    }
+
+    /// Grants freed leases to the head of the line and wakes them; gives up
+    /// the places of threads T3 no longer has and grants left unclaimed.
+    fn advance(&self) {
+        let max = self.host.max_leases();
+        let changed = {
+            let mut state = self.state.lock().unwrap();
+            let before = state.ledger.queue.len();
+            state.ledger.queue.retain(|w| match self.host.activity(&w.thread_id) {
+                Activity::Gone => false,
+                // The woken turn ended without taking the slot.
+                Activity::Idle => !w.grant.as_ref().is_some_and(|g| g.woken && self.host.turn(&w.thread_id) != g.turn),
+                Activity::Working | Activity::Unknown => true,
+            });
+            let left = state.ledger.queue.len() != before;
+            let granted = state.ledger.promote(max, |t| self.host.turn(t));
+            let changed = left || granted;
+            if changed {
+                let _ = self.save(&mut state);
+            }
+            changed
+        };
+        if changed {
+            self.announce_waiting();
+        }
+        let unwoken: Vec<Waiter> = self.state.lock().unwrap().ledger.queue.iter()
+            .filter(|w| w.grant.as_ref().is_some_and(|g| !g.woken)).cloned().collect();
+        let cli = self.host.cli();
+        for waiter in unwoken {
+            let thread = &waiter.thread_id;
+            let text = format!("[simulator ready]\nA simulator is free and held for this thread. Run {cli} sim start --thread {thread} \
+                now to take it, then carry on. If you no longer need it, run {cli} sim stop --thread {thread} to give it up.");
+            if let Err(error) = self.host.wake(thread, &waiter.id, text) {
+                eprintln!("Simulator wake for {thread} not queued: {error:#}");
+                continue;
+            }
+            let _ = self.update_waiter(&waiter.id, |w| if let Some(grant) = &mut w.grant { grant.woken = true });
+        }
+    }
+
+    fn update_waiter(&self, id: &str, change: impl FnOnce(&mut Waiter)) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let Some(waiter) = state.ledger.queue.iter_mut().find(|w| w.id == id) else { return Ok(()) };
+        change(waiter);
+        self.save(&mut state)
     }
 
     fn started(&self, session: &SimSession, status: &str) -> Value {
@@ -888,6 +1083,10 @@ impl Sims {
             let _op = self.ops.lock().await;
             self.release(None).await;
         }
+        // Not while a start is deciding whether it may take a lease.
+        if let Ok(_op) = self.ops.try_lock() {
+            self.advance();
+        }
     }
 
     fn releases_owed(&self) -> bool {
@@ -1080,6 +1279,11 @@ mod tests {
         close_fails: std::sync::atomic::AtomicBool,
         boot: Mutex<Option<std::result::Result<(), ()>>>,
         activity: Mutex<Option<Activity>>,
+        /// Per-thread T3 state and latest turn, over `activity`.
+        threads: Mutex<HashMap<String, (Activity, Option<String>)>>,
+        woken: Mutex<Vec<(String, String)>>,
+        waiting: Mutex<Vec<String>>,
+        max: std::sync::atomic::AtomicUsize,
     }
 
     impl Fake {
@@ -1102,7 +1306,10 @@ mod tests {
                                        {"id": "SIM2", "name": "iPad", "platform": "ios", "hostId": "local", "booted": false}]}))
             })
         }
-        fn activity(&self, _: &str) -> Activity { self.activity.lock().unwrap().unwrap_or(Activity::Working) }
+        fn activity(&self, thread: &str) -> Activity {
+            self.threads.lock().unwrap().get(thread).map(|t| t.0)
+                .unwrap_or_else(|| self.activity.lock().unwrap().unwrap_or(Activity::Working))
+        }
         fn cli(&self) -> String { "squircle".into() }
         fn boot<'a>(&'a self, _: &'a str) -> Pending<'a, Result<()>> {
             let outcome = *self.boot.lock().unwrap();
@@ -1129,8 +1336,14 @@ mod tests {
             self.calls.lock().unwrap().push(format!("release {device}"));
             Box::pin(async { Ok(()) })
         }
-        fn max_leases(&self) -> usize { 1 }
+        fn max_leases(&self) -> usize { self.max.load(std::sync::atomic::Ordering::SeqCst).max(1) }
         fn title(&self, _: &str) -> Option<String> { None }
+        fn turn(&self, thread: &str) -> Option<String> { self.threads.lock().unwrap().get(thread).and_then(|t| t.1.clone()) }
+        fn wake(&self, thread: &str, id: &str, _: String) -> Result<()> {
+            self.woken.lock().unwrap().push((thread.into(), id.into()));
+            Ok(())
+        }
+        fn waiting(&self, threads: Vec<String>) { *self.waiting.lock().unwrap() = threads }
     }
 
     fn sims(root: &Path, boot: Option<std::result::Result<(), ()>>) -> (Arc<Sims>, Arc<Fake>) {
@@ -1239,14 +1452,15 @@ mod tests {
     }
 
     /// A session's end shuts its simulator down once T3's device session is
-    /// closed; a start past the limit is refused rather than booting another.
+    /// closed; a start past the limit waits in line rather than booting another.
     #[tokio::test]
     async fn ended_session_releases_its_simulator_and_the_limit_holds() {
         let dir = tempfile::tempdir().unwrap();
         let (sims, fake) = sims(dir.path(), Some(Ok(())));
         sims.start(THREAD, None).await.unwrap();
         let other = "0e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
-        assert!(sims.start(other, None).await.unwrap_err().to_string().contains("limit is 1"));
+        assert_eq!(sims.start(other, None).await.unwrap()["status"], "queued");
+        assert_eq!(fake.count("device.open"), 1);
         sims.stop(Some(THREAD), None).await.unwrap();
         assert!(only_of(&sims, THREAD).release_pending);
         sims.tick().await;
@@ -1254,6 +1468,78 @@ mod tests {
         assert!(!only_of(&sims, THREAD).release_pending);
         sims.tick().await;
         assert_eq!(fake.count("release SIM1"), 1, "released twice");
+    }
+
+    fn queue(sims: &Sims) -> Vec<(String, bool)> {
+        sims.state.lock().unwrap().ledger.queue.iter().map(|w| (w.thread_id.clone(), w.grant.is_some())).collect()
+    }
+
+    /// Past the limit, starts wait first come first served: a freed lease is
+    /// held for the head (a later thread can't take it) and the head is woken
+    /// once, even across a restart; its next start takes the slot.
+    #[tokio::test]
+    async fn full_starts_wait_in_line_and_the_head_is_woken() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sims, fake) = sims(dir.path(), Some(Ok(())));
+        let (b, c, d) = ("0e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f", "1e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f", "2e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f");
+        sims.start(THREAD, None).await.unwrap();
+        assert_eq!(sims.start(b, None).await.unwrap()["position"], 1);
+        assert_eq!(sims.start(c, None).await.unwrap()["position"], 2);
+        // Asking again keeps the place.
+        assert_eq!(sims.start(b, None).await.unwrap()["position"], 1);
+        assert_eq!(*fake.waiting.lock().unwrap(), [b, c]);
+
+        sims.stop(Some(THREAD), None).await.unwrap();
+        sims.tick().await;
+        assert_eq!(queue(&sims), [(b.into(), true), (c.into(), false)]);
+        assert_eq!(fake.woken.lock().unwrap().iter().map(|w| w.0.as_str()).collect::<Vec<_>>(), [b]);
+        // The held slot isn't anyone else's, newcomer or next in line.
+        assert_eq!(sims.start(d, None).await.unwrap()["position"], 2);
+        assert_eq!(sims.start(c, None).await.unwrap()["status"], "queued");
+
+        // A restart neither loses the line nor wakes the head again.
+        drop(sims);
+        let reopened = Sims::with_host(dir.path(), fake.clone()).unwrap();
+        reopened.tick().await;
+        assert_eq!(fake.woken.lock().unwrap().len(), 1);
+        assert_eq!(queue(&reopened), [(b.into(), true), (c.into(), false), (d.into(), false)]);
+
+        reopened.start(b, None).await.unwrap();
+        assert_eq!(queue(&reopened), [(c.into(), false), (d.into(), false)]);
+        assert_eq!(*fake.waiting.lock().unwrap(), [c, d]);
+        reopened.stop(Some(b), None).await.unwrap();
+    }
+
+    /// A place is given up by leaving, when T3 no longer has the thread, or
+    /// when the woken turn ends without taking the slot; not while the turn
+    /// that queued is still finishing.
+    #[tokio::test]
+    async fn places_are_given_up_only_when_unwanted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sims, fake) = sims(dir.path(), Some(Ok(())));
+        let (b, c, d) = ("0e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f", "1e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f", "2e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f");
+        let set = |thread: &str, activity, turn: &str| { fake.threads.lock().unwrap().insert(thread.into(), (activity, Some(turn.into()))); };
+        sims.start(THREAD, None).await.unwrap();
+        for thread in [b, c, d] {
+            set(thread, Activity::Working, "t1");
+            sims.start(thread, None).await.unwrap();
+        }
+        assert!(sims.leave(c).unwrap());
+        set(d, Activity::Gone, "t1");
+        sims.tick().await;
+        assert_eq!(queue(&sims), [(b.into(), false)]);
+
+        sims.stop(Some(THREAD), None).await.unwrap();
+        sims.tick().await;
+        assert_eq!(queue(&sims), [(b.into(), true)]);
+        // The turn that queued ends: the wake hasn't run yet, so the slot stays held.
+        set(b, Activity::Idle, "t1");
+        sims.tick().await;
+        assert_eq!(queue(&sims), [(b.into(), true)]);
+        // The woken turn ends without taking it: the place goes.
+        set(b, Activity::Idle, "t2");
+        sims.tick().await;
+        assert!(queue(&sims).is_empty());
     }
 
     fn only_of(sims: &Sims, thread: &str) -> SimSession {

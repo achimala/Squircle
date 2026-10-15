@@ -2068,6 +2068,11 @@ async fn stop_sim(
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
     let sims = sims(&state)?;
+    // A thread in line for a simulator gives up its place.
+    let left = match request.thread_id.as_deref() { Some(thread) => sims.leave(thread).map_err(sim_error)?, None => false };
+    if left && !sims.running(request.thread_id.as_deref().unwrap_or_default()) {
+        return Ok(Json(success(json!({"left_queue": true, "next": "This thread is no longer waiting for a simulator."}))));
+    }
     // Filing a long recording takes minutes. A caller that gives up first
     // must not cancel it halfway: the session would stay "filing" until the
     // service restarts.

@@ -357,21 +357,21 @@ enum TaskCommand {
 #[derive(Subcommand)]
 enum SimCommand {
     /// Open, boot and start recording a simulator for your thread; returns the agent-device command to drive it.
-    #[command(after_help = "Idempotent: starting again on the same simulator returns the running session. Without --device: the simulator this thread used last, else a booted one of Squircle's that nothing holds, else a shut-down one (never a simulator the user or another agent has booted). At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once; past that start fails until one stops. Stopping (or the turn ending) shuts the simulator down. Use this for every simulator: don't boot or create simulators with simctl or xcodebuild.")]
+    #[command(after_help = "Idempotent: starting again on the same simulator returns the running session. Without --device: the simulator this thread used last, else a booted one of Squircle's that nothing holds, else a shut-down one (never a simulator the user or another agent has booted). At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once; past that, start puts your thread in line (first come, first served) and returns status \"queued\" with your position: end your turn, and Squircle wakes your thread with a [simulator ready] message once one is held for you; run start again then. sim stop leaves the line. Stopping (or the turn ending) shuts the simulator down. Use this for every simulator: don't boot or create simulators with simctl or xcodebuild.")]
     Start {
         #[arg(long, help = "Your T3 thread ID")]
         thread: String,
         #[arg(long, help = "Simulator name or UDID (squircle sim devices)")]
         device: Option<String>,
     },
-    /// Stop your thread's session; the recording is added to your current turn.
+    /// Stop your thread's session (the recording is added to your current turn), or leave the line for one.
     Stop {
         #[arg(long, help = "Your T3 thread ID")]
         thread: Option<String>,
         #[arg(long, help = "A session ID instead of a thread")]
         id: Option<String>,
     },
-    /// Every booted simulator with its owner (a session's thread, a T3 device session, or unowned), running sessions and recent recordings.
+    /// Every booted simulator with its owner (a session's thread, a T3 device session, or unowned), running sessions, the line waiting for one, and recent recordings.
     Status {
         #[arg(long)]
         thread: Option<String>,

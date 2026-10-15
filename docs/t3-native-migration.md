@@ -1913,8 +1913,16 @@ preview simulator; otherwise it is shut down after `SQUIRCLE_SIM_IDLE_MINUTES`
 (default 10) free. Simulators the user booted are never touched. Devices an
 agent created are deleted after a day unused. `sim start` without
 `--device` takes the thread's last simulator, a free booted one of
-Squircle's, then a shut-down one (never someone else's booted one) and
-refuses past `SQUIRCLE_MAX_SIMULATORS` (default 3) with the holders named.
+Squircle's, then a shut-down one (never someone else's booted one). Past
+`SQUIRCLE_MAX_SIMULATORS` (default 3) it puts the thread in a first-come
+line saved with the ledger and returns `queued` with its position; the
+agent ends its turn (a waiting worker's ended turn wakes nobody). When a
+lease frees, the head's slot is held for it and the service wakes the
+thread through the agents' outbox with a `[simulator ready]` service
+message (`squircle-sim-ready`); its next `sim start` takes the slot. The
+place is given up on `sim stop`, when T3 no longer has the thread, or when
+the woken turn ends without taking the slot. (2026-10-15, user-requested:
+workers stalled after a refused start.)
 `sim status` lists every booted simulator with its owner and its apps'
 CPU; `sim cleanup [--dry-run]` applies the policy without the idle wait.
 Agents are told to use `sim start/stop` for every simulator and not to boot
