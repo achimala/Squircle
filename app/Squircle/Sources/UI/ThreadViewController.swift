@@ -70,6 +70,37 @@ private final class WeakBox<Object: AnyObject> {
     weak var value: Object?
 }
 
+/// The conversation's table, reporting each layout pass and whether it
+/// began at the content's end.
+final class ConversationTable: UITableView {
+    var onLayout: ((_ wasAtEnd: Bool) -> Void)?
+
+    override func layoutSubviews() {
+        let end = max(-contentInset.top, contentSize.height + contentInset.bottom - bounds.height)
+        let wasAtEnd = abs(contentOffset.y - end) < 1
+        super.layoutSubviews()
+        onLayout?(wasAtEnd)
+    }
+
+    /// Rows measured against their estimates can shrink the content
+    /// under the offset; UIKit then pulls the offset back with an animated
+    /// scroll, which starts past the end (nothing showing) and drags through
+    /// older rows. That correction lands at once.
+    override var contentSize: CGSize {
+        get { super.contentSize }
+        set {
+            resizing = true
+            super.contentSize = newValue
+            resizing = false
+        }
+    }
+    private var resizing = false
+
+    override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
+        super.setContentOffset(contentOffset, animated: animated && !resizing)
+    }
+}
+
 /// One conversation with a coding agent, full height. A simulator the agent
 /// uses shows in the turn that used it (live, then its recording) and as a
 /// floating picture the app shows over every conversation (`SimulatorDock`).
@@ -135,7 +166,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var jumpShown = false
     private let clip = UIView()
     private let fade = CAGradientLayer()
-    private let table = UITableView(frame: .zero, style: .plain)
+    private let table = ConversationTable(frame: .zero, style: .plain)
     private let composer = Composer(placeholder: "Message")
     private lazy var picker = AttachmentPicker(host: self) { [weak self] image in
         if let attachment = ImageAttachment(image) { self?.model.attach(attachment) }
@@ -333,6 +364,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.showsVerticalScrollIndicator = false
         table.contentInsetAdjustmentBehavior = .never
         table.delegate = self
+        table.onLayout = { [weak self] wasAtEnd in self?.keepEnd(wasAtEnd) }
         table.estimatedRowHeight = 60
         table.register(MessageCell.self, forCellReuseIdentifier: "message")
         table.register(HeaderCell.self, forCellReuseIdentifier: "header")
@@ -875,6 +907,17 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             scrollSpring.set(max(start, target - table.bounds.height * 0.9))
             scrollSpring.animate(to: target)
         }
+    }
+
+    /// The table measures rows that come into view against their estimates
+    /// and applies the difference to its content size in its own layout
+    /// pass, without moving its offset: a pinned conversation would then sit
+    /// past its end (blank) or show older rows until something scrolled it.
+    /// One at its end before that pass stays at its end.
+    private func keepEnd(_ wasAtEnd: Bool) {
+        guard wasAtEnd, pinToBottom, flyingID == nil, !scrollSpring.isAnimating, !table.isTracking, !table.isDecelerating else { return }
+        let bottom = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
+        if abs(table.contentOffset.y - bottom) > 0.5 { table.contentOffset.y = bottom }
     }
 
     /// Scrolls the conversation on one spring, laying rows out every frame.
