@@ -75,9 +75,30 @@ import UIKit
 @MainActor
 enum ScrollSweep {
     static func start(_ scroll: UIScrollView) {
+        // `SQUIRCLE_SCROLL_BACK=POINTS`: for stills, scrolled back that far.
+        if let back = ProcessInfo.processInfo.environment["SQUIRCLE_SCROLL_BACK"].flatMap(Double.init) {
+            Task { [weak scroll] in
+                try? await Task.sleep(for: .seconds(6))
+                guard let scroll else { return }
+                scroll.setContentOffset(CGPoint(x: 0, y: max(-scroll.adjustedContentInset.top, scroll.contentOffset.y - back)), animated: false)
+            }
+        }
         guard ProcessInfo.processInfo.environment["SQUIRCLE_SCROLL_SWEEP"] == "1" else { return }
         Task { [weak scroll] in
             try? await Task.sleep(for: .seconds(5.5))
+            // Frames more than 1.5 periods apart while it scrolls, logged at the end.
+            var stamps: [(CFTimeInterval, CFTimeInterval)] = []
+            let link = CADisplayLink(target: DisplayLinkProxy { stamps.append(($0.timestamp, $0.duration)) },
+                                     selector: #selector(DisplayLinkProxy.tick(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            link.add(to: .main, forMode: .common)
+            defer {
+                link.invalidate()
+                let gaps = zip(stamps.dropFirst(), stamps).map { ($0.0 - $1.0, $1.1) }
+                let hitches = gaps.filter { $0.0 > 1.5 * $0.1 }
+                NSLog("SWEEP frames=%d hitches=%d hitch_ms=%.0f worst_ms=%.1f", stamps.count, hitches.count,
+                      hitches.reduce(0) { $0 + ($1.0 - $1.1) * 1000 }, (gaps.map(\.0).max() ?? 0) * 1000)
+            }
             for step in [-1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1] as [CGFloat] {
                 guard let scroll, scroll.window != nil else { return }
                 let page = scroll.bounds.height * 0.8
