@@ -976,21 +976,26 @@ final class LayoutView: UIView {
     }
 }
 
-/// What the agent is doing now, as a line of text. When the agent moves
-/// on, the finished task slides up out of it and the next slides in from
-/// below.
+/// What the agent is doing now, as a line of text, with the agent itself
+/// beside it: the conversation's jelly, live (direction B, 2026-10-15). When
+/// the agent moves on, the finished task slides up out of the line and the
+/// next slides in from below.
 final class LiveCell: TimelineCell {
     private let capsule = LiveCapsule()
+    private var hero: JellyHero?
+    private var heroLead: NSLayoutConstraint!
+    private static let heroSize: CGFloat = 34
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         capsule.isUserInteractionEnabled = false
         capsule.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(capsule)
+        heroLead = capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6)
         NSLayoutConstraint.activate([
             capsule.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
             capsule.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
-            capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6),
+            heroLead,
             capsule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
             capsule.heightAnchor.constraint(equalToConstant: 34)
         ])
@@ -1001,7 +1006,25 @@ final class LiveCell: TimelineCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ status: LiveStatus) {
+    /// `jelly`: who is working, drawn beside the line (nil: the line's mark).
+    func configure(_ status: LiveStatus, jelly: JellyLook? = nil) {
+        if let jelly {
+            if let hero { hero.look = jelly } else {
+                let hero = JellyHero(jelly, size: Self.heroSize)
+                hero.translatesAutoresizingMaskIntoConstraints = false
+                contentView.addSubview(hero)
+                NSLayoutConstraint.activate([
+                    hero.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+                    hero.centerYAnchor.constraint(equalTo: capsule.centerYAnchor),
+                    hero.widthAnchor.constraint(equalToConstant: Self.heroSize),
+                    hero.heightAnchor.constraint(equalToConstant: Self.heroSize)
+                ])
+                self.hero = hero
+            }
+        }
+        hero?.isHidden = jelly == nil
+        capsule.markSlot = jelly == nil ? nil : 0
+        heroLead.constant = jelly == nil ? 6 : 20 + Self.heroSize + 4
         capsule.configure(headline: status.headline, started: status.started)
         accessibilityLabel = status.headline
     }

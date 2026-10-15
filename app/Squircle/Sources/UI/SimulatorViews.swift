@@ -239,6 +239,9 @@ final class SimulatorDock: UIView {
     private(set) var uses: [SimulatorUse] = []
     private var currentThread: String?
     private var titles: [String: String] = [:]
+    /// The app's agent's thread: its pictures are labelled with the big
+    /// jelly, every other thread's with that worker's.
+    var agentThread: String?
     private let feeds: SimulatorFeeds
     private var pips: [String: PiP] = [:]
     private var order: [String] = []
@@ -606,7 +609,8 @@ final class SimulatorDock: UIView {
             pip.alpha = p.alpha
             pip.shade.alpha = p.shade
             pip.cornerRadius = p.cornerRadius
-            pip.caption.text = titles[use.threadID] ?? "Thread"
+            pip.label(titles[use.threadID] ?? "Thread",
+                      jelly: use.threadID == agentThread ? .agent(.working) : .worker(use.threadID, .working))
             pip.caption.alpha = p.caption
             pip.isUserInteractionEnabled = p.touchable
             pip.interactive = p.ownsInput
@@ -792,6 +796,23 @@ private final class PiP: UIView {
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         bounds.insetBy(dx: -4, dy: -4).contains(point)
+    }
+
+    private var labelled: (String, JellyLook)?
+
+    /// Its thread's name, led by the jelly of the agent driving it.
+    func label(_ title: String, jelly: JellyLook) {
+        guard labelled?.0 != title || labelled?.1 != jelly else { return }
+        labelled = (title, jelly)
+        let text = NSMutableAttributedString()
+        if let image = JellySprites.shared.image(jelly, .tight(12), traits: traitCollection) {
+            let attachment = NSTextAttachment(image: image)
+            attachment.bounds = CGRect(x: 0, y: (caption.font.capHeight - 12) / 2 - 12 * 0.12, width: image.size.width, height: image.size.height)
+            text.append(NSAttributedString(attachment: attachment))
+            text.append(NSAttributedString(string: " "))
+        }
+        text.append(NSAttributedString(string: title))
+        caption.attributedText = text
     }
 
     @objc private func tapped() { onTap?() }

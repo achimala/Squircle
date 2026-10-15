@@ -634,6 +634,9 @@ private final class TaskCell: UITableViewCell {
     private let note = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel, lines: 2)
     private let chips = UIStackView()
     private let chipScroll = UIScrollView()
+    /// Its workers that are alive (working, needing you, stopped on an
+    /// error): each is its jelly, its title and how it is doing.
+    private let crew = UIStackView()
     private let thumbs = UIStackView()
     private let thumbScroll = UIScrollView()
     private let install = UIButton(configuration: .filled())
@@ -696,7 +699,10 @@ private final class TaskCell: UITableViewCell {
         let top = UIStackView(arrangedSubviews: [text, install])
         top.alignment = .center
         top.spacing = 12
-        let column = UIStackView(arrangedSubviews: [top, chipScroll, thumbScroll])
+        crew.axis = .vertical
+        crew.spacing = 8
+        crew.alignment = .leading
+        let column = UIStackView(arrangedSubviews: [top, crew, chipScroll, thumbScroll])
         column.axis = .vertical
         column.spacing = 8
         rule.backgroundColor = .separator
@@ -757,10 +763,16 @@ private final class TaskCell: UITableViewCell {
         // redrawn row keeps its loaded thumbnails.
         if row.threads != shown?.threads {
             chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            for thread in row.threads {
+            crew.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            let alive = row.threads.filter { Self.mood($0) != nil }, rest = row.threads.filter { Self.mood($0) == nil }
+            for thread in alive {
+                crew.addArrangedSubview(member(thread))
+            }
+            for thread in rest {
                 chips.addArrangedSubview(chip(thread))
             }
-            chipScroll.isHidden = row.threads.isEmpty
+            crew.isHidden = alive.isEmpty
+            chipScroll.isHidden = rest.isEmpty
         }
         if row.media != shown?.media {
             loads.forEach { $0.cancel() }
@@ -792,6 +804,51 @@ private final class TaskCell: UITableViewCell {
         case .done: "Done"
         case .dropped: "Dropped"
         }
+    }
+
+    /// A linked worker's jelly mood while it is alive; nil once it finished.
+    private static func mood(_ thread: AppTask.Thread) -> JellyLook.Mood? {
+        switch thread.state {
+        case "working": .working
+        case "needs-you": .needsYou
+        case "error": .failed
+        default: nil
+        }
+    }
+
+    /// A live worker: the worker itself (its jelly), its title and how it is
+    /// doing. Tapping it opens it.
+    private func member(_ thread: AppTask.Thread) -> UIView {
+        let mood = Self.mood(thread) ?? .working
+        let button = UIControl()
+        let jelly = JellyView(.worker(thread.id, mood), canvas: .roomy(22))
+        let title = Theme.label(thread.title ?? "Worker", Theme.font(.subheadline, 15, .semibold), lines: 1)
+        let (word, color): (String, UIColor) = switch mood {
+        case .needsYou: ("Needs you", Theme.warning)
+        case .failed: ("Stopped with an error", Theme.failure)
+        default: ("Working", .secondaryLabel)
+        }
+        let state = Theme.label(word, Theme.font(.footnote, 13), color: color, lines: 1)
+        let text = UIStackView(arrangedSubviews: [title, state])
+        text.axis = .vertical
+        text.spacing = 0
+        text.isUserInteractionEnabled = false
+        [jelly, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; button.addSubview($0) }
+        NSLayoutConstraint.activate([
+            jelly.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 1),
+            jelly.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: 1),
+            jelly.widthAnchor.constraint(equalToConstant: 22),
+            jelly.heightAnchor.constraint(equalToConstant: 22),
+            text.leadingAnchor.constraint(equalTo: jelly.trailingAnchor, constant: 11),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: button.trailingAnchor),
+            text.topAnchor.constraint(equalTo: button.topAnchor, constant: 2),
+            text.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -2)
+        ])
+        button.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onThread?(thread.id) }, for: .touchUpInside)
+        button.isAccessibilityElement = true
+        button.accessibilityTraits = .button
+        button.accessibilityLabel = "Open thread \(thread.title ?? ""), \(word)"
+        return button
     }
 
     /// A linked thread: a dot for what it is doing and its title.
@@ -949,26 +1006,49 @@ final class TaskStrip: UIControl {
 
     private var shown: [String] = []
 
+    /// Counts of open tasks; working and needing you are shown by who is on
+    /// them (up to three of the crew, overlapping), the rest by a dot.
     func configure(_ open: [AppTask]) {
         func count(_ status: AppTask.Status) -> Int { open.filter { $0.status == status }.count }
-        var items: [(Int, String, UIColor, Bool)] = [
-            (count(.needsYou), "needs you", Theme.accent, true),
-            (count(.inProgress), "working", Theme.warning, false),
-            (count(.readyToTry), "to try", Theme.success, false)
+        func crew(_ state: String, _ mood: JellyLook.Mood) -> [JellyLook] {
+            var seen = Set<String>()
+            let threads = open.flatMap(\.threads).filter { $0.state == state && seen.insert($0.id).inserted }
+            // No worker on it: the app's agent is.
+            return threads.isEmpty ? [.agent(mood)] : threads.prefix(3).map { .worker($0.id, mood) }
+        }
+        var items: [(Int, String, UIColor, Bool, [JellyLook])] = [
+            (count(.needsYou), "needs you", Theme.accent, true, crew("needs-you", .needsYou).prefix(1).map { $0 }),
+            (count(.inProgress), "working", Theme.warning, false, crew("working", .working)),
+            (count(.readyToTry), "to try", Theme.success, false, [])
         ].filter { $0.0 > 0 }
-        if items.isEmpty { items = [(count(.queued), "queued", .tertiaryLabel, false)] }
+        if items.isEmpty { items = [(count(.queued), "queued", .tertiaryLabel, false, [])] }
         let texts = items.map { "\($0.0) \($0.1)" }
-        guard texts != shown else { return }
-        shown = texts
+        let key = texts + items.flatMap { $0.4.map { "\($0)" } }
+        guard key != shown else { return }
+        shown = key
         parts.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for (index, item) in items.enumerated() {
-            let dot = UIView()
-            dot.backgroundColor = item.2
-            dot.layer.cornerRadius = 3
-            dot.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([dot.widthAnchor.constraint(equalToConstant: 6), dot.heightAnchor.constraint(equalToConstant: 6)])
+            let lead: UIView
+            if item.4.isEmpty {
+                let dot = UIView()
+                dot.backgroundColor = item.2
+                dot.layer.cornerRadius = 3
+                dot.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([dot.widthAnchor.constraint(equalToConstant: 6), dot.heightAnchor.constraint(equalToConstant: 6)])
+                lead = dot
+            } else {
+                let group = UIStackView(arrangedSubviews: item.4.map { look in
+                    let jelly = JellyView(look, canvas: JellyCanvas(size: 16, side: 0.16, top: 0.42, bottom: 0.14))
+                    jelly.translatesAutoresizingMaskIntoConstraints = false
+                    NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: 16), jelly.heightAnchor.constraint(equalToConstant: 16)])
+                    return jelly
+                })
+                // A little crew, shoulder to shoulder.
+                group.spacing = -3
+                lead = group
+            }
             let label = Theme.label(texts[index], Theme.font(.footnote, 13, .medium), color: item.3 ? .label : .secondaryLabel)
-            let part = UIStackView(arrangedSubviews: [dot, label])
+            let part = UIStackView(arrangedSubviews: [lead, label])
             part.spacing = 5
             part.alignment = .center
             parts.addArrangedSubview(part)

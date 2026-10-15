@@ -15,6 +15,9 @@ protocol ConversationHost: AnyObject {
     /// Live simulator blocks at least half on screen in `conversation`;
     /// empty when it goes away.
     func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>)
+    /// Whether the conversation's agent sits by its live step as a jelly
+    /// (the overlay's own creature is that jelly already).
+    var showsAgentJelly: Bool { get }
 }
 
 /// The values used most recently, at most `limit`, the least recently used
@@ -1031,7 +1034,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .summary(let summary):
             (cell as? SummaryCell)?.configure(summary)
         case .live(let status):
-            (cell as? LiveCell)?.configure(status)
+            let jelly = host?.showsAgentJelly == true
+                ? isAgent ? JellyLook.agent(.working) : conversation.threadID.map { JellyLook.worker($0, .working) } : nil
+            (cell as? LiveCell)?.configure(status, jelly: jelly)
         case .changes(let changes, _):
             (cell as? ChangesCell)?.configure(changes)
         case .build(let build, _):
@@ -1163,6 +1168,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return text
     }
 
+    private static let lineJelly = JellyCanvas.tight(20)
+
+    /// The state a worker line shows its jelly in: what the news said, or
+    /// the worker's live state.
+    private func workerMood(_ line: ActionLine) -> JellyLook.Mood? {
+        if case .news(let news) = line.kind { return JellyLook.Mood(news) }
+        return line.state.map(JellyLook.Mood.init)
+    }
+
     /// "Started worker · Dark mode  working", with the worker's live state.
     private func actionText(_ line: ActionLine, expanded: Bool) -> NSAttributedString {
         let font = Theme.font(.subheadline, 15), bold = Theme.font(.subheadline, 15, .semibold)
@@ -1217,14 +1231,25 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if case .build(let news) = line.kind, !news.succeeded, let reason = news.reason, !reason.isEmpty {
             add("\n" + reason, Theme.font(.footnote, 13), .secondaryLabel)
         }
-        if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: UIImage.SymbolConfiguration(font: Theme.font(.footnote, 13, .medium)))?
+        // A line about a worker leads with the worker itself: its jelly, in
+        // the state it is in now (a still; the Tasks row is where it moves).
+        var lead: CGFloat = 27
+        if let worker = line.thread?.raw, let mood = workerMood(line),
+           let image = JellySprites.shared.image(.worker(worker, mood), Self.lineJelly, traits: view.traitCollection) {
+            let attachment = NSTextAttachment(image: image)
+            let size = image.size, body = Self.lineJelly.body
+            attachment.bounds = CGRect(x: 0, y: (font.capHeight - Self.lineJelly.size) / 2 - (size.height - body.maxY), width: size.width, height: size.height)
+            text.insert(NSAttributedString(string: " ", attributes: [.font: font]), at: 0)
+            text.insert(NSAttributedString(attachment: attachment), at: 0)
+            lead = size.width + 4
+        } else if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: UIImage.SymbolConfiguration(font: Theme.font(.footnote, 13, .medium)))?
             .withTintColor(line.failed ? Theme.failure : line.running ? Theme.accent : .secondaryLabel, renderingMode: .alwaysOriginal) {
             text.insert(NSAttributedString(string: "  ", attributes: [.font: font]), at: 0)
             text.insert(NSAttributedString(attachment: NSTextAttachment(image: symbol)), at: 0)
         }
         // Wrapped lines start under the text, not the icon.
         let hanging = NSMutableParagraphStyle()
-        hanging.headIndent = 27
+        hanging.headIndent = lead
         hanging.paragraphSpacing = 4
         text.addAttribute(.paragraphStyle, value: hanging, range: NSRange(location: 0, length: text.length))
         if expanded, let message = line.text?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {

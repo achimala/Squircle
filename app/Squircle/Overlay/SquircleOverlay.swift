@@ -1513,6 +1513,7 @@ private final class JellyAudit {
 extension OverlayController: ConversationHost {
     var simulatorFeeds: SimulatorFeeds { feeds }
     var expandsSimulators: Bool { false }
+    var showsAgentJelly: Bool { false }
     func expandSimulator(_ use: SimulatorUse) {}
     func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>) {}
 }

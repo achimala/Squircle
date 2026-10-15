@@ -1985,14 +1985,19 @@ final class SquircleModel {
     private var demoTasks: AppTasks? = SquircleModel.makeDemoTasks() { didSet { changed() } }
     private static func makeDemoTasks() -> AppTasks? {
         guard ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_TASKS"] == "1" else { return nil }
-        let asks: [(String, String)] = [
-            ("Stack the sims and fan them out", "in_progress"), ("Make the send button smaller", "ready_to_try"),
-            ("Dark mode for the build sheet", "ready_to_try"), ("Swipe back from anywhere in a thread", "queued"),
-            ("Show the build number on cards", "queued"), ("Faster cold launch", "queued"),
-            ("Pin the newest build to the top", "queued"), ("Haptic when a turn finishes", "queued")]
+        // Workers on some of them, so the crew shows: (title, state).
+        let asks: [(String, String, [(String, String)])] = [
+            ("Workers should ask before restarting the service", "needs_you", [("Workers inherit approvals", "needs-you")]),
+            ("Stack the sims and fan them out", "in_progress", [("Sim deck", "working")]),
+            ("Make the task pills look alive, like agents", "in_progress", [("Jelly crew prototype", "working"), ("Jelly crew doc", "working")]),
+            ("Faster cold launch", "in_progress", [("Launch trace", "error"), ("Old profile", "done")]),
+            ("Make the send button smaller", "ready_to_try", []), ("Dark mode for the build sheet", "ready_to_try", []),
+            ("Swipe back from anywhere in a thread", "queued", []), ("Show the build number on cards", "queued", []),
+            ("Pin the newest build to the top", "queued", []), ("Haptic when a turn finishes", "queued", [])]
         let tasks = asks.enumerated().map { index, item in
-            ["id": "demo-\(index)", "ask": item.0, "status": item.1, "note": "", "order": Double(index),
-             "updated_at": 0, "threads": [], "builds": [], "media": []] as [String: Any]
+            let threads = item.2.enumerated().map { ["id": "demo-worker-\(index)-\($0.offset)", "title": $0.element.0, "state": $0.element.1] }
+            return ["id": "demo-\(index)", "ask": item.0, "status": item.1, "note": "", "order": Double(index),
+                    "updated_at": 0, "threads": threads, "builds": [], "media": []] as [String: Any]
         }
         let data = try? JSONSerialization.data(withJSONObject: ["tasks": tasks, "history": []])
         return data.flatMap { try? JSONDecoder().decode(AppTasks.self, from: $0) }
