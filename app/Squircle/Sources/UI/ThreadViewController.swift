@@ -105,6 +105,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     var compactControls = false
     /// The overlay's full-screen toggle, offered in the ⋯ menu.
     var onToggleFull: (() -> Void)?
+    /// The ⋯ menu leads with the Mac connection (the overlay has no Home button for it).
+    var showsConnection = false
     var isFull: (() -> Bool)?
     /// The model, approvals and anything without a button of its own.
     private let more = Theme.glassButton(symbol: "ellipsis", identifier: "agent.more", accessibilityLabel: "More")
@@ -284,6 +286,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Model and approvals, plus whatever has no button here.
     private func moreMenu() -> [UIMenuElement] {
         var items: [UIMenuElement] = []
+        // In the overlay: how the Mac connection is, first.
+        if showsConnection { items.append(ConnectionMenu.section(model)) }
         if isAgent, compactControls {
             items.append(UIAction(title: "Tasks", image: UIImage(systemName: "checklist")) { [weak self] _ in self?.onTasks?() })
             items.append(UIAction(title: "Builds", image: UIImage(systemName: "shippingbox")) { [weak self] _ in self?.onBuilds?() })

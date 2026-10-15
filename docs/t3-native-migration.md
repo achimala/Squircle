@@ -1149,6 +1149,50 @@ off (`gliding`), the display link ran at full rate and nothing changed. Fixes:
   iOS 27.0); recorded frames show it settling after every throw. Not yet on
   the phone.
 
+**One material, head in place (user on the phone, 2026-10-15: "rendering
+artifacts … weird brown stuff inside the mascot", "solid dark brown … out of
+place", "tapping the jelly blob should toggle the collapsed state", "stay in
+the same place and the bubble just extend out of it", "connection status …
+in the menu", "horizontal motion … displace it a little and jiggle").**
+- The brown inside the head: the blur's mask added the cube, the neck and the
+  body as separate paths, and where opposite windings overlapped they
+  cancelled, punching a ring-shaped hole in the blur; the tinted shadow was
+  also drawn under the translucent cube. Now the mask is one union of the
+  outlines (covering the whole head), the shadow is masked to outside the
+  jelly, the neck is flattened front to back so its end no longer bulges the
+  cube's face, and the head has a little more body so its middle never reads
+  as a dark disc.
+- The panel is the same jelly as the head: the app shows through, blurred,
+  under about 70% paper (66–84% by appearance and size) with a breath of the
+  jelly's tint, the head's rim and highlight running across the join. Text
+  checked legible in light and dark over Squircle's Home.
+- Opening, the creature stays where it sat as the bubble and the panel grows
+  out of it: up from it in the lower half (the head just below the panel's
+  bottom edge, on its side), down from it in the upper half. Full screen keeps
+  the head on that edge (above the home indicator, or under the status bar).
+  The head's position is linear in the opening, so it holds still while the
+  frame spring moves the panel's edges. Tapping the head closes the panel;
+  dragging it moves the panel (released, the head's spot becomes the bubble's
+  place; a panel dropped in the other half hangs the other way). Full screen
+  stays on the handle drag and the ⋯ menu; the handle no longer toggles it on
+  a tap.
+- Dragging the resize handle sideways leans the jelly after the finger
+  (rubber-banded to 7 points: the body shifts, the top shears, the head
+  trails), and it springs back with a small jiggle when let go; vertical
+  resizing is unchanged.
+- The ⋯ menu leads with the Mac connection (Connected / Connecting /
+  Reconnecting / Offline / Needs pairing again / Paused, with the reason) and
+  Reconnect; Home's Mac button shows the same section (`ConnectionMenu`).
+  Offline, the jelly dozes: greyed, fainter, heavy-lidded.
+Verified in the simulator (iPhone 18 Pro Max, iOS 27.0) with real touches
+from a throwaway UI test (open, sideways resize, head tap, reopen, head drag
+to the top, close), frame by frame from the session recording; light and
+dark stills. Clips and stills: `attachments/jelly-cohesive/`. Seen while
+checking, not changed: the first frames of a handle drag show the
+conversation re-laid out at the drag's taller size (a blank, then an older
+scroll position for about 0.2 s). The offline doze was not seen (the
+simulator stayed connected). Not yet on the phone.
+
 **How the overlay reaches apps.** It is compiled into each app when Squircle
 signs it; an installed app keeps that overlay until the app is built and
 installed again. The service compiles it from the checkout its binary was
