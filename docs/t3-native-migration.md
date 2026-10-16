@@ -2378,7 +2378,12 @@ copies T3's or the providers' stores.
   or during local hour `SQUIRCLE_NIGHTLY_FRESH_HOUR` (4) past
   `SQUIRCLE_NIGHTLY_FRESH_TOKENS` (100000) after the same idle time, it runs
   the existing fresh start, whose handoff says why ("Started fresh" in the
-  chat). `0`/`off` turns a rule off. One reading is acted on once. An agent
+  chat). `0`/`off` turns a rule off. One reading is acted on once: a
+  compaction is saved with its exact command before it is sent and counts
+  once T3 accepts it; an unanswered one is sent again as that same command
+  the next time compaction is wanted, a refused reading is not retried, and
+  a fresh start is saved as the agent's queued reset (M26 in
+  [the state machines](fsm-architecture.md)). An agent
   turn that ends on an upkeep message (no reply) sends no notification.
   `squircle agent compact` runs the same compaction now.
 - **Measured** on the scratch "Orchestration Test" agent (Claude Code 2.1.300,

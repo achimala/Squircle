@@ -64,6 +64,8 @@ uuid_id! {
     EffectID,
     /// One C00 save of an aggregate.
     TransactionID,
+    /// One T3 orchestration command; T3 keeps a receipt per ID.
+    CommandID,
 }
 
 /// A T3 project, as T3 names it (not necessarily a UUID).

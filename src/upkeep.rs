@@ -4,8 +4,13 @@
 //! thread has been quiet, and either asks it to `/compact` (T3 passes slash
 //! commands through to Claude) or starts it fresh with the usual handoff.
 //! Thresholds come from the environment; `0` or `off` turns a rule off.
+//!
+//! This is only the policy that judges a reading; what is done about it,
+//! and when it counts as done, is M26 (`crate::fsm::coordinator::upkeep`).
 
 use anyhow::{Context, Result};
+
+pub use crate::fsm::coordinator::upkeep::Decision as Tidy;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Upkeep {
@@ -19,12 +24,6 @@ pub struct Upkeep {
     /// `nightly_tokens` (a new thread is far below it, so once a night).
     pub nightly_hour: Option<u32>,
     pub nightly_tokens: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tidy {
-    Compact,
-    Fresh { nightly: bool },
 }
 
 fn var(name: &str, default: u64) -> Result<u64> {

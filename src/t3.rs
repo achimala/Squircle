@@ -3,6 +3,7 @@
 //! framing T3 0.0.45 speaks over its `/ws` socket, the same protocol as the
 //! phone's `T3Gateway`.
 
+use crate::fsm::coordinator::{Command, Dispatched};
 use crate::store::{atomic_json, read_json};
 use anyhow::{Context, Result, bail};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
@@ -104,7 +105,29 @@ pub fn iso_seconds(secs: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
-type Waiter = oneshot::Sender<Result<Value>>;
+/// How a request ended that did not succeed.
+enum Ended {
+    /// T3 answered with a failure; the cause, as T3 sent it.
+    Failed(Value),
+    /// The connection closed before an answer.
+    Closed,
+}
+
+type Waiter = oneshot::Sender<Result<Value, Ended>>;
+
+/// What one request got, as far as this connection can tell.
+enum Reply {
+    Answered(Result<Value, Value>),
+    /// The frame never left: the connection was closed or stopped draining.
+    NotSent(anyhow::Error),
+    /// It went out (or may have), and no answer will come: the connection
+    /// closed, or the caller's budget ran out.
+    Lost(String),
+}
+
+/// The caller's budget for one request. Running out of it says nothing
+/// about what T3 did.
+const CALL_BUDGET: Duration = Duration::from_secs(45);
 
 /// How long the connection may take or stay quiet before it counts as dead.
 #[derive(Clone, Copy)]
@@ -229,16 +252,28 @@ impl T3 {
         self.link.send(Message::text(frame.to_string()))
     }
 
-    pub async fn call(&self, tag: &str, payload: Value) -> Result<Value> {
+    async fn exchange(&self, tag: &str, payload: Value) -> Reply {
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.link.pending.lock().unwrap().insert(id.clone(), tx);
         let _guard = PendingGuard { link: &self.link, id: &id };
-        self.request(&id, tag, payload)?;
-        match tokio::time::timeout(Duration::from_secs(45), rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => bail!("T3 connection closed"),
-            Err(_) => bail!("T3 did not answer {tag} within 45 seconds"),
+        if let Err(error) = self.request(&id, tag, payload) {
+            return Reply::NotSent(error);
+        }
+        match tokio::time::timeout(CALL_BUDGET, rx).await {
+            Ok(Ok(Ok(value))) => Reply::Answered(Ok(value)),
+            Ok(Ok(Err(Ended::Failed(cause)))) => Reply::Answered(Err(cause)),
+            Ok(Ok(Err(Ended::Closed)) | Err(_)) => Reply::Lost("T3 connection closed".into()),
+            Err(_) => Reply::Lost(format!("T3 did not answer {tag} within {} seconds", CALL_BUDGET.as_secs())),
+        }
+    }
+
+    pub async fn call(&self, tag: &str, payload: Value) -> Result<Value> {
+        match self.exchange(tag, payload).await {
+            Reply::Answered(Ok(value)) => Ok(value),
+            Reply::Answered(Err(cause)) => bail!("T3 rejected the request: {}", clip(&cause.to_string(), ERROR_DETAIL)),
+            Reply::NotSent(error) => Err(error),
+            Reply::Lost(detail) => bail!(detail),
         }
     }
 
@@ -272,15 +307,23 @@ impl T3 {
         }
     }
 
-    /// An orchestration command; T3 assigns order and answers with its sequence.
-    pub async fn dispatch(&self, mut command: Value) -> Result<Value> {
-        command["commandId"] = json!(uuid::Uuid::new_v4().to_string());
-        command["createdAt"] = json!(iso_now());
-        let result = self.call("orchestration.dispatchCommand", command).await?;
-        if result["status"] == "rejected" {
-            bail!("T3 rejected the command: {result}");
+    /// An orchestration command, sent exactly as given: its identity was
+    /// fixed when its intent was made. T3 assigns order and answers with its
+    /// sequence; an attempt whose answer is lost is `Unknown`, never refused.
+    pub async fn dispatch(&self, command: &Command) -> Dispatched {
+        if command.id().is_none() || !command.body()["createdAt"].is_string() {
+            return Dispatched::NotSent("A T3 command needs its commandId and createdAt".into());
         }
-        Ok(result)
+        match self.exchange("orchestration.dispatchCommand", command.body().clone()).await {
+            Reply::Answered(Ok(result)) if result["status"] == "rejected" => Dispatched::Refused(format!("T3 rejected the command: {result}")),
+            Reply::Answered(Ok(result)) => Dispatched::Accepted(result),
+            Reply::Answered(Err(cause)) => {
+                let detail = format!("T3 rejected the command: {}", clip(&cause.to_string(), ERROR_DETAIL));
+                if refused(&cause) { Dispatched::Refused(detail) } else { Dispatched::Unknown(detail) }
+            }
+            Reply::NotSent(error) => Dispatched::NotSent(format!("{error:#}")),
+            Reply::Lost(detail) => Dispatched::Unknown(detail),
+        }
     }
 
     pub async fn closed(&self) {
@@ -291,6 +334,20 @@ impl T3 {
             }
         }
     }
+}
+
+/// Whether a failed dispatch provably did nothing. T3 commits a command's
+/// events and its receipt in one transaction and answers every failure of
+/// its own with a typed error; it reports defects and interruptions (say,
+/// while it shuts down, when a queued command may still run) only as an
+/// `InternalError`. So only a typed failure is a refusal.
+fn refused(cause: &Value) -> bool {
+    let reasons = match cause {
+        Value::Array(reasons) => reasons.as_slice(),
+        reason => std::slice::from_ref(reason),
+    };
+    reasons.iter().any(|reason| reason["_tag"] == "Fail"
+        && reason["error"]["_tag"].as_str().is_some_and(|tag| tag != "InternalError"))
 }
 
 fn interrupt(id: &str) -> Message {
@@ -360,7 +417,7 @@ async fn run<W, R, E>(
     let _ = closed.send(true);
     let waiters: Vec<Waiter> = link.pending.lock().unwrap().drain().map(|(_, waiter)| waiter).collect();
     for waiter in waiters {
-        let _ = waiter.send(Err(anyhow::anyhow!("T3 connection closed")));
+        let _ = waiter.send(Err(Ended::Closed));
     }
     link.subscriptions.lock().unwrap().clear();
 }
@@ -401,8 +458,7 @@ fn receive(frame: &Value, link: &Link) {
                 let _ = waiter.send(if exit["_tag"] == "Success" {
                     Ok(exit["value"].clone())
                 } else {
-                    let cause = exit["cause"].to_string();
-                    Err(anyhow::anyhow!("T3 rejected the request: {}", clip(&cause, ERROR_DETAIL)))
+                    Err(Ended::Failed(exit["cause"].clone()))
                 });
             }
         }
@@ -467,6 +523,33 @@ mod tests {
         assert!(error.starts_with("T3 rejected the request"), "{error}");
         assert_eq!(client.call("b", json!({})).await.unwrap(), json!(7));
         drop(answers.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_keeps_its_identity_and_only_a_typed_failure_is_a_refusal() {
+        use crate::fsm::coordinator::Identity;
+        use crate::fsm::core::CommandID;
+        let (client, mut server) = peer(TIMING).await;
+        let identity = Identity { id: CommandID::fresh(), created_at: "2026-10-16T00:00:00.000Z".into() };
+        let command = Command::new(&identity, json!({"type": "thread.turn.start"}));
+        let answers = tokio::spawn(async move {
+            let fail = |error: Value| json!([{"_tag": "Fail", "error": error}]);
+            for cause in [fail(json!({"_tag": "OrchestrationDispatchCommandError", "message": "no"})), fail(json!({"_tag": "InternalError"}))] {
+                let request = next_request(&mut server).await;
+                assert_eq!((request["payload"]["commandId"].as_str(), request["payload"]["createdAt"].as_str()),
+                           (Some(identity.id.as_str()), Some("2026-10-16T00:00:00.000Z")));
+                let exit = json!({"_tag":"Exit","requestId":request["id"],"exit":{"_tag":"Failure","cause":cause}});
+                server.send(Message::text(exit.to_string())).await.unwrap();
+            }
+            // Sent, then the connection drops before an answer.
+            next_request(&mut server).await;
+        });
+        assert!(matches!(client.dispatch(&command).await, Dispatched::Refused(_)));
+        assert!(matches!(client.dispatch(&command).await, Dispatched::Unknown(_)));
+        let dropped = client.dispatch(&command);
+        let (outcome, _) = tokio::join!(dropped, answers);
+        assert!(matches!(outcome, Dispatched::Unknown(_)), "{outcome:?}");
+        assert!(matches!(client.dispatch(&command).await, Dispatched::NotSent(_)));
     }
 
     #[tokio::test]
