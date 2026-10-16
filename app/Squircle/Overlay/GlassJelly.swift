@@ -24,17 +24,41 @@ import UIKit
 /// attention. Eyes move in eased glances with holds and blink on a timer.
 @MainActor
 final class GlassJelly: UIView {
-    var tone = LiveCapsule.Tone.idle {
+    /// How the agent is, which its colour, eyes and motion show on their
+    /// own once the status line is absorbed (the jelly crew's states).
+    enum Mood: Equatable {
+        /// Nothing running; heavy lids, a slow breath.
+        case idle
+        /// The agent's turn runs: eyes read along, it kneads.
+        case working
+        /// A question or approval waits: ochre, worried, hops now and then.
+        case needsYou
+        /// A turn finished that you haven't looked at yet: olive, happy.
+        case done
+        /// A turn failed that you haven't looked at yet: crimson, slumped `> <`.
+        case failed
+        /// A screen or performance recording runs.
+        case recording
+    }
+    var mood = Mood.idle {
         didSet {
-            guard tone != oldValue else { return }
-            toneTime = 0
-            switch tone {
+            guard mood != oldValue else { return }
+            switch mood {
             case .done: creatureSquash.velocity -= 1.6
             case .needsYou: hop.velocity -= 70
+            case .failed:
+                // One shudder as it slumps.
+                creatureSquash.velocity += 1.2
+                roll.velocity += 3
             case .working, .idle, .recording: break
             }
             wake()
         }
+    }
+    /// Workers running for the agent: awake while it waits, it keeps an eye
+    /// on them (it glances toward where their sprouts sit).
+    var crew = 0 {
+        didSet { if crew != oldValue { wake() } }
     }
     /// The status line or the conversation: masked to the blob, carried by it.
     let content = UIView()
@@ -116,6 +140,12 @@ final class GlassJelly: UIView {
     private var worry = Wobble(0, response: 0.35, damping: 1)
     private var squintUntil: CGFloat = 0
     private var sleepy = Wobble(0, response: 0.6, damping: 1)
+    /// Idle with nothing running: heavy lids.
+    private var heavy = Wobble(0, response: 0.8, damping: 1)
+    /// Working: it kneads (a quick small squash pulse) instead of breathing.
+    private var busy = Wobble(0, response: 0.6, damping: 1)
+    /// Failed: slumped, tilted.
+    private var slump = Wobble(0, response: 0.5, damping: 0.75)
     /// A finger dragging the panel sideways without moving it (resizing):
     /// rubber-banded points the body and head lean toward.
     private var pullX: CGFloat = 0
@@ -124,7 +154,7 @@ final class GlassJelly: UIView {
                         b: Wobble(0, response: 0.35, damping: 1), a: Wobble(0, response: 0.35, damping: 1))
     private var tintSet = false
 
-    private var time: CGFloat = 0, toneTime: CGFloat = 0
+    private var time: CGFloat = 0
     private var nextHop: CGFloat = 1.5
     private var last: CFTimeInterval?
     /// The display link and how it runs, decided after every tick from what
@@ -325,7 +355,6 @@ final class GlassJelly: UIView {
         case .sleeping(let link, let since, _):
             let gap = CGFloat(max(0, CACurrentMediaTime() - since))
             time += gap
-            toneTime += gap
             last = nil
             setCadence(.moving, link: link)
         case .running(let link, _):
@@ -373,14 +402,12 @@ final class GlassJelly: UIView {
             let h = min(left, 1.0 / 60.0)
             left -= h
             time += h
-            toneTime += h
             stepBlob(h)
             stepCreature(h)
             stepFace(h)
             stepBridge(h)
         }
         time += dt - min(dt, 0.1)
-        toneTime += dt - min(dt, 0.1)
         if !isValid { settleAtRest() }
         // The owner's layout drew this frame already; what the springs
         // moved since shows next frame (`showsCurrentPose` keeps it awake).
@@ -396,10 +423,9 @@ final class GlassJelly: UIView {
         if !Motion.reduced, opened < 0.999 { return .breathing }
         var due: [CGFloat] = [gazeHold, squintUntil]
         if let finger { due.append(finger.at + 1.6) }
-        if tone == .done { due.append(time - toneTime + 4) }
         if !Motion.reduced {
             due.append(nextBlink)
-            if tone == .needsYou { due.append(nextHop) }
+            if mood == .needsYou { due.append(nextHop) }
         }
         return .still(after: due.filter { $0 > time }.min().map { $0 - time })
     }
@@ -412,7 +438,7 @@ final class GlassJelly: UIView {
               hypot(velocity.x, velocity.y) < 0.5, hypot(sizeVelocity.width, sizeVelocity.height) < 0.5,
               hypot(accel.x, accel.y) < 1, hypot(sizeAccel.width, sizeAccel.height) < 1 else { return false }
         let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, tint.r, tint.g, tint.b, tint.a]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, heavy, busy, slump, tint.r, tint.g, tint.b, tint.a]
         return modes.allSatisfy { $0.isAtRest } && wobbles.allSatisfy { $0.isAtRest }
     }
 
@@ -428,10 +454,10 @@ final class GlassJelly: UIView {
     /// Every value finite (a NaN anywhere would never settle and draw nothing).
     private var isValid: Bool {
         let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, tint.r, tint.g, tint.b, tint.a]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, heavy, busy, slump, tint.r, tint.g, tint.b, tint.a]
         let values = modes.flatMap { [$0.value, $0.velocity] } + wobbles.flatMap { [$0.value, $0.velocity] }
             + [velocity.x, velocity.y, sizeVelocity.width, sizeVelocity.height, accel.x, accel.y,
-               sizeAccel.width, sizeAccel.height, creatureWorld.x, creatureWorld.y, waist, catenary, cubeScale, time, toneTime]
+               sizeAccel.width, sizeAccel.height, creatureWorld.x, creatureWorld.y, waist, catenary, cubeScale, time]
         return values.allSatisfy(\.isFinite)
     }
 
@@ -444,12 +470,12 @@ final class GlassJelly: UIView {
             (wobble.value, wobble.velocity) = (wobble.target, 0)
         }
         rest(&yaw); rest(&pitch); rest(&roll); rest(&gazeX); rest(&gazeY)
-        rest(&happy); rest(&squint); rest(&worry); rest(&sleepy)
+        rest(&happy); rest(&squint); rest(&worry); rest(&sleepy); rest(&heavy); rest(&busy); rest(&slump)
         rest(&tint.r); rest(&tint.g); rest(&tint.b); rest(&tint.a)
         (velocity, sizeVelocity, accel, sizeAccel) = (.zero, .zero, .zero, .zero)
         (lastPosition, lastSize, gliding) = (nil, nil, false)
         (bridgeConnected, waist, catenary, cubeScale) = (true, Self.restWaist, 10, 1)
-        if !time.isFinite || !toneTime.isFinite { (time, toneTime, gazeHold, nextBlink, nextHop, squintUntil) = (0, 0, 0, 2.5, 1.5, 0) }
+        if !time.isFinite { (time, gazeHold, nextBlink, nextHop, squintUntil) = (0, 0, 2.5, 1.5, 0) }
         creatureWorld = anchorWorld
     }
 
@@ -476,8 +502,8 @@ final class GlassJelly: UIView {
     var debugState: String {
         let names = ["squash", "shear", "lagX", "lagY", "offsetX", "offsetY", "creatureSquash", "hop", "stubRoot", "stubCube"]
         let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
-        let wobbleNames = ["yaw", "pitch", "roll", "gazeX", "gazeY", "happy", "squint", "worry", "sleepy", "r", "g", "b", "a"]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, tint.r, tint.g, tint.b, tint.a]
+        let wobbleNames = ["yaw", "pitch", "roll", "gazeX", "gazeY", "happy", "squint", "worry", "sleepy", "heavy", "busy", "slump", "r", "g", "b", "a"]
+        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, heavy, busy, slump, tint.r, tint.g, tint.b, tint.a]
         var moving = zip(names, modes).filter { !$0.1.isAtRest }.map { "\($0.0)=\($0.1.value)/\($0.1.velocity)" }
         moving += zip(wobbleNames, wobbles).filter { !$0.1.isAtRest }.map { "\($0.0)=\($0.1.value)→\($0.1.target) v\($0.1.velocity)" }
         return "cadence=\(cadence) paused=\(link?.isPaused ?? true) rest=\(isAtRest) shows=\(showsCurrentPose) pressed=\(pressed) "
@@ -626,8 +652,8 @@ final class GlassJelly: UIView {
         let anchor = anchorWorld
         creatureWorld = CGPoint(x: anchor.x + offsetX.value, y: anchor.y + offsetY.value)
         creatureVelocity = CGPoint(x: velocity.x + offsetX.velocity, y: velocity.y + offsetY.velocity)
-        creatureSquash.target = pressed ? 0.16 : 0
-        if !Motion.reduced, tone == .needsYou, time > nextHop {
+        creatureSquash.target = pressed ? 0.16 : 0.1 * slump.value
+        if !Motion.reduced, mood == .needsYou, time > nextHop {
             // Now and then, a small hop for your attention.
             nextHop = time + 3.2
             hop.velocity -= 75
@@ -644,7 +670,7 @@ final class GlassJelly: UIView {
         let v = creatureVelocity
         yaw.target = -0.34 * creatureSide + (v.x / 2600).clamped(-0.25, 0.25) + gazeX.target * 0.05
         pitch.target = -0.42 + (v.y / 2600).clamped(-0.2, 0.2) - gazeY.target * 0.04
-        roll.target = (v.x / 4000).clamped(-0.12, 0.12)
+        roll.target = (v.x / 4000).clamped(-0.12, 0.12) - 0.16 * slump.value
         yaw.step(dt); pitch.step(dt); roll.step(dt)
     }
 
@@ -729,10 +755,20 @@ final class GlassJelly: UIView {
 
     private func stepFace(_ dt: CGFloat) {
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        let color: UIColor = tone == .needsYou ? Theme.warning : tone == .done ? Theme.success
-            : tone == .recording ? Theme.failure : Theme.accent
+        let color: UIColor = switch mood {
+        case .needsYou: Theme.warning
+        case .done: Theme.success
+        case .failed, .recording: Theme.failure
+        case .idle, .working: Theme.accent
+        }
         color.resolvedColor(with: traitCollection).getRed(&r, green: &g, blue: &b, alpha: &a)
-        var strength: CGFloat = tone == .idle ? 0.5 : 0.85
+        // Idle is terracotta at half strength (a little more while workers
+        // run); working is the fullest.
+        var strength: CGFloat = switch mood {
+        case .idle: crew > 0 ? 0.6 : 0.45
+        case .working: 0.92
+        default: 0.85
+        }
         if drowsy {
             // Offline: greyed toward its own luminance, and fainter.
             let grey = 0.3 * r + 0.59 * g + 0.11 * b
@@ -761,14 +797,24 @@ final class GlassJelly: UIView {
             } else if Motion.reduced {
                 // Still: it looks ahead, and only at what you do.
                 hold = 10
-            } else if tone == .working, opened < 0.5 {
+            } else if mood == .working, opened < 0.5 {
                 // Reading along the line, a word or two at a time.
                 readStep = (readStep + 1) % 4
                 target = CGPoint(x: -creatureSide * (0.6 + 0.6 * CGFloat(readStep)), y: 0.5)
                 hold = .random(in: 0.5...0.85)
-            } else if tone == .needsYou {
+            } else if mood == .needsYou {
                 target = CGPoint(x: 0, y: -0.3)
                 hold = 1
+            } else if mood == .failed {
+                // Downcast.
+                target = CGPoint(x: -creatureSide * 0.4, y: 1.4)
+                hold = 4
+            } else if crew > 0, opened < 0.5 {
+                // Keeping an eye on its workers, tucked in below it, between
+                // looks ahead.
+                readStep = (readStep + 1) % 3
+                target = readStep == 1 ? CGPoint(x: 0.2, y: -0.2) : CGPoint(x: -creatureSide * (1.4 + 0.5 * CGFloat(readStep)), y: 1.5)
+                hold = .random(in: 1.2...2.2)
             } else {
                 target = [CGPoint(x: -1.8, y: 0.4), CGPoint(x: 1.8, y: -0.3), .zero, .zero, CGPoint(x: 0.6, y: 1.1)].randomElement()!
                 hold = .random(in: 2.4...5)
@@ -794,15 +840,21 @@ final class GlassJelly: UIView {
                     nextBlink = time + 0.18
                 } else {
                     doubleBlink = false
-                    nextBlink = time + .random(in: 3...6)
+                    // Idle, it blinks slowly and seldom.
+                    nextBlink = time + (heavy.value > 0.5 ? .random(in: 5...9) : .random(in: 3...6))
                 }
             }
         }
-        happy.target = tone == .done && toneTime < 4 ? 1 : 0
-        squint.target = time < squintUntil ? 1 : 0
-        worry.target = tone == .needsYou ? 1 : 0
+        // Held while the state lasts, so the jelly alone says how it is.
+        happy.target = mood == .done ? 1 : 0
+        squint.target = time < squintUntil || mood == .failed ? 1 : 0
+        worry.target = mood == .needsYou ? 1 : 0
         sleepy.target = drowsy ? 1 : 0
+        heavy.target = mood == .idle && crew == 0 && !drowsy ? 1 : 0
+        busy.target = mood == .working ? 1 : 0
+        slump.target = mood == .failed ? 1 : 0
         happy.step(dt); squint.step(dt); worry.step(dt); sleepy.step(dt)
+        heavy.step(dt); busy.step(dt); slump.step(dt)
     }
 
     // MARK: Shape
@@ -816,6 +868,16 @@ final class GlassJelly: UIView {
         return CGAffineTransform(a: wide * (1 + breath), b: 0,
                                  c: -shear.value / hy, d: (1 / wide) * (1 + breath), tx: 0, ty: 0)
     }
+
+    /// The cube's own rhythm, on top of its squash: a slow breath, or while
+    /// it works a quicker small kneading; calm as a panel.
+    private var rhythm: CGFloat {
+        guard !Motion.reduced else { return 0 }
+        let breath = 0.018 * sin(time * 2 * .pi / 4.2), knead = 0.045 * sin(time * 2 * .pi / 1.1)
+        return (1 - opened) * .lerp(breath, knead, busy.value)
+    }
+
+    private var cubeSquash: CGFloat { creatureSquash.value + rhythm }
 
     private var pillow: CGFloat { min(4, 0.4 * abs(squash.value) + 0.25 * abs(shear.value)) }
 
@@ -862,10 +924,10 @@ final class GlassJelly: UIView {
         let u = JellyUniforms(
             tint: SIMD4(Float(tint.r.value), Float(tint.g.value), Float(tint.b.value), Float(tint.a.value)),
             fill: fillVector,
-            face: SIMD4(Float(lid * (1 - 0.55 * sleepy.value)), Float(happy.value), Float(squint.value), Float(worry.value)),
+            face: SIMD4(Float(lid * (1 - 0.55 * sleepy.value) * (1 - 0.42 * heavy.value)), Float(happy.value), Float(squint.value), Float(worry.value)),
             inverse: SIMD4(Float(inverse.a), Float(inverse.b), Float(inverse.c), Float(inverse.d)),
             creature: SIMD4(Float(creature.x), Float(creature.y), Float(s), Float(neckLength)),
-            pose: SIMD4(Float(yaw.value), Float(pitch.value), Float(roll.value), Float(creatureSquash.value)),
+            pose: SIMD4(Float(yaw.value), Float(pitch.value), Float(roll.value), Float(cubeSquash)),
             gaze: SIMD4(Float(gazeX.value), Float(gazeY.value), Float(rootNow.x), Float(rootNow.y)),
             bridge: SIMD4(Float(waist), Float(catenary), Float(Self.endRadius), bridgeConnected ? 1 : 0),
             stubs: SIMD4(Float(stubRoot.value), Float(stubCube.value), Float(cubeScale), 0),
@@ -882,7 +944,7 @@ final class GlassJelly: UIView {
     /// box (turned, squashed, scaled) projects to the convex hull of its
     /// inner box's corners grown by the rounding radius.
     private func cubeSilhouette(at center: CGPoint) -> CGPath {
-        let s = Self.creatureSize * cubeScale, squash = creatureSquash.value
+        let s = Self.creatureSize * cubeScale, squash = cubeSquash
         let side = 1 / sqrt(max(0.4, 1 - squash))
         let r = s * 0.28
         let inner = SIMD3<Double>(max(0, s * 0.5 * side - r), max(0, s * 0.5 * (1 - squash) - r), max(0, s * 0.4 * side - r))

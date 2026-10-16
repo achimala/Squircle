@@ -2400,3 +2400,43 @@ copies T3's or the providers' stores.
   only on the "squircle" Claude instance today, so nothing is built for Codex:
   a Codex app agent would need that role installed in its Codex config and a
   Codex `PreToolUse` hook equivalent to the guard. Not implemented.
+
+## 2026-10-16 overlay jelly: dock, absorb, two resize edges
+
+User feedback on the overlay: resize from the top or bottom edge with a
+visible but quiet handle; "done" and "N workers" stuck out of the blob
+indefinitely; wanted to drag the working line into the blob to get it out of
+the way, and the blob alone to say working / idle / status.
+
+- **Two resize edges.** The docked panel resizes from a small terracotta grip
+  (30×4 pt, 30% accent) on its top edge or its bottom edge; the other edge
+  stays. The head rides the edge it sits on (bottom in the lower half, top in
+  the upper). Only the top goes on to full screen; full screen resizes from
+  the top only. Either edge closes into the bubble below the minimum height.
+- **News is brief.** Done / Failed / Stopped and worker counts ("2 workers",
+  "Worker · …") show for 4 s, then the pill shrinks into the creature. The
+  pill's length is derived from the glass's width each frame, so it is always
+  absorbed continuously (no pop to the nub).
+- **Docking.** A sideways drag on the line toward the creature shortens it
+  after the finger; let go past halfway (or flung) and the frame spring sucks
+  it in with the finger's speed. `OverlayRoute.bubble(resume:docked:)` keeps it
+  in (lasting lines: working, needs you) until the panel next opens and
+  closes; brief news, including a new question, still shows. Recording can't
+  be docked.
+- **The blob alone** (`GlassJelly.Mood`): working is full terracotta, eyes
+  reading along, a quick small kneading; idle is half-strength terracotta,
+  heavy lids, slow breath, rare slow blinks; needs you is ochre, worried,
+  hopping; done is olive with happy arcs and failed crimson, slumped and
+  tilted with `> <` (one shudder), both held until you open the panel;
+  workers running show as up to three worker sprouts tucked behind the
+  jelly's lower inner corner (their own looks and states) while it keeps an
+  eye on them.
+- DEBUG: `SQUIRCLE_BUBBLE_DEMO=1` loops made-up activity through all of this;
+  `=idle|working|crew|needs|done|failed` holds one. `SQUIRCLE_OVERLAY_GESTURES=1`
+  runs the dock and the four edge drags through the gestures' own steps (the
+  simulator's touch driver was unavailable).
+
+Checked in the simulator (iPhone 18 Pro Max, iOS 27) from screenshots of
+every state and a frame sequence of the scripted dock and resizes; jelly
+stress 66 actions, 0 unsettled, 0 violations. Not yet on the phone, and the
+real touch path of the new pans was not exercised.
