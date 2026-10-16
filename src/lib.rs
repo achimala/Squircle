@@ -2,6 +2,7 @@ pub mod agents;
 pub mod apps;
 pub mod artifact;
 pub mod buildlog;
+pub mod fsm;
 pub mod guard;
 pub mod history;
 pub mod media;
