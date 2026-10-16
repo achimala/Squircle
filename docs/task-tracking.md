@@ -49,7 +49,11 @@ An explicit status records the observation the caller read with it
 outside the lock and applies them only to tasks still at the revision it
 read; anything changed meanwhile waits for the next tick. Every change is
 saved to `tasks.json` first and becomes visible only once saved; a change
-that can't be saved is not seen. Older files with `seen` and `archived_at`
+that can't be saved is not seen. The decisions are the M17 reducer in
+`src/fsm/tasks/`, saved through the C00 commit gate
+([state machines](fsm-architecture.md)); the file carries a `transaction` and
+`revision` stamp so a failed save can tell whether it landed. One whose
+outcome is unknown stays hidden and is written again before the next change. Older files with `seen` and `archived_at`
 are read and converted on load. The wire keeps `archived_at` (set while in
 History) and adds `revision`; `observed` stays internal.
 
