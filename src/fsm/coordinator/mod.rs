@@ -1,0 +1,74 @@
+//! The app-agent coordinator's machines (docs/fsm-architecture.md, package
+//! P1): what a T3 command is and how one attempt can end (M01's command
+//! side), the durable outbox (M16) and idle upkeep (M26). Pure: the owner
+//! (`crate::agents::Agents`) supplies the clock, new IDs and T3's answers,
+//! and commits each reduction before any effect it asks for runs.
+
+pub mod outbox;
+pub mod upkeep;
+
+use crate::fsm::core::CommandID;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+/// An orchestration command's identity, fixed when its intent is recorded
+/// and sent unchanged on every attempt. T3 (0.0.45) keeps a durable receipt
+/// per command ID in its own database: an accepted ID sent again answers
+/// with its original sequence and does nothing; a rejected one is rejected
+/// again. So sending the same identity again is how an unknown outcome is
+/// settled, and a new identity is made only once T3 has said no.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub id: CommandID,
+    pub created_at: String,
+}
+
+/// A command ready to send: its body carries its identity.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Command(Value);
+
+impl Command {
+    pub fn new(identity: &Identity, mut body: Value) -> Self {
+        body["commandId"] = json!(identity.id);
+        body["createdAt"] = json!(identity.created_at);
+        Self(body)
+    }
+
+    /// The command ID, if the body has one (a stored command always does).
+    pub fn id(&self) -> Option<&str> {
+        self.0["commandId"].as_str()
+    }
+
+    pub fn body(&self) -> &Value {
+        &self.0
+    }
+}
+
+/// How one dispatch attempt ended, as far as the connection can tell.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dispatched {
+    /// T3 accepted it, now or before (the same ID answers with the same receipt).
+    Accepted(Value),
+    /// T3 answered with a typed failure: the command's events were not
+    /// committed. T3 may keep a rejected receipt for the ID, so another
+    /// attempt needs a new identity.
+    Refused(String),
+    /// It never left this service: no connection, or the send queue was full.
+    NotSent(String),
+    /// It may have reached T3 and taken effect: the connection closed, no
+    /// answer came within the caller's budget, or T3 reported an internal
+    /// error. Only the same identity may be sent again.
+    Unknown(String),
+}
+
+impl Dispatched {
+    /// For callers that keep no intent of their own: anything but acceptance
+    /// is an error, with what is known about it.
+    pub fn into_result(self) -> anyhow::Result<Value> {
+        match self {
+            Self::Accepted(value) => Ok(value),
+            Self::Refused(detail) | Self::NotSent(detail) | Self::Unknown(detail) => Err(anyhow::anyhow!(detail)),
+        }
+    }
+}

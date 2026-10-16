@@ -78,8 +78,13 @@ resets; a persisted reservation finishes under the same thread ID. `POST
 when the thread is created; a fresh start keeps its predecessor's mode;
 workers run `full-access`. `GET /v1/agents` returns `cli`, the service's own
 invocation, which the phone uses in worker prompts. Wake-ups go through a
-persisted outbox with stable message IDs and retries; resets stay pending
-until they succeed. Worker cleanup deletes a branch only when its base
+persisted outbox with stable message IDs (M16, `src/fsm/coordinator/`):
+each attempt's command ID is saved before it is sent; a lost answer goes
+again as the same command at its saved retry time, which T3 answers from its
+receipt; only T3's refusal makes a new command; a recipient gone from a
+current shell is recorded as undelivered. Every `agents.json` change is
+saved before it is read or acted on (C00). Resets stay pending until they
+succeed. Worker cleanup deletes a branch only when its base
 contains it, or when `git cherry` finds every non-merge commit and the branch
 has no merge commits, and only at the tip it inspected. Files are removed
 only after T3 confirms the session stopped (review B below). Context goes to
@@ -88,7 +93,10 @@ the deepest matching project root.
 **T3 connection (Rust).** One supervised task per connection with
 connect/liveness deadlines; either half failing closes it; dropping the client
 cancels it; pending requests are removed on every exit path; the outbox is
-bounded; error text is clipped on character boundaries.
+bounded; error text is clipped on character boundaries. A command goes out
+exactly as its intent saved it (ID and time included); a typed T3 failure is
+a refusal, while a lost answer, the 45-second budget or T3's internal error
+leaves the outcome unknown.
 
 **Simulator sessions.** A start is a saved reservation with a rollback guard
 that kills the recorder and owes the device close. Recovery signals a saved
@@ -304,7 +312,10 @@ Pictures stay in memory. UserDefaults keys are unchanged.
 **Saved service files.** `agents.json`: per agent `lifecycle` (`creating /
 ready{refresh} / reset-queued{reset} / replacing{replacement}`, with
 `error`/`failures`), per worker `stage` and object `notified`, `outbox`
-wakes with `delivery`. It still reads the earlier `creating`, `pending`,
+wakes with `delivery` and the attempt's `command` identity, `failures`,
+`retry_at`, `error`; `upkeep` per project (M26: `unknown | applied |
+blocked`, with the compaction's command); `undelivered` receipts; C00's
+`transaction`/`revision` stamps. It still reads the earlier `creating`, `pending`,
 `replacing`, `reset_error`, `archived`, `attempted`, `handoff_sent` and
 colon-key forms and writes the new ones. `tasks.json`: see
 [tasks](task-tracking.md#model). `push/devices.json` keeps `activities`

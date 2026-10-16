@@ -3,5 +3,6 @@
 //! contracts and the durable commit gate (C00); each owner has its own
 //! module.
 
+pub mod coordinator;
 pub mod core;
 pub mod tasks;
