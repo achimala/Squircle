@@ -337,30 +337,6 @@ final class NativeStateTests: XCTestCase {
         XCTAssertEqual(model.attachments.map(\.id), ["picture"])
     }
 
-    /// The socket drops before T3 answers: the message stays pending, never
-    /// failed, and goes again on its own under the same command and message
-    /// IDs (T3 answers a command it already took from its receipt) (B-N05).
-    @MainActor
-    func testLostAnswerIsAskedAgainAsTheSameCommand() async throws {
-        let gate = GatedDispatch()
-        let (model, _) = await draftWithPicture(gate)
-        let thread = ConversationID.thread("t", appID: project.id)
-        await model.open(thread)
-        model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[],
-                                   "modelSelection":["instanceId":"codex","model":"sol"]]]]))
-        let sending = try start(model, "hello", from: thread)
-        await gate.until(1); gate.release(lost: true)
-        await gate.until(2)
-        XCTAssertEqual(gate.commands[1]["commandId"], gate.commands[0]["commandId"])
-        XCTAssertEqual(gate.commands[1]["message"]["messageId"], gate.commands[0]["message"]["messageId"])
-        XCTAssertEqual(model.pendingSend(for: thread)?.phase, .awaitingAcceptance)
-        XCTAssertNil(model.error)
-        guard case .refused = model.startSend("again", in: project, from: thread) else { return XCTFail("One message at a time") }
-        gate.release()
-        guard case .accepted = await sending.value else { return XCTFail("T3 took it") }
-        XCTAssertEqual(gate.commands.count, 2)
-    }
-
     /// The thread shows the message while T3's answer is still out, then
     /// the answer is lost: it was taken, and nothing is sent again.
     @MainActor
@@ -512,5 +488,436 @@ final class NativeStateTests: XCTestCase {
 
     static func configuration() throws -> AppConfiguration {
         try JSONDecoder().decode(AppConfiguration.self, from: Data(#"{"t3_url":"https://127.0.0.1:9","t3_token":"t","squircle_url":"https://127.0.0.1:9","squircle_token":"s","diagnostic_token":"d"}"#.utf8))
+    }
+}
+
+// MARK: Phone state machines (M01, M03, M04) and the pending-send journal
+
+/// A small seeded generator, so a failing trace can be replayed from its seed.
+private struct Seeded: RandomNumberGenerator {
+    var state: UInt64
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
+final class LinkMachineTests: XCTestCase {
+    private let now = ContinuousClock.now
+
+    /// Connected means both required subscriptions are current on the
+    /// attempt's socket; an Exit during setup or a late event from an older
+    /// attempt never makes (or keeps) the phone connected.
+    func testReadyOnlyOnceShellAndDevicesAreCurrentOnTheSameAttempt() {
+        var s = Link.State()
+        func step(_ e: Link.Event) -> Link.Result {
+            let r = Link.reduce(s, e); s = r.state
+            XCTAssertEqual(Link.violations(in: s), [], "\(e)")
+            return r
+        }
+        _ = step(.start)
+        _ = step(.socketOpened(attempt: 1))
+        _ = step(.synchronized(attempt: 1, .shell, now: now))
+        XCTAssertNil(s.session, "devices not current yet")
+        // T3 ends the device subscription during setup: this attempt fails and waits.
+        _ = step(.subscriptionEnded(attempt: 1, .devices, now: now))
+        guard case .retrying(let failed, _) = s.phase else { return XCTFail("\(s.phase)") }
+        XCTAssertEqual(failed.id, 1)
+        // A late value from attempt 1 changes nothing.
+        XCTAssertEqual(step(.synchronized(attempt: 1, .devices, now: now)).disposition, .stale)
+        _ = step(.retryDue(attempt: 1))
+        _ = step(.socketOpened(attempt: 2))
+        _ = step(.synchronized(attempt: 2, .devices, now: now))
+        let ready = step(.synchronized(attempt: 2, .shell, now: now))
+        XCTAssertTrue(ready.effects.contains(.sessionReady(Link.Session(attempt: 2, since: now))))
+        // The old socket's close is not this session's.
+        XCTAssertEqual(step(.dropped(attempt: 1, nil, now: now)).disposition, .stale)
+        XCTAssertNotNil(s.session)
+        // A refused credential stops retrying until asked.
+        let refused = step(.dropped(attempt: 2, .refused, now: now))
+        XCTAssertEqual(s.phase, .refused)
+        XCTAssertTrue(refused.effects.contains(.sessionLost))
+        XCTAssertFalse(refused.effects.contains { if case .armRetry = $0 { return true }; return false })
+    }
+
+    /// Any order of socket, subscription, clock and app events: sessions
+    /// open and close in pairs, a session only follows both scopes current
+    /// on its attempt, and the followed thread is subscribed only on a live socket.
+    func testGeneratedTracesKeepSessionsPaired() {
+        for seed in 0..<300 as Range<UInt64> {
+            var rng = Seeded(state: seed)
+            var s = Link.State()
+            var open = false
+            var current: [Int: Set<Link.Scope>] = [:]
+            var trace: [Link.Event] = []
+            for _ in 0..<80 {
+                let attempt = max(1, s.nextAttempt - Int.random(in: 1...2, using: &rng))
+                let scope: Link.Scope = Bool.random(using: &rng) ? .shell : .devices
+                let generation = max(1, s.nextGeneration - Int.random(in: 1...2, using: &rng))
+                let events: [Link.Event] = [
+                    .start, .socketOpened(attempt: attempt), .socketFailed(attempt: attempt, .transient("x"), now: now),
+                    .synchronized(attempt: attempt, scope, now: now), .subscriptionEnded(attempt: attempt, scope, now: now),
+                    .dropped(attempt: attempt, nil, now: now), .retryDue(attempt: attempt), .reconnect, .retryNow,
+                    .networkChanged(changed: Bool.random(using: &rng)), .foreground, .background, .backgroundExpired,
+                    .tick(now: now + .seconds(90)), .follow(Bool.random(using: &rng) ? "t\(Int.random(in: 0...1, using: &rng))" : nil),
+                    .followSubscribed(generation: generation, subscription: "sub"), .followEnded(generation: generation, reason: "x"),
+                    .followRetryDue(generation: generation, exists: Bool.random(using: &rng)), .followReverted(threadID: "t0"),
+                ]
+                let event = events.randomElement(using: &rng)!
+                trace.append(event)
+                let before = s
+                let r = Link.reduce(s, event); s = r.state
+                if case .synchronized(let a, let sc, _) = event, r.disposition == .applied { current[a, default: []].insert(sc) }
+                for effect in r.effects {
+                    switch effect {
+                    case .sessionReady(let session):
+                        XCTAssertFalse(open, "seed \(seed): two sessions at once \(trace)")
+                        XCTAssertEqual(current[session.attempt], Link.required, "seed \(seed): ready before both scopes")
+                        guard case .synchronizing = before.phase else { return XCTFail("seed \(seed): ready from \(before.phase)") }
+                        open = true
+                    case .sessionLost:
+                        XCTAssertTrue(open, "seed \(seed): lost a session never opened \(trace)"); open = false
+                    default: break
+                    }
+                }
+                XCTAssertEqual(open, s.session != nil, "seed \(seed) \(trace)")
+                XCTAssertEqual(Link.violations(in: s), [], "seed \(seed) \(trace)")
+                if s.phase == .stopped { break }
+            }
+        }
+    }
+}
+
+/// T3 as far as a message needs it: a receipt per command ID (kept
+/// forever, as T3 keeps them across restarts) and the messages it holds.
+private struct FakeT3 {
+    var receipts: [String: Bool] = [:]
+    var threads: Set<String> = []
+    var messages: [String] = []
+    /// Runs `command` unless T3 already took its ID; true if T3 has it now.
+    mutating func run(_ command: JSONValue) -> CommandOutcome {
+        let id = command["commandId"].string!
+        if let taken = receipts[id] { return taken ? .accepted(.object([:])) : .refused("previously rejected") }
+        switch command["type"].string {
+        case "thread.create": threads.insert(command["threadId"].string!)
+        case "thread.turn.start":
+            guard threads.contains(command["threadId"].string!) else { receipts[id] = false; return .refused("no such thread") }
+            messages.append(command["message"]["messageId"].string!)
+        default: break
+        }
+        receipts[id] = true
+        return .accepted(.object([:]))
+    }
+}
+
+final class DeliveryMachineTests: XCTestCase {
+    private func intent(_ destination: Delivery.Destination, origin: ConversationID, recordings: [Delivery.Recording] = []) -> Delivery.Intent {
+        Delivery.Intent(messageID: UUID().uuidString.lowercased(), origin: origin, projectID: "app", destination: destination,
+                        spoken: "hello", pictures: [.init(id: "p", jpeg: Data([1, 2, 3]))], recordings: recordings,
+                        selection: .from(["instanceId": "codex", "model": "sol"]), mode: "auto", context: "\n\nctx",
+                        titleSeed: "hello", turn: .fresh())
+    }
+    private func draft() -> (Delivery.Intent, String) {
+        let thread = UUID().uuidString.lowercased()
+        let command = Delivery.createCommand(threadID: thread, projectID: "app", selection: .null, mode: "auto", identity: .fresh())
+        return (intent(.newThread(id: thread, command: command), origin: .draft(UUID(), appID: "app", agent: false)), thread)
+    }
+
+    /// The app is killed at every point of a send (before or after each
+    /// save, after T3 ran a request but before its answer arrived) and
+    /// starts again from what was saved: T3 gets the message once, every
+    /// request carries the bytes first made, and a lost answer never turns
+    /// into a refusal or a second message.
+    func testCrashAtAnyPointSendsTheMessageOnce() {
+        for seed in 0..<400 as Range<UInt64> {
+            var rng = Seeded(state: seed)
+            var t3 = FakeT3()
+            var disk: [String: Delivery.Saved] = [:]
+            let (sent, thread) = seed % 2 == 0 ? draft() : (intent(.thread("t"), origin: .thread("t", appID: "app")), "t")
+            if seed % 2 == 1 { t3.threads.insert("t") }
+            var state = Delivery.State()
+            var queue: [Delivery.Effect] = []
+            var session = 1
+            var commands: [String: JSONValue] = [:]
+            var settled: [Delivery.Settlement] = []
+            func reduce(_ e: Delivery.Event) {
+                let r = Delivery.reduce(state, e); state = r.state; queue += r.effects
+                XCTAssertEqual(Delivery.violations(in: state), [], "seed \(seed) after \(e)")
+            }
+            func crash() {
+                state = Delivery.State(); queue = []
+                session += 1
+                reduce(.restore(Array(disk.values)))
+                reduce(.sessionReady(attempt: session))
+            }
+            reduce(.sessionReady(attempt: session))
+            reduce(.submit(sent))
+            var steps = 0
+            while !queue.isEmpty, steps < 200 {
+                steps += 1
+                // Crash before this effect runs: it and everything after are lost.
+                if Int.random(in: 0..<10, using: &rng) == 0 { crash(); continue }
+                let effect = queue.removeFirst()
+                switch effect {
+                case .save(let entry): disk[entry.intent.messageID] = .init(intent: entry.intent, stage: entry.stage)
+                case .forget(let id): disk[id] = nil
+                case .createThread(let id, let command, let attempt), .dispatch(let id, let command, let attempt):
+                    let key = command["type"].string!
+                    if let first = commands[key] { XCTAssertEqual(first, command, "seed \(seed): \(key) changed between attempts") }
+                    commands[key] = command
+                    let roll = Int.random(in: 0..<10, using: &rng)
+                    let outcome: CommandOutcome = roll < 2 ? .notSent("x") : t3.run(command)
+                    if roll == 2 || roll == 3 {
+                        // T3 ran it; the answer is lost with the socket, or the app dies first.
+                        if roll == 3 { crash(); continue }
+                        if case .createThread = effect { reduce(.createAnswered(messageID: id, attempt: attempt, .unknown("lost"))) }
+                        else { reduce(.turnAnswered(messageID: id, attempt: attempt, .unknown("lost"))) }
+                        reduce(.sessionLost); session += 1; reduce(.sessionReady(attempt: session))
+                        continue
+                    }
+                    if case .createThread = effect { reduce(.createAnswered(messageID: id, attempt: attempt, outcome)) }
+                    else { reduce(.turnAnswered(messageID: id, attempt: attempt, outcome)) }
+                    if case .notSent = outcome { reduce(.sessionLost); session += 1; reduce(.sessionReady(attempt: session)) }
+                case .settle(_, let settlement): settled.append(settlement)
+                case .prepare, .ensureAgent: XCTFail("seed \(seed): \(effect)")
+                case .adopt, .restoreField, .report: break
+                }
+            }
+            XCTAssertTrue(queue.isEmpty, "seed \(seed) didn't settle")
+            let landed = t3.messages.filter { $0 == sent.messageID }.count
+            if disk.isEmpty, state.entries.isEmpty, landed == 0 {
+                // The app died before the message was first saved: nothing left the phone.
+                XCTAssertTrue(commands.isEmpty, "seed \(seed)")
+                continue
+            }
+            XCTAssertEqual(landed, 1, "seed \(seed): T3 has the message \(landed) times")
+            XCTAssertEqual(t3.threads.subtracting(["t"]).count, seed % 2 == 0 ? 1 : 0, "seed \(seed)")
+            XCTAssertTrue(t3.threads.contains(thread))
+            XCTAssertFalse(settled.contains { if case .rejected = $0 { return true }; return false }, "seed \(seed): refused \(settled)")
+            XCTAssertTrue(disk.isEmpty, "seed \(seed): an accepted message is still kept")
+        }
+    }
+
+    /// T3 makes the draft's thread and refuses its turn: the message is
+    /// the thread's from then on, and only a typed refusal ends it.
+    func testDraftAliasSurvivesARefusedTurn() {
+        let (sent, thread) = draft()
+        var s = Delivery.State()
+        func reduce(_ e: Delivery.Event) -> [Delivery.Effect] { let r = Delivery.reduce(s, e); s = r.state; return r.effects }
+        _ = reduce(.sessionReady(attempt: 1))
+        _ = reduce(.submit(sent))
+        // The answer to making the thread is lost; the shell shows it anyway.
+        _ = reduce(.createAnswered(messageID: sent.messageID, attempt: 1, .unknown("lost")))
+        let created = reduce(.threadObserved(thread))
+        XCTAssertTrue(created.contains(.adopt(draft: sent.origin, thread: .thread(thread, appID: "app"), agentOf: nil)))
+        let refused = reduce(.turnAnswered(messageID: sent.messageID, attempt: 1, .refused("no")))
+        XCTAssertTrue(refused.contains(.settle(messageID: sent.messageID, .rejected(.thread(thread, appID: "app"), reason: "no"))))
+        XCTAssertTrue(refused.contains(.restoreField(.thread(thread, appID: "app"), sent)))
+        XCTAssertTrue(s.entries.isEmpty)
+    }
+
+    /// Recordings uploading when the app died are prepared again on
+    /// relaunch; nothing of a message that never left counts as sent.
+    func testPreparingMessageRestartsItsUploadsAfterRelaunch() {
+        let recording = Delivery.Recording(id: "r", kind: "video", path: "/tmp/r.mp4", label: "0:01", thumbnail: Data())
+        let sent = intent(.thread("t"), origin: .thread("t", appID: "app"), recordings: [recording])
+        let restored = Delivery.reduce(Delivery.State(), .restore([.init(intent: sent, stage: .preparing)]))
+        XCTAssertEqual(restored.effects, [.prepare(sent)])
+        XCTAssertEqual(restored.state.entries[sent.messageID]?.uncertain, false)
+        // A failed upload before anything was sent gives the field back.
+        let failed = Delivery.reduce(restored.state, .prepareFailed(messageID: sent.messageID, reason: "gone"))
+        XCTAssertTrue(failed.effects.contains(.restoreField(sent.origin, sent)))
+    }
+}
+
+final class CommandMachineTests: XCTestCase {
+    private func intent(_ kind: Commands.Kind) -> Commands.Intent {
+        let identity = CommandIdentity.fresh()
+        return .init(identity: identity, kind: kind, command: { if case .task = kind { return nil }; return identity.stamp(["type": "x"]) }())
+    }
+
+    /// An approval whose answer is lost stays answered here and goes again,
+    /// unchanged, on the next session; T3 showing the request resolved
+    /// settles it even before any answer.
+    func testLostApprovalIsResentAsItselfAndSettledByObservation() {
+        var s = Commands.State()
+        func reduce(_ e: Commands.Event) -> Commands.Result { let r = Commands.reduce(s, e); s = r.state; XCTAssertEqual(Commands.violations(in: s), []); return r }
+        let approval = intent(.approval(thread: "t", request: "r", decision: "accept"))
+        // Proposed offline: hidden, not sent.
+        XCTAssertEqual(reduce(.propose(approval)).effects, [])
+        XCTAssertEqual(s.answering, ["r"])
+        XCTAssertEqual(reduce(.propose(intent(.approval(thread: "t", request: "r", decision: "decline")))).disposition, .notApplicable)
+        XCTAssertEqual(reduce(.sessionReady(attempt: 1)).effects, [.dispatch(id: approval.id, command: approval.command!, attempt: 1)])
+        _ = reduce(.answered(id: approval.id, attempt: 1, .unknown("lost")))
+        XCTAssertEqual(s.answering, ["r"], "a lost answer is not a refusal")
+        _ = reduce(.sessionLost)
+        XCTAssertEqual(reduce(.sessionReady(attempt: 2)).effects, [.dispatch(id: approval.id, command: approval.command!, attempt: 2)])
+        // The request resolved in T3's view before the answer came.
+        let seen = reduce(.threadObserved(.init(threadID: "t", pendingRequests: [], runtimeMode: nil, running: true, activeTurn: "a")))
+        XCTAssertEqual(seen.effects, [.settle(id: approval.id, .done)])
+        XCTAssertEqual(reduce(.answered(id: approval.id, attempt: 2, .accepted(.null))).disposition, .stale)
+        XCTAssertTrue(s.answering.isEmpty)
+    }
+
+    /// A lost interrupt is never sent again onto a turn that started since.
+    func testLostInterruptNeverStopsANewerTurn() {
+        var s = Commands.State(session: 1)
+        func reduce(_ e: Commands.Event) -> Commands.Result { let r = Commands.reduce(s, e); s = r.state; return r }
+        let stop = intent(.interrupt(thread: "t", turn: "a"))
+        _ = reduce(.propose(stop))
+        _ = reduce(.answered(id: stop.id, attempt: 1, .unknown("lost")))
+        XCTAssertEqual(reduce(.sessionReady(attempt: 2)).effects, [], "waits to see the thread")
+        let newer = reduce(.threadObserved(.init(threadID: "t", pendingRequests: [], runtimeMode: nil, running: true, activeTurn: "b")))
+        XCTAssertEqual(newer.effects, [.settle(id: stop.id, .done)])
+        // Still the same turn: sent again as itself.
+        let again = intent(.interrupt(thread: "t", turn: "b"))
+        _ = reduce(.propose(again)); _ = reduce(.answered(id: again.id, attempt: 2, .unknown("lost")))
+        let same = reduce(.threadObserved(.init(threadID: "t", pendingRequests: [], runtimeMode: nil, running: true, activeTurn: "b")))
+        XCTAssertEqual(same.effects, [.dispatch(id: again.id, command: again.command!, attempt: 2)])
+    }
+
+    /// One thread's mode changes go one at a time: an unsent one is
+    /// replaced, a sent one is followed by the newest asked for; a refusal
+    /// takes only its own overlay away.
+    func testModeChangesAreSerializedAndSuperseded() {
+        var s = Commands.State()
+        func reduce(_ e: Commands.Event) -> Commands.Result { let r = Commands.reduce(s, e); s = r.state; XCTAssertEqual(Commands.violations(in: s), []); return r }
+        let ask = intent(.mode(thread: "t", .approvalRequired)), full = intent(.mode(thread: "t", .fullAccess))
+        _ = reduce(.propose(ask))
+        XCTAssertEqual(reduce(.propose(full)).effects, [.settle(id: ask.id, .superseded)], "not sent yet: replaced")
+        _ = reduce(.sessionReady(attempt: 1))
+        let auto = intent(.mode(thread: "t", .auto)), edits = intent(.mode(thread: "t", .autoAcceptEdits))
+        XCTAssertEqual(reduce(.propose(auto)).effects, [], "waits behind the one sent")
+        XCTAssertEqual(reduce(.propose(edits)).effects, [.settle(id: auto.id, .superseded)])
+        XCTAssertEqual(s.mode(for: "t"), .autoAcceptEdits)
+        let refused = reduce(.answered(id: full.id, attempt: 1, .refused("no")))
+        XCTAssertEqual(refused.effects, [.settle(id: full.id, .refused("no")), .dispatch(id: edits.id, command: edits.command!, attempt: 1), .report("no")])
+        _ = reduce(.answered(id: edits.id, attempt: 1, .accepted(.null)))
+        XCTAssertEqual(s.mode(for: "t"), .autoAcceptEdits, "shown until T3 shows it")
+        _ = reduce(.threadObserved(.init(threadID: "t", pendingRequests: [], runtimeMode: "auto-accept-edits", running: false, activeTurn: nil)))
+        XCTAssertNil(s.mode(for: "t"))
+    }
+
+    /// A task edit whose reply is lost is settled by the Mac's list: shown
+    /// there, done; not shown, the same edit (a set, not a toggle) goes again.
+    func testLostTaskEditIsReconciledAgainstTheList() {
+        var s = Commands.State()
+        func reduce(_ e: Commands.Event) -> Commands.Result { let r = Commands.reduce(s, e); s = r.state; return r }
+        let edit = intent(.task(id: "k", status: .done, toTop: false))
+        XCTAssertEqual(reduce(.propose(edit)).effects, [.editTask(id: edit.id, task: "k", status: .done, toTop: false)])
+        XCTAssertEqual(reduce(.answered(id: edit.id, attempt: 0, .unknown("lost"))).effects, [.readTasks(task: "k")])
+        XCTAssertEqual(reduce(.tasksObserved([.init(id: "k", status: .queued, revision: 3)])).effects,
+                       [.editTask(id: edit.id, task: "k", status: .done, toTop: false)])
+        _ = reduce(.answered(id: edit.id, attempt: 0, .accepted(.number(5))))
+        XCTAssertEqual(s.taskEdits.count, 1, "held until the list has revision 5")
+        _ = reduce(.tasksObserved([.init(id: "k", status: .done, revision: 4)]))
+        XCTAssertEqual(s.taskEdits.count, 1)
+        _ = reduce(.tasksObserved([.init(id: "k", status: .done, revision: 5)]))
+        XCTAssertTrue(s.taskEdits.isEmpty)
+    }
+
+    /// Only a typed T3 failure is a refusal; an InternalError (a defect, an
+    /// interruption while T3 shuts down) may have run.
+    func testT3OutcomeDecoding() {
+        func exit(_ value: [String: Any]) -> JSONValue { .from(value) }
+        XCTAssertEqual(CommandOutcome.t3(exit: exit(["_tag": "Success", "value": ["sequence": 4]])), .accepted(.from(["sequence": 4])))
+        guard case .refused = CommandOutcome.t3(exit: exit(["_tag": "Success", "value": ["status": "rejected"]])) else { return XCTFail() }
+        guard case .refused = CommandOutcome.t3(exit: exit(["_tag": "Failure", "cause": [["_tag": "Fail", "error": ["_tag": "OrchestrationCommandPreviouslyRejectedError"]]]])) else { return XCTFail() }
+        guard case .unknown = CommandOutcome.t3(exit: exit(["_tag": "Failure", "cause": [["_tag": "Fail", "error": ["_tag": "InternalError"]]]])) else { return XCTFail() }
+        guard case .unknown = CommandOutcome.t3(exit: exit(["_tag": "Failure", "cause": ["_tag": "Die", "defect": "boom"]])) else { return XCTFail() }
+        guard case .unknown = CommandOutcome.service(ClientError.connection("Squircle")) else { return XCTFail() }
+        guard case .unknown = CommandOutcome.service(ClientError.backend("Squircle", 503, "busy")) else { return XCTFail() }
+        guard case .refused = CommandOutcome.service(ClientError.backend("Squircle", 404, "gone")) else { return XCTFail() }
+    }
+}
+
+/// A command dispatch that answers each command when the test says.
+@MainActor
+private final class HeldT3 {
+    private(set) var commands: [JSONValue] = []
+    private var waiting: [CheckedContinuation<Void, Error>] = []
+    var dispatch: (JSONValue) async throws -> JSONValue {
+        { [unowned self] command in
+            commands.append(command)
+            try await withCheckedThrowingContinuation { waiting.append($0) }
+            return .object([:])
+        }
+    }
+    func answer() { waiting.removeFirst().resume() }
+    func until(_ count: Int) async { while commands.count < count { await Task.yield() } }
+}
+
+final class PendingJournalTests: XCTestCase {
+    private let config = JSONValue.from(["providers":[["instanceId":"codex","displayName":"Codex","enabled":true,"status":"ready",
+                                                        "models":[["slug":"sol","name":"Sol","isDefault":true]]]]])
+    private let project = AppProject(id: "app", name: "App", subtitle: "", bundleID: nil, canBuild: false, updatedAt: .now)
+
+    /// Killed while T3 hasn't answered: the next run sends the very same
+    /// command (IDs, text, pictures) once, and forgets it once T3 has it.
+    @MainActor
+    func testUnansweredSendIsResentAsItselfAfterRelaunch() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func launch(_ t3: HeldT3) async -> SquircleModel {
+            let model = SquircleModel(configuration: nil, preferences: UserDefaults(suiteName: UUID().uuidString)!,
+                                      commandDispatch: t3.dispatch, journal: PendingJournal(directory: root))
+            model.consumeConfig(config)
+            return model
+        }
+        let first = HeldT3()
+        let before = await launch(first)
+        let thread = ConversationID.thread("t", appID: project.id)
+        await before.open(thread)
+        before.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[["id":"m0","role":"user","text":"earlier sim start --thread t"]],
+                                    "modelSelection":["instanceId":"codex","model":"sol"]]]]))
+        before.attach(ImageAttachment(UIImage(systemName: "star")!, id: "picture")!)
+        guard case .started = before.startSend("hello", in: project, from: thread) else { return XCTFail("refused") }
+        await first.until(1)
+        before.close() // the app is killed; T3 never answered
+
+        let second = HeldT3()
+        let after = await launch(second)
+        await second.until(1)
+        XCTAssertEqual(second.commands, first.commands, "the same command, byte for byte")
+        await after.open(thread)
+        XCTAssertEqual(after.pendingSend(for: thread)?.phase, .awaitingAcceptance)
+        XCTAssertEqual(after.pendingSend(for: thread)?.images, 1)
+        second.answer()
+        while after.pendingSend(for: thread)?.phase == .awaitingAcceptance { await Task.yield() }
+        // Forgotten on disk: a third run sends nothing.
+        var left: [String] = []
+        for _ in 0..<200 { left = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []; if left.isEmpty { break }; await Task.yield() }
+        XCTAssertEqual(left, [])
+        let third = HeldT3()
+        _ = await launch(third)
+        for _ in 0..<50 { await Task.yield() }
+        XCTAssertTrue(third.commands.isEmpty)
+        after.close()
+    }
+
+    /// A slow save never brings back a message already forgotten, and an
+    /// unreadable file is set aside (never resent, never silently lost).
+    func testJournalOrdersWritesAndSetsUnreadableFilesAside() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = PendingJournal(directory: root)
+        let id = UUID().uuidString.lowercased()
+        let saved = Delivery.Saved(intent: .init(messageID: id, origin: .thread("t", appID: "a"), projectID: "a", destination: .thread("t"),
+                                                 spoken: "x", pictures: [], recordings: [], selection: .null, mode: "auto", context: "",
+                                                 titleSeed: "x", turn: .fresh()), stage: .preparing)
+        try await journal.save(saved, sequence: 1)
+        await journal.forget(id, sequence: 3)
+        try await journal.save(saved, sequence: 2)
+        var loaded = await journal.load()
+        XCTAssertTrue(loaded.saved.isEmpty)
+        try await journal.save(saved, sequence: 4)
+        try Data("{".utf8).write(to: root.appendingPathComponent(UUID().uuidString.lowercased() + ".json"))
+        loaded = await PendingJournal(directory: root).load()
+        XCTAssertEqual(loaded.saved, [saved])
+        XCTAssertEqual(loaded.unreadable.count, 1)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasSuffix(".unreadable") }.count, 1)
     }
 }
