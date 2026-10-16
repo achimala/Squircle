@@ -1,11 +1,15 @@
 //! The app-agent coordinator's machines (docs/fsm-architecture.md, package
 //! P1): what a T3 command is and how one attempt can end (M01's command
-//! side), the durable outbox (M16) and idle upkeep (M26). Pure: the owner
+//! side), the app agent's lifecycle (M14), workers' bootstrap and archive
+//! (M15), the durable outbox (M16) and idle upkeep (M26). Pure: the owner
 //! (`crate::agents::Agents`) supplies the clock, new IDs and T3's answers,
 //! and commits each reduction before any effect it asks for runs.
 
+pub mod agent;
 pub mod outbox;
+pub mod thread;
 pub mod upkeep;
+pub mod worker;
 
 use crate::fsm::core::CommandID;
 use serde::{Deserialize, Serialize};
@@ -71,4 +75,16 @@ impl Dispatched {
             Self::Refused(detail) | Self::NotSent(detail) | Self::Unknown(detail) => Err(anyhow::anyhow!(detail)),
         }
     }
+}
+
+/// A command a caller waits for (`thread send`, `thread answer`), saved
+/// with its identity before it is sent. `purpose` is the request itself
+/// (its thread, kind and text): the same request asked again while T3 has
+/// left this one unanswered sends this command again, never a second. Only
+/// an unanswered one is kept; the service never sends it by itself.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pending {
+    pub purpose: String,
+    pub command: Command,
+    pub at: u64,
 }
