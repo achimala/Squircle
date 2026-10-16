@@ -1,47 +1,43 @@
 //! Which booted simulators on this Mac are Squircle's to shut down, and
-//! which simulator devices are its to delete.
+//! which simulator devices are its to delete: the owner of M20
+//! (`fsm::sims::pool`, the policy itself, from plain facts).
 //!
-//! A simulator is ours when Squircle leased it (`squircle sim start`) or an
-//! agent's own command created, booted, installed on or built for it (T3's
-//! activity log, read read-only). Anything else is the user's and is never
-//! touched. A booted simulator of ours is left alone while a lease holds it,
-//! while a T3 device session of a working thread or of a thread that isn't
-//! Squircle's (the user's Device panel) is on it, or while the agent that
-//! booted it outside a lease is still working; otherwise it is shut down
-//! once it has been free for the idle time (at once when a lease ends, or
-//! on `squircle sim cleanup`). A device an agent created is deleted once
-//! nothing has used it for a day.
+//! A simulator is Squircle's only on proof (Q4): an agent's own command
+//! created it, or the current boot was a session's open or an agent's own
+//! `simctl boot` (T3's activity log, read read-only). Leasing, installing
+//! or building for one is an observation, not ownership. Anything else is
+//! the user's and is never touched. A booted simulator of ours is left
+//! alone while a session reserves it, while a T3 device session of a thread
+//! that may be working (busy, waiting on the user, or unknown) or of a
+//! thread that isn't Squircle's (the user's Device panel) is on it, or while
+//! an agent that used it outside a session may still be working; otherwise
+//! it is shut down once it has been free for the idle time (at once when a
+//! session releases it, or on `squircle sim cleanup`). A device an agent
+//! created is deleted once nothing has used it for a day.
 //!
-//! `plan` is the whole policy, from plain facts; `Pool` gathers them and
-//! applies its decisions.
+//! What is known is saved through the commit gate before anything acts on
+//! it; a cleanup is saved as an intent, revalidated on a fresh snapshot
+//! under a device reservation from the session owner (so a start can't take
+//! the simulator meanwhile), and settled only by simctl's answer or the
+//! next inventory.
 
+use crate::fsm::core::commit::{Gate, JsonFile};
+pub use crate::fsm::sims::pool::{Action, BootReceipt, Device, Facts, Lease, Policy, Provenance, Row, ThreadInfo, plan};
+use crate::fsm::sims::pool::{self as policy, Acting};
+use crate::fsm::sims::session::Released;
 use crate::sims::Pending;
-use crate::store::{atomic_json, read_json};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    convert::Infallible,
+    path::Path,
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::process::Command;
-
-/// An outside-a-lease use by an agent protects the simulator only this long
-/// after the command, and only while that agent is working.
-const TOUCH_WINDOW: f64 = 3.0 * 3600.0;
-
-#[derive(Clone, Copy, Debug)]
-pub struct Policy {
-    /// Concurrent leased simulators (`SQUIRCLE_MAX_SIMULATORS`, default 3).
-    pub max_leases: usize,
-    /// Seconds a free simulator of ours stays booted (`SQUIRCLE_SIM_IDLE_MINUTES`, default 10).
-    pub idle: f64,
-    /// Seconds unused before a device an agent created is deleted.
-    pub delete_after: f64,
-}
 
 impl Policy {
     pub fn from_env() -> Self {
@@ -54,173 +50,19 @@ impl Policy {
     }
 }
 
-/// One simulator device, as simctl lists it.
-#[derive(Clone, Debug)]
-pub struct Device {
-    pub udid: String,
-    pub name: String,
-    /// simctl's state: "Booted", "Shutdown", "Booting", ...
-    pub state: String,
-    /// When CoreSimulator last wrote its device.plist (boot and shutdown do).
-    pub changed_at: f64,
-}
-
-#[derive(Clone, Debug)]
-pub struct Lease {
-    pub device_id: String,
-    pub thread_id: String,
-}
-
-/// What Squircle knows of a device's history, kept in `simpool.json` (the
-/// session ledger and T3's activity log are trimmed or slow to rescan).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Provenance {
-    #[serde(default)]
-    pub leased: bool,
-    /// The thread whose command created it.
-    #[serde(default)]
-    pub created_by: Option<String>,
-    /// The latest thread that used it outside a lease, and when.
-    #[serde(default)]
-    pub touched_by: Option<String>,
-    #[serde(default)]
-    pub touched_at: f64,
-    /// The latest of any of the above.
-    #[serde(default)]
-    pub last_used: f64,
-}
-
-impl Provenance {
-    fn ours(&self) -> bool {
-        self.leased || self.created_by.is_some() || self.touched_by.is_some()
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct ThreadInfo {
-    pub working: bool,
-    /// An app agent or worker Squircle started.
-    pub squircle: bool,
-    pub archived: bool,
-}
-
-pub struct Facts<'a> {
-    pub now: f64,
-    pub devices: &'a [Device],
-    pub leases: &'a [Lease],
-    /// Open T3 device sessions: (thread, device).
-    pub t3_sessions: &'a [(String, String)],
-    pub known: &'a HashMap<String, Provenance>,
-    /// None: T3 has no such thread.
-    pub thread: &'a dyn Fn(&str) -> Option<ThreadInfo>,
-    /// When each simulator was first seen booted and free.
-    pub idle_since: &'a HashMap<String, f64>,
-    /// Never touched (the preview capture's `SQUIRCLE_SIMULATOR_ID`).
-    pub reserved: &'a [String],
-    pub policy: Policy,
-    /// `sim cleanup` and a lease ending: no idle wait.
-    pub now_please: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Action {
-    Shutdown,
-    Delete,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Row {
-    pub udid: String,
-    pub name: String,
-    pub booted: bool,
-    /// "lease", "t3 session", "agent outside a lease", "agent (idle)",
-    /// "unowned" (not Squircle's) or "reserved".
-    pub owner: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thread: Option<String>,
-    pub ours: bool,
-    /// Booted, ours and held by nothing: a start can take it.
-    pub free: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub action: Option<Action>,
-    pub why: String,
-}
-
-/// The policy: one row per booted simulator, plus devices to delete.
-pub fn plan(facts: &Facts) -> Vec<Row> {
-    let mut rows = Vec::new();
-    for device in facts.devices {
-        let known = facts.known.get(&device.udid).cloned().unwrap_or_default();
-        let ours = known.ours();
-        let row = |owner, thread: Option<&str>, free, action, why: String| Row {
-            udid: device.udid.clone(), name: device.name.clone(), booted: device.state == "Booted",
-            owner, thread: thread.map(str::to_string), ours, free, action, why,
-        };
-        let lease = facts.leases.iter().find(|l| l.device_id == device.udid);
-        // A T3 session protects while its thread works, and always when the
-        // thread is the user's own (not one Squircle started).
-        let session = facts.t3_sessions.iter().filter(|(_, d)| *d == device.udid).find(|(thread, _)| {
-            (facts.thread)(thread).is_some_and(|t| !t.archived && (t.working || !t.squircle))
-        });
-        let toucher = [known.touched_by.as_deref().filter(|_| facts.now - known.touched_at < TOUCH_WINDOW), known.created_by.as_deref()]
-            .into_iter().flatten()
-            .find(|t| (facts.thread)(t).is_some_and(|t| t.working && !t.archived));
-
-        if device.state != "Booted" {
-            let unused = facts.now - known.last_used.max(device.changed_at);
-            let deletable = device.state == "Shutdown" && known.created_by.is_some() && lease.is_none()
-                && !facts.reserved.contains(&device.udid) && !facts.t3_sessions.iter().any(|(_, d)| *d == device.udid)
-                && toucher.is_none() && unused >= facts.policy.delete_after;
-            if deletable {
-                rows.push(row("agent (idle)", known.created_by.as_deref(), false, Some(Action::Delete),
-                    format!("an agent created it; unused for {}", span(unused))));
-            }
-            continue;
-        }
-        let r = if let Some(lease) = lease {
-            row("lease", Some(&lease.thread_id), false, None, "leased through squircle sim start".into())
-        } else if facts.reserved.contains(&device.udid) {
-            row("reserved", None, false, None, "the preview capture's simulator".into())
-        } else if let Some((thread, _)) = session {
-            row("t3 session", Some(thread), false, None, "open in T3's device tools".into())
-        } else if !ours {
-            row("unowned", None, false, None, "not booted or used by Squircle or its agents; left alone".into())
-        } else if let Some(thread) = toucher {
-            row("agent outside a lease", Some(thread), false, None, "booted by an agent that is still working".into())
-        } else {
-            let since = facts.idle_since.get(&device.udid).copied().unwrap_or(facts.now);
-            let idle = facts.now - since;
-            let due = facts.now_please || idle >= facts.policy.idle;
-            let thread = known.touched_by.as_deref().or(known.created_by.as_deref());
-            row("agent (idle)", thread, true, due.then_some(Action::Shutdown),
-                if due { format!("Squircle's or an agent's, held by nothing (idle {})", span(idle)) }
-                else { format!("free; shut down after {} idle", span(facts.policy.idle)) })
-        };
-        rows.push(r);
-    }
-    rows
-}
-
-fn span(seconds: f64) -> String {
-    let minutes = (seconds / 60.0).round() as i64;
-    match minutes {
-        m if m < 1 => "under a minute".into(),
-        m if m < 120 => format!("{m} min"),
-        m if m < 48 * 60 => format!("{} h", m / 60),
-        m => format!("{} days", m / 1440),
-    }
-}
-
 // MARK: Agents' own simulator commands
 
 /// What one command in T3's activity log did to simulators.
 #[derive(Debug, Default, PartialEq)]
 pub struct Use {
     pub created: Vec<String>,
+    /// Booted by this command (`simctl boot`): a boot receipt.
+    pub booted: Vec<String>,
+    /// Used (booted, installed on, launched, built for): an observation.
     pub touched: Vec<String>,
     /// Names, resolved against the device list (only when unique).
     pub created_names: Vec<String>,
+    pub booted_names: Vec<String>,
     pub touched_names: Vec<String>,
 }
 
@@ -262,8 +104,9 @@ fn argument(rest: &str) -> Option<String> {
 }
 
 /// Parses a shell command an agent ran (and its output) for simulators it
-/// created (`simctl create/clone`, whose output is the new UDID) and used
-/// (`simctl boot/install/launch`, `xcodebuild -destination`).
+/// created (`simctl create/clone`, whose output is the new UDID), booted
+/// (`simctl boot`) and used (`simctl boot/install/launch`, `xcodebuild
+/// -destination`).
 pub fn parse_use(command: &str, output: &str) -> Use {
     let mut found = Use::default();
     let mut segments = command.split("simctl ");
@@ -280,9 +123,13 @@ pub fn parse_use(command: &str, output: &str) -> Use {
             }
             "boot" | "install" | "launch" | "bootstatus" | "openurl" | "spawn" => {
                 let ids = uuids(segment);
-                if ids.is_empty() {
-                    found.touched_names.extend(argument(rest).filter(|n| n != "booted"));
+                let name = if ids.is_empty() { argument(rest).filter(|n| n != "booted") } else { None };
+                // A boot of an already booted device boots nothing.
+                if verb == "boot" && !output.contains("current state: Booted") {
+                    found.booted.extend(ids.iter().take(1).cloned());
+                    found.booted_names.extend(name.clone());
                 }
+                found.touched_names.extend(name);
                 found.touched.extend(ids.into_iter().take(1));
             }
             _ => {}
@@ -303,10 +150,37 @@ pub fn parse_use(command: &str, output: &str) -> Use {
     found.created.sort();
     found.created.dedup();
     found.touched.retain(|t| !found.created.contains(t));
+    found.booted.retain(|t| !found.created.contains(t));
     found
 }
 
 // MARK: Applying it
+
+/// Notes which threads' commands created, booted or used simulators.
+fn merge_activity(saved: &mut Saved, rows: &[Activity], devices: &[Device]) {
+    let by_name = |name: &str| {
+        let matches: Vec<&Device> = devices.iter().filter(|d| d.name == name).collect();
+        (matches.len() == 1).then(|| matches[0].udid.clone())
+    };
+    for row in rows {
+        let used = parse_use(&row.command, &row.output);
+        let at = iso_seconds(&row.created_at).unwrap_or_else(now);
+        for udid in used.created.iter().cloned().chain(used.created_names.iter().filter_map(|n| by_name(n))) {
+            let entry = saved.known.entry(udid).or_default();
+            entry.created_by.get_or_insert_with(|| row.thread.clone());
+            entry.last_used = entry.last_used.max(at);
+        }
+        for udid in used.booted.iter().cloned().chain(used.booted_names.iter().filter_map(|n| by_name(n))) {
+            saved.known.entry(udid).or_default().note_boot(BootReceipt { at, thread: Some(row.thread.clone()), session: None });
+        }
+        for udid in used.touched.iter().cloned().chain(used.touched_names.iter().filter_map(|n| by_name(n))) {
+            saved.known.entry(udid).or_default().note_touch(&row.thread, at);
+        }
+        if row.created_at > saved.activity_seen {
+            saved.activity_seen = row.created_at.clone();
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Activity {
@@ -328,13 +202,41 @@ pub trait Simctl: Send + Sync {
 /// T3, as far as the policy needs it. Tests use a fake.
 pub trait World: Send + Sync {
     fn t3_sessions(&self) -> Pending<'_, Result<Vec<(String, String)>>>;
-    fn thread(&self, id: &str) -> Option<ThreadInfo>;
+    fn thread(&self, id: &str) -> ThreadInfo;
     fn title(&self, id: &str) -> Option<String>;
     /// Simulator and xcodebuild commands agents ran after `since` (ISO time).
     fn activity<'a>(&'a self, since: &'a str) -> Pending<'a, Result<Vec<Activity>>>;
 }
 
-#[derive(Default, Serialize, Deserialize)]
+/// The session owner, the one authority on which simulators are reserved.
+pub trait Holds: Send + Sync {
+    /// Simulators sessions reserve now (in use, or their cleanup unsettled).
+    fn leases(&self) -> Vec<Lease>;
+    /// Boots sessions' opens did: Squircle's, recorded in its ledger first.
+    fn boots(&self) -> Vec<(String, BootReceipt)>;
+    /// Reserves `udid` for a cleanup unless a session reserves it; no start
+    /// takes it until the returned exclusion is dropped.
+    fn exclude(&self, udid: &str) -> Option<Exclusion>;
+}
+
+/// A cleanup's reservation of one simulator; released when dropped.
+pub struct Exclusion(Option<Box<dyn FnOnce() + Send>>);
+
+impl Exclusion {
+    pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
+        Self(Some(Box::new(release)))
+    }
+}
+
+impl Drop for Exclusion {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
 struct Saved {
     #[serde(default)]
     known: HashMap<String, Provenance>,
@@ -343,27 +245,35 @@ struct Saved {
     activity_seen: String,
 }
 
-#[derive(Default)]
 struct State {
-    saved: Saved,
+    gate: Gate<Saved, Infallible, JsonFile>,
     idle_since: HashMap<String, f64>,
-    /// The last plan, for `free` and the cap's view.
-    rows: Vec<Row>,
+    /// Cleanups a previous run left unanswered have been settled from an inventory.
+    reconciled: bool,
 }
 
 pub struct Pool {
-    root: PathBuf,
     simctl: Arc<dyn Simctl>,
     world: Arc<dyn World>,
     pub policy: Policy,
     reserved: Vec<String>,
     state: Mutex<State>,
+    /// The session owner, attached once it exists.
+    holds: OnceLock<Weak<dyn Holds>>,
     /// One plan-and-apply at a time.
     applying: tokio::sync::Mutex<()>,
 }
 
 fn now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+/// What one look at the world found.
+struct Snapshot {
+    now: f64,
+    devices: Vec<Device>,
+    sessions: Vec<(String, String)>,
+    leases: Vec<Lease>,
 }
 
 impl Pool {
@@ -373,140 +283,191 @@ impl Pool {
     }
 
     pub fn with(root: &Path, simctl: Arc<dyn Simctl>, world: Arc<dyn World>, policy: Policy, reserved: Vec<String>) -> Result<Arc<Self>> {
-        let path = root.join("simpool.json");
-        let saved: Saved = if path.try_exists()? { read_json(&path)? } else { Saved::default() };
-        Ok(Arc::new(Self { root: root.into(), simctl, world, policy, reserved,
-            state: Mutex::new(State { saved, ..State::default() }), applying: tokio::sync::Mutex::new(()) }))
+        let file = JsonFile::new(root.join("simpool.json"));
+        let (saved, revision) = file.read::<Saved>()?.unwrap_or_default();
+        Ok(Arc::new(Self { simctl, world, policy, reserved,
+            state: Mutex::new(State { gate: Gate::restore(saved, revision, file), idle_since: HashMap::new(), reconciled: false }),
+            holds: OnceLock::new(), applying: tokio::sync::Mutex::new(()) }))
+    }
+
+    /// The session owner: its reservations, boots and cleanup exclusions.
+    pub fn attach(&self, holds: Weak<dyn Holds>) {
+        let _ = self.holds.set(holds);
+    }
+
+    fn holds(&self) -> Option<Arc<dyn Holds>> {
+        self.holds.get()?.upgrade()
+    }
+
+    /// Changes what is known and saves it before anything reads or acts on it.
+    fn change<T>(&self, change: impl FnOnce(&mut Saved) -> T) -> Result<T> {
+        let mut state = self.state.lock().unwrap();
+        state.gate.resolve().map_err(|e| anyhow!("Simulator pool state not saved: {e}"))?;
+        let mut candidate = state.gate.committed().clone();
+        let out = change(&mut candidate);
+        state.gate.commit(candidate, vec![]).map_err(|e| anyhow!("Simulator pool state not saved: {e}"))?;
+        Ok(out)
     }
 
     /// Simulators sessions used before (the session ledger), with when each
-    /// was last: Squircle's own, whatever this file has lost.
+    /// was last: an observation, whatever this file has lost.
     pub fn remember_leased(&self, used: impl IntoIterator<Item = (String, f64)>) {
-        let mut state = self.state.lock().unwrap();
-        for (udid, at) in used {
-            let entry = state.saved.known.entry(udid.to_ascii_uppercase()).or_default();
+        let used: Vec<(String, f64)> = used.into_iter().collect();
+        let saved = self.change(|saved| for (udid, at) in &used {
+            let entry = saved.known.entry(udid.to_ascii_uppercase()).or_default();
             entry.leased = true;
-            entry.last_used = entry.last_used.max(at);
+            entry.last_used = entry.last_used.max(*at);
+        });
+        if let Err(error) = saved {
+            eprintln!("{error:#}");
         }
     }
 
-    /// A booted simulator a start may take without booting another.
-    pub fn free(&self, udid: &str) -> bool {
-        self.state.lock().unwrap().rows.iter().any(|r| r.free && r.udid.eq_ignore_ascii_case(udid))
-    }
-
-    /// Notes which threads' commands created or used simulators since the last read.
-    async fn read_activity(&self, devices: &[Device]) -> Result<()> {
-        let since = self.state.lock().unwrap().saved.activity_seen.clone();
-        let rows = self.world.activity(&since).await?;
-        let by_name = |name: &str| {
-            let matches: Vec<&Device> = devices.iter().filter(|d| d.name == name).collect();
-            (matches.len() == 1).then(|| matches[0].udid.clone())
-        };
-        let mut state = self.state.lock().unwrap();
-        for row in &rows {
-            let used = parse_use(&row.command, &row.output);
-            let at = iso_seconds(&row.created_at).unwrap_or_else(now);
-            let created = used.created.iter().cloned().chain(used.created_names.iter().filter_map(|n| by_name(n)));
-            for udid in created {
-                let entry = state.saved.known.entry(udid).or_default();
-                entry.created_by.get_or_insert_with(|| row.thread.clone());
-                entry.last_used = entry.last_used.max(at);
-            }
-            for udid in used.touched.iter().cloned().chain(used.touched_names.iter().filter_map(|n| by_name(n))) {
-                let entry = state.saved.known.entry(udid).or_default();
-                if at >= entry.touched_at {
-                    entry.touched_by = Some(row.thread.clone());
-                    entry.touched_at = at;
-                }
-                entry.last_used = entry.last_used.max(at);
-            }
-            if row.created_at > state.saved.activity_seen {
-                state.saved.activity_seen = row.created_at.clone();
-            }
-        }
-        Ok(())
-    }
-
-    /// Gathers the facts and plans. `now_please` skips the idle wait.
-    pub async fn refresh(&self, leases: &[Lease], now_please: bool) -> Result<Vec<Row>> {
+    /// The facts as they are now, with T3's sessions: without them nothing
+    /// could be shown to be the user's, so no plan.
+    async fn look(&self, leases: Vec<Lease>) -> Result<Snapshot> {
         let devices = self.simctl.devices().await?;
-        if let Err(error) = self.read_activity(&devices).await {
-            eprintln!("Simulator pool: T3's activity log not read: {error:#}");
-        }
-        // Without T3's sessions nothing could be shown to be the user's: no plan.
         let sessions = self.world.t3_sessions().await.context("T3 did not list its device sessions")?;
-        let time = now();
-        let mut state = self.state.lock().unwrap();
-        for lease in leases {
-            let entry = state.saved.known.entry(lease.device_id.to_ascii_uppercase()).or_default();
-            entry.leased = true;
-            entry.last_used = time;
+        Ok(Snapshot { now: now(), devices, sessions, leases })
+    }
+
+    /// Commands agents ran since the last read, or None if T3's activity
+    /// log couldn't be read (then an unseen use could protect any of ours).
+    async fn read_activity(&self) -> Option<Vec<Activity>> {
+        let since = self.state.lock().unwrap().gate.committed().activity_seen.clone();
+        match self.world.activity(&since).await {
+            Ok(rows) => Some(rows),
+            Err(error) => {
+                eprintln!("Simulator pool: T3's activity log not read, so nothing of ours is cleaned up: {error:#}");
+                None
+            }
         }
+    }
+
+    fn plan_from(&self, snapshot: &Snapshot, complete: bool, now_please: bool) -> Vec<Row> {
+        let state = self.state.lock().unwrap();
         let world = self.world.clone();
         let thread = move |id: &str| world.thread(id);
-        let rows = plan(&Facts {
-            now: time, devices: &devices, leases, t3_sessions: &sessions, known: &state.saved.known,
-            thread: &thread, idle_since: &state.idle_since, reserved: &self.reserved, policy: self.policy, now_please,
-        });
+        plan(&Facts {
+            now: snapshot.now, devices: &snapshot.devices, leases: &snapshot.leases, t3_sessions: &snapshot.sessions,
+            known: &state.gate.committed().known, thread: &thread, activity_complete: complete, idle_since: &state.idle_since,
+            reserved: &self.reserved, policy: self.policy, now_please,
+        })
+    }
+
+    /// Gathers the facts, saves what they prove, and plans. `now_please`
+    /// skips the idle wait.
+    pub async fn refresh(&self, leases: &[Lease], now_please: bool) -> Result<Vec<Row>> {
+        let snapshot = self.look(leases.to_vec()).await?;
+        let activity = self.read_activity().await;
+        let complete = activity.is_some();
+        let boots = self.holds().map(|h| h.boots()).unwrap_or_default();
+        let reconcile = !self.state.lock().unwrap().reconciled;
+        self.change(|saved| {
+            merge_activity(saved, activity.as_deref().unwrap_or_default(), &snapshot.devices);
+            for (udid, receipt) in boots {
+                saved.known.entry(udid.to_ascii_uppercase()).or_default().note_boot(receipt);
+            }
+            for lease in &snapshot.leases {
+                let entry = saved.known.entry(lease.device_id.to_ascii_uppercase()).or_default();
+                entry.leased = true;
+                entry.last_used = snapshot.now;
+            }
+            policy::observe(&mut saved.known, &snapshot.devices, snapshot.now);
+            if reconcile {
+                policy::reconcile(&mut saved.known, &snapshot.devices);
+            }
+        })?;
+        self.state.lock().unwrap().reconciled = true;
+        let rows = self.plan_from(&snapshot, complete, now_please);
+        let mut state = self.state.lock().unwrap();
         state.idle_since.retain(|udid, _| rows.iter().any(|r| r.free && &r.udid == udid));
         for row in rows.iter().filter(|r| r.free) {
-            state.idle_since.entry(row.udid.clone()).or_insert(time);
+            state.idle_since.entry(row.udid.clone()).or_insert(snapshot.now);
         }
-        state.rows = rows.clone();
-        let _ = atomic_json(&self.root.join("simpool.json"), &state.saved);
         Ok(rows)
     }
 
-    async fn apply(&self, rows: &[Row]) -> Vec<Value> {
-        let mut done = Vec::new();
-        for row in rows {
-            let Some(action) = &row.action else { continue };
-            let result = match action {
-                Action::Shutdown => self.simctl.shutdown(&row.udid).await,
-                Action::Delete => self.simctl.delete(&row.udid).await,
-            };
-            if result.is_ok() {
-                let mut state = self.state.lock().unwrap();
-                state.idle_since.remove(&row.udid);
-                if *action == Action::Delete {
-                    state.saved.known.remove(&row.udid);
-                } else if let Some(known) = state.saved.known.get_mut(&row.udid) {
-                    known.last_used = now();
-                }
-            }
-            done.push(json!({"udid": row.udid, "name": row.name, "action": action, "why": row.why,
-                             "error": result.err().map(|e| format!("{e:#}"))}));
+    /// Runs one planned cleanup: reserves the simulator from the session
+    /// owner, saves the intent, plans again on a fresh snapshot, and acts
+    /// only if that still asks for it. Every outcome is saved.
+    async fn act(&self, row: &Row, now_please: bool) -> Value {
+        let report = |error: Option<String>| json!({"udid": row.udid, "name": row.name, "action": row.action, "why": row.why, "error": error});
+        let Some(action) = row.action else { return report(None) };
+        let Some(holds) = self.holds() else { return report(Some("no session owner to reserve it from".into())) };
+        let Some(_exclusion) = holds.exclude(&row.udid) else { return report(Some("a session took it meanwhile; left alone".into())) };
+        if let Err(error) = self.change(|saved| if let Some(entry) = saved.known.get_mut(&row.udid) {
+            entry.acting = Some(Acting { action, at: now() });
+        }) {
+            return report(Some(format!("{error:#}")));
         }
-        if !done.is_empty() {
-            let state = self.state.lock().unwrap();
-            let _ = atomic_json(&self.root.join("simpool.json"), &state.saved);
+        let fresh = match self.refresh(&holds.leases(), now_please).await {
+            Ok(rows) => rows.into_iter().find(|r| r.udid == row.udid),
+            Err(error) => {
+                let _ = self.change(|saved| if let Some(entry) = saved.known.get_mut(&row.udid) { entry.acting = None });
+                return report(Some(format!("not revalidated, left alone: {error:#}")));
+            }
+        };
+        if !policy::revalidate(action, fresh.as_ref()) {
+            let _ = self.change(|saved| if let Some(entry) = saved.known.get_mut(&row.udid) { entry.acting = None });
+            let why = fresh.map(|r| r.why).unwrap_or_else(|| "it is gone".into());
+            return report(Some(format!("no longer due ({why}); left alone")));
+        }
+        let result = match action {
+            Action::Shutdown => self.simctl.shutdown(&row.udid).await,
+            Action::Delete => self.simctl.delete(&row.udid).await,
+        }.map_err(|e| format!("{e:#}"));
+        let error = result.clone().err();
+        if let Err(saved) = self.change(|saved| policy::settle(&mut saved.known, &row.udid, action, result, now())) {
+            eprintln!("{saved:#}");
+        }
+        if error.is_none() {
+            self.state.lock().unwrap().idle_since.remove(&row.udid);
+        }
+        report(error)
+    }
+
+    async fn apply(&self, rows: &[Row], now_please: bool) -> Vec<Value> {
+        let mut done = Vec::new();
+        for row in rows.iter().filter(|r| r.action.is_some()) {
+            done.push(self.act(row, now_please).await);
         }
         done
     }
 
-    /// `thread`'s lease on `udid` ended and no other holds it: shut it down
-    /// now, unless the policy keeps it (the user's T3 session on it, say).
-    /// The thread's own commands on it don't keep it.
-    pub async fn release(&self, udid: &str, thread: &str, leases: &[Lease]) -> Result<()> {
+    /// A session on `udid` ended and its cleanup asks what to do with the
+    /// simulator. `others`: what other sessions reserve. The session's own
+    /// reservation keeps starts off it meanwhile; its thread's own commands
+    /// on it don't keep it.
+    pub async fn release(&self, udid: &str, thread: &str, others: &[Lease]) -> Result<Released> {
         let _apply = self.applying.lock().await;
-        self.remember_leased([(udid.to_string(), now())]);
-        let rows = self.refresh(leases, false).await?;
-        let mine: Vec<Row> = rows.into_iter()
-            .filter(|r| r.udid.eq_ignore_ascii_case(udid))
-            .filter(|r| r.free || (r.owner == "agent outside a lease" && r.thread.as_deref() == Some(thread)))
-            .map(|mut r| { r.action = Some(Action::Shutdown); r.why = "its lease ended".into(); r }).collect();
-        for result in self.apply(&mine).await {
-            ensure!(result["error"].is_null(), "{}", result["error"].as_str().unwrap_or("shutdown failed"));
+        let rows = self.refresh(others, false).await?;
+        let Some(row) = rows.into_iter().find(|r| r.udid.eq_ignore_ascii_case(udid)) else {
+            return Ok(Released::NotBooted);
+        };
+        if !row.booted {
+            return Ok(Released::NotBooted);
         }
-        Ok(())
+        let mine = row.free || (row.owner == "agent outside a lease" && row.thread.as_deref() == Some(thread));
+        if !mine {
+            return Ok(Released::Kept { why: row.why });
+        }
+        let udid = row.udid;
+        self.change(|saved| if let Some(entry) = saved.known.get_mut(&udid) {
+            entry.acting = Some(Acting { action: Action::Shutdown, at: now() });
+        })?;
+        let result = self.simctl.shutdown(&udid).await.map_err(|e| format!("{e:#}"));
+        self.change(|saved| policy::settle(&mut saved.known, &udid, Action::Shutdown, result.clone(), now()))?;
+        result.map_err(|e| anyhow!(e))?;
+        self.state.lock().unwrap().idle_since.remove(&udid);
+        Ok(Released::ShutDown)
     }
 
     /// Shuts down and deletes what the policy says (idle waits included).
     pub async fn tick(&self, leases: &[Lease]) -> Result<Vec<Value>> {
         let _apply = self.applying.lock().await;
         let rows = self.refresh(leases, false).await?;
-        Ok(self.apply(&rows).await)
+        Ok(self.apply(&rows, false).await)
     }
 
     /// `sim cleanup`: the policy without idle waits; `dry_run` only reports.
@@ -515,7 +476,7 @@ impl Pool {
         let rows = self.refresh(leases, true).await?;
         let planned: Vec<&Row> = rows.iter().filter(|r| r.action.is_some()).collect();
         let kept: Vec<&Row> = rows.iter().filter(|r| r.booted && r.action.is_none()).collect();
-        let done = if dry_run { Value::Null } else { Value::Array(self.apply(&rows).await) };
+        let done = if dry_run { Value::Null } else { Value::Array(self.apply(&rows, true).await) };
         Ok(json!({"dry_run": dry_run, "would": planned, "kept": kept, "done": done}))
     }
 
@@ -532,6 +493,11 @@ impl Pool {
             value
         }).collect();
         Ok(json!({"booted": booted, "max_leases": self.policy.max_leases, "idle_minutes": self.policy.idle / 60.0}))
+    }
+
+    /// T3's open device sessions: (thread, device).
+    pub async fn t3_sessions(&self) -> Result<Vec<(String, String)>> {
+        self.world.t3_sessions().await
     }
 
     /// Applies the policy every minute until the service stops.
@@ -641,13 +607,8 @@ impl World for T3World {
         })
     }
 
-    fn thread(&self, id: &str) -> Option<ThreadInfo> {
-        let row = self.0.thread_row(id)?;
-        Some(ThreadInfo {
-            working: crate::agents::worker_state(&row) == "working",
-            squircle: self.0.is_squircle_thread(id),
-            archived: !row["archivedAt"].is_null(),
-        })
+    fn thread(&self, id: &str) -> ThreadInfo {
+        ThreadInfo { seen: crate::sims::seen(&self.0, id), squircle: self.0.is_squircle_thread(id) }
     }
 
     fn title(&self, id: &str) -> Option<String> {
@@ -662,61 +623,12 @@ impl World for T3World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fsm::sims::Seen;
 
-    const HOUR: f64 = 3600.0;
-    const POLICY: Policy = Policy { max_leases: 3, idle: 600.0, delete_after: 24.0 * HOUR };
+    const POLICY: Policy = Policy { max_leases: 3, idle: 600.0, delete_after: 24.0 * 3600.0 };
 
     fn device(udid: &str, state: &str) -> Device {
         Device { udid: udid.into(), name: format!("sim {udid}"), state: state.into(), changed_at: 0.0 }
-    }
-
-    fn ours(created_by: Option<&str>) -> Provenance {
-        Provenance { leased: created_by.is_none(), created_by: created_by.map(str::to_string), ..Provenance::default() }
-    }
-
-    /// Which simulators the policy stops or deletes, and the owners it reports.
-    #[test]
-    fn policy_stops_only_free_simulators_of_ours() {
-        let now = 100.0 * HOUR;
-        let devices = [
-            device("LEASED", "Booted"), device("USER", "Booted"), device("PANEL", "Booted"),
-            device("ADHOC", "Booted"), device("IDLE", "Booted"), device("FRESH", "Booted"),
-            device("PREVIEW", "Booted"), device("STALE", "Shutdown"), device("RECENT", "Shutdown"),
-            device("STOCK", "Shutdown"),
-        ];
-        let known: HashMap<String, Provenance> = [
-            ("LEASED", ours(None)), ("PANEL", ours(None)), ("IDLE", ours(None)), ("FRESH", ours(None)),
-            ("PREVIEW", ours(None)), ("STOCK", ours(None)),
-            ("ADHOC", Provenance { touched_by: Some("worker".into()), touched_at: now - 60.0, ..Provenance::default() }),
-            ("STALE", Provenance { last_used: now - 30.0 * HOUR, ..ours(Some("old-worker")) }),
-            ("RECENT", Provenance { last_used: now - HOUR, ..ours(Some("old-worker")) }),
-        ].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-        let thread = |id: &str| match id {
-            "worker" => Some(ThreadInfo { working: true, squircle: true, archived: false }),
-            "user" => Some(ThreadInfo { working: false, squircle: false, archived: false }),
-            _ => None,
-        };
-        let idle_since: HashMap<String, f64> = [("IDLE".to_string(), now - 700.0), ("FRESH".to_string(), now - 60.0)].into();
-        let leases = [Lease { device_id: "LEASED".into(), thread_id: "worker".into() }];
-        let sessions = [("user".to_string(), "PANEL".to_string()), ("gone".to_string(), "IDLE".to_string())];
-        let reserved = ["PREVIEW".to_string()];
-        let facts = |now_please| Facts { now, devices: &devices, leases: &leases, t3_sessions: &sessions, known: &known,
-            thread: &thread, idle_since: &idle_since, reserved: &reserved, policy: POLICY, now_please };
-        let summary = |rows: Vec<Row>| rows.into_iter().map(|r| (r.udid, r.owner, r.action)).collect::<Vec<_>>();
-
-        assert_eq!(summary(plan(&facts(false))), vec![
-            ("LEASED".into(), "lease", None),
-            ("USER".into(), "unowned", None),
-            ("PANEL".into(), "t3 session", None),
-            ("ADHOC".into(), "agent outside a lease", None),
-            ("IDLE".into(), "agent (idle)", Some(Action::Shutdown)),
-            ("FRESH".into(), "agent (idle)", None),
-            ("PREVIEW".into(), "reserved", None),
-            ("STALE".into(), "agent (idle)", Some(Action::Delete)),
-        ]);
-        // On demand the idle wait goes, nothing else.
-        let rows = plan(&facts(true));
-        assert_eq!(rows.iter().filter(|r| r.action.is_some()).map(|r| r.udid.as_str()).collect::<Vec<_>>(), ["IDLE", "FRESH", "STALE"]);
     }
 
     #[test]
@@ -729,7 +641,12 @@ mod tests {
                     && xcodebuild test -scheme S -destination 'platform=iOS Simulator,id=DFDF12FB-5C70-4B39-B85C-D5D82D6AB5F7'";
         assert_eq!(parse_use(used, "1F0C7E5A-0000-4000-8000-000000000000"), Use {
             touched: vec!["389DF2C3-2656-40AD-830A-A8A90667D730".into(), "DFDF12FB-5C70-4B39-B85C-D5D82D6AB5F7".into()],
+            booted_names: vec!["iPhone 18 Pro Max".into()],
             touched_names: vec!["iPhone 18 Pro Max".into()], ..Use::default() });
+        // Booting a booted device boots nothing.
+        let again = parse_use("xcrun simctl boot 389DF2C3-2656-40AD-830A-A8A90667D730",
+            "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):\nUnable to boot device in current state: Booted");
+        assert!(again.booted.is_empty() && again.touched.len() == 1);
         // Listing, reading or recording is not a use; nor is the literal "booted".
         assert_eq!(parse_use("xcrun simctl list devices; xcrun simctl io booted screenshot /tmp/a.png; simctl boot booted", "x"), Use::default());
         assert_eq!(iso_seconds("2026-10-14T22:23:14.016Z").map(|s| s.round()), Some(1_792_016_594.0));
@@ -739,6 +656,9 @@ mod tests {
     struct Fake {
         devices: Mutex<Vec<Device>>,
         calls: Mutex<Vec<String>>,
+        /// T3 device sessions, changed by the next `devices` call (a race).
+        sessions: Mutex<Vec<(String, String)>>,
+        late_session: Mutex<Option<(String, String)>>,
     }
 
     impl Simctl for Fake {
@@ -758,10 +678,18 @@ mod tests {
         fn cpu(&self) -> HashMap<String, f64> { HashMap::new() }
     }
 
-    struct Quiet;
+    struct Quiet(Arc<Fake>);
     impl World for Quiet {
-        fn t3_sessions(&self) -> Pending<'_, Result<Vec<(String, String)>>> { Box::pin(async { Ok(vec![]) }) }
-        fn thread(&self, _: &str) -> Option<ThreadInfo> { None }
+        fn t3_sessions(&self) -> Pending<'_, Result<Vec<(String, String)>>> {
+            let sessions = self.0.sessions.lock().unwrap().clone();
+            if let Some(late) = self.0.late_session.lock().unwrap().take() {
+                self.0.sessions.lock().unwrap().push(late);
+            }
+            Box::pin(async move { Ok(sessions) })
+        }
+        fn thread(&self, id: &str) -> ThreadInfo {
+            ThreadInfo { seen: if id == "user" { Seen::Idle { turn: None } } else { Seen::Gone }, squircle: id != "user" }
+        }
         fn title(&self, _: &str) -> Option<String> { None }
         fn activity<'a>(&'a self, since: &'a str) -> Pending<'a, Result<Vec<Activity>>> {
             let rows = if since.is_empty() {
@@ -772,28 +700,99 @@ mod tests {
         }
     }
 
-    /// A dry run touches nothing; a lease's simulator stops when it ends; the
-    /// user's own booted simulator is never stopped; provenance survives a restart.
+    /// The session owner's view: reservations, boots, and exclusions it grants.
+    #[derive(Default)]
+    struct Owner {
+        leases: Mutex<Vec<Lease>>,
+        boots: Mutex<Vec<(String, BootReceipt)>>,
+        excluded: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Holds for Owner {
+        fn leases(&self) -> Vec<Lease> { self.leases.lock().unwrap().clone() }
+        fn boots(&self) -> Vec<(String, BootReceipt)> { self.boots.lock().unwrap().clone() }
+        fn exclude(&self, udid: &str) -> Option<Exclusion> {
+            if self.leases.lock().unwrap().iter().any(|l| l.device_id == udid) { return None }
+            self.excluded.lock().unwrap().push(udid.into());
+            let excluded = self.excluded.clone();
+            let udid = udid.to_string();
+            Some(Exclusion::new(move || excluded.lock().unwrap().retain(|d| *d != udid)))
+        }
+    }
+
+    const ADHOC: &str = "AAAAAAAA-0000-4000-8000-000000000000";
+    const LEASED: &str = "BBBBBBBB-0000-4000-8000-000000000000";
+    const USER: &str = "CCCCCCCC-0000-4000-8000-000000000000";
+
+    fn pool(dir: &Path, fake: &Arc<Fake>, owner: &Arc<Owner>) -> Arc<Pool> {
+        let pool = Pool::with(dir, fake.clone(), Arc::new(Quiet(fake.clone())), POLICY, vec![]).unwrap();
+        let holds: Arc<dyn Holds> = owner.clone();
+        pool.attach(Arc::downgrade(&holds));
+        pool
+    }
+
+    /// A dry run touches nothing; a session's simulator stops when its
+    /// release asks, but only if its boot is proven; the user's own booted
+    /// simulator is never stopped; provenance survives a restart.
     #[tokio::test]
     async fn cleanup_and_release_apply_the_plan() {
         let dir = tempfile::tempdir().unwrap();
-        let (adhoc, leased, user) = ("AAAAAAAA-0000-4000-8000-000000000000", "BBBBBBBB-0000-4000-8000-000000000000", "CCCCCCCC-0000-4000-8000-000000000000");
         let fake = Arc::new(Fake::default());
-        *fake.devices.lock().unwrap() = vec![device(adhoc, "Booted"), device(leased, "Booted"), device(user, "Booted")];
-        let pool = Pool::with(dir.path(), fake.clone(), Arc::new(Quiet), POLICY, vec![]).unwrap();
-        let lease = [Lease { device_id: leased.into(), thread_id: "w2".into() }];
+        *fake.devices.lock().unwrap() = vec![device(ADHOC, "Booted"), device(LEASED, "Booted"), device(USER, "Booted")];
+        let owner = Arc::new(Owner::default());
+        *owner.leases.lock().unwrap() = vec![Lease { device_id: LEASED.into(), thread_id: "w2".into() }];
+        let pool = pool(dir.path(), &fake, &owner);
 
-        let report = pool.cleanup(&lease, true).await.unwrap();
+        let report = pool.cleanup(&owner.leases(), true).await.unwrap();
         assert_eq!(report["would"].as_array().unwrap().len(), 1);
         assert!(fake.calls.lock().unwrap().is_empty());
 
-        pool.release(leased, "w2", &[]).await.unwrap();
-        assert_eq!(*fake.calls.lock().unwrap(), [format!("shutdown {leased}")]);
+        // Leased but not booted by the session: the user's, kept.
+        owner.leases.lock().unwrap().clear();
+        assert!(matches!(pool.release(USER, "w2", &[]).await.unwrap(), Released::Kept { .. }));
+        *owner.boots.lock().unwrap() = vec![(LEASED.into(), BootReceipt { at: now(), thread: None, session: Some("s".into()) })];
+        assert_eq!(pool.release(LEASED, "w2", &[]).await.unwrap(), Released::ShutDown);
+        assert_eq!(*fake.calls.lock().unwrap(), [format!("shutdown {LEASED}")]);
         // Within the idle time the ad-hoc one stays; cleanup takes it now.
         pool.tick(&[]).await.unwrap();
         assert_eq!(fake.calls.lock().unwrap().len(), 1);
-        let reopened = Pool::with(dir.path(), fake.clone(), Arc::new(Quiet), POLICY, vec![]).unwrap();
+        let reopened = super::tests::pool(dir.path(), &fake, &owner);
         reopened.cleanup(&[], false).await.unwrap();
-        assert_eq!(*fake.calls.lock().unwrap(), [format!("shutdown {leased}"), format!("shutdown {adhoc}")]);
+        assert_eq!(*fake.calls.lock().unwrap(), [format!("shutdown {LEASED}"), format!("shutdown {ADHOC}")]);
+        assert!(owner.excluded.lock().unwrap().is_empty(), "an exclusion outlived its cleanup");
+    }
+
+    /// A cleanup is saved before it runs and revalidated right before:
+    /// a session reserving the simulator or the user's T3 session appearing
+    /// meanwhile stops it; one a crash left unanswered is settled by the next
+    /// run's inventory, not assumed done.
+    #[tokio::test]
+    async fn stale_eligibility_never_executes() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(Fake::default());
+        *fake.devices.lock().unwrap() = vec![device(ADHOC, "Booted")];
+        let owner = Arc::new(Owner::default());
+        let pool = pool(dir.path(), &fake, &owner);
+        // The user opens it in T3 between the plan and the shutdown.
+        *fake.late_session.lock().unwrap() = Some(("user".into(), ADHOC.into()));
+        let report = pool.cleanup(&[], false).await.unwrap();
+        assert!(fake.calls.lock().unwrap().is_empty(), "{report}");
+        assert!(report["done"][0]["error"].as_str().unwrap().contains("no longer due"));
+        fake.sessions.lock().unwrap().clear();
+        // A session reserves it: no exclusion, no action.
+        *owner.leases.lock().unwrap() = vec![Lease { device_id: ADHOC.into(), thread_id: "w".into() }];
+        let rows = pool.refresh(&[], true).await.unwrap();
+        assert!(pool.apply(&rows, true).await[0]["error"].as_str().unwrap().contains("took it"));
+        assert!(fake.calls.lock().unwrap().is_empty());
+
+        // A crash after the intent was saved: the next run reads the
+        // inventory before deciding anything, and nothing is assumed done.
+        owner.leases.lock().unwrap().clear();
+        pool.change(|saved| saved.known.get_mut(ADHOC).unwrap().acting = Some(Acting { action: Action::Shutdown, at: 1.0 })).unwrap();
+        drop(pool);
+        let reopened = super::tests::pool(dir.path(), &fake, &owner);
+        let rows = reopened.refresh(&[], true).await.unwrap();
+        assert!(reopened.state.lock().unwrap().gate.committed().known[ADHOC].acting.is_none());
+        assert_eq!(rows[0].action, Some(Action::Shutdown));
     }
 }
