@@ -237,16 +237,18 @@ time, and a result for an older turn is dropped. The phone registers tokens
 as `unsent / sending / acknowledged` and sends presence in order (newest
 wins), renewed every 4 minutes while in the foreground.
 
-**Simulator sessions (W8).** A session's `SessionPhase` carries each
+**Simulator sessions (W8; machines M18–M20 since step 3, see
+[fsm-architecture](fsm-architecture.md)).** A session's phase carries each
 phase's data (`starting / recording / stopping / filing / finished(media) /
-failed`); the recorder PID exists only while one may run, and a PID from a
-saved ledger is adopted only when its command line names that session's
-file. Its T3 device session is a `DeviceLease` (`opening / open /
-close_owed(retry) / closed / abandoned` after 20 tries). A turn ends a
-session only when T3 currently shows it idle or gone for 8 s; unknown never
-does. `sims.json` and `/v1/sims` keep their flat keys (`state`,
-`recorder_pid`, `media_id`, …) plus `device_session`; older ledgers convert
-from `close_pending`/`close_error`.
+failed`); its recorder is identified by PID, start time and a command line
+naming that session's file. Its T3 device session is a `DeviceLease`
+(`opening / open / close_owed(retry) / closed`; a close is never given up)
+and the pool's release is its own owed obligation; the session reserves its
+simulator, and counts against the limit, until both are settled. A turn ends
+a session only when T3 currently shows it idle or gone for 8 s; busy,
+needs-you or unknown never does. `/v1/sims` keeps its flat keys (`state`,
+`recorder_pid`, `media_id`, `release_pending`, …) plus `device_session`;
+`sims.json` adds the receipts (schema 2) and older ledgers convert on open.
 
 **Conversations and sends on the phone (W6/W7).** A conversation is
 `ConversationID` = `draft(UUID, app, agent)` or `thread(ID, app)`; the

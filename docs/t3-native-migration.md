@@ -1936,6 +1936,18 @@ almost all in CoreSimulator's ROCK forwarding proxy enumerating a weak map
 table. That is T3's process; not changed here. The apps' spikes sampled in
 `ThreadViewController.render()`, which the render-performance work owns.
 
+**2026-10-16 (step 3 of the [state-machine migration](fsm-architecture.md), Q4
+decided by the user):** a simulator is Squircle's only on proof: an agent's
+`simctl create`, or the current boot being a session's (T3 listed it shut down
+and the session booted it) or an agent's own `simctl boot`. A lease, install,
+launch or build alone no longer makes a booted simulator Squircle's, so one the
+user booted and a session borrowed with `--device` stays booted. A session holds
+its slot until T3 has closed its device session and the pool has decided its
+release; a close or shutdown that keeps failing keeps the slot and is retried,
+never given up. A thread waiting on the user (needs-you) keeps its simulator and
+protects it like a working one. Simulators booted before this change carry no
+receipt and are left alone.
+
 ## 2026-10-14 simulator deck
 
 User, after trying several simulators on the phone: "we need to stack em

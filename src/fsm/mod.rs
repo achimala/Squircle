@@ -5,4 +5,5 @@
 
 pub mod coordinator;
 pub mod core;
+pub mod sims;
 pub mod tasks;
