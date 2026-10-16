@@ -4,8 +4,10 @@ import UIKit
 /// Where the overlay is. Everything on screen is derived from it and from
 /// two springs that move toward what it implies.
 enum OverlayRoute: Equatable {
-    /// The bubble; tapped, it opens the panel where you left it.
-    case bubble(resume: Panel)
+    /// The bubble; tapped, it opens the panel where you left it. `docked`:
+    /// you dragged its status line into the jelly, which keeps it in (only
+    /// brief news comes out) until you next open and close the panel.
+    case bubble(resume: Panel, docked: Bool)
     case panel(Panel)
 
     /// What the panel shows: its size and the conversation on top.
@@ -18,13 +20,15 @@ enum OverlayRoute: Equatable {
     var isOpen: Bool { if case .panel = self { true } else { false } }
     /// The panel's state, open or remembered while closed.
     var panel: Panel {
-        get { switch self { case .bubble(let panel), .panel(let panel): panel } }
-        set { self = isOpen ? .panel(newValue) : .bubble(resume: newValue) }
+        get { switch self { case .bubble(let panel, _), .panel(let panel): panel } }
+        set { self = isOpen ? .panel(newValue) : .bubble(resume: newValue, docked: isDocked) }
     }
+    var isDocked: Bool { if case .bubble(_, true) = self { true } else { false } }
     /// Full screen and showing.
     var isFull: Bool { isOpen && panel.full }
     mutating func open() { self = .panel(panel) }
-    mutating func close() { self = .bubble(resume: panel) }
+    mutating func close() { self = .bubble(resume: panel, docked: false) }
+    mutating func dock() { if !isOpen { self = .bubble(resume: panel, docked: true) } }
 }
 
 /// The app's agent, over the app. One piece of glass is the bubble (what the
@@ -47,7 +51,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private lazy var feeds = SimulatorFeeds(model: model)
     /// Torn down: its window was replaced or its scene went away.
     private var closed = false
-    private var route = OverlayRoute.bubble(resume: .init())
+    private var route = OverlayRoute.bubble(resume: .init(), docked: false)
 
     /// The bubble and the panel: one piece of glass jelly.
     private let glass = GlassJelly()
@@ -112,10 +116,16 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private var outgoing: Snapshot? { if case .stretched(let outgoing) = layout { outgoing } else { nil } }
     private var isLive: Bool { if case .live = layout { true } else { false } }
     private var revealedSize: CGSize? { if case .revealed(let size) = layout { size } else { nil } }
-    /// The panel's grab handle: drag it to resize the panel, up to full
-    /// screen or down into the bubble.
+    /// The panel's grab handles on its top and bottom edges: drag either to
+    /// resize the panel (the top also up to full screen), or to close it
+    /// into the bubble.
     private let handle = UIView()
+    private let bottomHandle = UIView()
     private var handlePan: UIPanGestureRecognizer!
+    private var bottomPan: UIPanGestureRecognizer!
+    private enum Edge { case top, bottom }
+    /// The edge a finger on a handle resizes.
+    private var resizing = Edge.top
     /// The docked panel's height, once the handle has set it.
     private var miniHeight: CGFloat?
     /// The panel's laid-out safe area (the part of the screen's it covers).
@@ -153,16 +163,29 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Each thread's newest finished turn already accounted for (thread ID
     /// → turn ID), so only a turn T3 newly reports finished is announced.
     private var completions: [String: String] = [:]
-    /// "Done · …" for a while after a turn T3 reported finished.
+    /// Brief news ("Done · …", "2 workers"), shown until it expires and
+    /// then absorbed into the jelly.
     private struct Notice {
-        let text: String
-        let tone: LiveCapsule.Tone
+        let line: Line
         let expires: ContinuousClock.Instant
     }
     private var notice: Notice?
+    private static let noticeDwell = Duration.seconds(4)
+    /// Workers and who needs you as last rendered, so a change is news.
+    private var knownWorkers: Int?
+    private var knownWaiting: String?
+    /// The last turn's outcome until you open the panel: the jelly stays
+    /// happy (done) or slumped (failed) meanwhile.
+    private var unseen: GlassJelly.Mood?
+    /// Up to three of the agent's running workers, as small sprouts tucked
+    /// in beside the jelly once its line is absorbed; each fades in and
+    /// out on its own spring.
+    private let crew = (0..<3).map { _ in (view: JellyView(.worker("", .working), canvas: .roomy(15)), shown: SpringDriver()) }
     /// Renders again when the notice expires; replaced by a newer one.
     private var noticeExpiry: Task<Void, Never>?
     private var bubblePan: UIPanGestureRecognizer!
+    /// Drags the status line into the jelly (docks it).
+    private var pillPan: UIPanGestureRecognizer!
     private var bubbleTap: UITapGestureRecognizer!
     private var bubblePress: UILongPressGestureRecognizer!
     /// A long press captures the app: the screen flashes, and its picture
@@ -232,30 +255,38 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         capture.onLimit = { [weak self] in self?.stopRecording() }
         capture.onStopping = { [weak self] in self?.render() }
         glass.content.addSubview(bubbleStage)
-        let pill = UIView()
-        pill.backgroundColor = .tertiaryLabel
-        pill.layer.cornerRadius = 2.5
-        pill.isUserInteractionEnabled = false
-        // The jelly's eyes are where you grab it; no pill.
-        pill.isHidden = true
-        handle.addSubview(pill)
-        handle.isAccessibilityElement = true
-        handle.accessibilityTraits = .adjustable
-        handle.accessibilityLabel = "Resize"
-        handle.accessibilityIdentifier = "overlay.handle"
-        body.addSubview(handle)
+        for (handle, id) in [(handle, "overlay.handle"), (bottomHandle, "overlay.bottomHandle")] {
+            // A small quiet grip on the edge it resizes.
+            let grip = UIView()
+            grip.backgroundColor = Theme.accent.withAlphaComponent(0.3)
+            grip.layer.cornerRadius = 2
+            grip.isUserInteractionEnabled = false
+            handle.addSubview(grip)
+            handle.isAccessibilityElement = true
+            handle.accessibilityTraits = .adjustable
+            handle.accessibilityLabel = "Resize"
+            handle.accessibilityIdentifier = id
+            body.addSubview(handle)
+        }
         page.addSubview(body)
+        for sprout in crew {
+            // Behind the jelly: the part under it shows through its frost.
+            view.insertSubview(sprout.view, belowSubview: glass)
+            sprout.shown.parameters = SpringDriver.Parameters(response: 0.45, damping: 0.7)
+            sprout.shown.onChange = { [weak self] _ in self?.applyScene() }
+        }
         glass.content.addSubview(page)
 
         bubbleTap = UITapGestureRecognizer(target: self, action: #selector(openTapped))
         bubblePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
+        pillPan = UIPanGestureRecognizer(target: self, action: #selector(pillDragged(_:)))
         movePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
         backPan = UIPanGestureRecognizer(target: self, action: #selector(backDragged(_:)))
         bubblePress = UILongPressGestureRecognizer(target: self, action: #selector(bubblePressed(_:)))
         bubblePress.minimumPressDuration = 0.35
         // A tap waits only for the finger to lift before the press fails.
         bubbleTap.require(toFail: bubblePress)
-        for gesture in [bubbleTap, bubblePress, bubblePan, movePan, backPan] as [UIGestureRecognizer] {
+        for gesture in [bubbleTap, bubblePress, bubblePan, pillPan, movePan, backPan] as [UIGestureRecognizer] {
             gesture.delegate = self
             glass.addGestureRecognizer(gesture)
         }
@@ -286,6 +317,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         handlePan = UIPanGestureRecognizer(target: self, action: #selector(handleDragged(_:)))
         handlePan.delegate = self
         handle.addGestureRecognizer(handlePan)
+        bottomPan = UIPanGestureRecognizer(target: self, action: #selector(handleDragged(_:)))
+        bottomPan.delegate = self
+        bottomHandle.addGestureRecognizer(bottomPan)
 
         frame.onChange = { [weak self] in self?.applyScene() }
         side.onChange = { [weak self] _ in self?.applyScene() }
@@ -326,69 +360,119 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private var project: AppProject? { model.projects.first }
 
+    /// A status line for the bubble.
+    struct Line: Equatable {
+        var text: String
+        var tone: LiveCapsule.Tone
+        var started: Date?
+    }
+
+    /// What the agent and its workers are doing, read from the model.
+    struct Activity {
+        /// What lasts while it is so: who needs you, else the agent's live
+        /// step (its turn runs).
+        var line: Line?
+        var mood = GlassJelly.Mood.idle
+        /// Workers running: their thread IDs, titles and states.
+        var workers: [(id: String, title: String, mood: JellyLook.Mood)] = []
+    }
+
     private func render() {
+        if let project, agent == nil { mountAgent(project) }
+        let activity = currentActivity()
+        noticeChanges(activity)
+        show(activity)
+    }
+
+    private func currentActivity() -> Activity {
         #if DEBUG
-        if let demo = demoStatus, project == nil {
-            bubble.configure(headline: demo.headline, started: nil, tone: demo.tone)
-            retarget()
-            return
-        }
+        if let demoActivity { return demoActivity }
         #endif
         guard let project else {
-            bubble.configure(headline: model.error, started: nil, tone: model.error == nil ? .idle : .needsYou)
-            retarget()
-            return
+            return Activity(line: model.error.map { Line(text: $0, tone: .needsYou) }, mood: model.error == nil ? .idle : .needsYou)
         }
-        if agent == nil { mountAgent(project) }
         let sessions = model.sessions(for: project, includingAgent: true)
         let agentID = model.agentThreadID(for: project)
         func title(_ session: ChatSession) -> String { session.id == agentID ? project.name : session.displayTitle(in: project) }
         let active = sessions.filter { $0.phase != .idle }
         noticeCompletions(in: sessions, title: title)
-
-        // What the bubble says: whoever needs you, else what the agent is
-        // doing (its live step), else that something just finished, else
-        // the workers still running, calmly: the agent's turn has ended, so
-        // nothing shimmers for them (with no agent, a thread is the work).
-        var headline: String?, tone: LiveCapsule.Tone, started: Date?
-        let workers = active.filter { $0.id != agentID }
+        var activity = Activity()
+        activity.workers = active.filter { $0.id != agentID }.map { ($0.id, title($0), JellyLook.Mood($0.phase)) }
+        // Whoever needs you, else what the agent is doing (its live step;
+        // with no agent, a thread is the work). Workers running while the
+        // agent's turn has ended say nothing lasting: the jelly shows them.
         if let waiting = active.first(where: { $0.phase == .needsYou }) {
-            (headline, tone, started) = ("Needs you · " + title(waiting), .needsYou, nil)
+            activity.line = Line(text: "Needs you · " + title(waiting), tone: .needsYou)
+            activity.mood = .needsYou
         } else if let busy = active.first(where: { $0.id == agentID }) ?? (agentID == nil ? active.first : nil) {
             let live = model.selectedSessionID == busy.id ? liveStatus() : nil
-            (headline, tone, started) = (live?.headline ?? title(busy), .working, live?.started)
-        } else if let notice, notice.expires > .now {
-            (headline, tone, started) = (notice.text, notice.tone, nil)
-        } else if let worker = workers.first {
-            (headline, tone, started) = (workers.count == 1 ? "Worker · " + title(worker) : "\(workers.count) workers", .idle, nil)
-        } else {
-            (headline, tone, started) = (nil, .idle, nil)
+            activity.line = Line(text: live?.headline ?? title(busy), tone: .working, started: live?.started)
+            activity.mood = .working
         }
-        #if DEBUG
-        if let demo = demoStatus { (headline, tone, started) = (demo.headline, demo.tone, nil) }
-        #endif
+        return activity
+    }
+
+    /// The bubble and the jelly for `activity`: its lasting line unless
+    /// you docked it, else brief news; the jelly's mood, the outcome you
+    /// haven't seen yet when nothing else is going on.
+    private func show(_ activity: Activity) {
+        var line = route.isDocked ? nil : activity.line
+        if line == nil, let notice, notice.expires > .now { line = notice.line }
+        var mood = activity.mood
+        if mood == .idle, let unseen { mood = unseen }
         if capture.isStopping {
-            (headline, tone, started) = ("Finishing recording", .recording, nil)
+            (line, mood) = (Line(text: "Finishing recording", tone: .recording), .recording)
         } else if let recording = capture.recording {
-            (headline, tone, started) = (recording.kind == .screen ? "Recording screen" : "Recording performance", .recording, recording.started)
+            line = Line(text: recording.kind == .screen ? "Recording screen" : "Recording performance", tone: .recording, started: recording.started)
+            mood = .recording
         }
         // Can't reach the Mac: it dozes until it can (the ⋯ menu says why).
         glass.drowsy = model.isOffline
+        glass.mood = mood
+        glass.crew = activity.workers.count
+        for (sprout, worker) in zip(crew, activity.workers) { sprout.view.look = JellyLook.worker(worker.id, worker.mood) }
+        for (index, sprout) in crew.enumerated() where sprout.shown.target != (index < activity.workers.count ? 1 : 0) {
+            sprout.shown.animate(to: index < activity.workers.count ? 1 : 0)
+        }
         bubble.showsTime = capture.recording != nil && !capture.isStopping
-        bubble.configure(headline: headline, started: started, tone: tone)
+        bubble.configure(headline: line?.text, started: line?.started, tone: line?.tone ?? .idle)
         bubble.accessibilityLabel = capture.recording == nil ? "Squircle" : "Stop recording"
-        bubble.accessibilityValue = headline ?? "Idle"
+        bubble.accessibilityValue = line?.text ?? "Idle"
         if let build = model.updatingTo {
             UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
         }
         retarget()
     }
 
-    /// Announces a turn T3 newly reports finished, for a few seconds. A
-    /// thread seen for the first time announces only a turn that ended just
-    /// now; what finished before the overlay looked stays quiet.
+    /// News that shows briefly, then is absorbed into the jelly: workers
+    /// starting or finishing (their count) and, docked, a new question.
+    private func noticeChanges(_ activity: Activity) {
+        let count = activity.workers.count
+        if let known = knownWorkers, count != known, count > 0 {
+            announce(Line(text: count == 1 ? "Worker · " + activity.workers[0].title : "\(count) workers", tone: .idle))
+        }
+        knownWorkers = count
+        let waiting = activity.line?.tone == .needsYou ? activity.line?.text : nil
+        if route.isDocked, let waiting, waiting != knownWaiting { announce(Line(text: waiting, tone: .needsYou)) }
+        knownWaiting = waiting
+    }
+
+    /// Shows `line` for `noticeDwell`, then lets it go.
+    private func announce(_ line: Line) {
+        notice = Notice(line: line, expires: .now + Self.noticeDwell)
+        noticeExpiry?.cancel()
+        noticeExpiry = Task { [weak self] in
+            try? await Task.sleep(for: Self.noticeDwell + .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            self?.render()
+        }
+    }
+
+    /// Announces a turn T3 newly reports finished, briefly; the jelly keeps
+    /// its outcome until you open the panel. A thread seen for the first
+    /// time announces only a turn that ended just now; what finished before
+    /// the overlay looked stays quiet.
     private func noticeCompletions(in sessions: [ChatSession], title: (ChatSession) -> String) {
-        let shown = Duration.seconds(6)
         for session in sessions {
             guard let completion = session.latestTurn?.completion else { continue }
             let known = completions[session.id]
@@ -396,19 +480,18 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             completions[session.id] = completion.turnID
             let recent = completion.endedAt.map { Date.now.timeIntervalSince($0) < 6 } ?? false
             guard known != nil || recent else { continue }
-            let (word, tone): (String, LiveCapsule.Tone) = switch completion.outcome {
-            case .completed: ("Done", .done)
-            case .interrupted: ("Stopped", .idle)
-            case .failed: ("Failed", .idle)
-            }
-            notice = Notice(text: word + " · " + title(session), tone: tone, expires: .now + shown)
-            noticeExpiry?.cancel()
-            noticeExpiry = Task { [weak self] in
-                try? await Task.sleep(for: shown + .milliseconds(100))
-                guard !Task.isCancelled else { return }
-                self?.render()
-            }
+            finished(completion.outcome, title: title(session))
         }
+    }
+
+    private func finished(_ outcome: TurnCompletion.Outcome, title: String) {
+        let (word, tone, mood): (String, LiveCapsule.Tone, GlassJelly.Mood?) = switch outcome {
+        case .completed: ("Done", .done, .done)
+        case .interrupted: ("Stopped", .idle, nil)
+        case .failed: ("Failed", .idle, .failed)
+        }
+        unseen = mood
+        announce(Line(text: word + " · " + title, tone: tone))
     }
 
     private func liveStatus() -> LiveStatus? {
@@ -538,7 +621,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // At the top centre, level with the ⋯ button; the strip it grabs runs
         // from the panel's edge to below the buttons.
         handle.frame = CGRect(x: size.width / 2 - 60, y: safe.top, width: 120, height: Self.inset + 44)
-        handle.subviews.first?.frame = CGRect(x: 42, y: 7, width: 36, height: 5)
+        handle.subviews.first?.frame = CGRect(x: 45, y: 5, width: 30, height: 4)
+        // At the bottom centre, in the inset under the field.
+        bottomHandle.frame = CGRect(x: size.width / 2 - 60, y: size.height - safe.bottom - 20, width: 120, height: 20)
+        bottomHandle.subviews.first?.frame = CGRect(x: 45, y: 11, width: 30, height: 4)
         for (controller, host) in [agent?.parts, thread?.parts].compactMap({ $0 }) {
             controller.setOverlayLayout(inset: Self.inset, safe: safe, contentWidth: contentWidth)
             place(host, controller, offset: 0)
@@ -609,7 +695,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // Full screen, the corners round less.
         let w = rect.width, h = rect.height, cell = Self.creatureCell
         let right = anchor?.right ?? true
-        let hasLine = bubble.headline?.isEmpty == false
         // Closed: the creature at the pill's end on the bubble's side, the
         // pill beside it (tucked under it when there is nothing to say).
         // Open: it stays put and the panel grows out of it, so it sits just
@@ -617,10 +702,16 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let creatureClosed = CGPoint(x: right ? w - 22 : 22, y: lower ? h - 22 : 22)
         // The pill slides to its new side on a spring rather than popping.
         if side.target != (right ? 0 : cell) { side.animate(to: right ? 0 : cell) }
-        let pill = hasLine
-            // A gap before the cube, bridged by the jelly's neck.
-            ? CGRect(x: side.value, y: (lower ? h - 44 : 0) + 3, width: max(1, w - cell), height: 38)
-            : CGRect(x: creatureClosed.x - 12, y: creatureClosed.y - 12, width: 24, height: 24)
+        // How much pill there is, from the glass's width beyond the
+        // creature's cell (the bubble's own, opening): as the glass narrows
+        // (its news over, or the line dragged in) the pill shrinks into the
+        // creature, continuously.
+        let reach = CGFloat.lerp(w, bubbleSize.width, opened) - cell
+        let extent = (reach / 40).clamped(), lineShare = extent * extent * (3 - 2 * extent)
+        // A gap before the cube, bridged by the jelly's neck.
+        let fullPill = CGRect(x: side.value, y: (lower ? h - 44 : 0) + 3, width: max(1, w - cell), height: 38)
+        let nub = CGRect(x: creatureClosed.x - 12, y: creatureClosed.y - 12, width: 24, height: 24)
+        let pill = CGRect.lerp(nub, fullPill, lineShare)
         let eased = opened * opened * (3 - 2 * opened)
         // Full screen reaches the display's edges; the head keeps its place.
         let edge = CGFloat.lerp(22, 34, fullness)
@@ -630,14 +721,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         glass.creatureAnchor = CGPoint(x: .lerp(creatureClosed.x, creatureOpen.x, opened), y: .lerp(creatureClosed.y, creatureOpen.y, opened))
         glass.creatureSide = right ? 1 : -1
         // The neck leaves the pill's end, or the panel's edge under the head.
-        let rootClosed = hasLine ? CGPoint(x: right ? pill.maxX - 10 : pill.minX + 10, y: pill.midY)
-            : CGPoint(x: creatureClosed.x, y: creatureClosed.y)
+        let pillEnd = CGPoint(x: right ? pill.maxX - 10 : pill.minX + 10, y: pill.midY)
+        let rootClosed = CGPoint(x: .lerp(creatureClosed.x, pillEnd.x, lineShare), y: .lerp(creatureClosed.y, pillEnd.y, lineShare))
         let root = CGPoint(x: .lerp(rootClosed.x, creatureOpen.x, eased), y: .lerp(rootClosed.y, lower ? h - 8 : 8, eased))
         glass.neckRoot = root
         glass.neckLength = max(1, hypot(glass.creatureAnchor.x - root.x, glass.creatureAnchor.y - root.y))
         glass.bodyRect = CGRect(x: .lerp(pill.minX, 0, opened), y: .lerp(pill.minY, 0, opened),
                                 width: .lerp(pill.width, w, opened), height: .lerp(pill.height, h, opened))
-        glass.cornerRadius = .lerp(hasLine ? 16 : 10, .lerp(Self.panelRadius, 40, fullness), opened)
+        glass.cornerRadius = .lerp(.lerp(10, 16, lineShare), .lerp(Self.panelRadius, 40, fullness), opened)
         glass.opened = opened
         glass.fill = Theme.paper
         // The panel is the same jelly as the head: the app tints it through
@@ -645,19 +736,20 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // text reads over anything.
         let dark = traitCollection.userInterfaceStyle == .dark
         glass.fillAmount = .lerp(0.15, .lerp(dark ? 0.84 : 0.86, dark ? 0.9 : 0.92, fullness), opened)
-        glass.tone = bubble.tone
         glass.typing = route.isOpen && keyboardTop < view.bounds.maxY
         glass.layoutChanged()
         headHandle.frame = glass.creatureFrame.insetBy(dx: -8, dy: -8)
         headHandle.isHidden = !route.isOpen
         view.bringSubviewToFront(headHandle)
+        placeCrew(around: glass.creatureFrame, right: right, showing: (1 - lineShare) * (1 - opened) * appeared)
 
         // The status line sits in the pill, and leaves in the first fifth of
         // the opening.
         bubbleStage.transform = .identity
         bubbleStage.frame = pill
         if bubble.frame.size != bubbleStage.bounds.size { bubble.frame = bubbleStage.bounds }
-        bubbleStage.alpha = (1 - opened * 5).clamped()
+        // The text goes before the pill is too short to hold it.
+        bubbleStage.alpha = (1 - opened * 5).clamped() * ((reach - 12) / 40).clamped()
         recordingTint.frame = local
         recordingTint.alpha = 0
         if let clip = revealedSize {
@@ -695,7 +787,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         page.backgroundColor = .clear
         outgoing?.view.backgroundColor = .clear
         body.bringSubviewToFront(handle)
+        body.bringSubviewToFront(bottomHandle)
         handle.accessibilityValue = route.panel.full ? "Full screen" : "Small"
+        // Full screen resizes from the top only.
+        bottomHandle.isHidden = route.panel.full
 
         // Flat push: a thread slides in on its own paper over the agent, which
         // drifts a third as far left and fades out first, so text never sits
@@ -730,6 +825,22 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         handle.frame.origin.y = y + panelSafe.top
         agent?.controller.setVisibleTop(y)
         thread?.controller.setVisibleTop(y)
+    }
+
+    /// The workers' sprouts, tucked in at the jelly's lower inner corner (on
+    /// the screen's side of it), partly behind it, while it has no line.
+    private func placeCrew(around creature: CGRect, right: Bool, showing: CGFloat) {
+        let inward: CGFloat = right ? -1 : 1
+        for (index, sprout) in crew.enumerated() {
+            let shown = (sprout.shown.value * showing).clamped(-0.2, 1.2)
+            let size: CGFloat = 15 * CGFloat.lerp(0.3, 1, shown.clamped())
+            let center = CGPoint(x: creature.midX + inward * (creature.width * 0.5 + 2 + 13 * CGFloat(index)),
+                                 y: creature.maxY - 6 - (index == 1 ? 3 : 0))
+            sprout.view.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+            sprout.view.center = center
+            sprout.view.alpha = shown.clamped()
+            sprout.view.isHidden = shown <= 0.01
+        }
     }
 
     /// Lays a view out at `size` and scales it to fill `rect`.
@@ -808,7 +919,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         guard !route.isOpen, project != nil else { return }
         Theme.openHaptic()
         makeKey()
+        unseen = nil
         route.open()
+        render()
         sync()
     }
 
@@ -845,6 +958,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         flying = Flight(attachmentID: attachment.id, conversation: conversation, start: start, lift: lift, picture: picture)
         conversation?.holdAttachment(attachment.id)
         model.attach(attachment)
+        unseen = nil
         route.open()
         makeKey()
         sync()
@@ -1089,7 +1203,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
         if gesture === bubblePress { return !route.isOpen && capture.recording == nil }
-        if gesture === bubbleTap || gesture === bubblePan { return !route.isOpen }
+        if gesture === bubbleTap { return !route.isOpen }
+        // A sideways drag from the line toward the jelly docks the line;
+        // any other drag moves the bubble.
+        if gesture === bubblePan || gesture === pillPan {
+            guard !route.isOpen else { return false }
+            return (gesture === pillPan) == startsDocking(gesture as! UIPanGestureRecognizer)
+        }
         // Where the finger went down, not where it is once the pan is
         // recognized: a quick drag has already left the strip by then.
         var point = gesture.location(in: body)
@@ -1109,6 +1229,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                 && !handle.frame.contains(point)
         }
         if gesture === handlePan || gesture === headPan { return route.isOpen }
+        if gesture === bottomPan { return route.isOpen && !route.panel.full }
         return true
     }
 
@@ -1126,12 +1247,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The head toggles the panel: tapped, it closes into the bubble.
     @objc private func headTapped() { close() }
 
-    /// The finger moves the panel's top edge along one path. Docked, only
-    /// the top moves, revealing the conversation from the bottom. Above the
-    /// tallest docked panel it morphs (stretch and cross blur, as the spring
-    /// does) toward full screen; shorter than `minimumHeight` it morphs
-    /// toward the bubble. Let go, the spring carries on from there with the
-    /// finger's speed, or back.
+    /// The finger moves the panel's top or bottom edge along one path; the
+    /// other edge stays. Docked, only that edge moves, revealing the
+    /// conversation (pinned to the panel's bottom). Past the tallest docked
+    /// panel the top edge morphs (stretch and cross blur, as the spring
+    /// does) toward full screen; shorter than `minimumHeight` either edge
+    /// morphs toward the bubble. Let go, the spring carries on from there
+    /// with the finger's speed, or back.
     @objc private func handleDragged(_ gesture: UIPanGestureRecognizer) {
         // From where the pan is recognized: its first translation includes
         // the system's slop, which would make the edge skip.
@@ -1139,49 +1261,80 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         switch gesture.state {
         case .began:
             dragSlop = gesture.translation(in: view).y
-            dragStart = frame.value
-            frame.hold(dragStart)
-            dragZone = nil
-            follow(top: dragStart.minY)
-            return
+            resizeBegan(gesture === bottomPan ? .bottom : .top)
         case .changed:
-            follow(top: dragStart.minY + dy)
+            follow(height: height(atEdge: edgeStart + dy))
             // Sideways the panel stays put; the jelly leans after the finger.
             glass.pull(gesture.translation(in: view).x)
         case .ended, .cancelled, .failed:
-            let vy = gesture.velocity(in: view).y
-            let top = dragStart.minY + dy + vy * 0.15
-            let tall = tallestDocked
-            glass.pull(nil)
-            frame.release()
-            if top < tall.minY - 0.4 * (tall.minY - fullFrame.minY) {
-                enter(.full)
-                route.panel.full = true
-            } else if top > collapseTop + 0.4 * (Self.minimumHeight - bubbleSize.height) {
-                enter(.collapse)
-                route.panel.full = false
-                close()
-            } else if top < tall.minY {
-                // Most of the way back from full: the tallest docked panel.
-                enter(.full)
-                route.panel.full = false
-                miniHeight = tall.height
-            } else if top > collapseTop {
-                enter(.collapse)
-                route.panel.full = false
-            } else {
-                route.panel.full = false
-                miniHeight = tall.maxY - top
-                // Hanging from the head, the panel's top carries it.
-                if !lower { anchor = (anchor?.right ?? true, top - Self.headGap) }
-            }
-            // Revealed from the bottom while only the height changes; a
-            // change of width (to or from full screen) is laid out live.
-            if revealedSize != nil, route.isOpen, abs(targetFrame.width - frame.value.width) > 0.5 { setLayout(.live) }
-            // The spring takes over: content follows the route again.
-            dragZone = nil
-            setNeedsUpdateOfSupportedInterfaceOrientations()
-            retarget(velocity: CGPoint(x: 0, y: vy), sizeVelocity: CGSize(width: 0, height: -vy))
+            resizeEnded(dy: dy, velocity: gesture.velocity(in: view).y)
+        default: break
+        }
+    }
+
+    private func resizeBegan(_ edge: Edge) {
+        resizing = edge
+        dragStart = frame.value
+        frame.hold(dragStart)
+        dragZone = nil
+        follow(height: height(atEdge: edgeStart))
+    }
+
+    /// Let go `dy` from where it started, moving at `vy`.
+    private func resizeEnded(dy: CGFloat, velocity vy: CGFloat) {
+        let height = height(atEdge: edgeStart + dy + vy * 0.15)
+        let tall = tallestDocked, full = fullHeight
+        glass.pull(nil)
+        frame.release()
+        if let full, height > tall.height + 0.4 * (full - tall.height) {
+            enter(.full)
+            route.panel.full = true
+        } else if height < Self.minimumHeight - 0.4 * (Self.minimumHeight - bubbleSize.height) {
+            enter(.collapse)
+            route.panel.full = false
+            close()
+        } else if height > tall.height {
+            // Most of the way back from full: the tallest docked panel.
+            enter(.full)
+            route.panel.full = false
+            dock(height: tall.height)
+        } else if height < Self.minimumHeight {
+            enter(.collapse)
+            route.panel.full = false
+        } else {
+            route.panel.full = false
+            dock(height: height)
+        }
+        // Revealed from the bottom while only the height changes; a
+        // change of width (to or from full screen) is laid out live.
+        if revealedSize != nil, route.isOpen, abs(targetFrame.width - frame.value.width) > 0.5 { setLayout(.live) }
+        // The spring takes over: content follows the route again.
+        dragZone = nil
+        setNeedsUpdateOfSupportedInterfaceOrientations()
+        switch resizing {
+        case .top: retarget(velocity: CGPoint(x: 0, y: vy), sizeVelocity: CGSize(width: 0, height: -vy))
+        case .bottom: retarget(velocity: .zero, sizeVelocity: CGSize(width: 0, height: vy))
+        }
+    }
+
+    /// Where the resized edge was when the finger took it.
+    private var edgeStart: CGFloat { resizing == .top ? dragStart.minY : dragStart.maxY }
+
+    /// The panel's height with the resized edge at `y` and the other where
+    /// the tallest docked panel has it.
+    private func height(atEdge y: CGFloat) -> CGFloat {
+        let tall = tallestDocked
+        return resizing == .top ? tall.maxY - y : y - tall.minY
+    }
+
+    /// Docks at `height`. The head rides the moving edge when it is on it:
+    /// the top in the upper half, the bottom in the lower.
+    private func dock(height: CGFloat) {
+        miniHeight = height
+        let tall = tallestDocked, right = anchor?.right ?? true
+        switch (resizing, lower) {
+        case (.top, false): anchor = (right, tall.maxY - height - Self.headGap)
+        case (.bottom, true): anchor = (right, tall.minY + height + Self.headGap)
         default: break
         }
     }
@@ -1189,30 +1342,50 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// The conversation's column: the docked panel's width, docked or not.
     private var contentWidth: CGFloat { miniFrame.width }
 
-    /// The tallest docked panel: the docked panel's sides and bottom, its top
-    /// just under the safe area.
+    /// The tallest docked panel for the resized edge: the other edge where
+    /// it is docked, this one as far as it goes (under the safe area, with
+    /// room for the head on its side).
     private var tallestDocked: CGRect {
-        let docked = miniFrame, top = safeBounds.minY + (lower ? 0 : Self.headRoom)
-        return CGRect(x: docked.minX, y: top, width: docked.width, height: docked.maxY - top)
+        let docked = miniFrame, safe = safeBounds
+        switch resizing {
+        case .top:
+            let top = safe.minY + (lower ? 0 : Self.headRoom)
+            return CGRect(x: docked.minX, y: top, width: docked.width, height: docked.maxY - top)
+        case .bottom:
+            let bottom = min(safe.maxY, keyboardTop - 8) - (lower ? Self.headRoom : 0)
+            return CGRect(x: docked.minX, y: docked.minY, width: docked.width, height: max(Self.minimumHeight, bottom - docked.minY))
+        }
     }
 
-    /// Shorter than here, the panel heads for the bubble.
-    private var collapseTop: CGFloat { tallestDocked.maxY - Self.minimumHeight }
+    /// The height at full screen along the resized edge's path (nil: the
+    /// bottom edge, which only resizes the docked panel).
+    private var fullHeight: CGFloat? {
+        resizing == .top ? tallestDocked.maxY - fullFrame.minY : nil
+    }
 
-    /// Holds the glass where the finger's top edge puts it on the path.
-    private func follow(top: CGFloat) {
-        let tall = tallestDocked, full = fullFrame
-        let zone: DragZone = top < tall.minY ? .full : top > collapseTop ? .collapse : .docked
+    /// The docked panel at `height`, its other edge in place.
+    private func docked(height: CGFloat) -> CGRect {
+        let tall = tallestDocked
+        return CGRect(x: tall.minX, y: resizing == .top ? tall.maxY - height : tall.minY, width: tall.width, height: height)
+    }
+
+    /// Holds the glass where the finger's edge puts it on the path.
+    private func follow(height: CGFloat) {
+        let tall = tallestDocked
+        let zone: DragZone = height > tall.height && fullHeight != nil ? .full : height < Self.minimumHeight ? .collapse : .docked
         enter(zone)
         let rect: CGRect
         switch zone {
         case .full:
-            rect = .lerp(tall, full, ((tall.minY - top) / max(1, tall.minY - full.minY)).clamped())
+            let full = fullHeight ?? tall.height
+            rect = .lerp(tall, fullFrame, ((height - tall.height) / max(1, full - tall.height)).clamped())
         case .docked:
-            rect = CGRect(x: tall.minX, y: top, width: tall.width, height: tall.maxY - top)
+            // The bottom edge stops at the tallest, with a little give.
+            let over = height - tall.height
+            rect = docked(height: over > 0 ? tall.height + 10 * tanh(over / 60) : height)
         case .collapse:
-            let start = CGRect(x: tall.minX, y: collapseTop, width: tall.width, height: Self.minimumHeight)
-            rect = .lerp(start, bubbleFrame, ((top - collapseTop) / max(1, Self.minimumHeight - bubbleSize.height)).clamped())
+            rect = .lerp(docked(height: Self.minimumHeight), bubbleFrame,
+                         ((Self.minimumHeight - height) / max(1, Self.minimumHeight - bubbleSize.height)).clamped())
         }
         frame.hold(rect)
     }
@@ -1240,6 +1413,61 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             layOutPanel(at: CGSize(width: tall.width, height: Self.minimumHeight), crossBlur: false)
         }
         applyScene()
+    }
+
+    /// Whether a pan on the bubble drags its line into the jelly: it starts
+    /// on the line (not the creature) and heads sideways toward the creature.
+    private func startsDocking(_ pan: UIPanGestureRecognizer) -> Bool {
+        guard capture.recording == nil, bubble.headline?.isEmpty == false else { return false }
+        let right = anchor?.right ?? true
+        let moved = pan.translation(in: glass), at = pan.location(in: glass)
+        let x = at.x - moved.x
+        let onLine = right ? x < glass.bounds.width - Self.creatureCell : x > Self.creatureCell
+        let v = pan.velocity(in: glass)
+        return onLine && v.x * (right ? 1 : -1) > abs(v.y)
+    }
+
+    /// The line follows the finger into the jelly, shortening from its far
+    /// end; let go past halfway (or flung), it is sucked in with the
+    /// finger's speed and stays docked until the panel next opens and
+    /// closes. Otherwise it springs back out.
+    @objc private func pillDragged(_ gesture: UIPanGestureRecognizer) {
+        let toward: CGFloat = anchor?.right ?? true ? 1 : -1
+        let travel = gesture.translation(in: view).x * toward
+        switch gesture.state {
+        case .began:
+            dragStart = frame.value
+            frame.hold(dragStart)
+        case .changed:
+            pillMoved(travel)
+            glass.look(at: gesture.location(in: glass))
+        case .ended, .cancelled, .failed:
+            pillReleased(travel, velocity: gesture.velocity(in: view).x * toward, docking: gesture.state == .ended)
+        default: break
+        }
+    }
+
+    /// The line `travel` points into the jelly (negative: pulled away).
+    private func pillMoved(_ travel: CGFloat) {
+        let right = anchor?.right ?? true, room = max(1, dragStart.width - Self.creatureCell)
+        // Into the jelly as far as it goes; pulled away, a little give.
+        let shift = travel >= 0 ? min(travel, room) : -12 * tanh(-travel / 80)
+        let width = dragStart.width - shift
+        frame.hold(CGRect(x: right ? dragStart.maxX - width : dragStart.minX, y: dragStart.minY, width: width, height: dragStart.height))
+    }
+
+    private func pillReleased(_ travel: CGFloat, velocity v: CGFloat, docking: Bool) {
+        let right = anchor?.right ?? true, room = max(1, dragStart.width - Self.creatureCell)
+        frame.release()
+        guard docking, travel + v * 0.15 > room * 0.5 else {
+            retarget(velocity: right ? CGPoint(x: v, y: 0) : .zero, sizeVelocity: CGSize(width: -v, height: 0))
+            return
+        }
+        Theme.selectionHaptic()
+        route.dock()
+        notice = nil
+        render()
+        retarget(velocity: right ? CGPoint(x: max(0, v), y: 0) : .zero, sizeVelocity: CGSize(width: -max(0, v), height: 0))
     }
 
     /// The glass and everything in it follow the finger; on release they
@@ -1314,7 +1542,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// (`capture`: as a long press does);
     /// `SQUIRCLE_OVERLAY_CYCLE=1` loops bubble → mini → full → thread → back
     /// → mini → bubble for recordings (`SQUIRCLE_SLOW` slows the springs).
-    private var demoStatus: (headline: String?, tone: LiveCapsule.Tone)?
+    private var demoActivity: Activity?
 
     /// `SQUIRCLE_OVERLAY_OPEN=record-screen|record-performance`: records for
     /// `SQUIRCLE_RECORD_SECONDS` (default 8), stops as a tap does, and with
@@ -1331,30 +1559,60 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
-        // `SQUIRCLE_BUBBLE_DEMO=1`: the bubble loops through made-up statuses
-        // (short, long, a rapid burst, needs you, done, idle) for recordings.
-        if environment["SQUIRCLE_BUBBLE_DEMO"] == "1" {
-            let script: [(String?, LiveCapsule.Tone, Double)] = [
-                (nil, .idle, 2.5),
-                ("Reading SquircleOverlay.swift", .working, 2.4),
-                ("Searching for LiveCapsule", .working, 2.4),
-                ("Running xcodebuild", .working, 0.15), ("Editing ThreadCells.swift", .working, 0.15),
-                ("Editing Theme.swift", .working, 0.15), ("Editing SquircleOverlay.swift", .working, 2.6),
-                ("Building Letters Abroad for the iPhone 17 Pro simulator with the overlay", .working, 2.8),
-                ("Testing", .working, 2.4),
-                ("Needs you · Letters Abroad", .needsYou, 3),
-                ("Done · Letters Abroad", .done, 3)
+        // `SQUIRCLE_BUBBLE_DEMO=1`: the bubble and the jelly loop through
+        // made-up activity (working, done, workers, needs you, failed) for
+        // recordings; `=idle|working|crew|needs|done|failed` holds one.
+        if let demo = environment["SQUIRCLE_BUBBLE_DEMO"] {
+            let crew = [(id: "demo-worker-1", title: "Fix the login crash", mood: JellyLook.Mood.working),
+                        (id: "demo-worker-2", title: "Add dark mode", mood: JellyLook.Mood.working)]
+            func working(_ text: String, workers: Int = 0) -> Activity {
+                Activity(line: Line(text: text, tone: .working, started: nil), mood: .working, workers: Array(crew.prefix(workers)))
+            }
+            let needs = Activity(line: Line(text: "Needs you · Letters Abroad", tone: .needsYou, started: nil), mood: .needsYou)
+            let script: [(Activity, TurnCompletion.Outcome?, Double)] = [
+                (Activity(), nil, 4),
+                (working("Reading SquircleOverlay.swift"), nil, 2.4),
+                (working("Editing GlassJelly.swift"), nil, 2.4),
+                (working("Building Letters Abroad for the iPhone 17 Pro simulator"), nil, 5),
+                (Activity(), .completed, 9),
+                (Activity(workers: crew), nil, 10),
+                (working("Reviewing the workers' changes", workers: 2), nil, 8),
+                (needs, nil, 6),
+                (Activity(), .failed, 9)
+            ]
+            let held: [String: (Activity, TurnCompletion.Outcome?)] = [
+                "idle": (Activity(), nil), "working": (working("Building Letters Abroad"), nil), "crew": (Activity(workers: crew), nil),
+                "needs": (needs, nil), "done": (Activity(), .completed), "failed": (Activity(), .failed)
             ]
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(2))
+                if let (activity, outcome) = held[demo] {
+                    guard let self else { return }
+                    demoActivity = activity
+                    if let outcome { finished(outcome, title: "Letters Abroad") }
+                    render()
+                    return
+                }
                 while true {
-                    for (headline, tone, pause) in script {
+                    self?.unseen = nil
+                    for (activity, outcome, pause) in script {
                         guard let self else { return }
-                        self.demoStatus = (headline, tone)
-                        self.render()
+                        demoActivity = activity
+                        if let outcome { finished(outcome, title: "Letters Abroad") }
+                        render()
                         try? await Task.sleep(for: .seconds(pause))
                     }
                 }
+            }
+        }
+        // `SQUIRCLE_OVERLAY_GESTURES=1`: drags as a finger would, through
+        // the gestures' own steps (the simulator can't be touched by a
+        // script here): the line into the jelly, then open, the top edge
+        // up and down, the bottom edge up and down, close.
+        if environment["SQUIRCLE_OVERLAY_GESTURES"] == "1" {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(6))
+                await self?.debugGestures()
             }
         }
         if let slow = environment["SQUIRCLE_SLOW"].flatMap(Double.init) { SpringDriver.debugSlowMotion = slow }
@@ -1398,6 +1656,32 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         }
     }
 
+    private func debugGestures() async {
+        func frames(_ count: Int, _ step: (CGFloat) -> Void) async {
+            for i in 1...count {
+                let t = CGFloat(i) / CGFloat(count)
+                step(t * t * (3 - 2 * t))
+                await DisplayFrame.next()
+            }
+        }
+        // The line into the jelly.
+        dragStart = frame.value
+        frame.hold(dragStart)
+        let room = dragStart.width - Self.creatureCell
+        await frames(50) { self.pillMoved(room * 0.7 * $0) }
+        pillReleased(room * 0.7, velocity: 300, docking: true)
+        try? await Task.sleep(for: .seconds(3))
+        open()
+        try? await Task.sleep(for: .seconds(2.5))
+        for (edge, dy) in [(Edge.top, -160.0), (.top, 160), (.bottom, -150), (.bottom, 150)] as [(Edge, CGFloat)] {
+            resizeBegan(edge)
+            await frames(60) { self.follow(height: self.height(atEdge: self.edgeStart + dy * $0)) }
+            resizeEnded(dy: dy, velocity: 0)
+            try? await Task.sleep(for: .seconds(2))
+        }
+        close()
+    }
+
     /// `SQUIRCLE_JELLY_STRESS=1` (`SQUIRCLE_JELLY_STRESS_SECONDS`, default
     /// 40): flings, drags, pokes, backgrounds, status changes, open/close,
     /// Reduce Motion and dropped frames at random 30–500 ms intervals, every
@@ -1427,9 +1711,11 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             unsettled.append(label)
             NSLog("JELLY STRESS did not settle: %@ — %@", label, glass.debugState)
         }
-        let statuses: [(String?, LiveCapsule.Tone)] = [
-            (nil, .idle), ("Reading GlassJelly.swift", .working), ("Building Letters Abroad for the simulator", .working),
-            ("Needs you · Letters Abroad", .needsYou), ("Done · Letters Abroad", .done), ("Worker · fix", .idle)
+        let statuses: [Activity] = [
+            Activity(), Activity(line: Line(text: "Reading GlassJelly.swift", tone: .working), mood: .working),
+            Activity(line: Line(text: "Building Letters Abroad for the simulator", tone: .working), mood: .working),
+            Activity(line: Line(text: "Needs you · Letters Abroad", tone: .needsYou), mood: .needsYou),
+            Activity(workers: [("stress", "fix", .working)]), Activity(mood: .done), Activity(mood: .failed)
         ]
         let deadline = CACurrentMediaTime() + seconds
         while CACurrentMediaTime() < deadline {
@@ -1458,8 +1744,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                 await pause(0.05...0.8)
                 glass.debugBackground(false)
             case 4:
-                let status = statuses.randomElement()!
-                demoStatus = (status.0, status.1)
+                demoActivity = statuses.randomElement()!
                 render()
             case 5:
                 [{ $0.open() }, { $0.close() }, { $0.toggleFull() }].randomElement()!(self)
