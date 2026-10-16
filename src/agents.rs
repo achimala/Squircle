@@ -5,9 +5,11 @@
 //! the start of each turn, and a wake-up when a worker finishes or needs
 //! input. How to work is up to the user and the agent. No model runs here.
 
+use crate::fsm::coordinator::agent::{self as m14, Order};
 use crate::fsm::coordinator::upkeep::{self as m26, Origin, Reading};
 use crate::fsm::coordinator::outbox::{self, Outbound, Settled};
-use crate::fsm::coordinator::{Command, Dispatched, Identity};
+use crate::fsm::coordinator::worker::{self as m15, ArchiveOrder, BootEffect, BootEvent};
+use crate::fsm::coordinator::{Command, Dispatched, Identity, Pending};
 use crate::fsm::core::commit::{Gate, JsonFile};
 use crate::fsm::core::{self as core, CommandID, Disposition, Epoch, Revision};
 use crate::store::private_dir;
@@ -41,50 +43,16 @@ pub struct Agent {
     pub lifecycle: Lifecycle,
 }
 
-/// Where an app agent is between creation, ordinary use and a reset. Each
-/// operation owns its own progress and last error, so a replacement cannot
-/// exist without the fresh start it belongs to.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-#[serde(tag = "state", rename_all = "kebab-case")]
-pub enum Lifecycle {
-    /// Reserved before T3 is asked to create the thread, so a retry or a
-    /// restart finishes that thread instead of creating a second agent.
-    Creating,
-    /// `refresh`: after a restart, the next turn's note carries the current
-    /// instructions, because Claude restores a resumed session's original
-    /// system prompt.
-    Ready {
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        refresh: bool,
-    },
-    /// A restart or fresh start that has not begun: it runs once no turn is
-    /// running (an agent cannot stop its own session while it runs, and a
-    /// newer turn is never stopped), and is retried after a failure.
-    ResetQueued {
-        reset: Reset,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        #[serde(default, skip_serializing_if = "is_zero")]
-        failures: u32,
-    },
-    /// A fresh start past its point of no return: the old thread is stopped
-    /// and renamed; the rest is retried with these identities.
-    Replacing {
-        replacement: Replacement,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        #[serde(default, skip_serializing_if = "is_zero")]
-        failures: u32,
-    },
-}
-
-fn is_zero(n: &u32) -> bool { *n == 0 }
+pub use crate::fsm::coordinator::agent::{Lifecycle, Replacement, Reset};
+pub use crate::fsm::coordinator::thread::{Execution, Phase, ThreadObservation};
+pub use crate::fsm::coordinator::worker::{ArchiveStep, Stage};
 
 impl Lifecycle {
     /// Records a reset attempt's outcome; returns the backoff before the
     /// next attempt after a failure.
     fn attempted(&mut self, failure: Option<String>) -> Option<Duration> {
-        let (Lifecycle::ResetQueued { error, failures, .. } | Lifecycle::Replacing { error, failures, .. }) = self else { return None };
+        let (Lifecycle::ResetQueued { error, failures, .. } | Lifecycle::Restarting { error, failures, .. }
+             | Lifecycle::Replacing { error, failures, .. }) = self else { return None };
         *failures = if failure.is_some() { (*failures + 1).min(6) } else { 0 };
         *error = failure;
         error.is_some().then(|| Duration::from_secs(4 << *failures))
@@ -117,7 +85,7 @@ impl TryFrom<AgentFile> for Agent {
         let lifecycle = match f.lifecycle {
             Some(lifecycle) => lifecycle,
             None => match (f.creating, f.pending, f.replacing) {
-                (true, None, None) => Lifecycle::Creating,
+                (true, None, None) => Lifecycle::Creating { command: None },
                 (false, Some(Reset::Fresh { .. }), Some(replacement)) => Lifecycle::Replacing { replacement, error: f.reset_error, failures: 0 },
                 (false, Some(reset), None) => Lifecycle::ResetQueued { reset, error: f.reset_error, failures: 0 },
                 (false, None, None) => Lifecycle::Ready { refresh: f.refresh },
@@ -126,31 +94,6 @@ impl TryFrom<AgentFile> for Agent {
         };
         Ok(Agent { project_id: f.project_id, thread_id: f.thread_id, created_at: f.created_at, lifecycle })
     }
-}
-
-/// `restart` relaunches the agent's Claude session on the same thread, so the
-/// next message starts with the current plugin instructions and the same
-/// history. `fresh` replaces the thread with a new one seeded by a handoff.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum Reset {
-    Restart,
-    Fresh { note: Option<String> },
-}
-
-/// A fresh start under way: the old thread has been stopped and renamed
-/// once the handoff is gathered; the rest is retried with these identities.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub struct Replacement {
-    pub previous: String,
-    pub thread_id: String,
-    pub model: String,
-    pub runtime_mode: String,
-    pub handoff: String,
-    pub message_id: String,
-    /// Whether the handoff may have reached T3; checked before sending again.
-    #[serde(default, alias = "handoff_sent", deserialize_with = "outbox::delivery_or_legacy")]
-    pub delivery: Delivery,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -167,29 +110,6 @@ pub struct Worker {
     pub notified: Option<WorkerEvent>,
     #[serde(default, alias = "archived", deserialize_with = "stage_or_legacy")]
     pub stage: Stage,
-}
-
-/// A worker from the moment it is reserved until T3 has archived it.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum Stage {
-    /// Recorded before T3 is asked to create the thread. Until T3 shows the
-    /// thread, the same command (same thread and message IDs) is sent again,
-    /// never a second worker.
-    Bootstrapping { message_id: String, command: Value },
-    #[default]
-    Active,
-    /// Its session was confirmed stopped and its files removed; T3 has not
-    /// archived the thread yet.
-    FilesRemoved,
-    Archived,
-}
-
-impl Stage {
-    /// Owned by its coordinator: shown on the board and woken about.
-    pub fn live(&self) -> bool {
-        matches!(self, Stage::Bootstrapping { .. } | Stage::Active)
-    }
 }
 
 fn stage_or_legacy<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Stage, D::Error> {
@@ -329,7 +249,13 @@ pub struct Registry {
     pub upkeep: BTreeMap<String, m26::Record>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub undelivered: Vec<Undelivered>,
+    /// Commands callers wait for whose answer was lost, newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intents: Vec<Pending>,
 }
+
+/// How many unanswered caller commands are kept.
+const INTENTS_KEPT: usize = 20;
 
 type RegistryGate = Gate<Registry, Infallible, JsonFile>;
 
@@ -348,17 +274,12 @@ fn identity() -> Identity {
     Identity { id: CommandID::fresh(), created_at: crate::t3::iso_now() }
 }
 
-/// A command sent once, for an operation that keeps no intent of its own
-/// (yet: creation, resets and archiving are journaled by M14/M15 later).
-async fn dispatch_once(client: &dyn Peer, body: Value) -> Result<Value> {
-    client.dispatch(&Command::new(&identity(), body)).await.into_result()
-}
-
 /// How long a build's watch is kept: past this, a build is long finished.
 const BUILD_WATCH_SECS: u64 = 14 * 24 * 3600;
 
 /// T3's runtime modes. A new app agent gets the one the user chose, or
-/// `full-access`; a fresh start keeps its predecessor's.
+/// `full-access`; a fresh start keeps its predecessor's, and workers inherit
+/// their agent's. A thread whose mode T3 doesn't report is never given one.
 const RUNTIME_MODES: [&str; 4] = ["approval-required", "auto-accept-edits", "auto", "full-access"];
 const AGENT_MODE: &str = "full-access";
 
@@ -366,6 +287,12 @@ fn runtime_mode(mode: Option<&str>) -> Result<String> {
     let mode = mode.unwrap_or(AGENT_MODE);
     ensure!(RUNTIME_MODES.contains(&mode), "Unknown runtime mode \"{mode}\". Modes: {}", RUNTIME_MODES.join(", "));
     Ok(mode.into())
+}
+
+/// The runtime mode T3 reports for a thread, as the commands that continue
+/// it send it back. None if T3 doesn't say: then nothing is sent.
+fn thread_mode(row: &Value) -> Result<&str> {
+    row["runtimeMode"].as_str().context("T3 doesn't say which runtime mode the thread runs in, so nothing was sent")
 }
 
 /// The part of T3 the agents use; a fake stands in for it in tests.
@@ -479,9 +406,11 @@ fn users_own(message: &Value) -> bool {
 fn worker_mode(driver: &str, coordinator: Option<&str>, requested: Option<&str>) -> Result<(String, &'static str)> {
     let mode = match requested {
         Some(mode) => runtime_mode(Some(mode))?,
-        None => match runtime_mode(coordinator).unwrap_or_else(|_| AGENT_MODE.into()).as_str() {
-            "auto" if driver == "antigravity" => "auto-accept-edits".into(),
-            mode => mode.into(),
+        None => match coordinator.filter(|mode| RUNTIME_MODES.contains(mode)) {
+            Some("auto") if driver == "antigravity" => "auto-accept-edits".into(),
+            Some(mode) => mode.into(),
+            None => bail!("T3 doesn't report a runtime mode this service knows for the app agent ({}), so the worker can't inherit it; \
+                           pass --runtime-mode", coordinator.unwrap_or("none")),
         },
     };
     let permissions = match (driver, mode.as_str()) {
@@ -566,94 +495,7 @@ impl crate::push::Threads for Agents {
     }
 }
 
-/// Whether T3 runs a provider session for a thread. T3 counts any session
-/// not `stopped` as live (it stops one before archiving), and a stop it
-/// carries out always ends in `stopped`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Execution {
-    /// No session, or T3 reports it stopped.
-    Stopped,
-    /// A session between turns (`idle`, `ready`, `interrupted`, `error`).
-    Idle,
-    /// A turn is running, possibly waiting on a question or approval.
-    Running,
-    /// A session status this service does not know; possibly running.
-    Unknown,
-}
-
-/// A thread as T3's shell row describes it, decoded once.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ThreadObservation {
-    pub turn: Option<String>,
-    pub execution: Execution,
-    /// A question or approval waits on the user.
-    pub waiting: bool,
-    pub failed: bool,
-}
-
-/// What a thread shows as: `working`, `needs-you`, `error` or `done`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Phase {
-    Working,
-    NeedsYou,
-    Error,
-    Done,
-}
-
-impl Phase {
-    pub fn label(self) -> &'static str {
-        match self {
-            Phase::Working => "working",
-            Phase::NeedsYou => "needs-you",
-            Phase::Error => "error",
-            Phase::Done => "done",
-        }
-    }
-}
-
 impl ThreadObservation {
-    pub fn decode(row: &Value) -> Self {
-        let session = &row["session"];
-        let waiting = row["hasPendingApprovals"] == true || row["hasPendingUserInput"] == true;
-        let turn_running = row["latestTurn"]["state"] == "running" || session["activeTurnId"].is_string();
-        let execution = match session["status"].as_str() {
-            Some("stopped") => Execution::Stopped,
-            _ if turn_running => Execution::Running,
-            _ if session.is_null() => Execution::Stopped,
-            Some("starting" | "running") => Execution::Running,
-            // T3 asks only from within a turn.
-            Some("idle" | "ready" | "interrupted" | "error") if waiting => Execution::Running,
-            Some("idle" | "ready" | "interrupted" | "error") => Execution::Idle,
-            _ => Execution::Unknown,
-        };
-        ThreadObservation {
-            turn: row["latestTurn"]["turnId"].as_str().map(str::to_string),
-            execution,
-            waiting,
-            failed: session["status"] == "error" || row["latestTurn"]["state"] == "error",
-        }
-    }
-
-    /// What it shows as. A waiting thread shows as needs-you whatever its
-    /// session, but a stopped session is never "working".
-    pub fn phase(&self) -> Phase {
-        if self.waiting {
-            Phase::NeedsYou
-        } else if self.failed {
-            Phase::Error
-        } else if matches!(self.execution, Execution::Running | Execution::Unknown) {
-            Phase::Working
-        } else {
-            Phase::Done
-        }
-    }
-
-    /// Whether a turn may be running: such a session is never stopped by a
-    /// reset, nor its files removed without discarding its work.
-    pub fn busy(&self) -> bool {
-        matches!(self.execution, Execution::Running | Execution::Unknown)
-    }
-
     /// The wake-up its state calls for, if any: a stopped turn (done, error)
     /// or one waiting on its owner, each delivered once.
     fn wake(&self) -> Option<WorkerEvent> {
@@ -1248,8 +1090,11 @@ impl Agents {
         let saved = self.change_if(|registry| {
             let (adopted, progressed) = changes(registry);
             if adopted.is_empty() && progressed.is_empty() { return None }
+            let shown = core::Observed::Current { epoch: Epoch::default(), revision: Revision::default(), value: true };
             for id in adopted {
-                if let Some(worker) = registry.workers.get_mut(&id) { worker.stage = Stage::Active; }
+                if let Some(worker) = registry.workers.get_mut(&id) {
+                    worker.stage = m15::bootstrap(worker.stage.clone(), BootEvent::Look { thread: shown.clone() }).state;
+                }
             }
             for (id, event) in progressed {
                 if let Some(worker) = registry.workers.get_mut(&id) { worker.notified = Some(event); }
@@ -1329,8 +1174,8 @@ impl Agents {
                     outbox::Effect::Commit | outbox::Effect::Settle(_) => {}
                     outbox::Effect::Send(identity) => {
                         let outcome = match self.wake_command(&wake, &identity) {
-                            Some(command) => client.dispatch(&command).await,
-                            None => Dispatched::NotSent("T3's shell no longer has the agent's thread".into()),
+                            Ok(command) => client.dispatch(&command).await,
+                            Err(why) => Dispatched::NotSent(why),
                         };
                         if let Dispatched::Refused(detail) | Dispatched::NotSent(detail) | Dispatched::Unknown(detail) = &outcome {
                             eprintln!("Wake-up {id} not delivered yet: {detail}");
@@ -1392,24 +1237,30 @@ impl Agents {
         Ok(Some((Wake { outbound: reduction.state, ..wake }, reduction.effects)))
     }
 
-    /// Whether the live shell has a thread, as M16 sees it.
-    fn recipient(&self, thread: &str) -> core::Observed<bool> {
+    /// What the live shell says of a thread, as the machines read it.
+    fn seen<T>(&self, thread: &str, f: impl Fn(Option<ThreadObservation>) -> T) -> core::Observed<T> {
         match self.observe(thread) {
-            Observed::Current { epoch, value } => core::Observed::Current { epoch: Epoch(epoch), revision: Revision::default(), value: value.is_some() },
-            Observed::Stale { epoch, value } => core::Observed::Stale { epoch: Epoch(epoch), revision: Revision::default(), last: Some(value.is_some()) },
+            Observed::Current { epoch, value } => core::Observed::Current { epoch: Epoch(epoch), revision: Revision::default(), value: f(value) },
+            Observed::Stale { epoch, value } => core::Observed::Stale { epoch: Epoch(epoch), revision: Revision::default(), last: Some(f(value)) },
             Observed::Unavailable => core::Observed::Unavailable("T3's thread list is not current".into()),
         }
     }
 
+    /// Whether the live shell has a thread, as M16 sees it.
+    fn recipient(&self, thread: &str) -> core::Observed<bool> {
+        self.seen(thread, |o| o.is_some())
+    }
+
     /// The update as T3 is sent it, under `identity`. T3 dedupes by command
     /// ID alone, so the rest may follow the thread's current mode.
-    fn wake_command(&self, wake: &Wake, identity: &Identity) -> Option<Command> {
-        let agent = self.thread(&wake.coordinator)?;
-        Some(Command::new(identity, json!({
+    fn wake_command(&self, wake: &Wake, identity: &Identity) -> std::result::Result<Command, String> {
+        let agent = self.thread(&wake.coordinator).ok_or("T3's shell no longer has the agent's thread")?;
+        let mode = thread_mode(&agent).map_err(|e| e.to_string())?;
+        Ok(Command::new(identity, json!({
             "type": "thread.turn.start", "threadId": wake.coordinator,
             "message": {"messageId": wake.message_id, "role": "user", "text": wake.text, "attachments": [],
                         "context": {"version": 1, "records": [wake.record]}},
-            "runtimeMode": agent["runtimeMode"].as_str().unwrap_or(AGENT_MODE),
+            "runtimeMode": mode,
             "interactionMode": "default",
         })))
     }
@@ -1589,80 +1440,124 @@ impl Agents {
 
     /// Call with the project's operation lock held.
     async fn existing_or_create(&self, client: &dyn Peer, project_id: &str, model: Option<&str>, mode: &str) -> Result<Agent> {
-        let Some(agent) = self.registry().agents.get(project_id).cloned() else {
-            return self.create(client, project_id, model, mode).await;
-        };
-        if matches!(agent.lifecycle, Lifecycle::Replacing { .. }) {
-            return Ok(agent);
-        }
-        let creating = agent.lifecycle == Lifecycle::Creating;
-        // A thread T3 has not sent yet may just be new: wait for it a moment
-        // (a reservation is finished below instead).
-        let row = match self.thread(&agent.thread_id) {
-            None if !creating => self.wait_thread(&agent.thread_id).await.ok(),
-            row => row,
-        };
-        match row {
-            Some(row) if row["archivedAt"].is_null() => {
-                Ok(if creating { self.created(project_id)? } else { agent })
-            }
-            // A reservation whose creation may not have reached T3: finish it
-            // under the same thread ID rather than starting another agent.
-            None if creating => {
-                let dispatched = self.create_thread(client, project_id, &agent.thread_id, model, mode).await;
-                if self.wait_thread(&agent.thread_id).await.is_err() {
-                    dispatched?;
-                    bail!("T3 has not created the app agent's thread yet; try again");
+        let saved = self.registry().agents.get(project_id).cloned();
+        let agent = match saved {
+            Some(agent @ Agent { lifecycle: Lifecycle::Creating { .. }, .. }) => agent,
+            Some(agent @ Agent { lifecycle: Lifecycle::Replacing { .. }, .. }) => return Ok(agent),
+            Some(agent) => {
+                // A thread T3 has not sent yet may just be new: wait for it a moment.
+                let row = match self.thread(&agent.thread_id) {
+                    None => self.wait_thread(&agent.thread_id).await.ok(),
+                    row => row,
+                };
+                if row.is_some_and(|row| row["archivedAt"].is_null()) {
+                    return Ok(agent);
                 }
-                self.created(project_id)
+                // Archived or deleted in T3: start a new agent.
+                self.reserve(client, project_id).await?
             }
-            // Archived or deleted in T3: start a new agent.
-            _ => self.create(client, project_id, model, mode).await,
-        }
+            None => self.reserve(client, project_id).await?,
+        };
+        self.create(client, &agent, model, mode).await
     }
 
-    /// Reserves the new agent in the registry, then has T3 create its thread.
-    async fn create(&self, client: &dyn Peer, project_id: &str, model: Option<&str>, mode: &str) -> Result<Agent> {
+    /// Reserves a new agent in the registry before T3 hears of it, so a
+    /// retry or a restart finishes that thread instead of making another.
+    async fn reserve(&self, client: &dyn Peer, project_id: &str) -> Result<Agent> {
         let config = client.call("server.getConfig", json!({})).await?;
         let ready = config["providers"].as_array().into_iter().flatten()
             .any(|p| p["instanceId"] == INSTANCE && p["status"] == "ready");
         ensure!(ready, "T3 has no ready \"{INSTANCE}\" agent instance. Run: squircle agent setup");
         let agent = Agent {
             project_id: project_id.into(), thread_id: uuid::Uuid::new_v4().to_string(), created_at: crate::model::now(),
-            lifecycle: Lifecycle::Creating,
+            lifecycle: Lifecycle::Creating { command: None },
         };
         self.change(|registry| registry.agents.insert(project_id.into(), agent.clone()))?;
-        self.create_thread(client, project_id, &agent.thread_id, model, mode).await?;
-        self.wait_thread(&agent.thread_id).await?;
-        self.created(project_id)
+        Ok(agent)
     }
 
-    async fn create_thread(&self, client: &dyn Peer, project_id: &str, thread_id: &str, model: Option<&str>, mode: &str) -> Result<()> {
+    /// Has T3 create a reserved agent's thread (M14): the creation is saved
+    /// before it is sent, and one T3 left unanswered is sent again as itself.
+    async fn create(&self, client: &dyn Peer, agent: &Agent, model: Option<&str>, mode: &str) -> Result<Agent> {
+        let (project, thread) = (agent.project_id.as_str(), agent.thread_id.as_str());
+        let create = self.create_command(project, thread, model, mode, &identity())?;
+        let mut event = m14::Event::Create { exists: self.seen(thread, |o| o.is_some()), create };
+        loop {
+            let mut next = None;
+            for effect in self.reduce_agent(project, event)? {
+                match effect {
+                    m14::Effect::Commit | m14::Effect::Rebind => {}
+                    m14::Effect::SendCreate(command) => {
+                        next = Some(m14::Event::Sent { outcome: client.dispatch(&command).await, next: identity() });
+                    }
+                    m14::Effect::Done => {
+                        // T3 has it; it shows in the shell a moment later.
+                        let _ = self.wait_thread(thread).await;
+                        return self.registry().agents.get(project).cloned().context("The app's agent is gone");
+                    }
+                    m14::Effect::Failed(detail) => bail!(detail),
+                    other => bail!("Unexpected step while creating the app's agent: {other:?}"),
+                }
+            }
+            event = next.context("The app agent's creation stopped without an answer")?;
+        }
+    }
+
+    fn create_command(&self, project_id: &str, thread_id: &str, model: Option<&str>, mode: &str, identity: &Identity) -> Result<Command> {
         let project = self.shell.lock().unwrap().projects.get(project_id).cloned()
             .with_context(|| format!("T3 has no project {project_id}"))?;
         let model = model.map(str::to_string)
             .or_else(|| project["defaultModelSelection"]["model"].as_str().filter(|_| project["defaultModelSelection"]["instanceId"] == "claudeAgent").map(str::to_string))
             .unwrap_or_else(|| DEFAULT_MODEL.into());
         let name = project["title"].as_str().unwrap_or("App");
-        dispatch_once(client, json!({
+        Ok(Command::new(identity, json!({
             "type": "thread.create", "threadId": thread_id, "projectId": project_id,
             "title": format!("{name} agent"),
             "modelSelection": {"instanceId": INSTANCE, "model": model},
             "runtimeMode": mode, "interactionMode": "default",
             "branch": null, "worktreePath": null,
-        })).await?;
-        Ok(())
+        })))
     }
 
-    /// T3 shows the reserved agent's thread: it is ready.
-    fn created(&self, project_id: &str) -> Result<Agent> {
-        let agent = self.registry().agents.get(project_id).cloned().context("The app's agent is gone")?;
-        if agent.lifecycle != Lifecycle::Creating { return Ok(agent) }
-        self.change_if(|registry| {
-            let agent = registry.agents.get_mut(project_id).filter(|a| a.lifecycle == Lifecycle::Creating)?;
-            agent.lifecycle = Lifecycle::Ready { refresh: false };
-            Some(agent.clone())
-        })?.context("The app's agent changed meanwhile; try again")
+    /// Reduces `event` for the app's agent (M14) and saves what it decided,
+    /// with the rebinding a replacement's handoff step implies, before any
+    /// effect it asks for runs.
+    fn reduce_agent(&self, project: &str, event: m14::Event) -> Result<Vec<m14::Effect>> {
+        let mut gate = self.ledger.lock().unwrap();
+        gate.resolve()?;
+        let agent = gate.committed().agents.get(project).cloned().context("The app has no agent")?;
+        let reduction = m14::reduce(agent.lifecycle, event);
+        if let Disposition::ProtocolFault(fault) = &reduction.disposition {
+            debug_assert!(false, "{fault}");
+            eprintln!("Agent lifecycle fault for {project}: {fault}");
+        }
+        #[cfg(debug_assertions)]
+        for violation in m14::violations(&reduction.state) {
+            eprintln!("Agent lifecycle invariant broken for {project}: {}", violation.0);
+        }
+        let rebind = reduction.effects.contains(&m14::Effect::Rebind);
+        if rebind || reduction.effects.contains(&m14::Effect::Commit) {
+            let mut next = gate.committed().clone();
+            if let (true, Lifecycle::Replacing { replacement, .. }) = (rebind, &reduction.state) {
+                Self::rebind(&mut next, project, &replacement.previous, &replacement.thread_id);
+            }
+            if let Some(agent) = next.agents.get_mut(project) { agent.lifecycle = reduction.state; }
+            gate.commit(next, vec![])?;
+        }
+        Ok(reduction.effects)
+    }
+
+    /// The agent, its workers and its updates not sent yet follow the new
+    /// thread. One that may have reached the old thread is settled there
+    /// (M16), never resent.
+    fn rebind(registry: &mut Registry, project: &str, previous: &str, thread: &str) {
+        for worker in registry.workers.values_mut().filter(|w| w.coordinator == previous) {
+            worker.coordinator = thread.into();
+        }
+        for wake in registry.outbox.iter_mut().filter(|w| w.coordinator == previous && w.outbound.delivery == Delivery::Queued) {
+            wake.coordinator = thread.into();
+        }
+        if let Some(agent) = registry.agents.get_mut(project) { agent.thread_id = thread.into(); }
     }
 
     fn agent_for_thread(&self, thread_id: &str) -> Option<Agent> {
@@ -1692,13 +1587,10 @@ impl Agents {
         let project = self.find_agent(project_id, thread_id)?.project_id;
         let _op = self.op(&project).await;
         let agent = self.find_agent(Some(&project), None)?;
-        match agent.lifecycle {
-            Lifecycle::Replacing { .. } => bail!("A fresh start of this agent is already under way"),
-            Lifecycle::Creating => bail!("The app's agent is still being created"),
-            _ => {}
-        }
         self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
-        self.update_agent(&project, |a| a.lifecycle = Lifecycle::ResetQueued { reset, error: None, failures: 0 })?;
+        for effect in self.reduce_agent(&project, m14::Event::Request(reset))? {
+            if let m14::Effect::Failed(detail) = effect { bail!(detail) }
+        }
         self.resets.lock().unwrap().insert(project.clone());
         let result = self.perform(&project).await;
         self.reset_finished(&project, &result);
@@ -1715,7 +1607,8 @@ impl Agents {
             let due: Vec<String> = registry.agents.values().filter(|agent| {
                 !running.contains(&agent.project_id) && match agent.lifecycle {
                     Lifecycle::Replacing { .. } => shell.current(),
-                    Lifecycle::ResetQueued { .. } => shell.observe(&agent.thread_id).current().flatten().is_some_and(|o| !o.busy()),
+                    Lifecycle::ResetQueued { .. } | Lifecycle::Restarting { .. } =>
+                        shell.observe(&agent.thread_id).current().flatten().is_some_and(|o| !o.busy()),
                     _ => false,
                 }
             }).map(|a| a.project_id.clone()).collect();
@@ -1759,97 +1652,126 @@ impl Agents {
         }
     }
 
-    /// The agent thread as T3 shows it now; a reset acts on nothing older.
+    /// The agent thread as T3 shows it now; nothing older is acted on.
     fn observe_now(&self, thread: &str) -> Result<ThreadObservation> {
         match self.observe(thread) {
             Observed::Current { value: Some(observation), .. } => Ok(observation),
             Observed::Current { value: None, .. } => bail!("The app agent's thread is gone"),
-            _ => bail!("T3's thread list is not current; the reset is retried"),
+            _ => bail!("T3's thread list is not current; try again"),
         }
     }
 
-    /// Carries out the project's queued or interrupted reset. Call with its
-    /// operation lock. Nothing is stopped while a turn may be running, the
-    /// agent's or a newer one: that defers the reset until it ends.
+    /// What T3 shows now of the agent's thread and, during a replacement,
+    /// of the new one: what a reset step decides on.
+    fn look(&self, agent: &Agent) -> m14::Event {
+        let successor = match &agent.lifecycle {
+            Lifecycle::Replacing { replacement, .. } => self.seen(&replacement.thread_id, |o| o.is_some()),
+            _ => core::Observed::Unavailable("no replacement".into()),
+        };
+        m14::Event::Look { agent: self.seen(&agent.thread_id, |o| o), successor, next: identity() }
+    }
+
+    /// Carries out the project's queued or interrupted reset (M14), each
+    /// step saved before its command is sent. Call with its operation lock.
+    /// Nothing is stopped while a turn may be running, the agent's or a
+    /// newer one: that defers the reset until it ends.
     async fn perform(&self, project: &str) -> Result<Value> {
         let client = self.ready().await?;
-        let agent = self.find_agent(Some(project), None)?;
-        let stop = |thread: &str| dispatch_once(&*client, json!({"type": "thread.session.stop", "threadId": thread}));
-        let deferred = |kind: &str| json!({"project_id": project, "thread_id": agent.thread_id, "action": kind, "when": "after-turn",
-            "next": "Happens when the agent's current turn ends. If that is you: end your turn now, telling the user in a sentence."});
-        let mut plan = match agent.lifecycle.clone() {
-            Lifecycle::Creating | Lifecycle::Ready { .. } => {
-                return Ok(json!({"project_id": project, "thread_id": agent.thread_id, "when": "done"}));
-            }
-            Lifecycle::ResetQueued { reset: Reset::Restart, .. } => {
-                let now = self.observe_now(&agent.thread_id)?;
-                if now.busy() { return Ok(deferred("restart")) }
-                if now.execution != Execution::Stopped { stop(&agent.thread_id).await?; }
-                self.update_agent(project, |a| a.lifecycle = Lifecycle::Ready { refresh: true })?;
-                return Ok(json!({"project_id": project, "thread_id": agent.thread_id, "action": "restart", "when": "now",
-                                 "next": "The agent's next message starts a new session with the same history and gets the current instructions."}));
-            }
-            Lifecycle::ResetQueued { reset: Reset::Fresh { note }, .. } => {
-                if self.observe_now(&agent.thread_id)?.busy() { return Ok(deferred("fresh")) }
-                let handoff = self.handoff(&*client, &agent, note.as_deref()).await?;
-                // Gathering the handoff took a while: look again right before stopping.
-                let now = self.observe_now(&agent.thread_id)?;
-                if now.busy() { return Ok(deferred("fresh")) }
-                if now.execution != Execution::Stopped { stop(&agent.thread_id).await?; }
-                let row = self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
-                let app = self.shell.lock().unwrap().projects.get(project)
-                    .and_then(|p| p["title"].as_str().map(str::to_string)).unwrap_or_else(|| "App".into());
-                let day = Process::new("date").arg("+%b %-d").output().await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-                dispatch_once(&*client, json!({"type": "thread.meta.update", "threadId": agent.thread_id,
-                                               "title": format!("{app} agent (until {day})")})).await?;
-                let plan = Replacement {
-                    previous: agent.thread_id.clone(),
-                    thread_id: uuid::Uuid::new_v4().to_string(),
-                    model: row["modelSelection"]["model"].as_str().unwrap_or(DEFAULT_MODEL).into(),
-                    runtime_mode: runtime_mode(row["runtimeMode"].as_str()).unwrap_or_else(|_| AGENT_MODE.into()),
-                    handoff,
-                    message_id: uuid::Uuid::new_v4().to_string(),
-                    delivery: Delivery::Queued,
-                };
-                self.update_agent(project, |a| a.lifecycle = Lifecycle::Replacing { replacement: plan.clone(), error: None, failures: 0 })?;
-                plan
-            }
-            Lifecycle::Replacing { replacement, .. } => replacement,
+        let start = self.find_agent(Some(project), None)?;
+        let (action, mut previous) = match &start.lifecycle {
+            Lifecycle::ResetQueued { reset: Reset::Restart, .. } | Lifecycle::Restarting { .. } => ("restart", start.thread_id.clone()),
+            Lifecycle::ResetQueued { reset: Reset::Fresh { .. }, .. } => ("fresh", start.thread_id.clone()),
+            Lifecycle::Replacing { replacement, .. } => ("fresh", replacement.previous.clone()),
+            Lifecycle::Creating { .. } | Lifecycle::Ready { .. } =>
+                return Ok(json!({"project_id": project, "thread_id": start.thread_id, "when": "done"})),
         };
-        if self.thread(&plan.thread_id).is_none() {
-            let dispatched = self.create_thread(&*client, project, &plan.thread_id, Some(&plan.model), &plan.runtime_mode).await;
-            if self.wait_thread(&plan.thread_id).await.is_err() {
-                dispatched?;
-                bail!("T3 has not created the new agent thread yet");
+        let mut event = self.look(&start);
+        loop {
+            let mut next = None;
+            for effect in self.reduce_agent(project, event)? {
+                let agent = self.find_agent(Some(project), None)?;
+                match effect {
+                    m14::Effect::Commit | m14::Effect::Rebind => {}
+                    m14::Effect::Send(order, identity) => {
+                        let command = self.order(&agent, order, &identity)?;
+                        let outcome = client.dispatch(&command).await;
+                        next = Some(m14::Event::Sent { outcome, next: self::identity() });
+                    }
+                    m14::Effect::Gather => {
+                        let plan = self.plan(&*client, &agent).await.map_err(|e| format!("{e:#}"));
+                        if let Ok(plan) = &plan { previous = plan.previous.clone(); }
+                        // Gathering took a while: what counts is the agent right after.
+                        next = Some(m14::Event::Gathered { plan, agent: self.seen(&agent.thread_id, |o| o), next: identity() });
+                    }
+                    m14::Effect::LookUp => {
+                        let Lifecycle::Replacing { replacement, .. } = &agent.lifecycle else { bail!("A handoff looked for outside a fresh start") };
+                        let found = self.has_message(&*client, &replacement.thread_id, &replacement.message_id).await.map_err(|e| format!("{e:#}"));
+                        next = Some(m14::Event::LookedUp { found, next: identity() });
+                    }
+                    m14::Effect::Deferred => return Ok(json!({
+                        "project_id": project, "thread_id": agent.thread_id, "action": action, "when": "after-turn",
+                        "next": "Happens when the agent's current turn ends. If that is you: end your turn now, telling the user in a sentence."})),
+                    m14::Effect::Done if action == "restart" => return Ok(json!({
+                        "project_id": project, "thread_id": agent.thread_id, "action": "restart", "when": "now",
+                        "next": "The agent's next message starts a new session with the same history and gets the current instructions."})),
+                    m14::Effect::Done => return Ok(json!({
+                        "project_id": project, "thread_id": agent.thread_id, "previous_thread_id": previous,
+                        "action": "fresh", "when": "now",
+                        "next": "The new agent has the handoff and is replying; the old conversation stays readable in the app's Threads."})),
+                    m14::Effect::Failed(detail) => bail!(detail),
+                    m14::Effect::SendCreate(_) => bail!("Unexpected creation during a reset"),
+                }
             }
+            event = next.context("The reset stopped without an answer")?;
         }
-        self.change(|registry| {
-            for worker in registry.workers.values_mut().filter(|w| w.coordinator == plan.previous) {
-                worker.coordinator = plan.thread_id.clone();
-            }
-            // Only updates not sent yet follow the agent; one that may have
-            // reached the old thread is settled there (M16), never resent.
-            for wake in registry.outbox.iter_mut().filter(|w| w.coordinator == plan.previous && w.outbound.delivery == Delivery::Queued) {
-                wake.coordinator = plan.thread_id.clone();
-            }
-            if let Some(agent) = registry.agents.get_mut(project) { agent.thread_id = plan.thread_id.clone(); }
-        })?;
-        if !(plan.delivery == Delivery::OutcomeUnknown && self.has_message(&*client, &plan.thread_id, &plan.message_id).await?) {
-            plan.delivery = Delivery::OutcomeUnknown;
-            self.update_agent(project, |a| if let Lifecycle::Replacing { replacement, .. } = &mut a.lifecycle {
-                replacement.delivery = Delivery::OutcomeUnknown;
-            })?;
-            dispatch_once(&*client, json!({
-                "type": "thread.turn.start", "threadId": plan.thread_id,
-                "message": Note::Handoff.message(&plan.message_id, &plan.handoff, json!({"previous": plan.previous})),
-                "runtimeMode": plan.runtime_mode, "interactionMode": "default",
-            })).await?;
-        }
-        self.update_agent(project, |a| a.lifecycle = Lifecycle::Ready { refresh: false })?;
-        Ok(json!({"project_id": project, "thread_id": plan.thread_id, "previous_thread_id": plan.previous,
-                  "action": "fresh", "when": "now",
-                  "next": "The new agent has the handoff and is replying; the old conversation stays readable in the app's Threads."}))
+    }
+
+    /// The command for a reset step, from the saved lifecycle.
+    fn order(&self, agent: &Agent, order: Order, identity: &Identity) -> Result<Command> {
+        let body = match (order, &agent.lifecycle) {
+            (Order::Stop, Lifecycle::Restarting { .. }) => json!({"type": "thread.session.stop", "threadId": agent.thread_id}),
+            (Order::Stop, Lifecycle::Replacing { replacement, .. }) => json!({"type": "thread.session.stop", "threadId": replacement.previous}),
+            (Order::Rename, Lifecycle::Replacing { replacement, .. }) => json!({
+                "type": "thread.meta.update", "threadId": replacement.previous,
+                "title": replacement.title.as_deref().context("The fresh start has no title for the old thread")?}),
+            (Order::Create, Lifecycle::Replacing { replacement, .. }) =>
+                return self.create_command(&agent.project_id, &replacement.thread_id, Some(&replacement.model), &replacement.runtime_mode, identity),
+            (Order::Handoff, Lifecycle::Replacing { replacement, .. }) => json!({
+                "type": "thread.turn.start", "threadId": replacement.thread_id,
+                "message": Note::Handoff.message(&replacement.message_id, &replacement.handoff, json!({"previous": replacement.previous})),
+                "runtimeMode": replacement.runtime_mode, "interactionMode": "default",
+            }),
+            (order, lifecycle) => bail!("No {order:?} command for an agent that is {lifecycle:?}"),
+        };
+        Ok(Command::new(identity, body))
+    }
+
+    /// A fresh start's plan: the handoff, the new thread's identities and
+    /// the old thread's new title. The new agent keeps the old one's model
+    /// and runtime mode; a mode T3 doesn't report holds the fresh start.
+    async fn plan(&self, client: &dyn Peer, agent: &Agent) -> Result<Replacement> {
+        let Lifecycle::ResetQueued { reset: Reset::Fresh { note }, .. } = &agent.lifecycle else { bail!("No fresh start is queued") };
+        let handoff = self.handoff(client, agent, note.as_deref()).await?;
+        let row = self.thread(&agent.thread_id).context("The app agent's thread is gone")?;
+        let mode = row["runtimeMode"].as_str().filter(|mode| RUNTIME_MODES.contains(mode)).with_context(|| format!(
+            "T3 doesn't report a runtime mode this service knows for the app agent ({}), so the fresh start waits",
+            row["runtimeMode"].as_str().unwrap_or("none")))?;
+        let app = self.shell.lock().unwrap().projects.get(&agent.project_id)
+            .and_then(|p| p["title"].as_str().map(str::to_string)).unwrap_or_else(|| "App".into());
+        let day = Process::new("date").arg("+%b %-d").output().await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        Ok(Replacement {
+            previous: agent.thread_id.clone(),
+            thread_id: uuid::Uuid::new_v4().to_string(),
+            model: row["modelSelection"]["model"].as_str().unwrap_or(DEFAULT_MODEL).into(),
+            runtime_mode: mode.into(),
+            handoff,
+            message_id: uuid::Uuid::new_v4().to_string(),
+            title: Some(format!("{app} agent (until {day})")),
+            note: None,
+            step: None,
+            delivery: Delivery::Queued,
+        })
     }
 
     // MARK: Upkeep
@@ -2000,19 +1922,16 @@ impl Agents {
     /// conversation shows for it.
     fn compact_command(&self, thread: &str, line: &str, tokens: u64) -> Result<Command> {
         let row = self.thread(thread).context("The app agent's thread is gone")?;
+        let mode = thread_mode(&row)?;
         let text = "/compact Keep: the user's open tasks and where each stands, decisions and preferences they stated, \
             workers still running or waiting and their branches, and the last few exchanges. Drop tool output and finished detail.";
         let record = Note::Upkeep.labeled(line, json!({"action": "compact", "tokens": tokens}));
         Ok(Command::new(&identity(), json!({
             "type": "thread.turn.start", "threadId": thread,
             "message": Note::with_record(&uuid::Uuid::new_v4().to_string(), text, record),
-            "runtimeMode": row["runtimeMode"].as_str().unwrap_or(AGENT_MODE),
+            "runtimeMode": mode,
             "interactionMode": row["interactionMode"].as_str().unwrap_or("default"),
         })))
-    }
-
-    fn update_agent(&self, project: &str, change: impl FnOnce(&mut Agent)) -> Result<()> {
-        self.change(|registry| if let Some(agent) = registry.agents.get_mut(project) { change(agent) })
     }
 
     /// What a new agent needs from the old one, gathered without a model:
@@ -2144,7 +2063,7 @@ impl Agents {
             .map(|(id, w)| {
                 let thread = shell.threads.get(id);
                 let state = match (&w.stage, thread) {
-                    (Stage::FilesRemoved, _) => "archiving",
+                    (Stage::FilesRemoved | Stage::Archiving(_), _) => "archiving",
                     (_, Some(row)) => worker_state(row),
                     (Stage::Bootstrapping { .. }, None) => "starting",
                     (_, None) => "missing",
@@ -2185,7 +2104,7 @@ impl Agents {
             .map(|(id, w)| (id.clone(), w.clone()));
         if let Some((id, worker)) = existing {
             let _op = self.op(&id).await;
-            self.bootstrap(&*client, &id).await?;
+            self.bootstrap(&*client, &id, true).await?;
             return Ok(json!({"id": id, "title": worker.title, "branch": worker.branch, "base": worker.base, "existing": true,
                              "next": "A worker on this branch already exists and is running; this did not start another. End your turn; a [worker update] arrives when it finishes."}));
         }
@@ -2232,33 +2151,57 @@ impl Agents {
             branch: branch.into(), base: base.into(), created_at: crate::model::now(), notified: None,
             stage: Stage::Bootstrapping { message_id, command },
         }))?;
-        self.bootstrap(&*client, &id).await?;
+        self.bootstrap(&*client, &id, false).await?;
         Ok(json!({"id": id, "title": title, "branch": branch, "base": base, "provider": instance, "model": model, "effort": effort,
                   "runtime_mode": mode, "permissions": permissions,
                   "next": "The worker is running. End your turn; a [worker update] arrives when it finishes."}))
     }
 
-    /// Sends a reserved worker's bootstrap (again, with the same IDs) until
-    /// T3 has it: an acknowledgement, the thread in the shell or its first
-    /// message counts. Call with the worker's operation lock.
-    async fn bootstrap(&self, client: &dyn Peer, id: &str) -> Result<()> {
-        let reserved = self.registry().workers.get(id).map(|w| w.stage.clone());
-        let Some(Stage::Bootstrapping { message_id, command }) = reserved else { return Ok(()) };
-        // T3 runs a bootstrap's worktree setup before its receipt check, so
-        // each attempt is its own command; the thread or message showing up
-        // is what proves an earlier one landed.
-        let dispatched = client.dispatch(&Command::new(&identity(), command)).await.into_result();
-        let accepted = dispatched.is_ok() || self.thread(id).is_some()
-            || self.has_message(client, id, &message_id).await.unwrap_or(false);
-        if !accepted {
-            return Err(dispatched.unwrap_err().context(
-                "T3 did not confirm the new worker. Run the same `thread spawn` again to finish this one; it will not start a second"));
+    /// Sends a reserved worker's bootstrap (M15) and confirms it: an
+    /// acknowledgement, the thread in the shell or its first message counts.
+    /// `again`: spawn was asked again for it, so T3's shell is looked at
+    /// first and the bootstrap is sent again (with the same thread and
+    /// message IDs) only if T3 doesn't show it. T3 runs a bootstrap's
+    /// worktree setup before its receipt check, so each attempt is its own
+    /// command. Call with the worker's operation lock.
+    async fn bootstrap(&self, client: &dyn Peer, id: &str, again: bool) -> Result<()> {
+        let mut effects = match again {
+            true => self.reduce_boot(id, BootEvent::Look { thread: self.seen(id, |o| o.is_some()) })?,
+            false => vec![BootEffect::Send],
+        };
+        loop {
+            let Some(Stage::Bootstrapping { message_id, command }) = self.registry().workers.get(id).map(|w| w.stage.clone()) else { return Ok(()) };
+            let mut next = None;
+            for effect in effects {
+                match effect {
+                    BootEffect::Commit => {}
+                    BootEffect::Send => next = Some(BootEvent::Sent(client.dispatch(&Command::new(&identity(), command.clone())).await)),
+                    BootEffect::Confirm(detail) => {
+                        let found = match self.thread(id) {
+                            Some(_) => Ok(true),
+                            None => self.has_message(client, id, &message_id).await.map_err(|e| format!("{e:#}")),
+                        };
+                        next = Some(BootEvent::Confirmed { found, detail });
+                    }
+                    BootEffect::Done => return Ok(()),
+                    BootEffect::Failed(detail) => bail!(detail),
+                }
+            }
+            effects = self.reduce_boot(id, next.context("The worker's bootstrap stopped without an answer")?)?;
         }
-        self.change_if(|registry| {
-            let worker = registry.workers.get_mut(id).filter(|w| matches!(w.stage, Stage::Bootstrapping { .. }))?;
-            worker.stage = Stage::Active;
-            Some(())
-        }).map(drop)
+    }
+
+    fn reduce_boot(&self, id: &str, event: BootEvent) -> Result<Vec<BootEffect>> {
+        let mut gate = self.ledger.lock().unwrap();
+        gate.resolve()?;
+        let Some(worker) = gate.committed().workers.get(id) else { return Ok(vec![BootEffect::Done]) };
+        let reduction = m15::bootstrap(worker.stage.clone(), event);
+        if reduction.effects.contains(&BootEffect::Commit) {
+            let mut next = gate.committed().clone();
+            if let Some(worker) = next.workers.get_mut(id) { worker.stage = reduction.state; }
+            gate.commit(next, vec![])?;
+        }
+        Ok(reduction.effects)
     }
 
     /// A thread from the live shell; one just created takes a moment to arrive.
@@ -2286,18 +2229,59 @@ impl Agents {
     async fn send_with(&self, thread_id: &str, text: &str, note: Option<(Note, Value)>) -> Result<()> {
         let client = self.ready().await?;
         let thread = self.wait_thread(thread_id).await?;
+        let mode = thread_mode(&thread)?;
+        let purpose = format!("send {thread_id} {}\n{text}", note.as_ref().map_or("user", |(note, _)| note.kind()));
         let id = uuid::Uuid::new_v4().to_string();
         let message = match note {
             Some((note, payload)) => note.message(&id, text, payload),
             None => json!({"messageId": id, "role": "user", "text": text, "attachments": []}),
         };
-        dispatch_once(&*client, json!({
+        self.dispatch_intent(&*client, purpose, |identity| Command::new(identity, json!({
             "type": "thread.turn.start", "threadId": thread_id,
             "message": message,
-            "runtimeMode": thread["runtimeMode"].as_str().unwrap_or(AGENT_MODE),
+            "runtimeMode": mode,
             "interactionMode": thread["interactionMode"].as_str().unwrap_or("default"),
-        })).await?;
+        }))).await?;
         Ok(())
+    }
+
+    /// Sends a command a caller waits for under a saved identity. Asked
+    /// again while T3 has left it unanswered, the same request sends that
+    /// same command (T3 answers it from its receipt if it has it), never a
+    /// second; any answer settles it.
+    async fn dispatch_intent(&self, client: &dyn Peer, purpose: String, build: impl FnOnce(&Identity) -> Command) -> Result<Value> {
+        let command = {
+            let mut gate = self.ledger.lock().unwrap();
+            gate.resolve()?;
+            match gate.committed().intents.iter().find(|p| p.purpose == purpose) {
+                Some(pending) => pending.command.clone(),
+                None => {
+                    let command = build(&identity());
+                    let mut next = gate.committed().clone();
+                    next.intents.push(Pending { purpose, command: command.clone(), at: crate::model::now() });
+                    let excess = next.intents.len().saturating_sub(INTENTS_KEPT);
+                    next.intents.drain(..excess);
+                    gate.commit(next, vec![])?;
+                    command
+                }
+            }
+        };
+        let outcome = client.dispatch(&command).await;
+        if !matches!(outcome, Dispatched::Unknown(_)) {
+            let forgotten = self.change_if(|registry| {
+                let index = registry.intents.iter().position(|p| p.command.id() == command.id())?;
+                registry.intents.remove(index);
+                Some(())
+            });
+            // Unsaved, it only stays as a record the same request would send again (T3 answers from its receipt).
+            if let Err(error) = forgotten { eprintln!("Settled command not saved: {error:#}"); }
+        }
+        match outcome {
+            Dispatched::Accepted(value) => Ok(value),
+            Dispatched::Unknown(detail) =>
+                bail!("T3 has not confirmed it ({detail}). Ask again with the same text: the same one is sent again, never a second"),
+            Dispatched::Refused(detail) | Dispatched::NotSent(detail) => bail!(detail),
+        }
     }
 
     async fn thread_detail(&self, client: &dyn Peer, id: &str) -> Result<Value> {
@@ -2352,16 +2336,19 @@ impl Agents {
         })?;
         let answers: serde_json::Map<String, Value> = questions.iter()
             .filter_map(|q| q["id"].as_str().or(q["question"].as_str()).map(|k| (k.to_string(), json!(text)))).collect();
-        dispatch_once(&*client, json!({"type": "thread.user-input.respond", "threadId": id, "requestId": request, "answers": answers})).await?;
+        let purpose = format!("answer {id} {request}\n{text}");
+        self.dispatch_intent(&*client, purpose, |identity| Command::new(identity,
+            json!({"type": "thread.user-input.respond", "threadId": id, "requestId": request, "answers": answers}))).await?;
         Ok(())
     }
 
-    /// Archives a worker: stops its session (one whose turn may still be
-    /// running only with `discard`), removes its worktree and deletes its
+    /// Archives a worker (M15): stops its session (one whose turn may still
+    /// be running only with `discard`), removes its worktree and deletes its
     /// branch, then archives its thread. Refuses while the branch has commits
     /// not in its base or the worktree has uncommitted changes, unless
     /// `discard` drops them. Nothing is removed until T3 reports the session
-    /// stopped; after a partial failure running it again finishes the job.
+    /// stopped. Each step is saved before it acts, so after a failure or a
+    /// crash running it again resumes where it stood.
     pub async fn archive(&self, id: &str, discard: bool) -> Result<Value> {
         let client = self.ready().await?;
         let _op = self.op(id).await;
@@ -2371,60 +2358,94 @@ impl Agents {
         let observed = self.observe(id).current().context("T3's thread list is not current; try again")?;
         ensure!(observed.is_some() || worker.is_some(), "T3 has no thread {id}");
         let title = worker.as_ref().map(|w| w.title.clone()).or_else(|| self.thread(id).and_then(|r| r["title"].as_str().map(str::to_string)));
-        if matches!(worker.as_ref().map(|w| &w.stage), Some(Stage::Bootstrapping { .. })) && observed.is_none() {
-            // T3 never created it: drop the reservation. Its branch name may
-            // belong to something else, so no Git state is touched.
-            self.set_stage(id, Stage::Archived)?;
-            return Ok(json!({"archived": id, "stopped": false, "title": title, "never_started": true}));
-        }
-        let mut stopped = false;
-        let receipt = match &observed {
-            Some(now) if now.execution != Execution::Stopped => {
-                if now.busy() {
-                    let what = if now.waiting { "waiting on a question or approval" } else { "still working" };
-                    ensure!(discard, "That worker is {what}; wait for it, or pass --discard to stop it and drop its work");
+        // A thread Squircle didn't start goes through the same steps, unsaved.
+        let mut stage = worker.as_ref().map_or(Stage::Active, |w| w.stage.clone());
+        let mut result = json!({"archived": id, "stopped": false, "title": title});
+        let mut inspected = None;
+        let look = || m15::ArchiveEvent::Look { thread: self.seen(id, |o| o), discard, next: identity() };
+        let mut event = look();
+        loop {
+            let mut next = None;
+            for effect in self.reduce_archive(id, worker.is_some(), &mut stage, event)? {
+                match effect {
+                    m15::ArchiveEffect::Commit => {}
+                    m15::ArchiveEffect::Send(order, identity) => {
+                        let kind = match order { ArchiveOrder::Stop => "thread.session.stop", ArchiveOrder::Archive => "thread.archive" };
+                        let outcome = client.dispatch(&Command::new(&identity, json!({"type": kind, "threadId": id}))).await;
+                        if order == ArchiveOrder::Stop && matches!(outcome, Dispatched::Accepted(_)) { result["stopped"] = json!(true); }
+                        next = Some(m15::ArchiveEvent::Sent { outcome, next: self::identity() });
+                    }
+                    m15::ArchiveEffect::AwaitStopped => next = Some(m15::ArchiveEvent::Stopped(self.wait_stopped(id).await.is_ok())),
+                    m15::ArchiveEffect::Inspect => {
+                        let found = self.inspect_worker(id, worker.as_ref()).await;
+                        let blocker = found.as_ref().map(|f| f.as_ref().and_then(|(_, state)| state.blocker())).map_err(|e| format!("{e:#}"));
+                        inspected = found.ok().flatten();
+                        next = Some(m15::ArchiveEvent::Inspected { blocker, discard });
+                    }
+                    m15::ArchiveEffect::Remove => {
+                        // Stopped right now, not just when it was inspected.
+                        let removed = match (&inspected, self.stopped(id)) {
+                            (_, None) => Err("Its session is live again, so nothing more was removed".to_string()),
+                            (None, Some(_)) => Ok(()),
+                            (Some((root, state)), Some(receipt)) => match remove(root, state, discard, &receipt).await {
+                                Ok(cleaned) => {
+                                    result["removed_worktree"] = json!(cleaned.worktree);
+                                    result["deleted_branch"] = json!(cleaned.branch);
+                                    result["discarded"] = json!(discard && state.blocker().is_some());
+                                    Ok(())
+                                }
+                                Err(error) => Err(format!("{error:#}")),
+                            },
+                        };
+                        next = Some(m15::ArchiveEvent::Removed(removed));
+                    }
+                    m15::ArchiveEffect::Look => next = Some(look()),
+                    m15::ArchiveEffect::Refused(why) | m15::ArchiveEffect::Failed(why) => bail!(why),
+                    m15::ArchiveEffect::Done => return Ok(result),
+                    m15::ArchiveEffect::NeverStarted =>
+                        return Ok(json!({"archived": id, "stopped": false, "title": title, "never_started": true})),
                 }
-                dispatch_once(&*client, json!({"type": "thread.session.stop", "threadId": id})).await?;
-                stopped = true;
-                self.wait_stopped(id).await?
             }
-            _ => self.stopped(id).context("T3's thread list is not current; try again")?,
-        };
-        let row = self.thread(id).unwrap_or(Value::Null);
-        let mut result = json!({"archived": id, "stopped": stopped, "title": title});
-        if worker.as_ref().is_none_or(|w| w.stage != Stage::FilesRemoved) {
-            let branch = worker.as_ref().map(|w| w.branch.clone()).or_else(|| row["branch"].as_str().map(str::to_string));
-            let base = worker.as_ref().map(|w| w.base.clone());
-            let project = worker.as_ref().map(|w| w.project_id.clone()).or_else(|| row["projectId"].as_str().map(str::to_string));
-            let root = project.and_then(|p| self.shell.lock().unwrap().projects.get(&p).and_then(|p| p["workspaceRoot"].as_str().map(PathBuf::from)));
-            let worktree = row["worktreePath"].as_str().map(PathBuf::from);
-            if let Some(root) = &root {
-                let base = match base {
-                    Some(base) => base,
-                    None => git(root, &["symbolic-ref", "--short", "HEAD"]).await?,
-                };
-                let state = inspect(root, worktree.as_deref(), branch.as_deref(), Some(&base)).await?;
-                if let Some(reason) = state.blocker().filter(|_| !discard) {
-                    bail!("Not archived: {reason}. Merge it first, or pass --discard to drop that work");
-                }
-                let cleaned = remove(root, &state, discard, &receipt).await
-                    .with_context(|| if stopped { "The worker was stopped, but its files were not all removed; run archive again" } else { "Its files were not all removed; run archive again" })?;
-                result["removed_worktree"] = json!(cleaned.worktree);
-                result["deleted_branch"] = json!(cleaned.branch);
-                result["discarded"] = json!(discard && state.blocker().is_some());
-            }
-            if worker.is_some() { self.set_stage(id, Stage::FilesRemoved)?; }
+            event = next.context("The archive stopped without an answer")?;
         }
-        if row["archivedAt"].is_null() && !row.is_null() {
-            dispatch_once(&*client, json!({"type": "thread.archive", "threadId": id})).await
-                .context("Its files were removed, but T3 did not archive the thread; run archive again")?;
-        }
-        if worker.is_some() { self.set_stage(id, Stage::Archived)?; }
-        Ok(result)
     }
 
-    fn set_stage(&self, id: &str, stage: Stage) -> Result<()> {
-        self.change(|registry| if let Some(worker) = registry.workers.get_mut(id) { worker.stage = stage })
+    /// Reduces `event` for a worker's archive and, for a registered worker,
+    /// saves the new stage before any effect it asks for runs.
+    fn reduce_archive(&self, id: &str, registered: bool, stage: &mut Stage, event: m15::ArchiveEvent) -> Result<Vec<m15::ArchiveEffect>> {
+        let mut gate = self.ledger.lock().unwrap();
+        if registered {
+            gate.resolve()?;
+            *stage = gate.committed().workers.get(id).context("The worker is gone from the registry")?.stage.clone();
+        }
+        let reduction = m15::archive(stage.clone(), event);
+        if let Disposition::ProtocolFault(fault) = &reduction.disposition {
+            debug_assert!(false, "{fault}");
+            eprintln!("Archive fault for {id}: {fault}");
+        }
+        if registered && reduction.effects.contains(&m15::ArchiveEffect::Commit) {
+            let mut next = gate.committed().clone();
+            if let Some(worker) = next.workers.get_mut(id) { worker.stage = reduction.state.clone(); }
+            gate.commit(next, vec![])?;
+        }
+        *stage = reduction.state;
+        Ok(reduction.effects)
+    }
+
+    /// The worker's checkout and its Git state, if its project has a folder.
+    async fn inspect_worker(&self, id: &str, worker: Option<&Worker>) -> Result<Option<(PathBuf, GitState)>> {
+        let row = self.thread(id).unwrap_or(Value::Null);
+        let branch = worker.map(|w| w.branch.clone()).or_else(|| row["branch"].as_str().map(str::to_string));
+        let project = worker.map(|w| w.project_id.clone()).or_else(|| row["projectId"].as_str().map(str::to_string));
+        let root = project.and_then(|p| self.shell.lock().unwrap().projects.get(&p).and_then(|p| p["workspaceRoot"].as_str().map(PathBuf::from)));
+        let Some(root) = root else { return Ok(None) };
+        let base = match worker {
+            Some(worker) => worker.base.clone(),
+            None => git(&root, &["symbolic-ref", "--short", "HEAD"]).await?,
+        };
+        let worktree = row["worktreePath"].as_str().map(PathBuf::from);
+        let state = inspect(&root, worktree.as_deref(), branch.as_deref(), Some(&base)).await?;
+        Ok(Some((root, state)))
     }
 
     /// A receipt if the live shell shows the thread's session stopped, or
@@ -2475,7 +2496,7 @@ impl Agents {
                 left.push(json!({"worker": entry, "reason": reason}));
                 continue;
             }
-            if worker.stage == Stage::FilesRemoved {
+            if matches!(worker.stage, Stage::FilesRemoved | Stage::Archiving(_)) {
                 if !dry_run { self.archive(&id, false).await?; }
                 archived.push(entry);
                 continue;
@@ -2549,9 +2570,9 @@ mod tests {
         // Asked for explicitly, a mode is kept as is, even where it asks more.
         assert_eq!(mode("antigravity", Some("auto"), Some("auto")), "auto");
         assert_eq!(mode("claudeAgent", Some("auto"), Some("full-access")), "full-access");
-        // An agent thread without a known mode is one the service created.
-        assert_eq!(mode("claudeAgent", None, None), AGENT_MODE);
-        assert_eq!(mode("claudeAgent", Some("bogus"), None), AGENT_MODE);
+        // An agent mode T3 doesn't report, or that isn't known, is never assumed.
+        assert!(worker_mode("claudeAgent", None, None).is_err());
+        assert!(worker_mode("claudeAgent", Some("bogus"), None).is_err());
         assert!(worker_mode("claudeAgent", Some("auto"), Some("yolo")).is_err());
     }
 
@@ -2653,7 +2674,8 @@ mod tests {
     /// answered from it and changes nothing.
     #[derive(Default)]
     struct Fake {
-        agents: std::sync::OnceLock<std::sync::Weak<Agents>>,
+        /// The agents it shows new threads to: the latest opened.
+        agents: Mutex<std::sync::Weak<Agents>>,
         log: Mutex<Vec<Value>>,
         receipts: Mutex<HashMap<String, bool>>,
         messages: Mutex<HashMap<String, Vec<String>>>,
@@ -2666,7 +2688,7 @@ mod tests {
     }
 
     impl Fake {
-        fn agents(&self) -> Arc<Agents> { self.agents.get().unwrap().upgrade().unwrap() }
+        fn agents(&self) -> Arc<Agents> { self.agents.lock().unwrap().upgrade().unwrap() }
         fn sent(&self, kind: &str) -> Vec<Value> {
             self.log.lock().unwrap().iter().filter(|c| c["type"] == kind).cloned().collect()
         }
@@ -2744,8 +2766,8 @@ mod tests {
         let tasks = Arc::new(Tasks::open(temp).unwrap());
         let agents = Agents::open(temp, "http://127.0.0.1:1", tasks).unwrap();
         let fake = Arc::new(Fake::default());
-        fake.agents.set(Arc::downgrade(&agents)).unwrap();
         assert!(agents.fake.set(fake.clone()).is_ok());
+        *fake.agents.lock().unwrap() = Arc::downgrade(&agents);
         agents.consume_shell(&json!({"kind": "snapshot", "snapshot": {
             "projects": [{"id": "p", "title": "App", "workspaceRoot": workspace}], "threads": threads}}));
         (agents, fake)
@@ -2786,7 +2808,7 @@ mod tests {
         fake.fail.lock().unwrap().push(("thread.create", false));
         assert!(agents.ensure("p", None, None, None).await.is_err());
         let reserved = agents.list()[0].clone();
-        assert_eq!(reserved.lifecycle, Lifecycle::Creating);
+        assert_eq!(reserved.lifecycle, Lifecycle::Creating { command: None });
         let agent = agents.ensure("p", None, None, None).await.unwrap();
         assert_eq!(agent.thread_id, reserved.thread_id);
         assert_eq!(agents.list()[0].lifecycle, Lifecycle::Ready { refresh: false });
@@ -3113,6 +3135,145 @@ mod tests {
         agents.observe_workers();
         assert_eq!(agents.registry().workers[&id].stage, Stage::Active);
         assert!(agents.due_wakes().iter().any(|(due, _, _)| *due == id));
+    }
+
+    /// The same agents, as a restarted service: the registry from disk, the
+    /// same fake T3 and its shell.
+    fn reopened(temp: &Path, fake: &Arc<Fake>, threads: Vec<Value>, workspace: &Path) -> Arc<Agents> {
+        let agents = Agents::open(temp, "http://127.0.0.1:1", Arc::new(Tasks::open(temp).unwrap())).unwrap();
+        assert!(agents.fake.set(fake.clone()).is_ok());
+        *fake.agents.lock().unwrap() = Arc::downgrade(&agents);
+        agents.consume_shell(&json!({"kind": "snapshot", "snapshot": {
+            "projects": [{"id": "p", "title": "App", "workspaceRoot": workspace}], "threads": threads}}));
+        agents
+    }
+
+    /// A fresh start whose answer is lost at each step in turn, with the
+    /// service restarted right after: it resumes from the saved step, and T3
+    /// gets each command once (a resend is answered from its receipt). The
+    /// agent, its workers and its unsent update move to the new thread in
+    /// one save; an update that may have reached the old thread stays there.
+    #[tokio::test]
+    async fn a_fresh_start_resumes_after_a_crash_at_any_step() {
+        for step in ["thread.session.stop", "thread.meta.update", "thread.create", "thread.turn.start"] {
+            let temp = tempfile::tempdir().unwrap();
+            let old = row("old", "p", "auto", "t", "completed", "ready", false);
+            let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![old.clone()]);
+            let wake = |id: &str, delivery| Wake { coordinator: "old".into(), message_id: id.into(), workers: vec![], text: "x".into(),
+                                                   record: json!({}), outbound: Outbound { delivery, ..Default::default() }, build: None };
+            registered(&agents, |r| {
+                r.agents.insert("p".into(), agent("old"));
+                r.workers.insert("w1".into(), worker("old"));
+                r.outbox.push(wake("unsent", Delivery::Queued));
+                r.outbox.push(wake("maybe", Delivery::OutcomeUnknown));
+            });
+            fake.fail.lock().unwrap().push((step, true));
+            assert!(agents.reset(Some("p"), None, Reset::Fresh { note: Some("n".into()) }).await.is_err(), "{step}");
+            let threads: Vec<Value> = agents.shell.lock().unwrap().threads.values().cloned().collect();
+            drop(agents);
+            let agents = reopened(temp.path(), &fake, threads, temp.path());
+            let _op = agents.op("p").await;
+            let done = agents.perform("p").await.unwrap();
+            assert_eq!((done["when"].as_str(), done["previous_thread_id"].as_str()), (Some("now"), Some("old")), "{step}");
+            let registry = agents.registry();
+            let new = registry.agents["p"].thread_id.clone();
+            assert!(new != "old" && registry.agents["p"].lifecycle == Lifecycle::Ready { refresh: false }, "{step}");
+            assert_eq!(registry.workers["w1"].coordinator, new);
+            let by_id = |id: &str| registry.outbox.iter().find(|w| w.message_id == id).unwrap().coordinator.clone();
+            assert_eq!((by_id("unsent"), by_id("maybe")), (new.clone(), "old".to_string()), "{step}");
+            for kind in ["thread.session.stop", "thread.meta.update", "thread.create", "thread.turn.start"] {
+                assert_eq!(fake.sent(kind).len(), 1, "{kind} after a cut at {step}");
+            }
+            assert_eq!(fake.sent("thread.turn.start")[0]["runtimeMode"], "auto");
+        }
+    }
+
+    /// A fresh start never makes up a runtime mode for the new agent.
+    #[tokio::test]
+    async fn a_fresh_start_waits_for_a_known_runtime_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut old = row("old", "p", "auto", "t", "completed", "ready", false);
+        old.as_object_mut().unwrap().remove("runtimeMode");
+        let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![old]);
+        registered(&agents, |r| { r.agents.insert("p".into(), agent("old")); });
+        let error = agents.reset(Some("p"), None, Reset::Fresh { note: None }).await.unwrap_err();
+        assert!(format!("{error:#}").contains("runtime mode"), "{error:#}");
+        assert!(fake.log.lock().unwrap().is_empty());
+        assert!(matches!(agents.list()[0].lifecycle, Lifecycle::ResetQueued { error: Some(_), .. }));
+        // Nor sends a message into a thread whose mode it doesn't know.
+        assert!(agents.send("old", "hi").await.is_err());
+        assert!(fake.log.lock().unwrap().is_empty());
+    }
+
+    /// A message whose answer is lost is sent again, when asked again, as
+    /// the same command: T3 shows it once.
+    #[tokio::test]
+    async fn a_send_asked_again_after_a_lost_answer_is_the_same_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![row("w1", "p", "auto", "t", "completed", "ready", false)]);
+        fake.fail.lock().unwrap().push(("thread.turn.start", true));
+        assert!(agents.message("w1", "go on").await.is_err());
+        assert_eq!(agents.registry().intents.len(), 1);
+        let agents = reopened(temp.path(), &fake, vec![row("w1", "p", "auto", "t", "completed", "ready", false)], temp.path());
+        agents.message("w1", "go on").await.unwrap();
+        assert_eq!(fake.messages.lock().unwrap()["w1"].len(), 1);
+        assert!(agents.registry().intents.is_empty());
+        // A new request is a new command.
+        agents.message("w1", "go on").await.unwrap();
+        assert_eq!(fake.messages.lock().unwrap()["w1"].len(), 2);
+    }
+
+    /// An archive cut after the stop and after T3's archive, each answer
+    /// lost and the service restarted: it resumes from the saved step,
+    /// sends each command once and removes files only once T3 shows the
+    /// worker stopped.
+    #[tokio::test]
+    async fn an_archive_resumes_after_lost_answers_and_a_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("repo");
+        std::fs::create_dir(&root).unwrap();
+        run(&root, &["init", "-q", "-b", "main"]).await;
+        commit(&root, "a").await;
+        let tree = temp.path().join("w");
+        run(&root, &["worktree", "add", "-q", "-b", "w", tree.to_str().unwrap()]).await;
+        let mut idle = row("w1", "p", "auto", "t", "completed", "ready", false);
+        idle["worktreePath"] = json!(tree);
+        let data = temp.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let (agents, fake) = fake_agents(&data, &root, vec![idle.clone()]);
+        registered(&agents, |r| { r.workers.insert("w1".into(), worker("agent")); });
+        let (weak, checked, stopped) = (Arc::downgrade(&agents), tree.clone(), {
+            let mut stopped = idle.clone();
+            stopped["session"]["status"] = json!("stopped");
+            stopped
+        });
+        let shown = stopped.clone();
+        *fake.on_dispatch.lock().unwrap() = Some(Box::new(move |command| {
+            if command["type"] == "thread.session.stop" {
+                assert!(checked.exists());
+                // T3 shows the stop only after the (lost) answer.
+                let (agents, stopped) = (weak.upgrade().unwrap(), shown.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    agents.consume_shell(&json!({"kind": "thread-upserted", "thread": stopped}));
+                });
+            }
+        }));
+        fake.fail.lock().unwrap().push(("thread.session.stop", true));
+        let error = agents.archive("w1", false).await.unwrap_err();
+        assert!(format!("{error:#}").contains("nothing was removed"), "{error:#}");
+        assert!(tree.exists() && matches!(agents.registry().workers["w1"].stage, Stage::Archiving(ArchiveStep::Stopping { .. })));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        fake.fail.lock().unwrap().push(("thread.archive", true));
+        assert!(agents.archive("w1", false).await.is_err());
+        assert!(!tree.exists() && matches!(agents.registry().workers["w1"].stage, Stage::Archiving(ArchiveStep::Thread { .. })));
+        drop(agents);
+        let agents = reopened(&data, &fake, vec![stopped], &root);
+        let result = agents.archive("w1", false).await.unwrap();
+        assert_eq!(result["archived"], "w1");
+        assert_eq!(agents.registry().workers["w1"].stage, Stage::Archived);
+        let order: Vec<Value> = fake.log.lock().unwrap().iter().map(|c| c["type"].clone()).collect();
+        assert_eq!(order, [json!("thread.session.stop"), json!("thread.archive")]);
     }
 
     async fn run(dir: &Path, args: &[&str]) {
