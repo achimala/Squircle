@@ -488,7 +488,11 @@ impl Sims {
 
     fn claim(&self, id: &str, work: Work) -> Option<Running<'_>> {
         let key = (id.to_string(), work);
-        self.state.lock().unwrap().running.insert(key.clone()).then_some(Running { sims: self, key })
+        // The guard is released before a claim exists: dropping one locks the
+        // state, and an eager `then_some` would drop an unwanted claim (and
+        // remove the holder's key) while the guard is still alive.
+        let claimed = self.state.lock().unwrap().running.insert(key.clone());
+        claimed.then(|| Running { sims: self, key })
     }
 
     /// Every simulator a session has used, with when it was last used.
@@ -1372,6 +1376,27 @@ mod tests {
             if let session::Release::Owed(retry) = &mut s.release { retry.retry_at = 0.0 }
         }
         save(&mut state.gate, ledger).unwrap();
+    }
+
+    /// A second cleanup of a session already being cleaned up (`sim stop`
+    /// racing the watchdog) is turned away without touching the first's
+    /// claim. It once self-deadlocked on the state lock and hung the service.
+    #[test]
+    fn overlapping_claims_neither_deadlock_nor_release_the_holder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sims, _) = sims(dir.path(), None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let racing = sims.clone();
+        std::thread::spawn(move || {
+            let held = racing.claim("s", Work::Release).expect("first claim");
+            let second = racing.claim("s", Work::Release).is_none();
+            let still_held = racing.claim("s", Work::Release).is_none();
+            drop(held);
+            let again = racing.claim("s", Work::Release).is_some();
+            tx.send((second, still_held, again)).unwrap();
+        });
+        let outcome = rx.recv_timeout(Duration::from_secs(5)).expect("claim deadlocked on the state lock");
+        assert_eq!(outcome, (true, true, true));
     }
 
     /// Recovery signals a saved PID only while it is still that session's
