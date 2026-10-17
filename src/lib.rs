@@ -1,3 +1,4 @@
+pub mod actor;
 pub mod agents;
 pub mod apps;
 pub mod artifact;
