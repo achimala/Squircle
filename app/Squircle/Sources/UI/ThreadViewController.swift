@@ -517,6 +517,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         render()
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        setNeedsMediaPass()
+    }
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        setNeedsMediaPass()
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         // Bounds and centre: the overlay's handle may be shifting them.
@@ -556,6 +565,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             }
         }
         placeFade()
+        setNeedsMediaPass()
         // The jump button floats over the conversation; it takes no row.
         let field = strip.isHidden ? composer.frame.minY : strip.frame.minY
         let floor = request.isHidden ? (notice.isHidden ? field : notice.frame.minY) : request.frame.minY
@@ -606,6 +616,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if shown != onScreen {
             onScreen = shown
             for case let cell as SimulatorCell in table.visibleCells { cell.showing = shown }
+            setNeedsMediaPass()
         }
     }
     /// Some of this conversation is in sight; live simulators stream only then.
@@ -795,6 +806,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
         updateSticky()
         reportVisibleSimulators()
+        setNeedsMediaPass()
         // Only the turn that was live pulses, when it folds into its own
         // summary; a quick reply with no steps must not light up an older one.
         let wasLive = liveTurn
@@ -935,6 +947,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateSticky()
         reportVisibleSimulators()
+        setNeedsMediaPass()
         guard scrollView.isTracking || scrollView.isDecelerating else { return }
         let bottom = scrollView.contentSize.height + scrollView.contentInset.bottom - scrollView.bounds.height
         pinToBottom = bottom - scrollView.contentOffset.y < 60
@@ -1024,12 +1037,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? 56 : 20, id: id,
                            trailing: id.hasPrefix("gallery:sent:"))
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
-            for shot in shots where GalleryCell.image(for: shot) == nil { loadImage(shot, item: id) }
         case .figure(let id, let shots):
             guard let cell = cell as? FigureCell else { return }
             cell.configure(shots, width: table.bounds.width)
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
-            for shot in shots where FigureCell.image(for: shot) == nil { loadFigure(shot, item: id) }
         case .summary(let summary):
             (cell as? SummaryCell)?.configure(summary)
         case .live(let status):
@@ -1050,36 +1061,85 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.configure(use, feeds: simulatorFeeds, video: stepID.flatMap(StepVideos.url(for:)), poster: poster, tappable: tappable)
             cell.showing = onScreen
             cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
-            if let stepID, let id = use.recordingID, StepVideos.url(for: stepID) == nil {
-                if poster == nil, !model.posterless.contains(id) { loadPoster(id, item: item.id) }
-                if model.autoLoadsRecording(id) { loadRecording(stepID, item: item.id) }
-            }
         }
     }
 
-    private func loadPoster(_ id: String, item: String) {
-        guard loadingRecordings.insert("poster:" + id).inserted else { return }
+    // MARK: Media (M06)
+
+    /// The conversation's downloads, nearest what shows first.
+    private lazy var media: MediaQueue = {
+        let queue = MediaQueue()
+        queue.onEnded = { [weak self] in self?.setNeedsMediaPass() }
+        return queue
+    }()
+    private var mediaPassPending = false
+    /// What's on screen changed: look again once, on the next frame.
+    private func setNeedsMediaPass() {
+        guard !mediaPassPending else { return }
+        mediaPassPending = true
         Task { [weak self] in
+            await DisplayFrame.next()
             guard let self else { return }
-            let data = await model.recordingPoster(id)
-            loadingRecordings.remove("poster:" + id)
-            // A poster to show, or none: then a small recording may load instead.
-            guard StepVideos.url(for: "media:" + id) == nil, data != nil || model.autoLoadsRecording(id) else { return }
-            await reconfigure(item)
+            mediaPassPending = false
+            mediaPass()
         }
     }
-    private var loadingRecordings = Set<String>()
-    private func loadRecording(_ stepID: String, item: String) {
-        guard loadingRecordings.insert(stepID).inserted else { return }
-        Task { [weak self] in
-            guard let self else { return }
-            let url = await model.loadVideo(stepID)
-            loadingRecordings.remove(stepID)
-            guard url != nil, dataSource.indexPath(for: item) != nil else { return }
-            var snapshot = dataSource.snapshot()
-            snapshot.reconfigureItems([item])
-            await dataSource.apply(snapshot, animatingDifferences: false)
+    /// The media missing from the rows in sight and a screen either side,
+    /// each with its distance from the middle of what shows. Nothing while
+    /// the conversation is out of sight.
+    private func mediaPass() {
+        guard onScreen, view.window != nil, table.bounds.height > 0 else { media.seen([:]); return }
+        let top = table.contentOffset.y + table.contentInset.top
+        let bottom = max(top, table.contentOffset.y + table.bounds.height - table.contentInset.bottom)
+        let middle = (top + bottom) / 2, reach = table.bounds.height
+        let near = CGRect(x: 0, y: top - reach, width: table.bounds.width, height: bottom - top + 2 * reach)
+        var wants: [String: MediaQueue.Want] = [:]
+        for path in table.indexPathsForRows(in: near) ?? [] {
+            guard let id = dataSource.itemIdentifier(for: path), let item = itemsByID[id] else { continue }
+            let row = table.rectForRow(at: path)
+            let distance = Double(abs(min(max(middle, row.minY), row.maxY) - middle))
+            let visible = row.maxY > top && row.minY < bottom
+            func want(_ key: String, after: Double = 0, whole: Bool = false, _ load: @escaping () async -> Bool) {
+                wants[key] = MediaQueue.Want(need: MediaLoads.Need(distance: distance + after, visible: visible, whole: whole), load: load)
+            }
+            switch item {
+            case .gallery(let id, let shots):
+                // It rests on its newest; older ones are off to the left.
+                for (index, shot) in shots.enumerated() where GalleryCell.image(for: shot) == nil {
+                    want("image:\(shot.step)#\(shot.index)", after: Double(shots.count - 1 - index) * GalleryCell.height) { [weak self] in
+                        await self?.loadImage(shot, item: id) ?? false
+                    }
+                }
+            case .figure(let id, let shots):
+                for shot in shots where FigureCell.image(for: shot) == nil {
+                    want("figure:" + shot.step) { [weak self] in await self?.loadFigure(shot, item: id) ?? false }
+                }
+            case .simulator(let use):
+                guard let recording = use.recordingID, StepVideos.url(for: "media:" + recording) == nil else { continue }
+                if StepImages.data(for: "poster:" + recording, index: 0) == nil, !model.posterless.contains(recording) {
+                    want("poster:" + recording) { [weak self] in await self?.loadPoster(recording, item: item.id) ?? false }
+                }
+                // After the pictures around it.
+                if model.autoLoadsRecording(recording) {
+                    want("recording:" + recording, after: reach, whole: true) { [weak self] in
+                        await self?.loadRecording("media:" + recording, item: item.id) ?? false
+                    }
+                }
+            default: continue
+            }
         }
+        media.seen(wants)
+    }
+
+    private func loadPoster(_ id: String, item: String) async -> Bool {
+        guard await model.recordingPoster(id) != nil else { return false }
+        if StepVideos.url(for: "media:" + id) == nil { await reconfigure(item) }
+        return true
+    }
+    private func loadRecording(_ stepID: String, item: String) async -> Bool {
+        guard await model.loadVideo(stepID) != nil else { return false }
+        await reconfigure(item)
+        return true
     }
 
     /// Live: large over the conversation. Recorded: the recording, full screen.
@@ -1374,34 +1434,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         present(StepDetailViewController(step: step), animated: true)
     }
 
-    private var loadingImages = Set<String>()
-    private func loadImage(_ shot: Shot, item: String) {
-        let key = "\(shot.step)#\(shot.index)"
-        guard loadingImages.insert(key).inserted else { return }
-        Task { [weak self] in
-            guard let self else { return }
-            let data = await model.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment)
-            let picture = data == nil ? nil : await GalleryCell.prepare(shot)
-            loadingImages.remove(key)
-            guard picture != nil, dataSource.indexPath(for: item) != nil else { return }
-            var snapshot = dataSource.snapshot()
-            snapshot.reconfigureItems([item])
-            await dataSource.apply(snapshot, animatingDifferences: false)
-            if pinToBottom { scrollToBottom(animated: true) }
-        }
+    private func loadImage(_ shot: Shot, item: String) async -> Bool {
+        guard await model.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment) != nil,
+              await GalleryCell.prepare(shot) != nil else { return false }
+        await reconfigure(item)
+        return true
     }
 
     /// Its size first, so the conversation makes room once, then the picture.
-    private func loadFigure(_ shot: Shot, item: String) {
-        guard loadingImages.insert(shot.step).inserted else { return }
-        Task { [weak self] in
-            guard let self else { return }
-            if MediaFiles.sizes[shot.step] == nil, await model.mediaSize(shot.step) != nil { await reconfigure(item) }
-            let data = await model.loadStepImage(shot.step, index: shot.index)
-            let picture = data == nil ? nil : await FigureCell.prepare(shot)
-            loadingImages.remove(shot.step)
-            if picture != nil { await reconfigure(item) }
-        }
+    private func loadFigure(_ shot: Shot, item: String) async -> Bool {
+        if MediaFiles.sizes[shot.step] == nil, await model.mediaSize(shot.step) != nil { await reconfigure(item) }
+        guard await model.loadStepImage(shot.step, index: shot.index) != nil, await FigureCell.prepare(shot) != nil else { return false }
+        await reconfigure(item)
+        return true
     }
 
     private func reconfigure(_ item: String) async {

@@ -35,6 +35,7 @@
 		3C7DE78ED76461B8ADDDA8AE /* ThreadsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A9104B7F53D24F7A87D8327 /* ThreadsViewController.swift */; };
 		418A84EAC572BD0535B5A81B /* T3DeviceStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */; };
 		41B1C50BF1A995CD85DD2FFC /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
+		444388714CC5582B2E850BCD /* MediaQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C145C181C585068CB76395D /* MediaQueue.swift */; };
 		45C61996DABA71051DAB9F0B /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		462A9D97A5F00E2C5438DDF7 /* ScreenRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A692004605868DC5DD94E0A /* ScreenRecorder.swift */; };
 		46CA1887E09993777FA2FC1D /* FrameSpring.swift in Sources */ = {isa = PBXBuildFile; fileRef = 413DFF5E9FEE90218E49E059 /* FrameSpring.swift */; };
@@ -66,6 +67,8 @@
 		871E8BD00509204FC051A81D /* SquircleWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5036FBEB6F4388E0E737FC4F /* SquircleWidgets.swift */; };
 		87256F7C2F8C28B7CD4FCF94 /* StudioViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */; };
 		87D6E7B728B1986849DCC922 /* StageLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5F85DA67966D2090740EE5 /* StageLayout.swift */; };
+		87EB507DA8B63DDD44B8A5CE /* MediaQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C145C181C585068CB76395D /* MediaQueue.swift */; };
+		8B051A4212A0CA5304E5B468 /* MediaLoads.swift in Sources */ = {isa = PBXBuildFile; fileRef = C60DABB5C15076DEACE629BB /* MediaLoads.swift */; };
 		8BAA4E81B553C53F52679B42 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
 		8E05EDDC1E59BC47FF661B32 /* PushTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E789B7BEFACE83A6B725DF3 /* PushTarget.swift */; };
 		8ECBFCDE794CEEE7DA10B1CB /* ClientModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */; };
@@ -108,6 +111,7 @@
 		D6A02AFEF384A1D3B5DBC0D8 /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD9D79E5C23223D44EB56B4B /* Link.swift */; };
 		DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
+		DF2A9CF739AF15C1A69A09AD /* MediaLoadsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D09985092A609178762E275 /* MediaLoadsTests.swift */; };
 		E1DE053BB794F521C586AAA7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9E1BA05082A949D15835CAAF /* Assets.xcassets */; };
 		E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
 		E97B8544C8D44C08980511EA /* FrameSpring.swift in Sources */ = {isa = PBXBuildFile; fileRef = 413DFF5E9FEE90218E49E059 /* FrameSpring.swift */; };
@@ -116,6 +120,7 @@
 		ED14D13BF4DEA33CADAEEEEC /* AttachmentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD8598F09B147F0F828D9AA7 /* AttachmentPicker.swift */; };
 		EF17406AB166353AD47A5EA0 /* SquircleActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */; };
 		EF2030F39BE56875E731AD9A /* ThreadCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA04F2B838066131F83E73E4 /* ThreadCells.swift */; };
+		EFCF9E7E751ECA0142376B80 /* MediaLoads.swift in Sources */ = {isa = PBXBuildFile; fileRef = C60DABB5C15076DEACE629BB /* MediaLoads.swift */; };
 		F3F1E7E795F24834F86E91A8 /* OverlayHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C4FD428C018FB4AA1950164 /* OverlayHost.swift */; };
 		F7D9F068163E2C0578B781E7 /* OverlayHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C4FD428C018FB4AA1950164 /* OverlayHost.swift */; };
 		F9ABC01D7F49133520F5279F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
@@ -138,10 +143,12 @@
 		03A1A3F89F39409756FF7CA2 /* Commands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Commands.swift; sourceTree = "<group>"; };
 		04F9E05172DC12D427E2C642 /* PerfRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfRecorder.swift; sourceTree = "<group>"; };
 		0882163016B1D5C885051FAD /* AppProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProject.swift; sourceTree = "<group>"; };
+		0C145C181C585068CB76395D /* MediaQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaQueue.swift; sourceTree = "<group>"; };
 		0C170C9A359425DE7827D4B3 /* JellyShader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyShader.swift; sourceTree = "<group>"; };
 		0C4FD428C018FB4AA1950164 /* OverlayHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayHost.swift; sourceTree = "<group>"; };
 		0D5F85DA67966D2090740EE5 /* StageLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageLayout.swift; sourceTree = "<group>"; };
 		1AE56C52866D21AD27A18697 /* DeviceStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStage.swift; sourceTree = "<group>"; };
+		1D09985092A609178762E275 /* MediaLoadsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaLoadsTests.swift; sourceTree = "<group>"; };
 		27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = OverlayLoader.c; sourceTree = "<group>"; };
 		2A9104B7F53D24F7A87D8327 /* ThreadsViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadsViewController.swift; sourceTree = "<group>"; };
 		2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViewController.swift; sourceTree = "<group>"; };
@@ -182,6 +189,7 @@
 		C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorViews.swift; sourceTree = "<group>"; };
 		C37CA1E433E4B0E8834ACEE9 /* TasksViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksViewController.swift; sourceTree = "<group>"; };
 		C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Gateway.swift; sourceTree = "<group>"; };
+		C60DABB5C15076DEACE629BB /* MediaLoads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaLoads.swift; sourceTree = "<group>"; };
 		CA04F2B838066131F83E73E4 /* ThreadCells.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadCells.swift; sourceTree = "<group>"; };
 		CC31297102176DC07450ECF1 /* SquircleOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleOverlay.swift; sourceTree = "<group>"; };
 		CD5E21CCB017A11F8E69752C /* GlassJelly.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassJelly.swift; sourceTree = "<group>"; };
@@ -212,6 +220,7 @@
 				DD697C4012A3FE758399C140 /* Delivery.swift */,
 				FD9D79E5C23223D44EB56B4B /* Link.swift */,
 				42E355291AFF2203E6E4CEAE /* LinkRuntime.swift */,
+				C60DABB5C15076DEACE629BB /* MediaLoads.swift */,
 				E51B1927FA5562FDD8F56D9E /* PendingJournal.swift */,
 				E82DFCDDC8D37D4A8C1B776F /* Reduction.swift */,
 			);
@@ -231,6 +240,7 @@
 			isa = PBXGroup;
 			children = (
 				DB495D800CF688C469BFF725 /* AppProjectTests.swift */,
+				1D09985092A609178762E275 /* MediaLoadsTests.swift */,
 				97B5F2EC90068F8A4116DF04 /* OverlayCaptureTests.swift */,
 				51AB12A9050AE317BDBA9C84 /* SpringTests.swift */,
 				FC334D6BA2EF208D5744BEEE /* SquircleActionTests.swift */,
@@ -290,6 +300,7 @@
 				8FC2D42D3BB1254066A5007E /* Jelly.swift */,
 				0C170C9A359425DE7827D4B3 /* JellyShader.swift */,
 				5DF796323376B17E9A5610B5 /* Markdown.swift */,
+				0C145C181C585068CB76395D /* MediaQueue.swift */,
 				9685CE2D9A277E148073C169 /* MotionAudit.swift */,
 				D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */,
 				C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */,
@@ -568,6 +579,8 @@
 				4CF0218EF899EB2390B44FCA /* Link.swift in Sources */,
 				80634C6AFE018923DA492393 /* LinkRuntime.swift in Sources */,
 				3B375023CFEB927A141C090E /* Markdown.swift in Sources */,
+				EFCF9E7E751ECA0142376B80 /* MediaLoads.swift in Sources */,
+				87EB507DA8B63DDD44B8A5CE /* MediaQueue.swift in Sources */,
 				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
 				F7D9F068163E2C0578B781E7 /* OverlayHost.swift in Sources */,
 				9F3620C86B7294E17D5922F4 /* PendingJournal.swift in Sources */,
@@ -608,6 +621,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */,
+				DF2A9CF739AF15C1A69A09AD /* MediaLoadsTests.swift in Sources */,
 				EC790312B147A7CDB5AA90A4 /* OverlayCaptureTests.swift in Sources */,
 				C5F5AE1D757E9658332F4638 /* SpringTests.swift in Sources */,
 				548C32A10537BFA96967F9CD /* SquircleActionTests.swift in Sources */,
@@ -650,6 +664,8 @@
 				D6A02AFEF384A1D3B5DBC0D8 /* Link.swift in Sources */,
 				CD226037FA13D2D06431D81D /* LinkRuntime.swift in Sources */,
 				01C183AE5505BED2A14E3B72 /* Markdown.swift in Sources */,
+				8B051A4212A0CA5304E5B468 /* MediaLoads.swift in Sources */,
+				444388714CC5582B2E850BCD /* MediaQueue.swift in Sources */,
 				B2B96A36977324FDBFA7E8F7 /* MotionAudit.swift in Sources */,
 				F3F1E7E795F24834F86E91A8 /* OverlayHost.swift in Sources */,
 				2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */,
