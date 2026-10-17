@@ -220,7 +220,16 @@ final class T3Gateway {
     private var socket: URLSessionWebSocketTask?
     private var receiver: Task<Void, Never>?
     private var heartbeat: Task<Void, Never>?
-    private var pending: [String: CheckedContinuation<JSONValue, Error>] = [:]
+    /// How each request ended: T3's Exit, or the socket going first.
+    private enum Reply {
+        case exit(JSONValue)
+        /// It never left the phone.
+        case notSent
+        /// Written (perhaps only in part); the socket went before T3 answered.
+        case lost(Error)
+        case cancelled
+    }
+    private var pending: [String: CheckedContinuation<Reply, Never>] = [:]
     /// Live subscriptions: their values, and how they end if T3 ends them.
     /// A dropped socket ends none of them; `onDisconnect` covers that.
     private var subscriptions: [String: (receive: (JSONValue) -> Void, ended: (Error?) -> Void)] = [:]
@@ -322,35 +331,51 @@ final class T3Gateway {
         receiver = nil; heartbeat = nil; requestsWriting = 0
         queuedBytes = 0; readBytes = 0; pings.removeAll()
         let waiting = pending; pending.removeAll(); subscriptions.removeAll()
-        for p in waiting.values { p.resume(throwing: error ?? ClientError.connection("T3")) }
+        for p in waiting.values { p.resume(returning: .lost(error ?? ClientError.connection("T3"))) }
         if notify { onDisconnect?() }
     }
     #if DEBUG
     /// Verification only: the socket fails as if the network dropped it.
     func dropForTesting() { socket?.cancel(with: .abnormalClosure, reason: nil) }
     #endif
-    /// Requests made while the socket is being replaced wait for the new one
-    /// instead of failing; nothing was sent, so nothing can run twice.
-    private func open() async throws {
-        let start = ContinuousClock.now
-        while socket == nil {
-            guard start.duration(to: .now) < .seconds(15), !Task.isCancelled else { throw ClientError.connection("T3") }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-    }
-    func call(_ method: String, _ payload: JSONValue = .object([:])) async throws -> JSONValue {
-        try await open()
+    /// One request and how it ended. Without a socket it is never sent:
+    /// whoever asked waits for T3's next connection, not for a time limit.
+    private func request(_ method: String, _ payload: JSONValue) async -> Reply {
+        guard socket != nil else { return .notSent }
         let id = UUID().uuidString
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
                 pending[id] = continuation
-                // T3 answers every request; a socket that dies first fails it.
+                // T3 answers every request; a socket that dies first ends it.
                 Task {
                     do { try await write(.from(["_tag":"Request", "id":id, "tag":method, "payload":payload.foundation, "headers":[]]), request: true) }
-                    catch { pending.removeValue(forKey: id)?.resume(throwing: error) }
+                    catch is NotWritten { pending.removeValue(forKey: id)?.resume(returning: .notSent) }
+                    catch { pending.removeValue(forKey: id)?.resume(returning: .lost(error)) }
                 }
             }
-        } onCancel: { Task { @MainActor in self.pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) } }
+        } onCancel: { Task { @MainActor in self.pending.removeValue(forKey: id)?.resume(returning: .cancelled) } }
+    }
+    /// A read-only request: its value, or why there is none.
+    func call(_ method: String, _ payload: JSONValue = .object([:])) async throws -> JSONValue {
+        switch await request(method, payload) {
+        case .exit(let exit):
+            guard exit["_tag"].string == "Success" else { throw ClientError.backend("T3", 0, "T3 rejected the request: \(exit["cause"].formatted.prefix(700))") }
+            return exit["value"]
+        case .notSent: throw ClientError.connection("T3")
+        case .lost(let error): throw error
+        case .cancelled: throw CancellationError()
+        }
+    }
+    /// An orchestration command, sent exactly as given (its identity was
+    /// fixed with its intent), and how T3 answered: only a typed refusal
+    /// proves nothing ran; a lost answer is `unknown`, never a refusal.
+    func dispatch(_ command: JSONValue) async -> CommandOutcome {
+        switch await request("orchestration.dispatchCommand", command) {
+        case .exit(let exit): return .t3(exit: exit)
+        case .notSent: return .notSent("Not connected to T3.")
+        case .lost(let error): return .unknown(error.localizedDescription)
+        case .cancelled: return .unknown("Cancelled after it was sent.")
+        }
     }
     /// `ended` runs if T3 finishes or rejects the subscription while the
     /// socket stays up: nil for an (unexpected) success, else why.
@@ -359,7 +384,7 @@ final class T3Gateway {
                    ended: @escaping (Error?) -> Void) async throws -> String {
         let id = UUID().uuidString; track(id, receive: receive, ended: ended)
         do { try await write(.from(["_tag":"Request","id":id,"tag":method,"payload":payload.foundation,"headers":[]]), request: true) }
-        catch { subscriptions.removeValue(forKey: id); throw error }
+        catch { subscriptions.removeValue(forKey: id); throw error is NotWritten ? ClientError.connection("T3") : error }
         return id
     }
     func track(_ id: String, receive: @escaping (JSONValue) -> Void, ended: @escaping (Error?) -> Void) {
@@ -370,8 +395,10 @@ final class T3Gateway {
         guard let id else { return }; subscriptions.removeValue(forKey: id)
         try? await write(.from(["_tag":"Interrupt","requestId":id]))
     }
+    /// No socket to write on: nothing left the phone.
+    private struct NotWritten: Error {}
     private func write(_ value: JSONValue, request: Bool = false) async throws {
-        guard let socket else { throw ClientError.connection("T3") }
+        guard let socket else { throw NotWritten() }
         let text = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
         guard request else { return try await socket.send(.string(text)) }
         requestsWriting += 1; queuedBytes += text.utf8.count
@@ -393,10 +420,9 @@ final class T3Gateway {
             Task { try? await write(.from(["_tag":"Ack","requestId":id])) }
         case "Exit":
             let exit = frame["exit"]
+            pending.removeValue(forKey: id)?.resume(returning: .exit(exit))
             let failure = exit["_tag"].string == "Success" ? nil
                 : ClientError.backend("T3",0,"T3 rejected the request: \(exit["cause"].formatted.prefix(700))")
-            if let failure { pending.removeValue(forKey:id)?.resume(throwing: failure) }
-            else { pending.removeValue(forKey:id)?.resume(returning:exit["value"]) }
             subscriptions.removeValue(forKey:id)?.ended(failure)
         case "Ping": Task { try? await write(.from(["_tag":"Pong"])) }
         case "Pong": if !pings.isEmpty { readBytes = max(readBytes, pings.removeFirst()) }

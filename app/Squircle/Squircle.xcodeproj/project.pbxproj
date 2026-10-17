@@ -12,6 +12,7 @@
 		04DE0DC0D5FADCDE83698BB8 /* SquircleAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1BB7C210A5D1493DD8BAAA /* SquircleAction.swift */; };
 		0E04509ED2231B46D027C890 /* AppProjectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB495D800CF688C469BFF725 /* AppProjectTests.swift */; };
 		102F79B8F25117C695BB30B8 /* ConnectionMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 798FEF664BDD1B7B8FF392B4 /* ConnectionMenu.swift */; };
+		1162A5F78FA6376A4D1B087B /* Commands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03A1A3F89F39409756FF7CA2 /* Commands.swift */; };
 		11B881C0DC0CDC3A0D97F892 /* ConnectionMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 798FEF664BDD1B7B8FF392B4 /* ConnectionMenu.swift */; };
 		12B04ECEBDEB13B4FDDE58CC /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
 		137F5D691337ACCA68558014 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
@@ -39,8 +40,10 @@
 		46CA1887E09993777FA2FC1D /* FrameSpring.swift in Sources */ = {isa = PBXBuildFile; fileRef = 413DFF5E9FEE90218E49E059 /* FrameSpring.swift */; };
 		4799E1F4447FF279740AD98A /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
 		4B0F162145780C3662E872B0 /* HostCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C2A80FAC707271FB5E24DAF /* HostCapture.swift */; };
+		4CF0218EF899EB2390B44FCA /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD9D79E5C23223D44EB56B4B /* Link.swift */; };
 		4D5A0C54F52464D0DC7E6B0B /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
 		4DDFD13E3021EAE8FBD50E7D /* T3RuntimeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */; };
+		52A55DF003085423A2CC75CF /* Reduction.swift in Sources */ = {isa = PBXBuildFile; fileRef = E82DFCDDC8D37D4A8C1B776F /* Reduction.swift */; };
 		540C9A566D7E624B05F3C475 /* CaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B031C12FA385E38F95AAF587 /* CaptureSession.swift */; };
 		5437154D48528C4055384701 /* SimulatorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */; };
 		548C32A10537BFA96967F9CD /* SquircleActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC334D6BA2EF208D5744BEEE /* SquircleActionTests.swift */; };
@@ -54,24 +57,30 @@
 		6C61E7B0513FDFC6D7E44DFA /* GlassJelly.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD5E21CCB017A11F8E69752C /* GlassJelly.swift */; };
 		6F5DF790DA62AD3825768741 /* GlassJelly.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD5E21CCB017A11F8E69752C /* GlassJelly.swift */; };
 		6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
+		70B9AB47633EBEEAFDE339D4 /* Commands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03A1A3F89F39409756FF7CA2 /* Commands.swift */; };
+		80634C6AFE018923DA492393 /* LinkRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42E355291AFF2203E6E4CEAE /* LinkRuntime.swift */; };
 		825485BA091840E2DDC3668A /* Jelly.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FC2D42D3BB1254066A5007E /* Jelly.swift */; };
 		8561E88460F96DCD4AB29DB4 /* ThreadViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */; };
 		856B0BA10D16A808D8A613D6 /* SimulatorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */; };
+		857787AA81D421AE636AA038 /* Reduction.swift in Sources */ = {isa = PBXBuildFile; fileRef = E82DFCDDC8D37D4A8C1B776F /* Reduction.swift */; };
 		871E8BD00509204FC051A81D /* SquircleWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5036FBEB6F4388E0E737FC4F /* SquircleWidgets.swift */; };
 		87256F7C2F8C28B7CD4FCF94 /* StudioViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */; };
 		87D6E7B728B1986849DCC922 /* StageLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5F85DA67966D2090740EE5 /* StageLayout.swift */; };
 		8BAA4E81B553C53F52679B42 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
 		8E05EDDC1E59BC47FF661B32 /* PushTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E789B7BEFACE83A6B725DF3 /* PushTarget.swift */; };
 		8ECBFCDE794CEEE7DA10B1CB /* ClientModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */; };
+		91FB48006D79A82C2C6430A6 /* PendingJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51B1927FA5562FDD8F56D9E /* PendingJournal.swift */; };
 		93827AAA4A823E5BCDF41C05 /* DiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */; };
 		952AEDBB410D133FE04E3DBB /* SquircleActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */; };
 		96D8D7C221734472B9BF0B8F /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
 		97B0E27B68EBBED4F0D63633 /* DiffViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C5EF2E1D5CCA0EA4D498601 /* DiffViewer.swift */; };
 		97C1E54012EDF05F226B3682 /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
 		98AB6903BD1F9CBB8D2523B9 /* TasksViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C37CA1E433E4B0E8834ACEE9 /* TasksViewController.swift */; };
+		9B1CCB2EA22692542FE72D49 /* Delivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD697C4012A3FE758399C140 /* Delivery.swift */; };
 		9D1F202195C47DF92993790B /* PerfRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04F9E05172DC12D427E2C642 /* PerfRecorder.swift */; };
 		9DF97E781B2CFBE77266D411 /* Jelly.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FC2D42D3BB1254066A5007E /* Jelly.swift */; };
 		9E22C0A4E3B1D986E5633B2B /* SquircleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CC6C7E09D1D06D146A2465 /* SquircleClient.swift */; };
+		9F3620C86B7294E17D5922F4 /* PendingJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51B1927FA5562FDD8F56D9E /* PendingJournal.swift */; };
 		9FA48EFC97AE505AA2608481 /* JellyShader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C170C9A359425DE7827D4B3 /* JellyShader.swift */; };
 		A0F79FFADAE3DED7606CEC97 /* T3Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */; };
 		A2EDACED9AB17C1C38A6F3D4 /* SquircleAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1BB7C210A5D1493DD8BAAA /* SquircleAction.swift */; };
@@ -91,9 +100,12 @@
 		BEF0D97D54BE2869497C9088 /* ThreadDetail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */; };
 		C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AE56C52866D21AD27A18697 /* DeviceStage.swift */; };
 		C5F5AE1D757E9658332F4638 /* SpringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51AB12A9050AE317BDBA9C84 /* SpringTests.swift */; };
+		C83D620A6D40B25B34DD6338 /* Delivery.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD697C4012A3FE758399C140 /* Delivery.swift */; };
 		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
 		CB3B7947C642FB450BF2C93F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
+		CD226037FA13D2D06431D81D /* LinkRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42E355291AFF2203E6E4CEAE /* LinkRuntime.swift */; };
 		D3823161D75D25966F363568 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
+		D6A02AFEF384A1D3B5DBC0D8 /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD9D79E5C23223D44EB56B4B /* Link.swift */; };
 		DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		E1DE053BB794F521C586AAA7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9E1BA05082A949D15835CAAF /* Assets.xcassets */; };
@@ -123,6 +135,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		03A1A3F89F39409756FF7CA2 /* Commands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Commands.swift; sourceTree = "<group>"; };
 		04F9E05172DC12D427E2C642 /* PerfRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfRecorder.swift; sourceTree = "<group>"; };
 		0882163016B1D5C885051FAD /* AppProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProject.swift; sourceTree = "<group>"; };
 		0C170C9A359425DE7827D4B3 /* JellyShader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyShader.swift; sourceTree = "<group>"; };
@@ -136,6 +149,7 @@
 		33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpringDriver.swift; sourceTree = "<group>"; };
 		3C480DAB8EE878E0069F36AD /* SquircleOverlay.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = SquircleOverlay.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		413DFF5E9FEE90218E49E059 /* FrameSpring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameSpring.swift; sourceTree = "<group>"; };
+		42E355291AFF2203E6E4CEAE /* LinkRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkRuntime.swift; sourceTree = "<group>"; };
 		44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadDetail.swift; sourceTree = "<group>"; };
 		48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCurtain.swift; sourceTree = "<group>"; };
 		4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViews.swift; sourceTree = "<group>"; };
@@ -175,7 +189,10 @@
 		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotBinding.swift; sourceTree = "<group>"; };
 		DB495D800CF688C469BFF725 /* AppProjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProjectTests.swift; sourceTree = "<group>"; };
+		DD697C4012A3FE758399C140 /* Delivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Delivery.swift; sourceTree = "<group>"; };
 		DD8598F09B147F0F828D9AA7 /* AttachmentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentPicker.swift; sourceTree = "<group>"; };
+		E51B1927FA5562FDD8F56D9E /* PendingJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingJournal.swift; sourceTree = "<group>"; };
+		E82DFCDDC8D37D4A8C1B776F /* Reduction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Reduction.swift; sourceTree = "<group>"; };
 		EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleActivity.swift; sourceTree = "<group>"; };
 		EBD483A8574350974655CD0C /* T3ThreadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3ThreadState.swift; sourceTree = "<group>"; };
 		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
@@ -183,10 +200,24 @@
 		FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppImportViewController.swift; sourceTree = "<group>"; };
 		FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3DeviceStream.swift; sourceTree = "<group>"; };
 		FC334D6BA2EF208D5744BEEE /* SquircleActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleActionTests.swift; sourceTree = "<group>"; };
+		FD9D79E5C23223D44EB56B4B /* Link.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Link.swift; sourceTree = "<group>"; };
 		FFCEA4E3A732D845AAAF5DFC /* T3Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Tests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
+		07E0106905582DE532ED1DA2 /* ClientState */ = {
+			isa = PBXGroup;
+			children = (
+				03A1A3F89F39409756FF7CA2 /* Commands.swift */,
+				DD697C4012A3FE758399C140 /* Delivery.swift */,
+				FD9D79E5C23223D44EB56B4B /* Link.swift */,
+				42E355291AFF2203E6E4CEAE /* LinkRuntime.swift */,
+				E51B1927FA5562FDD8F56D9E /* PendingJournal.swift */,
+				E82DFCDDC8D37D4A8C1B776F /* Reduction.swift */,
+			);
+			path = ClientState;
+			sourceTree = "<group>";
+		};
 		09E2BCB3BB6DE16ED7C0CB0A /* Widgets */ = {
 			isa = PBXGroup;
 			children = (
@@ -294,6 +325,7 @@
 				C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */,
 				614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */,
 				EBD483A8574350974655CD0C /* T3ThreadState.swift */,
+				07E0106905582DE532ED1DA2 /* ClientState */,
 				80D91E9DBE83CF2C0802769A /* UI */,
 			);
 			path = Sources;
@@ -523,7 +555,9 @@
 				6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */,
 				01B7E72409266156BB49C33E /* CaptureSession.swift in Sources */,
 				B33D4A9C782619416B5ABFD7 /* ClientModels.swift in Sources */,
+				70B9AB47633EBEEAFDE339D4 /* Commands.swift in Sources */,
 				11B881C0DC0CDC3A0D97F892 /* ConnectionMenu.swift in Sources */,
+				C83D620A6D40B25B34DD6338 /* Delivery.swift in Sources */,
 				C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */,
 				93827AAA4A823E5BCDF41C05 /* DiffViewer.swift in Sources */,
 				46CA1887E09993777FA2FC1D /* FrameSpring.swift in Sources */,
@@ -531,12 +565,16 @@
 				FB3FA377C1D0CCED56B5215F /* HostCapture.swift in Sources */,
 				825485BA091840E2DDC3668A /* Jelly.swift in Sources */,
 				59B9D8CA84D07C9BAC40B408 /* JellyShader.swift in Sources */,
+				4CF0218EF899EB2390B44FCA /* Link.swift in Sources */,
+				80634C6AFE018923DA492393 /* LinkRuntime.swift in Sources */,
 				3B375023CFEB927A141C090E /* Markdown.swift in Sources */,
 				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
 				F7D9F068163E2C0578B781E7 /* OverlayHost.swift in Sources */,
+				9F3620C86B7294E17D5922F4 /* PendingJournal.swift in Sources */,
 				9D1F202195C47DF92993790B /* PerfRecorder.swift in Sources */,
 				150D982A0801A3F17A5C0630 /* PushCenter.swift in Sources */,
 				FCD6CE4E2BFA8F5440565BF9 /* PushTarget.swift in Sources */,
+				857787AA81D421AE636AA038 /* Reduction.swift in Sources */,
 				3A3E16EA445BF69E2C979A4F /* ScreenRecorder.swift in Sources */,
 				261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */,
 				5437154D48528C4055384701 /* SimulatorViews.swift in Sources */,
@@ -599,7 +637,9 @@
 				DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */,
 				540C9A566D7E624B05F3C475 /* CaptureSession.swift in Sources */,
 				8ECBFCDE794CEEE7DA10B1CB /* ClientModels.swift in Sources */,
+				1162A5F78FA6376A4D1B087B /* Commands.swift in Sources */,
 				102F79B8F25117C695BB30B8 /* ConnectionMenu.swift in Sources */,
+				9B1CCB2EA22692542FE72D49 /* Delivery.swift in Sources */,
 				B9EF10730486FE81421DC60F /* DeviceStage.swift in Sources */,
 				97B0E27B68EBBED4F0D63633 /* DiffViewer.swift in Sources */,
 				E97B8544C8D44C08980511EA /* FrameSpring.swift in Sources */,
@@ -607,12 +647,16 @@
 				4B0F162145780C3662E872B0 /* HostCapture.swift in Sources */,
 				9DF97E781B2CFBE77266D411 /* Jelly.swift in Sources */,
 				9FA48EFC97AE505AA2608481 /* JellyShader.swift in Sources */,
+				D6A02AFEF384A1D3B5DBC0D8 /* Link.swift in Sources */,
+				CD226037FA13D2D06431D81D /* LinkRuntime.swift in Sources */,
 				01C183AE5505BED2A14E3B72 /* Markdown.swift in Sources */,
 				B2B96A36977324FDBFA7E8F7 /* MotionAudit.swift in Sources */,
 				F3F1E7E795F24834F86E91A8 /* OverlayHost.swift in Sources */,
 				2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */,
+				91FB48006D79A82C2C6430A6 /* PendingJournal.swift in Sources */,
 				A3A54C0479DF84AA96EE8A82 /* PerfRecorder.swift in Sources */,
 				8E05EDDC1E59BC47FF661B32 /* PushTarget.swift in Sources */,
+				52A55DF003085423A2CC75CF /* Reduction.swift in Sources */,
 				462A9D97A5F00E2C5438DDF7 /* ScreenRecorder.swift in Sources */,
 				59C2E7027B55B03E5809A83B /* ScreenshotBinding.swift in Sources */,
 				856B0BA10D16A808D8A613D6 /* SimulatorViews.swift in Sources */,
