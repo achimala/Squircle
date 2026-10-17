@@ -1,3 +1,8 @@
+// No locks or blocking waits: state is shared only through single owners
+// (see `actor` and clippy.toml).
+#![deny(clippy::disallowed_types, clippy::disallowed_methods)]
+
+pub mod actor;
 pub mod agents;
 pub mod apps;
 pub mod artifact;

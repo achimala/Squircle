@@ -1,3 +1,7 @@
+// A fake HTTP server on a plain thread records the CLI's requests behind a
+// leaf lock; this is test scaffolding, not service state.
+#![allow(clippy::disallowed_types)]
+
 use serde_json::Value;
 use std::{
     io::{Read, Write},

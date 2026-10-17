@@ -5,6 +5,7 @@
 //! `Transport`; the phone's contract (registration endpoints, the `squircle`
 //! payload key, the activity's content state) stays the same.
 
+use crate::actor::Owner;
 use crate::store::{atomic_json, private_dir, read_json};
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
@@ -16,9 +17,10 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
     time::{Duration, Instant, SystemTime},
 };
+use tokio::sync::Notify;
 
 /// The Swift type name of the activity's attributes (`attributes-type`).
 pub const ACTIVITY_TYPE: &str = "SquircleActivityAttributes";
@@ -90,13 +92,11 @@ fn b64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// Signs APNs provider tokens (ES256 JWT). Apple accepts a token for an hour
-/// and rejects refreshing more than every 20 minutes, so one is reused for 40.
+/// Signs APNs provider tokens (ES256 JWT).
 pub struct Signer {
     key: EcdsaKeyPair,
     key_id: String,
     team_id: String,
-    cached: Mutex<Option<(u64, String)>>,
 }
 
 impl Signer {
@@ -104,7 +104,7 @@ impl Signer {
         let der = pem_der(&config.key_pem)?;
         let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der, &ring::rand::SystemRandom::new())
             .map_err(|e| anyhow::anyhow!("invalid P-256 key: {e}"))?;
-        Ok(Self { key, key_id: config.key_id.clone(), team_id: config.team_id.clone(), cached: Mutex::default() })
+        Ok(Self { key, key_id: config.key_id.clone(), team_id: config.team_id.clone() })
     }
 
     pub fn jwt(&self, issued_at: u64) -> Result<String> {
@@ -114,19 +114,6 @@ impl Signer {
         let signature = self.key.sign(&ring::rand::SystemRandom::new(), input.as_bytes())
             .map_err(|_| anyhow::anyhow!("signing failed"))?;
         Ok(format!("{input}.{}", b64url(signature.as_ref())))
-    }
-
-    fn token(&self, refresh: bool) -> Result<String> {
-        let now = crate::model::now();
-        let mut cached = self.cached.lock().unwrap();
-        if let Some((at, token)) = cached.as_ref()
-            && !refresh && now < at + 40 * 60
-        {
-            return Ok(token.clone());
-        }
-        let token = self.jwt(now)?;
-        *cached = Some((now, token.clone()));
-        Ok(token)
     }
 
     pub fn public_key(&self) -> &[u8] {
@@ -184,9 +171,32 @@ pub trait Transport: Send + Sync {
     fn send<'a>(&'a self, delivery: &'a Delivery) -> BoxFuture<'a, Result<Outcome>>;
 }
 
+/// The signer and the provider token it last made. Apple accepts a token
+/// for an hour and rejects refreshing more than every 20 minutes, so one is
+/// reused for 40; one owner makes and hands it out, so concurrent sends
+/// share it.
+struct Tokens {
+    signer: Signer,
+    cached: Option<(u64, String)>,
+}
+
+impl Tokens {
+    fn token(&mut self, refresh: bool) -> Result<String> {
+        let now = crate::model::now();
+        if let Some((at, token)) = self.cached.as_ref()
+            && !refresh && now < at + 40 * 60
+        {
+            return Ok(token.clone());
+        }
+        let token = self.signer.jwt(now)?;
+        self.cached = Some((now, token.clone()));
+        Ok(token)
+    }
+}
+
 /// Apple's push service, directly, with the user's key.
 pub struct Apns {
-    signer: Signer,
+    tokens: Owner<Tokens>,
     client: reqwest::Client,
     sandbox: String,
     production: String,
@@ -205,7 +215,8 @@ impl Apns {
         if sandbox.starts_with("http://") {
             builder = builder.http2_prior_knowledge();
         }
-        Ok(Self { signer: Signer::new(config)?, client: builder.build()?, sandbox: sandbox.into(), production: production.into() })
+        let tokens = Owner::spawn("APNs tokens", Tokens { signer: Signer::new(config)?, cached: None });
+        Ok(Self { tokens, client: builder.build()?, sandbox: sandbox.into(), production: production.into() })
     }
 
     async fn post(&self, delivery: &Delivery, refresh: bool) -> Result<(u16, String)> {
@@ -214,8 +225,9 @@ impl Apns {
             PushType::Alert => ("alert", delivery.bundle_id.clone()),
             PushType::LiveActivity => ("liveactivity", format!("{}.push-type.liveactivity", delivery.bundle_id)),
         };
+        let token = self.tokens.ask(move |tokens| tokens.token(refresh)).await?;
         let mut request = self.client.post(format!("{host}/3/device/{}", delivery.token))
-            .bearer_auth(self.signer.token(refresh)?)
+            .bearer_auth(token)
             .header("apns-topic", topic)
             .header("apns-push-type", kind)
             .header("apns-priority", delivery.priority.to_string())
@@ -682,12 +694,21 @@ fn describe(outcome: &Result<Outcome>) -> String {
     }
 }
 
+/// The push owner's state, reached only by its letters.
 #[derive(Default)]
 struct State {
+    root: PathBuf,
     devices: BTreeMap<String, Device>,
     presence: HashMap<String, Presence>,
     apps: BTreeMap<String, AppLive>,
     generation: u64,
+    /// The key file's modification time and the transport made from it.
+    loaded: Option<(SystemTime, Arc<dyn Transport>)>,
+    /// Notes waiting for the burst window to close.
+    pending: Vec<Note>,
+    /// Each thread's last turn and phase, once the first shell is seen.
+    seen: Option<HashMap<String, (Option<String>, Phase)>>,
+    threads: Option<Arc<dyn Threads>>,
 }
 
 impl State {
@@ -699,238 +720,28 @@ impl State {
             _ => d.start_token.is_some() && shown(&self.presence, &d.id) == Shown::Background,
         })
     }
-}
 
-/// A send the reconciler decided on, with the generation its result must match.
-struct Outgoing {
-    device: String,
-    project: String,
-    generation: u64,
-    message: Message,
-    delivery: Delivery,
-}
-
-pub struct Push {
-    root: PathBuf,
-    state: Mutex<State>,
-    /// The key file's modification time and the transport made from it.
-    loaded: Mutex<Option<(SystemTime, Arc<dyn Transport>)>>,
-    fixed: Option<Arc<dyn Transport>>,
-    pending: Mutex<Vec<Note>>,
-    timing: Timing,
-    alerts_sent: std::sync::atomic::AtomicU64,
-    seen: Mutex<Option<HashMap<String, (Option<String>, Phase)>>>,
-    threads: Mutex<Option<Arc<dyn Threads>>>,
-    /// Wakes the reconciler after a shell change, a phone report or a result.
-    wake: tokio::sync::Notify,
-}
-
-impl Push {
-    pub fn open(root: &Path) -> Result<Arc<Self>> {
-        Self::build(root, None, Timing::default())
-    }
-
-    /// With a given transport and timing, for tests.
-    pub fn with_transport(root: &Path, transport: Arc<dyn Transport>, timing: Timing) -> Result<Arc<Self>> {
-        Self::build(root, Some(transport), timing)
-    }
-
-    fn build(root: &Path, fixed: Option<Arc<dyn Transport>>, timing: Timing) -> Result<Arc<Self>> {
-        private_dir(&root.join("push"))?;
-        let path = root.join("push").join("devices.json");
-        let devices = if path.try_exists()? { read_json(&path)? } else { BTreeMap::new() };
-        Ok(Arc::new(Self {
-            root: root.to_path_buf(), state: Mutex::new(State { devices, ..State::default() }),
-            loaded: Mutex::default(), fixed, pending: Mutex::default(), timing,
-            alerts_sent: Default::default(), seen: Mutex::default(), threads: Mutex::default(),
-            wake: tokio::sync::Notify::new(),
-        }))
-    }
-
-    pub fn set_threads(&self, threads: Arc<dyn Threads>) {
-        *self.threads.lock().unwrap() = Some(threads);
-    }
-
-    fn save(&self, devices: &BTreeMap<String, Device>) {
-        if let Err(error) = atomic_json(&self.root.join("push").join("devices.json"), devices) {
+    fn save(&self) {
+        if let Err(error) = atomic_json(&self.root.join("push").join("devices.json"), &self.devices) {
             eprintln!("Push: cannot save devices: {error:#}");
         }
     }
 
-    /// The transport for the current key, reloaded when the key changes.
-    fn transport(&self) -> Result<Option<Arc<dyn Transport>>> {
-        if let Some(fixed) = &self.fixed {
-            return Ok(Some(fixed.clone()));
-        }
-        let path = key_path(&self.root);
-        let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
-            *self.loaded.lock().unwrap() = None;
-            return Ok(None);
-        };
-        let mut loaded = self.loaded.lock().unwrap();
-        if let Some((at, transport)) = loaded.as_ref()
-            && *at == modified
-        {
-            return Ok(Some(transport.clone()));
-        }
-        let config = KeyConfig::load(&self.root)?.context("APNs key disappeared")?;
-        let transport: Arc<dyn Transport> = Arc::new(Apns::new(&config)?);
-        *loaded = Some((modified, transport.clone()));
-        Ok(Some(transport))
-    }
-
-    // MARK: Phone reports
-
-    pub fn register(&self, r: Registration) -> Result<()> {
-        ensure!(valid_id(&r.device_id), "invalid device ID");
-        ensure!(valid_id(&r.bundle_id) && r.bundle_id.contains('.'), "invalid bundle ID");
-        for token in [&r.token, &r.start_token].into_iter().flatten() {
-            ensure!(valid_token(token), "a push token is hex");
-        }
-        let mut state = self.state.lock().unwrap();
-        let device = state.devices.entry(r.device_id.clone()).or_insert_with(|| Device {
-            id: r.device_id.clone(), token: None, environment: r.environment, bundle_id: r.bundle_id.clone(),
-            start_token: None, links: BTreeMap::new(), updated_at: 0,
-        });
-        if device.environment != r.environment || device.bundle_id != r.bundle_id {
-            // A different build: its activities belong to the old one.
-            device.links.clear();
-            device.token = None;
-            device.start_token = None;
-        }
-        device.environment = r.environment;
-        device.bundle_id = r.bundle_id;
-        if r.token.is_some() { device.token = r.token; }
-        if r.start_token.is_some() { device.start_token = r.start_token; }
-        device.updated_at = crate::model::now();
-        self.save(&state.devices);
-        drop(state);
-        self.wake.notify_one();
-        Ok(())
-    }
-
-    pub fn register_activity(&self, r: ActivityRegistration) -> Result<()> {
-        ensure!(valid_id(&r.project_id) && valid_id(&r.activity_id), "invalid ID");
-        let mut state = self.state.lock().unwrap();
-        let device = state.devices.get_mut(&r.device_id).context("Register the device first")?;
-        match r.token {
-            Some(token) => {
-                ensure!(valid_token(&token), "a push token is hex");
-                // A new token supersedes whatever was in flight for the old one;
-                // the current content goes to it next. The phone repeats a known
-                // one each time Squircle opens, which changes nothing.
-                let activity = Activity { id: r.activity_id, token };
-                let known = device.links.get(&r.project_id)
-                    .is_some_and(|l| matches!(&l.stage, Stage::Running { activity: a, .. } if *a == activity));
-                if !known {
-                    device.links.insert(r.project_id, Link::new(Stage::Running { activity, acked: None }));
-                }
-            }
-            None => {
-                if device.links.get(&r.project_id)
-                    .is_some_and(|l| matches!(&l.stage, Stage::Running { activity, .. } if activity.id == r.activity_id))
-                {
-                    device.links.remove(&r.project_id);
-                }
-            }
-        }
-        self.save(&state.devices);
-        drop(state);
-        self.wake.notify_one();
-        Ok(())
-    }
-
-    pub fn report_presence(&self, r: PresenceReport) -> Result<()> {
-        ensure!(valid_id(&r.device_id), "invalid device ID");
-        let shown = if r.foreground { Shown::Foreground { thread: r.thread_id } } else { Shown::Background };
-        self.state.lock().unwrap().presence.insert(r.device_id, Presence { shown, until: Instant::now() + PRESENCE });
-        self.wake.notify_one();
-        Ok(())
-    }
-
-    pub fn status(&self) -> Value {
-        let key = KeyConfig::load(&self.root).ok().flatten();
-        let state = self.state.lock().unwrap();
-        json!({
-            "configured": key.is_some() || self.fixed.is_some(),
-            "key_id": key.as_ref().map(|k| k.key_id.clone()), "team_id": key.as_ref().map(|k| k.team_id.clone()),
-            "transport": if self.fixed.is_some() { "test" } else { "apns" },
-            "devices": state.devices.values().map(|d| json!({
-                "id": d.id, "environment": d.environment, "bundle_id": d.bundle_id,
-                "notifications": d.token.is_some(), "live_activity_start": d.start_token.is_some(),
-                "live_activities": d.running(), "updated_at": d.updated_at,
-            })).collect::<Vec<_>>(),
-        })
-    }
-
-    // MARK: Notifications
-
     /// Forgets a token Apple says is gone, wherever this device used it.
-    fn forget(&self, device: &str, token: &str) {
-        let mut state = self.state.lock().unwrap();
-        let Some(d) = state.devices.get_mut(device) else { return };
+    fn forget(&mut self, device: &str, token: &str) {
+        let Some(d) = self.devices.get_mut(device) else { return };
         if d.token.as_deref() == Some(token) { d.token = None; }
         if d.start_token.as_deref() == Some(token) { d.start_token = None; }
         d.links.retain(|_, l| !matches!(&l.stage, Stage::Running { activity, .. } if activity.token == token));
-        self.save(&state.devices);
-    }
-
-    /// Queues a notification; notes within the burst window go out together.
-    pub fn notify(self: &Arc<Self>, note: Note) {
-        let mut pending = self.pending.lock().unwrap();
-        pending.push(note);
-        if pending.len() > 1 {
-            return;
-        }
-        let this = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(this.timing.coalesce).await;
-            this.flush();
-        });
-    }
-
-    /// Sends the batch; each alert retries transient failures on its own,
-    /// under one collapse ID so a retry of a delivered alert replaces it.
-    fn flush(self: &Arc<Self>) {
-        let notes = std::mem::take(&mut *self.pending.lock().unwrap());
-        for (device, mut delivery) in self.alerts(&notes) {
-            let n = self.alerts_sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            delivery.collapse_id = Some(format!("squircle-{}-{n}", crate::model::now()));
-            let this = self.clone();
-            tokio::spawn(async move { this.send_alert(device, delivery).await });
-        }
-    }
-
-    async fn send_alert(&self, device: String, delivery: Delivery) {
-        for attempt in 1..=ALERT_ATTEMPTS {
-            let transport = match self.transport() {
-                Ok(Some(t)) => t,
-                Ok(None) => return,
-                Err(error) => { eprintln!("Push: {error:#}"); return }
-            };
-            let outcome = transport.send(&delivery).await;
-            if matches!(outcome, Ok(Outcome::Unregistered)) {
-                self.forget(&device, &delivery.token);
-            }
-            if !matches!(outcome, Ok(Outcome::Sent)) {
-                eprintln!("Push to device {device} (try {attempt}): {}", describe(&outcome));
-            }
-            if !transient(&outcome) {
-                return;
-            }
-            if attempt < ALERT_ATTEMPTS {
-                tokio::time::sleep(backoff(self.timing.retry, attempt)).await;
-            }
-        }
+        self.save();
     }
 
     /// One alert per device and app, leaving out what the phone is looking at.
     fn alerts(&self, notes: &[Note]) -> Vec<(String, Delivery)> {
-        let state = self.state.lock().unwrap();
         let mut out = vec![];
-        for device in state.devices.values() {
+        for device in self.devices.values() {
             let Some(token) = &device.token else { continue };
-            let here = shown(&state.presence, &device.id);
+            let here = shown(&self.presence, &device.id);
             let mut by_app: BTreeMap<&str, Vec<&Note>> = BTreeMap::new();
             for note in notes {
                 if let (Some(t), Shown::Foreground { thread: Some(viewed) }) = (&note.target.thread, &here)
@@ -950,134 +761,33 @@ impl Push {
         out
     }
 
-    /// `squircle push test`: a notification, and optionally a Live Activity,
-    /// now, once each, reporting what Apple said.
-    pub async fn test(&self, live: bool) -> Value {
-        let note = Note { app: "Squircle".into(), line: "Notifications from your Mac work.".into(), target: Target::default() };
-        let mut deliveries = self.alerts(&[note]);
-        if live {
-            let content = LiveState { status: "Testing the Live Activity".into(), workers: 1, needs_you: false, working: true };
-            let state = self.state.lock().unwrap();
-            for device in state.devices.values() {
-                let Some(token) = &device.start_token else { continue };
-                deliveries.push((device.id.clone(), Delivery {
-                    token: token.clone(), environment: device.environment, bundle_id: device.bundle_id.clone(),
-                    push_type: PushType::LiveActivity, priority: 10, collapse_id: None,
-                    payload: activity_payload(LiveEvent::Start, &content, "Squircle", "test", crate::model::now()),
-                }));
-            }
-        }
-        if deliveries.is_empty() {
-            return json!({"sent": [], "note": "No phone has registered yet. Open Squircle on the phone and allow notifications."});
-        }
-        let transport = match self.transport() {
-            Ok(Some(t)) => t,
-            Ok(None) => return json!({"sent": [{"error": "No APNs key. Run: squircle push setup --key-file PATH --key-id ID --team-id ID"}]}),
-            Err(error) => return json!({"sent": [{"error": format!("{error:#}")}]}),
-        };
-        let mut results = vec![];
-        for (device, delivery) in deliveries {
-            let outcome = transport.send(&delivery).await;
-            if matches!(outcome, Ok(Outcome::Unregistered)) {
-                self.forget(&device, &delivery.token);
-            }
-            results.push(json!({"device": device, "result": describe(&outcome)}));
-        }
-        json!({"sent": results})
-    }
-
-    // MARK: Builds
-
-    /// A finished device build. `app` is its catalog app, when the caller
-    /// knows it, so even a failed build without output opens its app.
-    pub fn build_finished(self: &Arc<Self>, job: &crate::model::Job, app: Option<&crate::apps::AppRecord>) {
-        use crate::model::{BuildMode, BuildState};
-        let Some(request) = job.request() else { return };
-        if request.mode != BuildMode::Archive {
-            return; // Agents' simulator builds are their own business.
-        }
-        let output = job.output();
-        let record = app;
-        let app = output.map(|o| o.title.clone()).filter(|t| !t.is_empty())
-            .or_else(|| record.map(|r| r.name.clone())).unwrap_or_else(|| request.scheme.clone());
-        let line = match job.state() {
-            BuildState::Succeeded => match output {
-                Some(o) => format!("Build {} is ready to install", o.build_number),
-                None => "Build is ready to install".into(),
-            },
-            BuildState::Failed => {
-                let reason = job.error().map(summary_line).filter(|l| !l.is_empty());
-                reason.map_or("Build failed".into(), |r| format!("Build failed: {r}"))
-            }
-            _ => return,
-        };
-        let target = Target {
-            app: record.map(|r| r.id.clone()), build: Some(job.id.clone()),
-            bundle: output.map(|o| o.bundle_id.clone()).or_else(|| record.and_then(|r| r.bundle_id.clone())),
-            ..Target::default()
-        };
-        self.notify(Note { app, line, target });
-    }
-
-    // MARK: Agents
-
-    /// Called with each change to T3's shell: notes for finished turns and
-    /// questions, and what each app's Live Activity should show.
-    pub fn apps_changed(self: &Arc<Self>, apps: Vec<AppView>) {
+    /// Notes for finished turns and questions since the last shell.
+    fn changes(&mut self, apps: &[AppView]) -> Vec<(String, String, String, Option<String>, Change)> {
         let mut changes = vec![];
-        {
-            let mut seen = self.seen.lock().unwrap();
-            let first = seen.is_none();
-            let seen = seen.get_or_insert_with(HashMap::new);
-            for app in &apps {
-                let agent = app.agent.iter().map(|(id, row)| (id, None, row));
-                let workers = app.workers.iter().map(|(id, title, row)| (id, Some(title), row));
-                for (id, title, row) in agent.chain(workers) {
-                    let turn = row["latestTurn"]["turnId"].as_str().map(str::to_string);
-                    let now = phase(row);
-                    if !first && let Some(change) = change(seen.get(id), turn.clone(), now) {
-                        changes.push((app.app.clone(), app.project_id.clone(), id.clone(), title.cloned(), change));
-                    }
-                    seen.insert(id.clone(), (turn, now));
+        let first = self.seen.is_none();
+        let seen = self.seen.get_or_insert_with(HashMap::new);
+        for app in apps {
+            let agent = app.agent.iter().map(|(id, row)| (id, None, row));
+            let workers = app.workers.iter().map(|(id, title, row)| (id, Some(title), row));
+            for (id, title, row) in agent.chain(workers) {
+                let turn = row["latestTurn"]["turnId"].as_str().map(str::to_string);
+                let now = phase(row);
+                if !first && let Some(change) = change(seen.get(id), turn.clone(), now) {
+                    changes.push((app.app.clone(), app.project_id.clone(), id.clone(), title.cloned(), change));
                 }
+                seen.insert(id.clone(), (turn, now));
             }
         }
-        self.observe(&apps);
-        for (app, project, thread, worker, change) in changes {
-            let this = self.clone();
-            tokio::spawn(async move {
-                let threads = this.threads.lock().unwrap().clone();
-                if worker.is_none() && change == Change::Replied && let Some(t) = &threads && t.quiet(&thread).await {
-                    return;
-                }
-                let line = match (&worker, change) {
-                    (Some(title), Change::Replied) => format!("“{title}” finished"),
-                    (Some(title), Change::Asks) => format!("“{title}” needs you"),
-                    (Some(title), Change::Failed) => format!("“{title}” stopped with an error"),
-                    (None, Change::Replied) => match &threads {
-                        Some(t) => t.last_reply(&thread).await.map(|r| summary_line(&r)).filter(|l| !l.is_empty())
-                            .unwrap_or_else(|| "Replied".into()),
-                        None => "Replied".into(),
-                    },
-                    (None, Change::Asks) => match &threads {
-                        Some(t) => t.question(&thread).await.map(|q| summary_line(&q)).unwrap_or_else(|| "Needs your approval".into()),
-                        None => "Needs you".into(),
-                    },
-                    (None, Change::Failed) => "Stopped with an error".into(),
-                };
-                this.notify(Note { app, line, target: Target { project: Some(project), thread: Some(thread), ..Target::default() } });
-            });
-        }
+        changes
     }
 
     /// Moves each app's wanted activity to what the shell now says.
-    fn observe(&self, apps: &[AppView]) {
+    fn observe(&mut self, apps: &[AppView]) {
         let now = Instant::now();
-        let mut state = self.state.lock().unwrap();
         for app in apps {
             let (observed, stepping) = observe(app);
             let active = observed.working || observed.needs_you;
-            let entry = state.apps.entry(app.project_id.clone()).or_insert_with(|| AppLive {
+            let entry = self.apps.entry(app.project_id.clone()).or_insert_with(|| AppLive {
                 name: app.app.clone(), want: Want::Hide(observed.clone()), stepping: None, step: None,
             });
             entry.name = app.app.clone();
@@ -1092,46 +802,25 @@ impl Push {
             }
             entry.stepping = stepping;
         }
-        drop(state);
-        self.wake.notify_one();
     }
 
-    /// Keeps every phone's activities in line with what each app wants, until
-    /// the service stops. Runs on each change and at least every `TICK`.
-    pub async fn run(self: Arc<Self>) {
-        loop {
-            let next = self.reconcile();
-            let wait = next.map_or(TICK, |at| at.saturating_duration_since(Instant::now())).min(TICK);
-            tokio::select! {
-                _ = self.wake.notified() => {}
-                _ = tokio::time::sleep(wait) => {}
-            }
-        }
-    }
-
-    /// One pass: decides the sends and step lookups due now, starts them, and
-    /// returns when the next pass is due.
-    fn reconcile(self: &Arc<Self>) -> Option<Instant> {
-        let transport = match self.transport() {
-            Ok(Some(t)) => t,
-            Ok(None) => return None, // nobody to tell: no sends, no lookups
-            Err(error) => { eprintln!("Push: {error:#}"); return None }
-        };
+    /// One pass of the reconciler: the sends and step lookups due now, and
+    /// when the next pass is due.
+    fn reconcile(&mut self, timing: Timing) -> (Vec<(u32, Outgoing)>, Vec<(String, StepKey)>, Option<Instant>) {
         let now = Instant::now();
         let mut next: Option<Instant> = None;
         let mut due = |at: Instant| next = Some(next.map_or(at, |n: Instant| n.min(at)));
         let mut sends = vec![];
         let mut lookups = vec![];
-        let mut state = self.state.lock().unwrap();
         // The step is read only while it can reach someone.
-        let recipients: Vec<String> = state.apps.keys().filter(|p| state.has_recipient(p)).cloned().collect();
-        let State { devices, presence, apps, generation } = &mut *state;
+        let recipients: Vec<String> = self.apps.keys().filter(|p| self.has_recipient(p)).cloned().collect();
+        let State { devices, presence, apps, generation, .. } = self;
         for app in apps.values_mut() {
             if let Want::Pausing { since, last } = &app.want {
-                if now.duration_since(*since) >= self.timing.pause {
+                if now.duration_since(*since) >= timing.pause {
                     app.want = Want::Hide(last.clone());
                 } else {
-                    due(*since + self.timing.pause);
+                    due(*since + timing.pause);
                 }
             }
         }
@@ -1156,8 +845,8 @@ impl Push {
                         });
                         match acked {
                             Some((s, _)) if *s == content => continue,
-                            Some((_, at)) if !important && now.duration_since(*at) < self.timing.throttle => {
-                                due(*at + self.timing.throttle);
+                            Some((_, at)) if !important && now.duration_since(*at) < timing.throttle => {
+                                due(*at + timing.throttle);
                                 continue;
                             }
                             _ => {}
@@ -1209,29 +898,13 @@ impl Push {
                 }
             }
         }
-        drop(state);
-        for (failures, send) in sends {
-            let (this, transport) = (self.clone(), transport.clone());
-            tokio::spawn(async move {
-                let outcome = transport.send(&send.delivery).await;
-                this.settle(send, failures, outcome);
-            });
-        }
-        for (project, key) in lookups {
-            let this = self.clone();
-            tokio::spawn(async move { this.look_up(project, key).await });
-        }
-        next
+        (sends, lookups, next)
     }
 
     /// Applies a send's result, if the link still waits for that send.
-    fn settle(&self, send: Outgoing, failures: u32, outcome: Result<Outcome>) {
+    fn settle(&mut self, send: Outgoing, failures: u32, outcome: Result<Outcome>, retry: Duration) {
         let now = Instant::now();
-        if !matches!(outcome, Ok(Outcome::Sent)) {
-            eprintln!("Live Activity push to device {} ({}): {}", send.device, send.project, describe(&outcome));
-        }
-        let mut state = self.state.lock().unwrap();
-        let Some(device) = state.devices.get_mut(&send.device) else { return };
+        let Some(device) = self.devices.get_mut(&send.device) else { return };
         let Some(link) = device.links.get_mut(&send.project) else { return };
         if link.flight != Flight::Sending(send.generation) {
             return; // superseded: a new activity token, or the link went away
@@ -1256,39 +929,407 @@ impl Push {
                 save = true;
             }
             (Ok(Outcome::Retry(_)) | Err(_), _) => {
-                link.flight = Flight::Waiting { until: now + backoff(self.timing.retry, failures + 1), failures: failures + 1 };
+                link.flight = Flight::Waiting { until: now + backoff(retry, failures + 1), failures: failures + 1 };
             }
         }
         if save {
-            self.save(&state.devices);
+            self.save();
         }
-        drop(state);
+    }
+}
+
+/// A send the reconciler decided on, with the generation its result must match.
+struct Outgoing {
+    device: String,
+    project: String,
+    generation: u64,
+    message: Message,
+    delivery: Delivery,
+}
+
+pub struct Push {
+    root: PathBuf,
+    /// Devices, presence, apps and pending notes; reached only by letters.
+    owner: Owner<State>,
+    fixed: Option<Arc<dyn Transport>>,
+    timing: Timing,
+    alerts_sent: AtomicU64,
+    /// Wakes the reconciler after a shell change, a phone report or a result.
+    wake: Notify,
+}
+
+impl Push {
+    pub fn open(root: &Path) -> Result<Arc<Self>> {
+        Self::build(root, None, Timing::default())
+    }
+
+    /// With a given transport and timing, for tests.
+    pub fn with_transport(root: &Path, transport: Arc<dyn Transport>, timing: Timing) -> Result<Arc<Self>> {
+        Self::build(root, Some(transport), timing)
+    }
+
+    fn build(root: &Path, fixed: Option<Arc<dyn Transport>>, timing: Timing) -> Result<Arc<Self>> {
+        private_dir(&root.join("push"))?;
+        let path = root.join("push").join("devices.json");
+        let devices = if path.try_exists()? { read_json(&path)? } else { BTreeMap::new() };
+        let owner = Owner::spawn("push", State { root: root.to_path_buf(), devices, ..State::default() });
+        Ok(Arc::new(Self { root: root.to_path_buf(), owner, fixed, timing, alerts_sent: AtomicU64::new(0), wake: Notify::new() }))
+    }
+
+    pub fn set_threads(&self, threads: Arc<dyn Threads>) {
+        self.owner.tell(move |s| s.threads = Some(threads));
+    }
+
+    /// The transport for the current key, reloaded when the key changes.
+    async fn transport(&self) -> Result<Option<Arc<dyn Transport>>> {
+        if let Some(fixed) = &self.fixed {
+            return Ok(Some(fixed.clone()));
+        }
+        let path = key_path(&self.root);
+        let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+            self.owner.ask(|s| s.loaded = None).await;
+            return Ok(None);
+        };
+        let loaded = self.owner.ask(move |s| s.loaded.as_ref().filter(|(at, _)| *at == modified).map(|(_, t)| t.clone())).await;
+        if let Some(transport) = loaded {
+            return Ok(Some(transport));
+        }
+        let config = KeyConfig::load(&self.root)?.context("APNs key disappeared")?;
+        let transport: Arc<dyn Transport> = Arc::new(Apns::new(&config)?);
+        let made = transport.clone();
+        self.owner.ask(move |s| s.loaded = Some((modified, made))).await;
+        Ok(Some(transport))
+    }
+
+    // MARK: Phone reports
+
+    pub async fn register(&self, r: Registration) -> Result<()> {
+        ensure!(valid_id(&r.device_id), "invalid device ID");
+        ensure!(valid_id(&r.bundle_id) && r.bundle_id.contains('.'), "invalid bundle ID");
+        for token in [&r.token, &r.start_token].into_iter().flatten() {
+            ensure!(valid_token(token), "a push token is hex");
+        }
+        self.owner.ask(move |s| {
+            let device = s.devices.entry(r.device_id.clone()).or_insert_with(|| Device {
+                id: r.device_id.clone(), token: None, environment: r.environment, bundle_id: r.bundle_id.clone(),
+                start_token: None, links: BTreeMap::new(), updated_at: 0,
+            });
+            if device.environment != r.environment || device.bundle_id != r.bundle_id {
+                // A different build: its activities belong to the old one.
+                device.links.clear();
+                device.token = None;
+                device.start_token = None;
+            }
+            device.environment = r.environment;
+            device.bundle_id = r.bundle_id;
+            if r.token.is_some() { device.token = r.token; }
+            if r.start_token.is_some() { device.start_token = r.start_token; }
+            device.updated_at = crate::model::now();
+            s.save();
+        }).await;
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    pub async fn register_activity(&self, r: ActivityRegistration) -> Result<()> {
+        ensure!(valid_id(&r.project_id) && valid_id(&r.activity_id), "invalid ID");
+        if let Some(token) = &r.token {
+            ensure!(valid_token(token), "a push token is hex");
+        }
+        self.owner.ask(move |s| -> Result<()> {
+            let device = s.devices.get_mut(&r.device_id).context("Register the device first")?;
+            match r.token {
+                Some(token) => {
+                    // A new token supersedes whatever was in flight for the old one;
+                    // the current content goes to it next. The phone repeats a known
+                    // one each time Squircle opens, which changes nothing.
+                    let activity = Activity { id: r.activity_id, token };
+                    let known = device.links.get(&r.project_id)
+                        .is_some_and(|l| matches!(&l.stage, Stage::Running { activity: a, .. } if *a == activity));
+                    if !known {
+                        device.links.insert(r.project_id, Link::new(Stage::Running { activity, acked: None }));
+                    }
+                }
+                None => {
+                    if device.links.get(&r.project_id)
+                        .is_some_and(|l| matches!(&l.stage, Stage::Running { activity, .. } if activity.id == r.activity_id))
+                    {
+                        device.links.remove(&r.project_id);
+                    }
+                }
+            }
+            s.save();
+            Ok(())
+        }).await?;
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    pub async fn report_presence(&self, r: PresenceReport) -> Result<()> {
+        ensure!(valid_id(&r.device_id), "invalid device ID");
+        let shown = if r.foreground { Shown::Foreground { thread: r.thread_id } } else { Shown::Background };
+        self.owner.ask(move |s| { s.presence.insert(r.device_id, Presence { shown, until: Instant::now() + PRESENCE }); }).await;
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    pub async fn status(&self) -> Value {
+        let key = KeyConfig::load(&self.root).ok().flatten();
+        let devices: Vec<Value> = self.owner.ask(|s| s.devices.values().map(|d| json!({
+            "id": d.id, "environment": d.environment, "bundle_id": d.bundle_id,
+            "notifications": d.token.is_some(), "live_activity_start": d.start_token.is_some(),
+            "live_activities": d.running(), "updated_at": d.updated_at,
+        })).collect()).await;
+        json!({
+            "configured": key.is_some() || self.fixed.is_some(),
+            "key_id": key.as_ref().map(|k| k.key_id.clone()), "team_id": key.as_ref().map(|k| k.team_id.clone()),
+            "transport": if self.fixed.is_some() { "test" } else { "apns" },
+            "devices": devices,
+        })
+    }
+
+    // MARK: Notifications
+
+    /// Forgets a token Apple says is gone, wherever this device used it.
+    async fn forget(&self, device: &str, token: &str) {
+        let (device, token) = (device.to_string(), token.to_string());
+        self.owner.ask(move |s| s.forget(&device, &token)).await
+    }
+
+    /// Queues a notification; notes within the burst window go out together.
+    pub fn notify(self: &Arc<Self>, note: Note) {
+        let this = self.clone();
+        self.owner.tell(move |s| {
+            s.pending.push(note);
+            if s.pending.len() > 1 {
+                return;
+            }
+            tokio::spawn(async move {
+                tokio::time::sleep(this.timing.coalesce).await;
+                this.flush().await;
+            });
+        });
+    }
+
+    /// Sends the batch; each alert retries transient failures on its own,
+    /// under one collapse ID so a retry of a delivered alert replaces it.
+    async fn flush(self: &Arc<Self>) {
+        let deliveries = self.owner.ask(|s| {
+            let notes = std::mem::take(&mut s.pending);
+            s.alerts(&notes)
+        }).await;
+        for (device, mut delivery) in deliveries {
+            let n = self.alerts_sent.fetch_add(1, Ordering::Relaxed);
+            delivery.collapse_id = Some(format!("squircle-{}-{n}", crate::model::now()));
+            let this = self.clone();
+            tokio::spawn(async move { this.send_alert(device, delivery).await });
+        }
+    }
+
+    async fn send_alert(&self, device: String, delivery: Delivery) {
+        for attempt in 1..=ALERT_ATTEMPTS {
+            let transport = match self.transport().await {
+                Ok(Some(t)) => t,
+                Ok(None) => return,
+                Err(error) => { eprintln!("Push: {error:#}"); return }
+            };
+            let outcome = transport.send(&delivery).await;
+            if matches!(outcome, Ok(Outcome::Unregistered)) {
+                self.forget(&device, &delivery.token).await;
+            }
+            if !matches!(outcome, Ok(Outcome::Sent)) {
+                eprintln!("Push to device {device} (try {attempt}): {}", describe(&outcome));
+            }
+            if !transient(&outcome) {
+                return;
+            }
+            if attempt < ALERT_ATTEMPTS {
+                tokio::time::sleep(backoff(self.timing.retry, attempt)).await;
+            }
+        }
+    }
+
+    /// `squircle push test`: a notification, and optionally a Live Activity,
+    /// now, once each, reporting what Apple said.
+    pub async fn test(&self, live: bool) -> Value {
+        let note = Note { app: "Squircle".into(), line: "Notifications from your Mac work.".into(), target: Target::default() };
+        let deliveries = self.owner.ask(move |s| {
+            let mut deliveries = s.alerts(&[note]);
+            if live {
+                let content = LiveState { status: "Testing the Live Activity".into(), workers: 1, needs_you: false, working: true };
+                for device in s.devices.values() {
+                    let Some(token) = &device.start_token else { continue };
+                    deliveries.push((device.id.clone(), Delivery {
+                        token: token.clone(), environment: device.environment, bundle_id: device.bundle_id.clone(),
+                        push_type: PushType::LiveActivity, priority: 10, collapse_id: None,
+                        payload: activity_payload(LiveEvent::Start, &content, "Squircle", "test", crate::model::now()),
+                    }));
+                }
+            }
+            deliveries
+        }).await;
+        if deliveries.is_empty() {
+            return json!({"sent": [], "note": "No phone has registered yet. Open Squircle on the phone and allow notifications."});
+        }
+        let transport = match self.transport().await {
+            Ok(Some(t)) => t,
+            Ok(None) => return json!({"sent": [{"error": "No APNs key. Run: squircle push setup --key-file PATH --key-id ID --team-id ID"}]}),
+            Err(error) => return json!({"sent": [{"error": format!("{error:#}")}]}),
+        };
+        let mut results = vec![];
+        for (device, delivery) in deliveries {
+            let outcome = transport.send(&delivery).await;
+            if matches!(outcome, Ok(Outcome::Unregistered)) {
+                self.forget(&device, &delivery.token).await;
+            }
+            results.push(json!({"device": device, "result": describe(&outcome)}));
+        }
+        json!({"sent": results})
+    }
+
+    // MARK: Builds
+
+    /// A finished device build. `app` is its catalog app, when the caller
+    /// knows it, so even a failed build without output opens its app.
+    pub fn build_finished(self: &Arc<Self>, job: &crate::model::Job, app: Option<&crate::apps::AppRecord>) {
+        use crate::model::{BuildMode, BuildState};
+        let Some(request) = job.request() else { return };
+        if request.mode != BuildMode::Archive {
+            return; // Agents' simulator builds are their own business.
+        }
+        let output = job.output();
+        let record = app;
+        let app = output.map(|o| o.title.clone()).filter(|t| !t.is_empty())
+            .or_else(|| record.map(|r| r.name.clone())).unwrap_or_else(|| request.scheme.clone());
+        let line = match job.state() {
+            BuildState::Succeeded => match output {
+                Some(o) => format!("Build {} is ready to install", o.build_number),
+                None => "Build is ready to install".into(),
+            },
+            BuildState::Failed => {
+                let reason = job.error().map(summary_line).filter(|l| !l.is_empty());
+                reason.map_or("Build failed".into(), |r| format!("Build failed: {r}"))
+            }
+            _ => return,
+        };
+        let target = Target {
+            app: record.map(|r| r.id.clone()), build: Some(job.id.clone()),
+            bundle: output.map(|o| o.bundle_id.clone()).or_else(|| record.and_then(|r| r.bundle_id.clone())),
+            ..Target::default()
+        };
+        self.notify(Note { app, line, target });
+    }
+
+    // MARK: Agents
+
+    /// Called with each change to T3's shell: notes for finished turns and
+    /// questions, and what each app's Live Activity should show.
+    pub async fn apps_changed(self: &Arc<Self>, apps: Vec<AppView>) {
+        let (changes, threads) = self.owner.ask(move |s| {
+            let changes = s.changes(&apps);
+            s.observe(&apps);
+            (changes, s.threads.clone())
+        }).await;
+        self.wake.notify_one();
+        for (app, project, thread, worker, change) in changes {
+            let (this, threads) = (self.clone(), threads.clone());
+            tokio::spawn(async move {
+                if worker.is_none() && change == Change::Replied && let Some(t) = &threads && t.quiet(&thread).await {
+                    return;
+                }
+                let line = match (&worker, change) {
+                    (Some(title), Change::Replied) => format!("“{title}” finished"),
+                    (Some(title), Change::Asks) => format!("“{title}” needs you"),
+                    (Some(title), Change::Failed) => format!("“{title}” stopped with an error"),
+                    (None, Change::Replied) => match &threads {
+                        Some(t) => t.last_reply(&thread).await.map(|r| summary_line(&r)).filter(|l| !l.is_empty())
+                            .unwrap_or_else(|| "Replied".into()),
+                        None => "Replied".into(),
+                    },
+                    (None, Change::Asks) => match &threads {
+                        Some(t) => t.question(&thread).await.map(|q| summary_line(&q)).unwrap_or_else(|| "Needs your approval".into()),
+                        None => "Needs you".into(),
+                    },
+                    (None, Change::Failed) => "Stopped with an error".into(),
+                };
+                this.notify(Note { app, line, target: Target { project: Some(project), thread: Some(thread), ..Target::default() } });
+            });
+        }
+    }
+
+    /// Keeps every phone's activities in line with what each app wants, until
+    /// the service stops. Runs on each change and at least every `TICK`.
+    pub async fn run(self: Arc<Self>) {
+        loop {
+            let next = self.reconcile().await;
+            let wait = next.map_or(TICK, |at| at.saturating_duration_since(Instant::now())).min(TICK);
+            tokio::select! {
+                _ = self.wake.notified() => {}
+                _ = tokio::time::sleep(wait) => {}
+            }
+        }
+    }
+
+    /// One pass: decides the sends and step lookups due now, starts them, and
+    /// returns when the next pass is due.
+    async fn reconcile(self: &Arc<Self>) -> Option<Instant> {
+        let transport = match self.transport().await {
+            Ok(Some(t)) => t,
+            Ok(None) => return None, // nobody to tell: no sends, no lookups
+            Err(error) => { eprintln!("Push: {error:#}"); return None }
+        };
+        let timing = self.timing;
+        let (sends, lookups, next) = self.owner.ask(move |s| s.reconcile(timing)).await;
+        for (failures, send) in sends {
+            let (this, transport) = (self.clone(), transport.clone());
+            tokio::spawn(async move {
+                let outcome = transport.send(&send.delivery).await;
+                this.settle(send, failures, outcome).await;
+            });
+        }
+        for (project, key) in lookups {
+            let this = self.clone();
+            tokio::spawn(async move { this.look_up(project, key).await });
+        }
+        next
+    }
+
+    /// Applies a send's result, if the link still waits for that send.
+    async fn settle(&self, send: Outgoing, failures: u32, outcome: Result<Outcome>) {
+        if !matches!(outcome, Ok(Outcome::Sent)) {
+            eprintln!("Live Activity push to device {} ({}): {}", send.device, send.project, describe(&outcome));
+        }
+        let retry = self.timing.retry;
+        self.owner.ask(move |s| s.settle(send, failures, outcome, retry)).await;
         self.wake.notify_one();
     }
 
     /// Reads the agent's current step for one turn; the text is kept only if
     /// that turn is still the one the activity shows.
     async fn look_up(&self, project: String, key: StepKey) {
-        let threads = self.threads.lock().unwrap().clone();
+        let threads = self.owner.ask(|s| s.threads.clone()).await;
         let text = match threads {
             Some(t) => tokio::time::timeout(STEP_DEADLINE, t.current_step(&key.thread)).await.ok().flatten(),
             None => None,
         };
-        let mut state = self.state.lock().unwrap();
-        let Some(step) = state.apps.get_mut(&project).and_then(|a| a.step.as_mut()).filter(|s| s.key == key) else { return };
-        step.looking = false;
-        step.checked = Some(Instant::now());
-        if text.is_some() {
-            step.text = text;
-        }
-        drop(state);
+        self.owner.ask(move |s| {
+            let Some(step) = s.apps.get_mut(&project).and_then(|a| a.step.as_mut()).filter(|s| s.key == key) else { return };
+            step.looking = false;
+            step.checked = Some(Instant::now());
+            if text.is_some() {
+                step.text = text;
+            }
+        }).await;
         self.wake.notify_one();
     }
 }
 
 #[cfg(test)]
+// Fakes record calls behind leaf locks; never held across a call.
+#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use axum::{Router, extract::State, http::HeaderMap, routing::post};
 
     // A throwaway P-256 key in Apple's .p8 format (PKCS#8 with public key).
@@ -1393,30 +1434,31 @@ mod tests {
         let timing = Timing { coalesce: Duration::from_millis(50), ..Timing::default() };
         let push = Push::with_transport(dir.path(), Arc::new(Apns::with_hosts(&config, &url, &url).unwrap()), timing).unwrap();
         push.register(Registration { device_id: "phone".into(), bundle_id: "ai.dreamslate.Squircle".into(),
-            environment: Environment::Development, token: Some("ab".repeat(32)), start_token: None }).unwrap();
+            environment: Environment::Development, token: Some("ab".repeat(32)), start_token: None }).await.unwrap();
         push.register(Registration { device_id: "old".into(), bundle_id: "ai.dreamslate.Squircle".into(),
-            environment: Environment::Production, token: Some(format!("dead{}", "0".repeat(28))), start_token: None }).unwrap();
+            environment: Environment::Production, token: Some(format!("dead{}", "0".repeat(28))), start_token: None }).await.unwrap();
         assert!(push.register(Registration { device_id: "x".into(), bundle_id: "ai.dreamslate.Squircle".into(),
-            environment: Environment::Development, token: Some("../../x".into()), start_token: None }).is_err());
-        push.report_presence(PresenceReport { device_id: "phone".into(), foreground: true, thread_id: Some("t1".into()) }).unwrap();
+            environment: Environment::Development, token: Some("../../x".into()), start_token: None }).await.is_err());
+        push.report_presence(PresenceReport { device_id: "phone".into(), foreground: true, thread_id: Some("t1".into()) }).await.unwrap();
         let note = |line: &str, thread: &str| Note { app: "Notes".into(), line: line.into(),
             target: Target { project: Some("p".into()), thread: Some(thread.into()), ..Target::default() } };
         push.notify(note("Looked at it", "t1"));
         push.notify(note("“Login” finished", "w1"));
         tokio::time::sleep(Duration::from_millis(400)).await;
 
-        let requests = seen.lock().unwrap();
-        assert_eq!(requests.len(), 2, "one alert per device");
-        let (headers, _, body) = requests.iter().find(|r| r.1.starts_with("abab")).unwrap();
-        assert_eq!(body["aps"]["alert"]["body"], "“Login” finished", "the viewed thread is left out on that phone");
-        assert_eq!(headers["apns-topic"], "ai.dreamslate.Squircle");
-        assert_eq!(headers["apns-push-type"], "alert");
-        let jwt = headers["authorization"].to_str().unwrap().strip_prefix("bearer ").or_else(|| headers["authorization"].to_str().unwrap().strip_prefix("Bearer ")).unwrap();
-        verify(jwt, &public);
-        let (_, _, other) = requests.iter().find(|r| r.1.starts_with("dead")).unwrap();
-        assert_eq!(other["aps"]["alert"]["body"], "Looked at it\n“Login” finished");
-        drop(requests);
-        let status = push.status();
+        {
+            let requests = seen.lock().unwrap();
+            assert_eq!(requests.len(), 2, "one alert per device");
+            let (headers, _, body) = requests.iter().find(|r| r.1.starts_with("abab")).unwrap();
+            assert_eq!(body["aps"]["alert"]["body"], "“Login” finished", "the viewed thread is left out on that phone");
+            assert_eq!(headers["apns-topic"], "ai.dreamslate.Squircle");
+            assert_eq!(headers["apns-push-type"], "alert");
+            let jwt = headers["authorization"].to_str().unwrap().strip_prefix("bearer ").or_else(|| headers["authorization"].to_str().unwrap().strip_prefix("Bearer ")).unwrap();
+            verify(jwt, &public);
+            let (_, _, other) = requests.iter().find(|r| r.1.starts_with("dead")).unwrap();
+            assert_eq!(other["aps"]["alert"]["body"], "Looked at it\n“Login” finished");
+        }
+        let status = push.status().await;
         let old = status["devices"].as_array().unwrap().iter().find(|d| d["id"] == "old").unwrap();
         assert_eq!(old["notifications"], false, "a 410 forgets the token");
     }
@@ -1451,11 +1493,11 @@ mod tests {
         json!({"latestTurn": {"turnId": turn, "state": "running"}})
     }
 
-    fn phone(push: &Push) {
+    async fn phone(push: &Push) {
         push.register(Registration { device_id: "phone".into(), bundle_id: "ai.dreamslate.Squircle".into(),
-            environment: Environment::Development, token: Some("ab".repeat(32)), start_token: None }).unwrap();
+            environment: Environment::Development, token: Some("ab".repeat(32)), start_token: None }).await.unwrap();
         push.register_activity(ActivityRegistration { device_id: "phone".into(), project_id: "p".into(),
-            activity_id: "a1".into(), token: Some("cd".repeat(32)) }).unwrap();
+            activity_id: "a1".into(), token: Some("cd".repeat(32)) }).await.unwrap();
     }
 
     fn events(transport: &Scripted) -> Vec<String> {
@@ -1469,7 +1511,7 @@ mod tests {
         let transport = Arc::new(Scripted::default());
         let push = Push::with_transport(dir.path(), transport.clone(), fast()).unwrap();
         tokio::spawn(push.clone().run());
-        phone(&push);
+        phone(&push).await;
 
         // An alert that APNs drops once arrives on the retry, under one collapse ID.
         transport.answers.lock().unwrap().push((PushType::Alert, Outcome::Retry("HTTP 503".into())));
@@ -1480,19 +1522,19 @@ mod tests {
         transport.sent.lock().unwrap().clear();
         assert!(alerts[0].collapse_id.is_some() && alerts[0].collapse_id == alerts[1].collapse_id);
 
-        push.apps_changed(app(working("t1")));
+        push.apps_changed(app(working("t1"))).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(events(&transport), ["update"]);
 
         // Idle past the pause: the End fails once, and the token survives it.
         transport.answers.lock().unwrap().push((PushType::LiveActivity, Outcome::Retry("HTTP 500".into())));
-        push.apps_changed(app(json!({"latestTurn": {"turnId": "t1", "state": "completed"}})));
+        push.apps_changed(app(json!({"latestTurn": {"turnId": "t1", "state": "completed"}}))).await;
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(events(&transport), ["update", "end"]);
-        assert_eq!(push.status()["devices"][0]["live_activities"], 1, "token kept for the retry");
+        assert_eq!(push.status().await["devices"][0]["live_activities"], 1, "token kept for the retry");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(events(&transport), ["update", "end", "end"]);
-        assert_eq!(push.status()["devices"][0]["live_activities"], 0, "forgotten once ended");
+        assert_eq!(push.status().await["devices"][0]["live_activities"], 0, "forgotten once ended");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(events(&transport).len(), 3, "nothing more once acknowledged");
     }
@@ -1529,14 +1571,14 @@ mod tests {
         push.set_threads(steps.clone());
         tokio::spawn(push.clone().run());
 
-        push.apps_changed(app(working("t1")));
+        push.apps_changed(app(working("t1"))).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(steps.calls.lock().unwrap().is_empty(), "no phone, no lookup");
 
-        phone(&push);
+        phone(&push).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(steps.calls.lock().unwrap().len(), 1);
-        push.apps_changed(app(working("t2")));
+        push.apps_changed(app(working("t2"))).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
         steps.release.notify_one();
         tokio::time::sleep(Duration::from_millis(50)).await;

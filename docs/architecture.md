@@ -61,7 +61,7 @@ outcome is unknown is never retryable. Captures each stream into their own priva
 staging file after a Content-Length check; they never wait for each other
 (a single upload slot let one phone app suspended mid-send refuse every
 later upload, 2026-10-15). Authentication and paths
-use immutable settings; diagnostics have their own lock; slow file work runs
+use immutable settings; diagnostics have their own lane; slow file work runs
 on blocking workers. An app whose preview bytes are missing still lists, with
 `preview_unavailable`, and republishing repairs it.
 
@@ -71,7 +71,7 @@ the connection (`GET /v1/install-links/{token}`). Neither proves installation
 or launch; `launch_observed` comes from the app's own diagnostic event. The
 phone's update curtain waits for every byte sent.
 
-**App agents.** One operation lock per project serializes creation and
+**App agents.** One operation lane per project serializes creation and
 resets; a persisted reservation finishes under the same thread ID. `POST
 /v1/agents` takes an optional `runtime_mode` (`approval-required`,
 `auto-accept-edits`, `auto`, `full-access`; default `full-access`), applied

@@ -1,0 +1,21 @@
+# Service state is shared only through single owners (src/actor.rs): no
+# locks, so no lock can be taken twice or in two orders, and nothing a letter
+# or a Drop does can wait. See docs/fsm-architecture.md §4.
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "share state through a crate::actor::Owner; readers use a Snapshot" },
+    { path = "std::sync::RwLock", reason = "publish a crate::actor::Snapshot instead" },
+    { path = "std::sync::Condvar", reason = "owners never wait; tell an owner instead" },
+    { path = "tokio::sync::Mutex", reason = "async work that must not overlap runs in a ranked crate::actor::Lane" },
+    { path = "tokio::sync::RwLock", reason = "publish a crate::actor::Snapshot instead" },
+    { path = "parking_lot::Mutex", reason = "no locks; see crate::actor", allow-invalid = true },
+    { path = "parking_lot::RwLock", reason = "no locks; see crate::actor", allow-invalid = true },
+    { path = "parking_lot::ReentrantMutex", reason = "no locks; see crate::actor", allow-invalid = true },
+]
+disallowed-methods = [
+    { path = "tokio::sync::oneshot::Receiver::blocking_recv", reason = "waits on a thread; await it instead" },
+    { path = "tokio::sync::mpsc::Receiver::blocking_recv", reason = "waits on a thread; await it instead" },
+    { path = "tokio::sync::mpsc::UnboundedReceiver::blocking_recv", reason = "waits on a thread; await it instead" },
+    { path = "tokio::sync::mpsc::Sender::blocking_send", reason = "waits on a thread; send without waiting instead" },
+    { path = "tokio::runtime::Handle::block_on", reason = "a letter or Drop must never wait" },
+    { path = "std::sync::OnceLock::get_or_init", reason = "waits while another thread initializes; set it once at startup" },
+]

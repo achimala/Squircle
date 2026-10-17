@@ -50,6 +50,15 @@ Read [README.md](README.md), then only the linked detail relevant to the task. D
   app and looking at it. Delete a test when the design it pins changes;
   don't rewrite it. The suite must stay a few seconds.
 
+## Engineering rules (service)
+
+- **No locks** (user, 2026-10-17). Service state lives in single owners
+  (`src/actor.rs`): letters are synchronous, readers use published
+  snapshots, async work that must not overlap runs in ranked lanes, and
+  `Drop` only tells an owner. `clippy.toml` and `tests/ownership.rs` fail on
+  any mutex, read-write lock or blocking wait. See
+  [owners](docs/fsm-architecture.md#owners-and-who-may-wait-for-whom-implemented-2026-10-17).
+
 ## Documentation discipline
 
 User instructions take precedence. Label proposals and unknowns; do not turn a researched capability into a tested fact. Record evidence and versions when a milestone is actually validated. Update the relevant detail page when a decision changes; keep this entry point short.

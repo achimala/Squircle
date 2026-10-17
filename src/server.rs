@@ -1,4 +1,5 @@
-use crate::{agents::Agents, apps, push::Push, simpool::Pool, sims::{Exit, Sims}, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::{AdmitError, Jobs, MAX_OPERATIONS, Store}, xcode};
+use crate::actor::{Lane, Owner, Rank};
+use crate::{agents::Agents, apps, push::Push, simpool::Pool, sims::{Exit, Sims}, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::{AdmitError, JobView, Jobs, MAX_OPERATIONS, Store}, xcode};
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -21,7 +22,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -30,13 +31,15 @@ use tokio_util::io::ReaderStream;
 
 #[derive(Clone)]
 pub struct AppState {
-    /// Job, ticket and app-catalog records: held across their read/modify/write.
-    pub store: Arc<Mutex<Store>>,
-    /// The same store's immutable root and credentials, for authentication and
-    /// paths without waiting behind record or catalog file I/O.
-    files: Arc<Store>,
-    /// Serializes per-build diagnostic appends and reads (append-only files).
-    diagnostics: Arc<Mutex<()>>,
+    /// The store's immutable root and credentials, for authentication, paths
+    /// and reads (records are replaced atomically).
+    pub files: Arc<Store>,
+    /// Install-link tickets: their read/modify/write is this owner's.
+    tickets: Owner<Store>,
+    /// App catalog writes, one at a time.
+    catalog: Arc<Lane>,
+    /// Per-build diagnostic appends and reads (append-only files), one at a time.
+    diagnostics: Arc<Lane>,
     /// Build jobs: records, unpersisted results and live operations.
     jobs: Arc<Jobs>,
     slots: Arc<Semaphore>,
@@ -52,13 +55,14 @@ pub struct AppState {
 
 impl AppState {
     /// Loads the job index; work a previous service left unfinished is
-    /// recorded as interrupted.
+    /// recorded as interrupted. Call inside the runtime.
     pub fn new(store: Store, public_url: Option<String>) -> Result<Self> {
         Ok(Self {
             jobs: Arc::new(Jobs::open(&store)?),
             files: Arc::new(store.clone()),
-            store: Arc::new(Mutex::new(store)),
-            diagnostics: Arc::default(),
+            tickets: Owner::spawn("install tickets", store),
+            catalog: Arc::new(Lane::new(Rank::Catalog)),
+            diagnostics: Arc::new(Lane::new(Rank::Diagnostics)),
             slots: Arc::new(Semaphore::new(1)),
             inspection_slots: Arc::new(Semaphore::new(2)),
             public_url,
@@ -70,6 +74,14 @@ impl AppState {
             tasks: None,
         })
     }
+}
+
+/// Runs blocking file work in `lane`, off the async workers, to its end even
+/// if the request that asked for it goes away (so the lane is held for as
+/// long as the work runs).
+async fn in_lane<T: Send + 'static>(lane: &Arc<Lane>, work: impl FnOnce() -> T + Send + 'static) -> std::result::Result<T, tokio::task::JoinError> {
+    let lane = lane.clone();
+    tokio::spawn(async move { lane.run(tokio::task::spawn_blocking(work)).await }).await?
 }
 
 #[derive(Debug)]
@@ -364,7 +376,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     agents.attach_push(push.clone());
     let pool = Pool::open(&store.root, agents.clone())?;
     let sims = Sims::open(&store.root, agents.clone(), pool.clone())?;
-    pool.remember_leased(sims.used());
+    pool.remember_leased(sims.used()).await;
     let mut state = tokio::task::spawn_blocking(move || AppState::new(store, public_url)).await??;
     state.agents = Some(agents.clone());
     state.sims = Some(sims.clone());
@@ -378,7 +390,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         let state = state.clone();
         background.push(tokio::spawn(async move {
             loop {
-                if let Err(error) = tasks.tick(|task| task_signals(&state, task)) {
+                if let Err(error) = tasks.tick(|task| task_signals(&state, task)).await {
                     eprintln!("Tasks not updated: {error:#}");
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -412,12 +424,10 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
             Exit::Handover => "Restarting: simulator sessions keep running for the next start to adopt.",
             Exit::Stop => "Stopping: simulator sessions end and their recordings are filed.",
         });
-        // Serialize the admission cutoff with start's registration of a job.
-        {
-            let _store = shutdown.store.lock().unwrap();
-            shutdown.draining.store(true, Ordering::Release);
-        }
-        shutdown.jobs.cancel_all();
+        // The jobs owner refuses admission and cancels what runs in one turn,
+        // so no job registers after the cutoff.
+        shutdown.draining.store(true, Ordering::Release);
+        shutdown.jobs.close().await;
         // Let cancelled runners reap their children and persist terminal state.
         for _ in 0..100 {
             if shutdown.jobs.operations() == 0 {
@@ -461,11 +471,8 @@ async fn status(
     let view = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     let job = &view.job;
     let launches = {
-        let (files, lock, id) = (state.files.clone(), state.diagnostics.clone(), id.clone());
-        tokio::task::spawn_blocking(move || {
-            let _serial = lock.lock().unwrap();
-            files.diagnostics(&id, 0, 1, Some(DiagnosticKind::Launch))
-        })
+        let (files, id) = (state.files.clone(), id.clone());
+        in_lane(&state.diagnostics, move || files.diagnostics(&id, 0, 1, Some(DiagnosticKind::Launch)))
         .await
         .map_err(ApiError::internal)?
         .map_err(ApiError::internal)?
@@ -561,38 +568,43 @@ async fn start(
         request.thread = state.agents.as_ref().and_then(|a| a.worker_at(&request.project));
     }
     let (revision, dirty) = source_provenance(&request.project).await;
-    let (job, lease, dir) = {
-        let store = state.store.lock().unwrap();
-        if state.draining.load(Ordering::Acquire) {
-            return Err(ApiError::unavailable());
+    if state.draining.load(Ordering::Acquire) {
+        return Err(ApiError::unavailable());
+    }
+    let replay = |prior: JobView| -> ApiResult<Json<Value>> {
+        if prior.job.request() != Some(&request) {
+            return Err(ApiError::new(StatusCode::CONFLICT, "request_id_conflict", "Request ID already belongs to different build arguments", "Use a new request ID for different work."));
         }
-        if let Some(key) = &request.request_id
-            && let Some(prior) = state.jobs.with_request_id(key)
-        {
-            if prior.job.request() != Some(&request) {
-                return Err(ApiError::new(StatusCode::CONFLICT, "request_id_conflict", "Request ID already belongs to different build arguments", "Use a new request ID for different work."));
-            }
-            return Ok(Json(success(json!({"job":prior,"replayed":true}))));
-        }
-        let job = Job {
-            id: uuid::Uuid::new_v4().to_string(),
-            created_at: now(),
-            updated_at: now(),
-            origin: BuildOrigin::Project { request: request.clone(), provenance: Provenance { revision, dirty } },
-            phase: JobPhase::Queued,
-        };
-        let dir = store.job_dir(&job.id).map_err(ApiError::internal)?;
-        let lease = state.jobs.admit(job.clone()).map_err(admit_error)?;
-        (job, lease, dir)
+        Ok(Json(success(json!({"job":prior,"replayed":true}))))
+    };
+    if let Some(key) = &request.request_id
+        && let Some(prior) = state.jobs.with_request_id(key)
+    {
+        return replay(prior);
+    }
+    let job = Job {
+        id: uuid::Uuid::new_v4().to_string(),
+        created_at: now(),
+        updated_at: now(),
+        origin: BuildOrigin::Project { request: request.clone(), provenance: Provenance { revision, dirty } },
+        phase: JobPhase::Queued,
+    };
+    let dir = state.files.job_dir(&job.id).map_err(ApiError::internal)?;
+    // The jobs owner looks for the request ID again as it admits: two
+    // starts with one ID admit one build.
+    let lease = match state.jobs.admit(job.clone()).await {
+        Ok(lease) => lease,
+        Err(AdmitError::Duplicate(prior)) => return replay(*prior),
+        Err(error) => return Err(admit_error(error)),
     };
     let response = state.jobs.get(&job.id);
-    if let Some(agents) = &state.agents
-        && let Err(error) = agents.build_started(&job.id, request.thread.as_deref())
-    {
-        eprintln!("Build {} start not recorded for its agent: {error:#}", job.id);
-    }
     tokio::spawn(async move {
         let mut job = job;
+        if let Some(agents) = &state.agents
+            && let Err(error) = agents.build_started(&job.id, request.thread.as_deref()).await
+        {
+            eprintln!("Build {} start not recorded for its agent: {error:#}", job.id);
+        }
         let mut receiver = lease.cancelled.clone();
         let permit = tokio::select! {
             result = state.slots.clone().acquire_owned() => result.ok(),
@@ -603,7 +615,7 @@ async fn start(
         } else {
             job.phase = JobPhase::Running;
             job.updated_at = now();
-            let result = match state.jobs.commit(&lease, &job) {
+            let result = match state.jobs.commit(&lease, &job).await {
                 Ok(()) => xcode::run(&request, &dir, receiver.clone()).await,
                 Err(error) => {
                     state.draining.store(true, Ordering::Release);
@@ -617,7 +629,7 @@ async fn start(
             };
             if request.capture_preview && job.set_preview(PreviewState::Absent.capturing()) {
                 job.updated_at = now();
-                let capture = match state.jobs.commit(&lease, &job) {
+                let capture = match state.jobs.commit(&lease, &job).await {
                     Ok(()) => match preview::simulator_id(None) {
                         Ok(simulator) => preview::capture(&job, &dir, &simulator, receiver.clone()).await,
                         Err(error) => Err(error),
@@ -631,7 +643,7 @@ async fn start(
             }
         }
         job.updated_at = now();
-        if let Err(error) = state.jobs.finish(lease, &job) {
+        if let Err(error) = state.jobs.finish(lease, &job).await {
             eprintln!("Cannot persist job {}: {error:#}. Service paused; the result is served from memory until shutdown.", job.id);
             state.draining.store(true, Ordering::Release);
         }
@@ -667,7 +679,7 @@ async fn tell_agent(state: &AppState, job: &Job, app: Option<&apps::AppRecord>) 
     };
     let title = app.map(|a| a.name.clone()).or_else(|| job.output().map(|o| o.title.clone())).unwrap_or_else(|| request.scheme.clone());
     let build = crate::agents::FinishedBuild { id: job.id.clone(), thread: request.thread.clone(), app: title, succeeded, reason };
-    if let Err(error) = agents.build_finished(&build) {
+    if let Err(error) = agents.build_finished(&build).await {
         eprintln!("Build {} not queued for its agent: {error:#}", job.id);
     }
 }
@@ -678,6 +690,8 @@ fn admit_error(error: AdmitError) -> ApiError {
         AdmitError::Busy => ApiError::new(StatusCode::CONFLICT, "preview_in_progress", "This build already has work in progress", "Poll build status before recapturing."),
         AdmitError::Refused(message) => ApiError::bad(message),
         AdmitError::Persist(error) => ApiError::internal(format!("{error:#}")),
+        AdmitError::Closed => ApiError::unavailable(),
+        AdmitError::Duplicate(prior) => ApiError::bad(format!("Build {} already has this request ID", prior.job.id)),
     }
 }
 
@@ -705,18 +719,14 @@ async fn capture_preview(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let input = body(input)?;
     let simulator = preview::simulator_id(input.simulator.as_deref()).map_err(ApiError::bad)?;
-    let (mut job, lease, directory) = {
-        let store = state.store.lock().unwrap();
-        if state.draining.load(Ordering::Acquire) {
-            return Err(ApiError::unavailable());
-        }
-        if state.jobs.get(&id).is_none() {
-            return Err(ApiError::missing(format!("No build {id}")));
-        }
-        let (job, lease) = state.jobs.begin_preview(&id).map_err(admit_error)?;
-        let directory = store.job_dir(&id).map_err(ApiError::internal)?;
-        (job, lease, directory)
-    };
+    if state.draining.load(Ordering::Acquire) {
+        return Err(ApiError::unavailable());
+    }
+    if state.jobs.get(&id).is_none() {
+        return Err(ApiError::missing(format!("No build {id}")));
+    }
+    let directory = state.files.job_dir(&id).map_err(ApiError::internal)?;
+    let (mut job, lease) = state.jobs.begin_preview(&id).await.map_err(admit_error)?;
     let response = state.jobs.get(&id);
     tokio::spawn(async move {
         let mut receiver = lease.cancelled.clone();
@@ -730,7 +740,7 @@ async fn capture_preview(
             let capturing = job.preview().map(PreviewState::capturing).unwrap_or_default();
             job.set_preview(capturing);
             job.updated_at = now();
-            match state.jobs.commit(&lease, &job) {
+            match state.jobs.commit(&lease, &job).await {
                 Ok(()) => preview::capture(&job, &directory, &simulator, receiver).await,
                 Err(error) => {
                     state.draining.store(true, Ordering::Release);
@@ -740,7 +750,7 @@ async fn capture_preview(
         };
         finish_preview(&mut job, result);
         job.updated_at = now();
-        if let Err(error) = state.jobs.finish(lease, &job) {
+        if let Err(error) = state.jobs.finish(lease, &job).await {
             eprintln!("Cannot persist preview of {id}: {error:#}. Service paused.");
             state.draining.store(true, Ordering::Release);
         } else {
@@ -756,10 +766,9 @@ async fn capture_preview(
 /// app already registered for its project and scheme (or bundle, for an
 /// import), so its notification can still open the app.
 async fn build_app(state: &AppState, job: &Job) -> Option<apps::AppRecord> {
-    let (state, job) = (state.clone(), job.clone());
-    // Copies the preview under the record lock; keep it off the async workers.
-    let result = tokio::task::spawn_blocking(move || {
-        let store = state.store.lock().unwrap();
+    let (store, job) = (state.files.clone(), job.clone());
+    // Copies the preview in the catalog's lane, off the async workers.
+    let result = in_lane(&state.catalog, move || {
         if job.output().is_some() && job.request().is_some() {
             apps::sync_build_preview(&store, &job).map(Some).map_err(|e| (job.id.clone(), e))
         } else {
@@ -862,19 +871,18 @@ async fn import_app(
     )
     .await
     .map_err(ApiError::bad)?;
-    let app = tokio::task::spawn_blocking(move || {
-        let store = state.store.lock().unwrap();
+    let app = in_lane(&state.catalog.clone(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
-        projects::import_inspected(&store, &inspected, &input.name).map_err(ApiError::bad)
+        projects::import_inspected(&state.files, &inspected, &input.name).map_err(ApiError::bad)
     })
     .await
     .map_err(ApiError::internal)??;
     Ok(Json(success(public_app(app))))
 }
 
-// App records are replaced atomically, so reads need no record lock; the
+// App records are replaced atomically, so reads need no lane; the
 // catalog scan and preview checks are file I/O, kept off the async workers.
 async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let apps = tokio::task::spawn_blocking(move || {
@@ -902,12 +910,11 @@ async fn register_app(
     input: std::result::Result<Json<apps::AppRegistration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
-    let app = tokio::task::spawn_blocking(move || {
-        let store = state.store.lock().unwrap();
+    let app = in_lane(&state.catalog.clone(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
-        apps::register(&store, input).map_err(ApiError::bad)
+        apps::register(&state.files, input).map_err(ApiError::bad)
     })
     .await
     .map_err(ApiError::internal)??;
@@ -920,13 +927,12 @@ async fn update_app(
     input: std::result::Result<Json<apps::AppUpdate>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
-    let app = tokio::task::spawn_blocking(move || {
-        let store = state.store.lock().unwrap();
+    let app = in_lane(&state.catalog.clone(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
-        apps::get(&store, &id).map_err(ApiError::missing)?;
-        apps::update(&store, &id, input).map_err(ApiError::bad)
+        apps::get(&state.files, &id).map_err(ApiError::missing)?;
+        apps::update(&state.files, &id, input).map_err(ApiError::bad)
     })
     .await
     .map_err(ApiError::internal)??;
@@ -939,21 +945,26 @@ async fn publish_app_preview(
     input: std::result::Result<Json<apps::PreviewPublication>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
-    let app = tokio::task::spawn_blocking(move || {
-        // Copy and validate outside the record lock; only the commit holds it.
-        let staged = apps::stage_preview(&state.files.root, &id, &input.file).map_err(|error| {
-            if state.files.root.join("apps").join(&id).is_dir() {
+    // Copy and validate outside the catalog's lane; only the commit is in it.
+    let (files, preview) = (state.files.clone(), id.clone());
+    let source = input.file.clone();
+    let staged = tokio::task::spawn_blocking(move || {
+        apps::stage_preview(&files.root, &preview, &source).map_err(|error| {
+            if files.root.join("apps").join(&preview).is_dir() {
                 ApiError::bad(format!("{error:#}"))
             } else {
                 ApiError::missing(format!("{error:#}"))
             }
-        })?;
-        let store = state.store.lock().unwrap();
+        })
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    let app = in_lane(&state.catalog.clone(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
-        apps::get(&store, &id).map_err(ApiError::missing)?;
-        apps::publish_staged(&store, &id, input, staged).map_err(ApiError::bad)
+        apps::get(&state.files, &id).map_err(ApiError::missing)?;
+        apps::publish_staged(&state.files, &id, input, staged).map_err(ApiError::bad)
     })
     .await
     .map_err(ApiError::internal)??;
@@ -1087,9 +1098,11 @@ async fn app_preview(
     query: std::result::Result<Query<PreviewVersion>, QueryRejection>,
 ) -> ApiResult<Response> {
     let query = parse_query(query)?;
-    let (file, preview_id) = {
-        let store = state.store.lock().unwrap();
-        let app = apps::get(&store, &id).map_err(ApiError::missing)?;
+    // In the catalog's lane, so a publish can't replace the image between
+    // reading the record and opening its file.
+    let files = state.files.clone();
+    let (file, preview_id) = in_lane(&state.catalog, move || {
+        let app = apps::get(&files, &id).map_err(ApiError::missing)?;
         let preview = app
             .preview
             .clone()
@@ -1102,8 +1115,10 @@ async fn app_preview(
             return Err(ApiError::new(StatusCode::CONFLICT, "preview_changed", "App preview has changed since metadata was read", "Refresh app metadata and request its current preview version."));
         }
         let file = apps::open_preview(&app).map_err(ApiError::missing)?;
-        (file, preview.id)
-    };
+        Ok((file, preview.id))
+    })
+    .await
+    .map_err(ApiError::internal)??;
     let size = file.metadata().map_err(ApiError::internal)?.len();
     let file = tokio::fs::File::from_std(file);
     let mut response = (
@@ -1258,7 +1273,7 @@ async fn cancel(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (job_state, operation) = state.jobs.cancel(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
+    let (job_state, operation) = state.jobs.cancel(&id).await.ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     Ok(Json(success(
         json!({"build_id":id,"cancel_requested":operation.is_some(),"state":job_state}),
     )))
@@ -1273,14 +1288,25 @@ async fn import(
     input: std::result::Result<Json<ImportRequest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
-    // Copying, ZIP inspection and fsync stay off both the HTTP worker and the
-    // global store lock, so an import cannot block authentication/cancellation.
-    let job =
-        tokio::task::spawn_blocking(move || import_ipa(&state, &input.ipa, copy_and_inspect_ipa))
-            .await
-            .map_err(ApiError::internal)?
-            .map_err(ApiError::bad)?;
+    let job = import_job(state, input.ipa, copy_and_inspect_ipa).await.map_err(ApiError::bad)?;
     Ok(Json(success(job)))
+}
+
+/// Imports an IPA as a finished job: copying, ZIP inspection and fsync run
+/// off the HTTP workers and block nothing else; the job is published once
+/// its IPA is in place, even if the request goes away meanwhile.
+async fn import_job(
+    state: AppState,
+    source: PathBuf,
+    prepare: impl FnOnce(&std::path::Path, &std::path::Path) -> Result<BuildOutput> + Send + 'static,
+) -> Result<Job> {
+    tokio::spawn(async move {
+        let importing = state.clone();
+        let job = tokio::task::spawn_blocking(move || import_ipa(&importing, &source, prepare)).await??;
+        state.jobs.insert(job.clone()).await?;
+        Ok(job)
+    })
+    .await?
 }
 
 fn copy_and_inspect_ipa(
@@ -1292,6 +1318,8 @@ fn copy_and_inspect_ipa(
     artifact::inspect_ipa(destination)
 }
 
+/// Copies and validates an IPA into a new job's directory; the caller then
+/// publishes the job.
 fn import_ipa(
     state: &AppState,
     source: &std::path::Path,
@@ -1305,14 +1333,11 @@ fn import_ipa(
         "IPA exceeds 4 GiB"
     );
     let id = uuid::Uuid::new_v4().to_string();
-    let dir = {
-        let store = state.store.lock().unwrap();
-        anyhow::ensure!(
-            !state.draining.load(Ordering::Acquire),
-            "Service is shutting down or paused"
-        );
-        store.job_dir(&id)?
-    };
+    anyhow::ensure!(
+        !state.draining.load(Ordering::Acquire),
+        "Service is shutting down or paused"
+    );
+    let dir = state.files.job_dir(&id)?;
     let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -1325,8 +1350,6 @@ fn import_ipa(
         Err(error) => {
             // No job record exists yet. Clean up only this import's staging
             // directory; never erase evidence after attempting publication.
-            // Serialize directory removal with list_jobs directory traversal.
-            let _store = state.store.lock().unwrap();
             let _ = std::fs::remove_dir_all(&dir);
             return Err(error);
         }
@@ -1338,9 +1361,8 @@ fn import_ipa(
         origin: BuildOrigin::Imported,
         phase: JobPhase::Succeeded { output, preview: PreviewState::Absent },
     };
-    // Work admitted before shutdown may finish. Publication occurs only after
-    // the copied IPA has been synced and its metadata validated.
-    state.jobs.insert(job.clone())?;
+    // Work admitted before shutdown may finish. Publication (`Jobs::insert`)
+    // occurs only after the copied IPA has been synced and its metadata validated.
     Ok(job)
 }
 
@@ -1381,20 +1403,16 @@ async fn create_link(
         base_url: base.clone(),
         transfer: TransferEvidence::NotStarted,
     };
-    state.store.lock().unwrap().save_ticket(&ticket).map_err(ApiError::internal)?;
+    let saved = ticket.clone();
+    state.tickets.ask(move |store| store.save_ticket(&saved)).await.map_err(ApiError::internal)?;
     let page = format!("{base}/install/{}", ticket.token);
     Ok(Json(success(
         json!({"build_id":id,"page_url":page,"manifest_url":format!("{page}/manifest.plist"),"install_url":artifact::install_url(&format!("{page}/manifest.plist")),"expires_at":ticket.expires_at,"installation_confirmed":false}),
     )))
 }
 /// A ticket's build, which has an IPA: only that can be installed.
-fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, String, BuildOutput)> {
-    let ticket = state
-        .store
-        .lock()
-        .unwrap()
-        .load_ticket(token)
-        .map_err(|_| ApiError::missing("Invalid install link"))?;
+async fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, String, BuildOutput)> {
+    let ticket = load_ticket(state, token).await.map_err(|_| ApiError::missing("Invalid install link"))?;
     if ticket.expires_at <= now() {
         return Err(ApiError::new(StatusCode::GONE, "link_expired", "Install link expired", "Request a new install link for the same build."));
     }
@@ -1411,12 +1429,7 @@ async fn link_status(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let ticket = state
-        .store
-        .lock()
-        .unwrap()
-        .load_ticket(&token)
-        .map_err(|_| ApiError::missing("Unknown install link"))?;
+    let ticket = load_ticket(&state, &token).await.map_err(|_| ApiError::missing("Unknown install link"))?;
     let mut view = json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,
         "download_started_at":null,"downloaded_at":null});
     if let (Some(view), Value::Object(transfer)) = (view.as_object_mut(), json!(ticket.transfer)) {
@@ -1435,7 +1448,7 @@ async fn install_page(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, build_id, output) = ticket_job(&state, &token)?;
+    let (ticket, build_id, output) = ticket_job(&state, &token).await?;
     let link = artifact::install_url(&format!(
         "{}/install/{}/manifest.plist",
         ticket.base_url, token
@@ -1454,7 +1467,7 @@ async fn download_manifest(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, _, output) = ticket_job(&state, &token)?;
+    let (ticket, _, output) = ticket_job(&state, &token).await?;
     let bytes = artifact::manifest(
         &output,
         &format!("{}/install/{}/app.ipa", ticket.base_url, token),
@@ -1471,7 +1484,7 @@ async fn download_ipa(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Response> {
-    let (ticket, _, output) = ticket_job(&state, &token)?;
+    let (ticket, _, output) = ticket_job(&state, &token).await?;
     let path = output.ipa_path.expect("ticket_job checks the IPA");
     let file = tokio::fs::File::open(path)
         .await
@@ -1481,11 +1494,11 @@ async fn download_ipa(
     // then every byte was handed to the connection. Neither blocks the
     // download, and neither proves installation or launch.
     if ticket.transfer == TransferEvidence::NotStarted {
-        let _ = mark_ticket(&state, &token, |t| t.opened(now()));
+        mark_ticket(&state, &token, |t| t.opened(now())).await;
     }
     // Hyper stops polling a body once Content-Length bytes are out, so the
     // finish is recorded when it drops the body, not by a trailing chunk.
-    let sent = Delivered { sent: 0, size, ticket: Some((state, token)) };
+    let sent = Delivered { sent: 0, size, ticket: Some((state.tickets.clone(), token)) };
     use futures_util::StreamExt;
     let stream = ReaderStream::new(file).scan(sent, |sent, chunk| {
         if let Ok(chunk) = &chunk {
@@ -1506,28 +1519,38 @@ async fn download_ipa(
 }
 
 /// Bytes of an IPA response handed to the connection; records the ticket's
-/// `downloaded_at` when the response is dropped with all of them sent.
+/// `downloaded_at` when the response is dropped with all of them sent, by
+/// telling the tickets owner (a drop never writes or waits itself).
 struct Delivered {
     sent: u64,
     size: u64,
-    ticket: Option<(AppState, String)>,
+    ticket: Option<(Owner<Store>, String)>,
 }
 impl Drop for Delivered {
     fn drop(&mut self) {
         if self.sent != self.size {
             return;
         }
-        // One small record write, like `download_started_at` above.
-        if let Some((state, token)) = self.ticket.take() {
-            let _ = mark_ticket(&state, &token, |t| t.completed(now()));
+        if let Some((tickets, token)) = self.ticket.take() {
+            tickets.tell(move |store| { let _ = advance_ticket(store, &token, |t| t.completed(now())); });
         }
     }
 }
 
-/// Advances a ticket's transfer evidence under the record lock. Evidence
-/// only moves forward; a repeated mark keeps the first times.
-fn mark_ticket(state: &AppState, token: &str, mark: impl FnOnce(TransferEvidence) -> TransferEvidence) -> Result<()> {
-    let store = state.store.lock().unwrap();
+/// Advances a ticket's transfer evidence in the tickets owner's turn.
+/// Evidence only moves forward; a repeated mark keeps the first times.
+/// A ticket as its owner has it, after every mark told before.
+async fn load_ticket(state: &AppState, token: &str) -> Result<Ticket> {
+    let token = token.to_string();
+    state.tickets.ask(move |store| store.load_ticket(&token)).await
+}
+
+async fn mark_ticket(state: &AppState, token: &str, mark: impl FnOnce(TransferEvidence) -> TransferEvidence + Send + 'static) {
+    let token = token.to_string();
+    state.tickets.ask(move |store| { let _ = advance_ticket(store, &token, mark); }).await
+}
+
+fn advance_ticket(store: &Store, token: &str, mark: impl FnOnce(TransferEvidence) -> TransferEvidence) -> Result<()> {
     let mut ticket = store.load_ticket(token)?;
     let next = mark(ticket.transfer);
     if next == ticket.transfer {
@@ -1550,9 +1573,8 @@ async fn diagnostics(
     page: std::result::Result<Query<Page>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let page = parse_query(page)?;
-    let (files, lock) = (state.files.clone(), state.diagnostics.clone());
-    let data = tokio::task::spawn_blocking(move || {
-        let _serial = lock.lock().unwrap();
+    let files = state.files.clone();
+    let data = in_lane(&state.diagnostics, move || {
         files.diagnostics(&id, page.since, page.limit.unwrap_or(100), page.kind)
     })
     .await
@@ -1649,11 +1671,8 @@ async fn ingest(
         .map_err(|_| ApiError::bad("build_id must be a valid UUID"))?
         .hyphenated()
         .to_string();
-    let (files, lock, stored) = (state.files.clone(), state.diagnostics.clone(), event.clone());
-    let inserted = tokio::task::spawn_blocking(move || {
-        let _serial = lock.lock().unwrap();
-        files.append_diagnostic(&stored)
-    })
+    let (files, stored) = (state.files.clone(), event.clone());
+    let inserted = in_lane(&state.diagnostics, move || files.append_diagnostic(&stored))
     .await
     .map_err(ApiError::internal)?
     .map_err(ApiError::bad)?;
@@ -1782,16 +1801,6 @@ mod tests {
             thread: None,
         }
     }
-    fn headers(state: &AppState) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        let token = state.store.lock().unwrap().settings.control_token.clone();
-        headers.insert(
-            header::AUTHORIZATION,
-            format!("Bearer {token}").parse().unwrap(),
-        );
-        headers
-    }
-
     fn test_ipa(path: &std::path::Path) -> Result<()> {
         let mut metadata = plist::Dictionary::new();
         metadata.insert("CFBundleIdentifier".into(), "dev.example.probe".into());
@@ -1808,28 +1817,20 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn import_leaves_store_available_and_publishes_only_after_validation() -> Result<()> {
+    #[tokio::test]
+    async fn import_publishes_only_after_validation() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
         let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
-        let authorization = headers(&state);
-        let job = import_ipa(&state, &source, |source, destination| {
-            // A nonblocking acquisition makes a regression fail immediately,
-            // instead of hanging the test on the old global-lock behavior.
-            let store = state
-                .store
-                .try_lock()
-                .expect("copy must not hold store lock");
-            assert!(store.list_jobs()?.is_empty());
-            drop(store);
-            auth(&state, &authorization, false).unwrap();
+        let checking = state.clone();
+        let job = import_job(state.clone(), source.clone(), move |source, destination| {
+            assert!(checking.jobs.list().is_empty() && checking.files.list_jobs()?.is_empty());
             let output = copy_and_inspect_ipa(source, destination)?;
-            assert!(state.store.lock().unwrap().list_jobs()?.is_empty());
+            assert!(checking.jobs.list().is_empty() && checking.files.list_jobs()?.is_empty());
             Ok(output)
-        })?;
-        let stored = state.store.lock().unwrap().load_job(&job.id)?;
+        }).await?;
+        let stored = state.files.load_job(&job.id)?;
         assert_eq!(stored.state(), BuildState::Succeeded);
         assert_eq!(stored.origin, BuildOrigin::Imported);
         let output = stored.output().unwrap();
@@ -1848,12 +1849,9 @@ mod tests {
         let source = dir.path().join("input.ipa");
         test_ipa(&source)?;
         let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
-        let job = import_ipa(&state, &source, copy_and_inspect_ipa)?;
+        let job = import_job(state.clone(), source.clone(), copy_and_inspect_ipa).await?;
         let diagnostic_token = state
-            .store
-            .lock()
-            .unwrap()
-            .settings
+            .files.settings
             .diagnostic_token
             .clone();
         let mut authorization = HeaderMap::new();
@@ -1888,10 +1886,7 @@ mod tests {
         .unwrap();
         assert_eq!(retry["data"]["duplicate"], true);
         let stored = state
-            .store
-            .lock()
-            .unwrap()
-            .diagnostics(&job.id, 0, 10, None)?;
+            .files.diagnostics(&job.id, 0, 10, None)?;
         assert_eq!(stored["events"].as_array().unwrap().len(), 1);
         assert_eq!(stored["events"][0]["event_id"], event_id);
         assert_eq!(stored["events"][0]["build_id"], job.id);
@@ -1919,12 +1914,12 @@ mod tests {
             )
             .await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let jobs_directory = state.store.lock().unwrap().root.join("jobs");
+        let jobs_directory = state.files.root.join("jobs");
         assert_eq!(std::fs::read_dir(&jobs_directory)?.count(), 0);
 
         std::fs::write(&source, b"not an IPA")?;
         assert!(import_ipa(&state, &source, copy_and_inspect_ipa).is_err());
-        assert!(state.store.lock().unwrap().list_jobs()?.is_empty());
+        assert!(state.files.list_jobs()?.is_empty());
         assert_eq!(std::fs::read_dir(jobs_directory)?.count(), 0);
         Ok(())
     }
@@ -1964,7 +1959,7 @@ mod tests {
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if state.store.lock().unwrap().load_job(&id).unwrap().state() == BuildState::Cancelled
+                if state.files.load_job(&id).unwrap().state() == BuildState::Cancelled
                 {
                     break;
                 }
@@ -1975,10 +1970,7 @@ mod tests {
         .expect("queued cancellation should be immediate");
         assert!(
             !state
-                .store
-                .lock()
-                .unwrap()
-                .job_dir(&id)
+                .files.job_dir(&id)
                 .unwrap()
                 .join("build.log")
                 .exists()
@@ -1998,7 +1990,7 @@ mod tests {
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         // Refused before any side effect, so clients may send it again.
         assert!(error.retryable);
-        assert!(state.store.lock().unwrap().list_jobs().unwrap().is_empty());
+        assert!(state.files.list_jobs().unwrap().is_empty());
     }
 }
 
@@ -2078,7 +2070,7 @@ async fn stop_sim(
     let request = body(payload)?;
     let sims = sims(&state)?;
     // A thread in line for a simulator gives up its place.
-    let left = match request.thread_id.as_deref() { Some(thread) => sims.leave(thread).map_err(sim_error)?, None => false };
+    let left = match request.thread_id.as_deref() { Some(thread) => sims.leave(thread).await.map_err(sim_error)?, None => false };
     if left && !sims.running(request.thread_id.as_deref().unwrap_or_default()) {
         return Ok(Json(success(json!({"left_queue": true, "next": "This thread is no longer waiting for a simulator."}))));
     }
@@ -2194,7 +2186,7 @@ async fn agent_context(
     query: std::result::Result<Query<ContextQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
-    Ok(Json(success(json!({"context": agents(&state)?.context(&query.cwd)}))))
+    Ok(Json(success(json!({"context": agents(&state)?.context(&query.cwd).await}))))
 }
 
 #[derive(Deserialize)]
@@ -2240,7 +2232,7 @@ async fn spawn_worker(
         .await
         .map_err(agent_error)?;
     if let (Some(task), Some(id)) = (&r.task, worker["id"].as_str()) {
-        tasks_of(&state)?.link(task, Some(id), None, false).map_err(task_error)?;
+        tasks_of(&state)?.link(task, Some(id), None, false).await.map_err(task_error)?;
     }
     Ok(Json(success(worker)))
 }
@@ -2312,14 +2304,14 @@ fn push(state: &AppState) -> ApiResult<Arc<Push>> {
 }
 
 async fn push_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    Ok(Json(success(push(&state)?.status())))
+    Ok(Json(success(push(&state)?.status().await)))
 }
 
 async fn push_register(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::Registration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.register(body(payload)?).map_err(ApiError::bad)?;
+    push(&state)?.register(body(payload)?).await.map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
@@ -2327,7 +2319,7 @@ async fn push_activity(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::ActivityRegistration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.register_activity(body(payload)?).map_err(ApiError::bad)?;
+    push(&state)?.register_activity(body(payload)?).await.map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
@@ -2335,7 +2327,7 @@ async fn push_presence(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::PresenceReport>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.report_presence(body(payload)?).map_err(ApiError::bad)?;
+    push(&state)?.report_presence(body(payload)?).await.map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
@@ -2547,6 +2539,7 @@ async fn add_task(
     let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
     let task = tasks_of(&state)?
         .add(&project, &r.ask, r.status, r.note.as_deref(), by, source, vec![])
+        .await
         .map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task),
         "next": "Link its workers and builds as you start them; set its status when it changes."}))))
@@ -2575,7 +2568,7 @@ async fn update_task(
     let current = tasks.get(&id).map_err(ApiError::missing)?;
     let observed = task_signals(&state, &current);
     let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
-    let task = tasks.update(&id, r.update, by, Some(observed)).map_err(task_error)?;
+    let task = tasks.update(&id, r.update, by, Some(observed)).await.map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
 }
 
@@ -2593,13 +2586,13 @@ async fn link_task(
     payload: std::result::Result<Json<LinkTask>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
-    let task = tasks_of(&state)?.link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove).map_err(task_error)?;
+    let task = tasks_of(&state)?.link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove).await.map_err(task_error)?;
     // A build that finished before it was linked (a fast failure) still
     // reaches the agent; one that finished long ago is no news.
     if let Some(view) = r.build.as_deref().filter(|_| !r.remove).and_then(|b| state.jobs.get(b))
         && view.job.state().terminal() && now().saturating_sub(view.job.updated_at) < 600
     {
-        let app = apps::list(&state.store.lock().unwrap()).ok().and_then(|apps| apps::owner_of(&apps, &view.job).cloned());
+        let app = apps::list(&state.files).ok().and_then(|apps| apps::owner_of(&apps, &view.job).cloned());
         tell_agent(&state, &view.job, app.as_ref()).await;
     }
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
@@ -2618,7 +2611,7 @@ async fn attach_task(
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
     let tasks = tasks_of(&state)?;
-    let media = tasks.attach(&id, &r.file, r.caption.as_deref()).map_err(task_error)?;
+    let media = tasks.attach(&id, &r.file, r.caption.as_deref()).await.map_err(task_error)?;
     Ok(Json(success(json!({"id": media.id, "task_id": id, "kind": media.kind, "caption": media.caption,
         "next": "It shows on the task on the phone within a few seconds."}))))
 }

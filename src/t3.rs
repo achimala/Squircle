@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -151,17 +151,30 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const OUTBOX: usize = 1024;
 const ERROR_DETAIL: usize = 700;
 
-/// What the connection task and its client share.
+/// What a client hands the connection task, in order. A call's waiter
+/// travels with its request, so its answer can't arrive before it.
+enum Outbound {
+    Frame(Message),
+    Call { id: String, waiter: Waiter, frame: Message },
+    Subscribe { id: String, chunks: mpsc::UnboundedSender<Value>, frame: Message },
+    /// A call that ended without its answer (out of budget, or dropped).
+    Forget(String),
+    Unsubscribe(String),
+    /// How many calls and subscriptions the task holds, for tests.
+    #[cfg(test)]
+    Count(oneshot::Sender<(usize, usize)>),
+}
+
+/// What the connection task and its client share: its queue and its stop.
+/// The calls waiting for answers and the open subscriptions are the task's alone.
 struct Link {
-    out: mpsc::Sender<Message>,
-    pending: Mutex<HashMap<String, Waiter>>,
-    subscriptions: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
+    out: mpsc::Sender<Outbound>,
     stop: CancellationToken,
 }
 
 impl Link {
-    fn send(&self, message: Message) -> Result<()> {
-        match self.out.try_send(message) {
+    fn send(&self, outbound: Outbound) -> Result<()> {
+        match self.out.try_send(outbound) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.stop.cancel();
@@ -188,8 +201,8 @@ impl Drop for T3 {
     }
 }
 
-/// Removes a call's waiter however the call ends (answer, timeout, or the
-/// caller dropping the future).
+/// Tells the connection task to forget a call's waiter however the call
+/// ends (answer, budget, or the caller dropping the future). It only queues.
 struct PendingGuard<'a> {
     link: &'a Link,
     id: &'a str,
@@ -197,7 +210,8 @@ struct PendingGuard<'a> {
 
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
-        self.link.pending.lock().unwrap().remove(self.id);
+        // A full queue stops the connection anyway, and with it every waiter.
+        let _ = self.link.out.try_send(Outbound::Forget(self.id.to_string()));
     }
 }
 
@@ -236,28 +250,21 @@ impl T3 {
         E: Send + 'static,
     {
         let (out, outgoing) = mpsc::channel(OUTBOX);
-        let link = Arc::new(Link {
-            out,
-            pending: Mutex::default(),
-            subscriptions: Mutex::default(),
-            stop: CancellationToken::new(),
-        });
+        let link = Arc::new(Link { out, stop: CancellationToken::new() });
         let (closed_tx, closed) = watch::channel(false);
         tokio::spawn(run(link.clone(), sink, stream, outgoing, closed_tx, timing));
         Arc::new(Self { config, link, closed })
     }
 
-    fn request(&self, id: &str, tag: &str, payload: Value) -> Result<()> {
-        let frame = json!({"_tag":"Request","id":id,"tag":tag,"payload":payload,"headers":[]});
-        self.link.send(Message::text(frame.to_string()))
+    fn request(id: &str, tag: &str, payload: Value) -> Message {
+        Message::text(json!({"_tag":"Request","id":id,"tag":tag,"payload":payload,"headers":[]}).to_string())
     }
 
     async fn exchange(&self, tag: &str, payload: Value) -> Reply {
         let id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = oneshot::channel();
-        self.link.pending.lock().unwrap().insert(id.clone(), tx);
+        let (waiter, rx) = oneshot::channel();
         let _guard = PendingGuard { link: &self.link, id: &id };
-        if let Err(error) = self.request(&id, tag, payload) {
+        if let Err(error) = self.link.send(Outbound::Call { id: id.clone(), waiter, frame: Self::request(&id, tag, payload) }) {
             return Reply::NotSent(error);
         }
         match tokio::time::timeout(CALL_BUDGET, rx).await {
@@ -281,18 +288,13 @@ impl T3 {
     /// the receiver interrupts the stream at its next chunk.
     pub fn subscribe(&self, tag: &str, payload: Value) -> Result<(String, mpsc::UnboundedReceiver<Value>)> {
         let id = uuid::Uuid::new_v4().to_string();
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.link.subscriptions.lock().unwrap().insert(id.clone(), tx);
-        if let Err(error) = self.request(&id, tag, payload) {
-            self.link.subscriptions.lock().unwrap().remove(&id);
-            return Err(error);
-        }
+        let (chunks, rx) = mpsc::unbounded_channel();
+        self.link.send(Outbound::Subscribe { id: id.clone(), chunks, frame: Self::request(&id, tag, payload) })?;
         Ok((id, rx))
     }
 
     pub fn unsubscribe(&self, id: &str) {
-        self.link.subscriptions.lock().unwrap().remove(id);
-        let _ = self.link.send(interrupt(id));
+        let _ = self.link.send(Outbound::Unsubscribe(id.to_string()));
     }
 
     /// The first chunk of a subscription (T3 sends a snapshot first).
@@ -360,7 +362,7 @@ async fn run<W, R, E>(
     link: Arc<Link>,
     mut sink: W,
     mut stream: R,
-    mut outgoing: mpsc::Receiver<Message>,
+    mut outgoing: mpsc::Receiver<Outbound>,
     closed: watch::Sender<bool>,
     timing: Timing,
 ) where
@@ -370,13 +372,15 @@ async fn run<W, R, E>(
     let start = tokio::time::Instant::now();
     let mut heartbeat = tokio::time::interval_at(start + timing.heartbeat, timing.heartbeat);
     let mut heard = start;
+    let mut open = Open::default();
     loop {
         tokio::select! {
             _ = link.stop.cancelled() => {
                 let _ = tokio::time::timeout(timing.write, sink.send(Message::Close(None))).await;
                 break;
             }
-            Some(message) = outgoing.recv() => {
+            Some(outbound) = outgoing.recv() => {
+                let Some(message) = open.take(outbound) else { continue };
                 if !matches!(tokio::time::timeout(timing.write, sink.send(message)).await, Ok(Ok(()))) {
                     break;
                 }
@@ -405,7 +409,7 @@ async fn run<W, R, E>(
                     other => vec![other],
                 };
                 for frame in frames {
-                    receive(&frame, &link);
+                    open.receive(&frame, &link);
                 }
             }
         }
@@ -415,11 +419,79 @@ async fn run<W, R, E>(
     // then fails to send instead of waiting for an answer that cannot come.
     drop(outgoing);
     let _ = closed.send(true);
-    let waiters: Vec<Waiter> = link.pending.lock().unwrap().drain().map(|(_, waiter)| waiter).collect();
-    for waiter in waiters {
+    for (_, waiter) in open.pending.drain() {
         let _ = waiter.send(Err(Ended::Closed));
     }
-    link.subscriptions.lock().unwrap().clear();
+}
+
+/// The calls waiting for answers and the open subscriptions: the
+/// connection task's own.
+#[derive(Default)]
+struct Open {
+    pending: HashMap<String, Waiter>,
+    subscriptions: HashMap<String, mpsc::UnboundedSender<Value>>,
+}
+
+impl Open {
+    /// Records what `outbound` registers; the frame it sends, if any.
+    fn take(&mut self, outbound: Outbound) -> Option<Message> {
+        match outbound {
+            Outbound::Frame(message) => Some(message),
+            Outbound::Call { id, waiter, frame } => {
+                self.pending.insert(id, waiter);
+                Some(frame)
+            }
+            Outbound::Subscribe { id, chunks, frame } => {
+                self.subscriptions.insert(id, chunks);
+                Some(frame)
+            }
+            Outbound::Forget(id) => {
+                self.pending.remove(&id);
+                None
+            }
+            Outbound::Unsubscribe(id) => self.subscriptions.remove(&id).map(|_| interrupt(&id)),
+            #[cfg(test)]
+            Outbound::Count(reply) => {
+                let _ = reply.send((self.pending.len(), self.subscriptions.len()));
+                None
+            }
+        }
+    }
+
+    fn receive(&mut self, frame: &Value, link: &Link) {
+        let id = match &frame["requestId"] {
+            Value::String(id) => id.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        };
+        let reply = |message: Message| { let _ = link.send(Outbound::Frame(message)); };
+        match frame["_tag"].as_str() {
+            Some("Chunk") => {
+                if let Some(sender) = self.subscriptions.get(&id) {
+                    let gone = frame["values"].as_array().into_iter().flatten().any(|value| sender.send(value.clone()).is_err());
+                    if gone {
+                        self.subscriptions.remove(&id);
+                        reply(interrupt(&id));
+                        return;
+                    }
+                }
+                reply(Message::text(json!({"_tag":"Ack","requestId":id}).to_string()));
+            }
+            Some("Exit") => {
+                self.subscriptions.remove(&id);
+                if let Some(waiter) = self.pending.remove(&id) {
+                    let exit = &frame["exit"];
+                    let _ = waiter.send(if exit["_tag"] == "Success" {
+                        Ok(exit["value"].clone())
+                    } else {
+                        Err(Ended::Failed(exit["cause"].clone()))
+                    });
+                }
+            }
+            Some("Ping") => reply(Message::text(json!({"_tag":"Pong"}).to_string())),
+            _ => {}
+        }
+    }
 }
 
 /// The longest prefix of `text` within `max` bytes that ends on a character.
@@ -429,44 +501,6 @@ fn clip(text: &str, max: usize) -> &str {
         end -= 1;
     }
     &text[..end]
-}
-
-fn receive(frame: &Value, link: &Link) {
-    let id = match &frame["requestId"] {
-        Value::String(id) => id.clone(),
-        Value::Number(n) => n.to_string(),
-        _ => String::new(),
-    };
-    match frame["_tag"].as_str() {
-        Some("Chunk") => {
-            let sender = link.subscriptions.lock().unwrap().get(&id).cloned();
-            if let Some(sender) = sender {
-                let gone = frame["values"].as_array().into_iter().flatten().any(|value| sender.send(value.clone()).is_err());
-                if gone {
-                    link.subscriptions.lock().unwrap().remove(&id);
-                    let _ = link.send(interrupt(&id));
-                    return;
-                }
-            }
-            let _ = link.send(Message::text(json!({"_tag":"Ack","requestId":id}).to_string()));
-        }
-        Some("Exit") => {
-            link.subscriptions.lock().unwrap().remove(&id);
-            let waiter = link.pending.lock().unwrap().remove(&id);
-            if let Some(waiter) = waiter {
-                let exit = &frame["exit"];
-                let _ = waiter.send(if exit["_tag"] == "Success" {
-                    Ok(exit["value"].clone())
-                } else {
-                    Err(Ended::Failed(exit["cause"].clone()))
-                });
-            }
-        }
-        Some("Ping") => {
-            let _ = link.send(Message::text(json!({"_tag":"Pong"}).to_string()));
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]
@@ -591,7 +625,9 @@ mod tests {
     async fn abandoned_call_forgets_its_waiter() {
         let (client, server) = peer(TIMING).await;
         assert!(tokio::time::timeout(Duration::from_millis(20), client.call("a", json!({}))).await.is_err());
-        assert!(client.link.pending.lock().unwrap().is_empty());
+        let (reply, count) = oneshot::channel();
+        client.link.send(Outbound::Count(reply)).unwrap();
+        assert_eq!(count.await.unwrap(), (0, 0));
         drop(server);
     }
 }

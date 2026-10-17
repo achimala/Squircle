@@ -1,5 +1,5 @@
 //! Persistent app identity and agent-published, immutable screenshot artifacts.
-//! Callers hold the Store's outer mutex across these read/modify/write operations,
+//! Callers run these read/modify/write operations one at a time (the service's catalog lane),
 //! except `stage_preview`, which only writes a new, unreferenced artifact file.
 //! A record stays readable when its preview bytes go missing: the artifact is
 //! reported unavailable and a new publication repairs it.
@@ -319,7 +319,7 @@ impl Drop for StagedPreview {
 }
 
 /// Validates and copies a screenshot into an app's artifact directory without
-/// touching its record, so callers can do this file I/O outside the store lock.
+/// touching its record, so callers can do this file I/O outside the catalog lane.
 pub fn stage_preview(root: &Path, id: &str, file: &Path) -> Result<StagedPreview> {
     validate_id(id)?;
     let directory = root.join("apps").join(id);
