@@ -1446,17 +1446,18 @@ mod tests {
         push.notify(note("“Login” finished", "w1"));
         tokio::time::sleep(Duration::from_millis(400)).await;
 
-        let requests = seen.lock().unwrap();
-        assert_eq!(requests.len(), 2, "one alert per device");
-        let (headers, _, body) = requests.iter().find(|r| r.1.starts_with("abab")).unwrap();
-        assert_eq!(body["aps"]["alert"]["body"], "“Login” finished", "the viewed thread is left out on that phone");
-        assert_eq!(headers["apns-topic"], "ai.dreamslate.Squircle");
-        assert_eq!(headers["apns-push-type"], "alert");
-        let jwt = headers["authorization"].to_str().unwrap().strip_prefix("bearer ").or_else(|| headers["authorization"].to_str().unwrap().strip_prefix("Bearer ")).unwrap();
-        verify(jwt, &public);
-        let (_, _, other) = requests.iter().find(|r| r.1.starts_with("dead")).unwrap();
-        assert_eq!(other["aps"]["alert"]["body"], "Looked at it\n“Login” finished");
-        drop(requests);
+        {
+            let requests = seen.lock().unwrap();
+            assert_eq!(requests.len(), 2, "one alert per device");
+            let (headers, _, body) = requests.iter().find(|r| r.1.starts_with("abab")).unwrap();
+            assert_eq!(body["aps"]["alert"]["body"], "“Login” finished", "the viewed thread is left out on that phone");
+            assert_eq!(headers["apns-topic"], "ai.dreamslate.Squircle");
+            assert_eq!(headers["apns-push-type"], "alert");
+            let jwt = headers["authorization"].to_str().unwrap().strip_prefix("bearer ").or_else(|| headers["authorization"].to_str().unwrap().strip_prefix("Bearer ")).unwrap();
+            verify(jwt, &public);
+            let (_, _, other) = requests.iter().find(|r| r.1.starts_with("dead")).unwrap();
+            assert_eq!(other["aps"]["alert"]["body"], "Looked at it\n“Login” finished");
+        }
         let status = push.status().await;
         let old = status["devices"].as_array().unwrap().iter().find(|d| d["id"] == "old").unwrap();
         assert_eq!(old["notifications"], false, "a 410 forgets the token");

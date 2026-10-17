@@ -1485,7 +1485,7 @@ mod tests {
         // Cancelled after asking, before the owner granted it: the guard,
         // made first, still releases what the owner then grants.
         let mut cancelled = Box::pin(sims.claim("s", Work::Close));
-        std::future::poll_fn(|cx| std::task::Poll::Ready(assert!(cancelled.as_mut().poll(cx).is_pending()))).await;
+        assert!(std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx).is_pending())).await);
         drop(cancelled);
         assert!(sims.claim("s", Work::Close).await.is_some() && sims.claim("s", Work::Release).await.is_some());
     }
