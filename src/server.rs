@@ -364,7 +364,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     agents.attach_push(push.clone());
     let pool = Pool::open(&store.root, agents.clone())?;
     let sims = Sims::open(&store.root, agents.clone(), pool.clone())?;
-    pool.remember_leased(sims.used());
+    pool.remember_leased(sims.used()).await;
     let mut state = tokio::task::spawn_blocking(move || AppState::new(store, public_url)).await??;
     state.agents = Some(agents.clone());
     state.sims = Some(sims.clone());
@@ -2078,7 +2078,7 @@ async fn stop_sim(
     let request = body(payload)?;
     let sims = sims(&state)?;
     // A thread in line for a simulator gives up its place.
-    let left = match request.thread_id.as_deref() { Some(thread) => sims.leave(thread).map_err(sim_error)?, None => false };
+    let left = match request.thread_id.as_deref() { Some(thread) => sims.leave(thread).await.map_err(sim_error)?, None => false };
     if left && !sims.running(request.thread_id.as_deref().unwrap_or_default()) {
         return Ok(Json(success(json!({"left_queue": true, "next": "This thread is no longer waiting for a simulator."}))));
     }
