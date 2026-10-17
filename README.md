@@ -7,6 +7,14 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 
 ## Current state
 
+**2026-10-17: no locks in the service.** After a deadlock froze the
+service, every piece of shared state became a single owner reached by
+messages, readers read published snapshots, and long work waits only in
+ranked lanes, so a deadlock can't be written; clippy and a test fail on
+any lock. Behavior and wire formats are unchanged; not yet run against live
+T3 or the phone. See
+[owners](docs/fsm-architecture.md#owners-and-who-may-wait-for-whom-implemented-2026-10-17).
+
 **2026-10-15: agent memory.** An app agent looks up the past through a
 read-only Haiku subagent backed by `squircle history` (T3's conversations,
 tasks, builds, git and docs, read where they live, nothing copied), keeps a
