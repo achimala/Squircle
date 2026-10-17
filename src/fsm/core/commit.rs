@@ -166,7 +166,7 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// Runs the gate synchronously for an owner that saves under its own lock:
+/// Runs the gate synchronously for an owner that saves in its own turn:
 /// each `WriteCandidate` goes to `storage` and its result straight back in.
 pub struct Gate<R, A, S> {
     state: Option<Commit<R, A>>,
