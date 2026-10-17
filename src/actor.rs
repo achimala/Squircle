@@ -167,6 +167,10 @@ pub enum Rank {
     SimStart,
     /// One simulator pool plan-and-apply.
     PoolApply,
+    /// One read/modify/write of the app catalog.
+    Catalog,
+    /// One append to, or read of, a build's diagnostics.
+    Diagnostics,
 }
 
 tokio::task_local! {

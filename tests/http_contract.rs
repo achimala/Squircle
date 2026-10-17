@@ -84,7 +84,7 @@ impl Fixture {
 
     /// A new service over the same data directory, which rereads its records.
     fn reopen(&mut self) {
-        let root = self.state.store.lock().unwrap().root.clone();
+        let root = self.state.files.root.clone();
         self.state = AppState::new(Store::open(root).unwrap(), Some("https://mac.test".into())).unwrap();
         self.app = router(self.state.clone());
     }
@@ -250,7 +250,7 @@ async fn preview_download_is_bound_to_its_job_and_control_token() {
     // Artifact transport fixture only; this is not a claimed simulator capture.
     let png = b"\x89PNG\r\n\x1a\npreview transport fixture";
     {
-        let store = fixture.state.store.lock().unwrap();
+        let store = fixture.state.files.clone();
         let mut job = store.load_job(&id).unwrap();
         let artifact = store.job_dir(&id).unwrap().join("preview.png");
         fs::write(&artifact, png).unwrap();
@@ -287,7 +287,7 @@ async fn preview_download_is_bound_to_its_job_and_control_token() {
         StatusCode::NOT_FOUND
     );
     {
-        let store = fixture.state.store.lock().unwrap();
+        let store = fixture.state.files.clone();
         let mut job = store.load_job(&other).unwrap();
         let path = store.job_dir(&id).unwrap().join("preview.png");
         job.set_preview(PreviewState::Ready(PreviewArtifact { path, captured_at: 1, source: None }));
@@ -307,7 +307,7 @@ async fn preview_download_is_bound_to_its_job_and_control_token() {
         StatusCode::INTERNAL_SERVER_ERROR
     );
     {
-        let store = fixture.state.store.lock().unwrap();
+        let store = fixture.state.files.clone();
         let artifact = store.job_dir(&id).unwrap().join("preview.png");
         fs::remove_file(&artifact).unwrap();
         std::os::unix::fs::symlink(&fixture.ipa, artifact).unwrap();
@@ -379,15 +379,12 @@ async fn remote_project_routes_require_control_before_inspecting_paths_or_query_
     assert!(
         fixture
             .state
-            .store
-            .lock()
-            .unwrap()
-            .list_jobs()
+            .files.list_jobs()
             .unwrap()
             .is_empty()
     );
     assert!(
-        squircle::apps::list(&fixture.state.store.lock().unwrap())
+        squircle::apps::list(&fixture.state.files)
             .unwrap()
             .is_empty()
     );
@@ -550,7 +547,7 @@ async fn app_metadata_and_versioned_preview_survive_refresh_and_restart() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error["error"]["code"], "preview_changed");
     fs::remove_file(&source).unwrap();
-    let root = fixture.state.store.lock().unwrap().root.clone();
+    let root = fixture.state.files.root.clone();
     let reopened = router(AppState::new(Store::open(root).unwrap(), None).unwrap());
     let response = reopened
         .oneshot(
@@ -741,10 +738,7 @@ async fn invalid_and_expired_tickets_cannot_fetch_any_installation_resource() {
     };
     fixture
         .state
-        .store
-        .lock()
-        .unwrap()
-        .save_ticket(&expired)
+        .files.save_ticket(&expired)
         .unwrap();
     for suffix in ["", "/manifest.plist", "/app.ipa"] {
         for invalid in ["invalid".to_owned(), token()] {

@@ -5,7 +5,8 @@ use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::{collections::HashMap, sync::Mutex};
+use crate::actor::{Owner, Published, Snapshot};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -14,8 +15,10 @@ pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512 * 1024;
 const MAX_DIAGNOSTIC_EVENT_BYTES: usize = 1024 * 1024;
 const MAX_PAGE_SIZE: usize = 1000;
 
-/// The service serializes all access to this store, including read/modify/write
-/// operations, with its outer mutex and holds the exclusive service lock.
+/// Files under the data directory. Records are replaced atomically, so reads
+/// need no coordination; each kind of read/modify/write has one owner in the
+/// service (jobs: `Jobs`; tickets, the catalog and diagnostics: the server's
+/// owner and lanes), and the service holds the exclusive service lock.
 #[derive(Clone)]
 pub struct Store {
     pub root: PathBuf,
@@ -262,16 +265,28 @@ impl Store {
 /// Build jobs as the service sees them, with one owner: each job's record
 /// (committed, or a terminal result the disk refused), its revision, and
 /// the live operation (build or preview) that alone may change it. Every
-/// view reads this index; nothing rescans the jobs directory after startup.
+/// view reads the index the owner publishes; nothing rescans the jobs
+/// directory after startup.
 pub struct Jobs {
-    store: Store,
-    index: Mutex<JobIndex>,
+    owner: Owner<JobIndex>,
+    views: Snapshot<Views>,
 }
 
-#[derive(Default)]
+/// What readers see: every job, and how many builds and previews are live.
+#[derive(Clone, Default)]
+struct Views {
+    jobs: HashMap<String, Arc<JobView>>,
+    operations: usize,
+}
+
 struct JobIndex {
+    store: Store,
     entries: HashMap<String, JobEntry>,
     leases: u64,
+    /// The service is stopping: no new builds or previews.
+    closed: bool,
+    views: Views,
+    published: Published<Views>,
 }
 
 struct JobEntry {
@@ -303,11 +318,21 @@ struct Operation {
 }
 
 /// The right to run a job's build or preview and commit its progress.
-/// Cancellation reaches the job through `cancelled`.
+/// Cancellation reaches the job through `cancelled`. One dropped before
+/// `finish` (its runner panicked or went away) tells the owner, which ends
+/// the operation as interrupted.
 pub struct Lease {
     id: String,
     lease: u64,
     pub cancelled: watch::Receiver<bool>,
+    owner: Owner<JobIndex>,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let (id, lease) = (self.id.clone(), self.lease);
+        self.owner.tell(move |index| index.abandon(&id, lease));
+    }
 }
 
 /// One job as every reader sees it.
@@ -338,6 +363,10 @@ pub enum AdmitError {
     /// The job is unknown, or cannot run this operation.
     Refused(String),
     Persist(anyhow::Error),
+    /// The service is stopping.
+    Closed,
+    /// A job with this request ID exists already.
+    Duplicate(Box<JobView>),
 }
 
 /// Live operations at once, across builds and previews.
@@ -351,7 +380,7 @@ impl Jobs {
         for (id, error) in invalid {
             eprintln!("Skipping invalid build record {id}: {error:#}");
         }
-        let mut index = JobIndex::default();
+        let mut entries = HashMap::new();
         for mut job in jobs {
             if let Some(preview) = job.preview().filter(|p| p.in_progress()) {
                 let next = preview.failed("Service stopped during preview capture; no automatic retry was made");
@@ -364,154 +393,220 @@ impl Jobs {
                 job.updated_at = now();
                 store.save_job(&job)?;
             }
-            index.entries.insert(job.id.clone(), JobEntry { job, revision: 1, record: Record::Committed, operation: None });
+            entries.insert(job.id.clone(), JobEntry { job, revision: 1, record: Record::Committed, operation: None });
         }
-        Ok(Self { store: store.clone(), index: Mutex::new(index) })
+        let views = Views { jobs: entries.iter().map(|(id, e)| (id.clone(), Arc::new(e.view()))).collect(), operations: 0 };
+        let (published, snapshot) = Published::new(views.clone());
+        let index = JobIndex { store: store.clone(), entries, leases: 0, closed: false, views, published };
+        Ok(Self { owner: Owner::spawn("build jobs", index), views: snapshot })
     }
 
     pub fn list(&self) -> Vec<JobView> {
-        let index = self.index.lock().unwrap();
-        let mut jobs: Vec<JobView> = index.entries.values().map(JobEntry::view).collect();
+        let mut jobs: Vec<JobView> = self.views.get().jobs.values().map(|v| (**v).clone()).collect();
         jobs.sort_by(|l, r| r.job.created_at.cmp(&l.job.created_at).then_with(|| l.job.id.cmp(&r.job.id)));
         jobs
     }
 
     pub fn get(&self, id: &str) -> Option<JobView> {
-        self.index.lock().unwrap().entries.get(id).map(JobEntry::view)
+        self.views.get().jobs.get(id).map(|v| (**v).clone())
     }
 
     pub fn state(&self, id: &str) -> Option<BuildState> {
-        self.index.lock().unwrap().entries.get(id).map(|e| e.job.state())
+        self.views.get().jobs.get(id).map(|v| v.job.state())
     }
 
     /// The project build submitted with this idempotency key.
     pub fn with_request_id(&self, key: &str) -> Option<JobView> {
-        let index = self.index.lock().unwrap();
-        index.entries.values()
-            .find(|e| e.job.request().and_then(|r| r.request_id.as_deref()) == Some(key))
-            .map(JobEntry::view)
+        self.views.get().jobs.values()
+            .find(|v| v.job.request().and_then(|r| r.request_id.as_deref()) == Some(key))
+            .map(|v| (**v).clone())
     }
 
     /// Builds and previews queued or running.
     pub fn operations(&self) -> usize {
-        self.index.lock().unwrap().entries.values().filter(|e| e.operation.is_some()).count()
+        self.views.get().operations
     }
 
-    /// Persists a new queued job and leases its build.
-    pub fn admit(&self, job: Job) -> std::result::Result<Lease, AdmitError> {
-        if self.operations() >= MAX_OPERATIONS {
-            return Err(AdmitError::Full);
-        }
-        self.store.save_job(&job).map_err(AdmitError::Persist)?;
-        let mut index = self.index.lock().unwrap();
-        let (operation, lease) = index.lease(&job.id, OperationKind::Build);
-        index.entries.insert(job.id.clone(), JobEntry { job, revision: 1, record: Record::Committed, operation: Some(operation) });
-        Ok(lease)
+    /// Persists a new queued job and leases its build, unless the service
+    /// is stopping, the queue is full, or its request ID has a job already.
+    pub async fn admit(&self, job: Job) -> std::result::Result<Lease, AdmitError> {
+        let owner = self.owner.clone();
+        self.owner.ask(move |index| {
+            if index.closed {
+                return Err(AdmitError::Closed);
+            }
+            let key = job.request().and_then(|r| r.request_id.as_deref());
+            if let Some(prior) = index.entries.values().find(|e| key.is_some() && e.job.request().and_then(|r| r.request_id.as_deref()) == key) {
+                return Err(AdmitError::Duplicate(Box::new(prior.view())));
+            }
+            if index.operations() >= MAX_OPERATIONS {
+                return Err(AdmitError::Full);
+            }
+            index.store.save_job(&job).map_err(AdmitError::Persist)?;
+            let (operation, lease) = index.lease(&job.id, OperationKind::Build, owner);
+            let id = job.id.clone();
+            index.entries.insert(id.clone(), JobEntry { job, revision: 1, record: Record::Committed, operation: Some(operation) });
+            index.publish(&id);
+            Ok(lease)
+        }).await
     }
 
     /// Persists a finished job that runs nothing (an import).
-    pub fn insert(&self, job: Job) -> Result<()> {
-        self.store.save_job(&job)?;
-        self.index.lock().unwrap().entries
-            .insert(job.id.clone(), JobEntry { job, revision: 1, record: Record::Committed, operation: None });
-        Ok(())
+    pub async fn insert(&self, job: Job) -> Result<()> {
+        self.owner.ask(move |index| {
+            index.store.save_job(&job)?;
+            let id = job.id.clone();
+            index.entries.insert(id.clone(), JobEntry { job, revision: 1, record: Record::Committed, operation: None });
+            index.publish(&id);
+            Ok(())
+        }).await
     }
 
     /// Queues a new preview of a succeeded project build, keeping its
     /// current image until the capture replaces it.
-    pub fn begin_preview(&self, id: &str) -> std::result::Result<(Job, Lease), AdmitError> {
-        let mut job = {
-            let index = self.index.lock().unwrap();
-            let entry = index.entries.get(id).ok_or_else(|| AdmitError::Refused(format!("No build {id}")))?;
+    pub async fn begin_preview(&self, id: &str) -> std::result::Result<(Job, Lease), AdmitError> {
+        let (id, owner) = (id.to_string(), self.owner.clone());
+        self.owner.ask(move |index| {
+            if index.closed {
+                return Err(AdmitError::Closed);
+            }
+            let operations = index.operations();
+            let entry = index.entries.get(&id).ok_or_else(|| AdmitError::Refused(format!("No build {id}")))?;
             if entry.operation.is_some() {
                 return Err(AdmitError::Busy);
             }
-            if index.entries.values().filter(|e| e.operation.is_some()).count() >= MAX_OPERATIONS {
+            if operations >= MAX_OPERATIONS {
                 return Err(AdmitError::Full);
             }
             if entry.job.request().is_none() || entry.job.preview().is_none() {
                 return Err(AdmitError::Refused("Preview requires a succeeded project build with a simulator build recipe".into()));
             }
-            entry.job.clone()
-        };
-        let queued = job.preview().map(PreviewState::queued).unwrap_or_default();
-        job.set_preview(queued);
-        job.updated_at = now();
-        self.store.save_job(&job).map_err(AdmitError::Persist)?;
-        let mut index = self.index.lock().unwrap();
-        let (operation, lease) = index.lease(id, OperationKind::Preview);
-        let entry = index.entries.get_mut(id).expect("jobs are never removed");
-        if entry.operation.is_some() {
-            return Err(AdmitError::Busy);
-        }
-        entry.job = job.clone();
-        entry.revision += 1;
-        entry.operation = Some(operation);
-        Ok((job, lease))
+            let mut job = entry.job.clone();
+            let queued = job.preview().map(PreviewState::queued).unwrap_or_default();
+            job.set_preview(queued);
+            job.updated_at = now();
+            index.store.save_job(&job).map_err(AdmitError::Persist)?;
+            let (operation, lease) = index.lease(&id, OperationKind::Preview, owner);
+            let entry = index.entries.get_mut(&id).expect("jobs are never removed");
+            entry.job = job.clone();
+            entry.revision += 1;
+            entry.operation = Some(operation);
+            index.publish(&id);
+            Ok((job, lease))
+        }).await
     }
 
     /// Commits progress made under a lease. A stale lease commits nothing.
-    pub fn commit(&self, lease: &Lease, job: &Job) -> Result<()> {
+    pub async fn commit(&self, lease: &Lease, job: &Job) -> Result<()> {
         anyhow::ensure!(job.id == lease.id, "lease belongs to another job");
-        anyhow::ensure!(self.holds(lease), "build operation no longer owns this job");
-        self.store.save_job(job)?;
-        let mut index = self.index.lock().unwrap();
-        let entry = index.entries.get_mut(&job.id).expect("jobs are never removed");
-        entry.job = job.clone();
-        entry.revision += 1;
-        entry.record = Record::Committed;
-        Ok(())
+        let (job, held) = (job.clone(), lease.lease);
+        self.owner.ask(move |index| {
+            anyhow::ensure!(index.holds(&job.id, held), "build operation no longer owns this job");
+            index.store.save_job(&job)?;
+            let id = job.id.clone();
+            let entry = index.entries.get_mut(&id).expect("jobs are never removed");
+            entry.job = job;
+            entry.revision += 1;
+            entry.record = Record::Committed;
+            index.publish(&id);
+            Ok(())
+        }).await
     }
 
     /// Ends a lease with the job's terminal result. When the disk refuses it,
     /// the result is still published as `UnpersistedTerminal` and the error
     /// returned so the service can stop admitting work.
-    pub fn finish(&self, lease: Lease, job: &Job) -> Result<()> {
+    pub async fn finish(&self, lease: Lease, job: &Job) -> Result<()> {
         anyhow::ensure!(job.id == lease.id, "lease belongs to another job");
-        let persisted = self.store.save_job(job);
-        let mut index = self.index.lock().unwrap();
-        let entry = index.entries.get_mut(&job.id).expect("jobs are never removed");
-        if entry.operation.as_ref().is_some_and(|o| o.lease == lease.lease) {
-            entry.operation = None;
-        }
-        entry.job = job.clone();
-        entry.revision += 1;
-        entry.record = match &persisted {
-            Ok(()) => Record::Committed,
-            Err(error) => Record::UnpersistedTerminal { reason: format!("{error:#}") },
-        };
-        persisted
-    }
-
-    fn holds(&self, lease: &Lease) -> bool {
-        self.index.lock().unwrap().entries.get(&lease.id)
-            .and_then(|e| e.operation.as_ref())
-            .is_some_and(|o| o.lease == lease.lease)
+        let (job, held) = (job.clone(), lease.lease);
+        self.owner.ask(move |index| {
+            let persisted = index.store.save_job(&job);
+            let id = job.id.clone();
+            let entry = index.entries.get_mut(&id).expect("jobs are never removed");
+            if entry.operation.as_ref().is_some_and(|o| o.lease == held) {
+                entry.operation = None;
+            }
+            entry.job = job;
+            entry.revision += 1;
+            entry.record = match &persisted {
+                Ok(()) => Record::Committed,
+                Err(error) => Record::UnpersistedTerminal { reason: format!("{error:#}") },
+            };
+            index.publish(&id);
+            persisted
+        }).await
     }
 
     /// Asks a job's live operation to stop. None for an unknown job; false
     /// when nothing is running.
-    pub fn cancel(&self, id: &str) -> Option<(BuildState, Option<OperationKind>)> {
-        let index = self.index.lock().unwrap();
-        let entry = index.entries.get(id)?;
-        let kind = entry.operation.as_ref().filter(|o| o.cancel.send(true).is_ok()).map(|o| o.kind);
-        Some((entry.job.state(), kind))
+    pub async fn cancel(&self, id: &str) -> Option<(BuildState, Option<OperationKind>)> {
+        let id = id.to_string();
+        self.owner.ask(move |index| {
+            let entry = index.entries.get(&id)?;
+            let kind = entry.operation.as_ref().filter(|o| o.cancel.send(true).is_ok()).map(|o| o.kind);
+            Some((entry.job.state(), kind))
+        }).await
     }
 
-    pub fn cancel_all(&self) {
-        for entry in self.index.lock().unwrap().entries.values() {
-            if let Some(operation) = &entry.operation {
-                let _ = operation.cancel.send(true);
+    /// For the service's exit: refuses new builds and previews, then asks
+    /// every live one to stop, in one turn, so none is admitted after.
+    pub async fn close(&self) {
+        self.owner.ask(|index| {
+            index.closed = true;
+            for entry in index.entries.values() {
+                if let Some(operation) = &entry.operation {
+                    let _ = operation.cancel.send(true);
+                }
             }
-        }
+        }).await
     }
 }
 
 impl JobIndex {
-    fn lease(&mut self, id: &str, kind: OperationKind) -> (Operation, Lease) {
+    /// `owner` is this index's own handle, for the lease to tell when dropped.
+    fn lease(&mut self, id: &str, kind: OperationKind, owner: Owner<JobIndex>) -> (Operation, Lease) {
         self.leases += 1;
         let (cancel, cancelled) = watch::channel(false);
-        (Operation { kind, lease: self.leases, cancel }, Lease { id: id.into(), lease: self.leases, cancelled })
+        let lease = Lease { id: id.into(), lease: self.leases, cancelled, owner };
+        (Operation { kind, lease: self.leases, cancel }, lease)
+    }
+
+    fn operations(&self) -> usize {
+        self.entries.values().filter(|e| e.operation.is_some()).count()
+    }
+
+    fn holds(&self, id: &str, lease: u64) -> bool {
+        self.entries.get(id).and_then(|e| e.operation.as_ref()).is_some_and(|o| o.lease == lease)
+    }
+
+    /// A lease dropped while it still holds its job: the runner is gone, so
+    /// the job ends interrupted (saved if it can be) and frees its slot.
+    fn abandon(&mut self, id: &str, lease: u64) {
+        if !self.holds(id, lease) {
+            return;
+        }
+        let store = self.store.clone();
+        let entry = self.entries.get_mut(id).expect("jobs are never removed");
+        entry.operation = None;
+        if !entry.job.state().terminal() {
+            entry.job.phase = JobPhase::Interrupted { message: "Its runner stopped before finishing; no automatic retry was made.".into() };
+            entry.job.updated_at = now();
+            entry.revision += 1;
+            entry.record = match store.save_job(&entry.job) {
+                Ok(()) => Record::Committed,
+                Err(error) => Record::UnpersistedTerminal { reason: format!("{error:#}") },
+            };
+        }
+        self.publish(id);
+    }
+
+    /// Publishes the index with `id`'s entry as it now is.
+    fn publish(&mut self, id: &str) {
+        if let Some(entry) = self.entries.get(id) {
+            self.views.jobs.insert(id.to_string(), Arc::new(entry.view()));
+        }
+        self.views.operations = self.operations();
+        self.published.set(self.views.clone());
     }
 }
 
@@ -971,23 +1066,29 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn job_index_owns_leases_and_serves_a_result_the_disk_refused() -> Result<()> {
+    #[tokio::test]
+    async fn job_index_owns_leases_and_serves_a_result_the_disk_refused() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let store = Store::open(temporary.path().to_owned())?;
         let jobs = Jobs::open(&store)?;
-        let mut queued = job();
-        queued.origin = BuildOrigin::Project {
-            request: serde_json::from_value(json!({"project": "/P.xcodeproj", "scheme": "P", "configuration": "Debug",
-                "mode": "simulator", "export_options": null, "request_id": "k"}))?,
-            provenance: Default::default(),
+        let project = |key: &str| -> Result<Job> {
+            let mut queued = job();
+            queued.origin = BuildOrigin::Project {
+                request: serde_json::from_value(json!({"project": "/P.xcodeproj", "scheme": "P", "configuration": "Debug",
+                    "mode": "simulator", "export_options": null, "request_id": key}))?,
+                provenance: Default::default(),
+            };
+            queued.phase = JobPhase::Queued;
+            Ok(queued)
         };
-        queued.phase = JobPhase::Queued;
-        let lease = jobs.admit(queued.clone()).unwrap();
-        assert!(matches!(jobs.begin_preview(&queued.id), Err(AdmitError::Busy)));
+        let queued = project("k")?;
+        let lease = jobs.admit(queued.clone()).await.unwrap();
+        assert!(matches!(jobs.begin_preview(&queued.id).await, Err(AdmitError::Busy)));
         assert_eq!(jobs.with_request_id("k").map(|v| v.job.id), Some(queued.id.clone()));
+        // The same request ID again, even as a new job, admits nothing.
+        assert!(matches!(jobs.admit(project("k")?).await, Err(AdmitError::Duplicate(prior)) if prior.job.id == queued.id));
         // Cancellation reaches the live operation.
-        assert_eq!(jobs.cancel(&queued.id), Some((BuildState::Queued, Some(OperationKind::Build))));
+        assert_eq!(jobs.cancel(&queued.id).await, Some((BuildState::Queued, Some(OperationKind::Build))));
         assert!(*lease.cancelled.borrow());
         // The disk refuses the terminal write: the result is still what readers see.
         let directory = store.job_dir(&queued.id)?;
@@ -995,16 +1096,22 @@ mod tests {
         fs::write(&directory, b"not a directory")?;
         let mut cancelled = queued.clone();
         cancelled.phase = JobPhase::Cancelled { message: None };
-        let stale = Lease { id: queued.id.clone(), lease: 0, cancelled: lease.cancelled.clone() };
-        assert!(jobs.finish(lease, &cancelled).is_err());
+        let stale = Lease { id: queued.id.clone(), lease: 0, cancelled: lease.cancelled.clone(), owner: jobs.owner.clone() };
+        assert!(jobs.finish(lease, &cancelled).await.is_err());
         let view = jobs.get(&queued.id).unwrap();
         assert_eq!((view.job.state(), view.revision), (BuildState::Cancelled, 2));
         assert!(matches!(view.record, Record::UnpersistedTerminal { .. }));
         assert!(serde_json::to_value(&view)?["persistence_error"].is_string());
         assert_eq!(jobs.operations(), 0);
         // An ended lease commits nothing more.
-        assert!(jobs.commit(&stale, &queued).is_err());
+        assert!(jobs.commit(&stale, &queued).await.is_err());
         assert_eq!(jobs.get(&queued.id).unwrap().job.state(), BuildState::Cancelled);
+        // A lease whose runner went away frees its slot and ends its job interrupted.
+        let orphan = project("o")?;
+        drop(jobs.admit(orphan.clone()).await.unwrap());
+        jobs.owner.ask(|_| ()).await;
+        assert_eq!((jobs.operations(), jobs.state(&orphan.id)), (0, Some(BuildState::Interrupted)));
+        assert_eq!(store.load_job(&orphan.id)?.state(), BuildState::Interrupted);
         Ok(())
     }
 }
