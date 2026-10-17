@@ -311,7 +311,7 @@ async fn gather(root: &Path, scope: &Scope, terms: &[String], kinds: &[Kind], af
     }
     let matches = |text: &str| { let lower = text.to_lowercase(); terms.iter().any(|t| lower.contains(t.as_str())) };
     if kinds.contains(&Kind::Task) {
-        match crate::tasks::Tasks::open(root) {
+        match crate::tasks::read(root) {
             Ok(tasks) => for task in tasks.list(project) {
                 let notes: Vec<&str> = task.history.iter().map(|c| c.note.as_str()).filter(|n| !n.is_empty()).collect();
                 let text = format!("{} {} {}", task.ask, task.note, notes.join(" "));
@@ -529,7 +529,7 @@ pub async fn show(root: &Path, scope: Option<&Scope>, reference: &str, max_chars
                              "detail": s("detail"), "input": s("input"), "at": s("created_at")})))
         }
         Kind::Task => {
-            let task = crate::tasks::Tasks::open(root)?.get(id)?;
+            let task = crate::tasks::read(root)?.get(id).with_context(|| format!("No task {id}"))?;
             let mut text = format!("{reference} · {} · created {}, updated {}\nAsk: {}\n", task.status.label(),
                 when(task.created_at as i64), when(task.updated_at as i64), task.ask);
             if !task.note.is_empty() { text += &format!("Note: {}\n", task.note); }

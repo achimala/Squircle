@@ -2913,8 +2913,8 @@ mod tests {
         agents.build_finished(&finished(by_worker, Some("w1"))).unwrap();
         agents.build_finished(&finished(by_worker, Some("w1"))).unwrap();
         // A build no thread claims, linked to one of the app's tasks.
-        let task = agents.tasks.add("p", "ship it", None, None, crate::tasks::By::Agent, None, vec![]).unwrap();
-        agents.tasks.link(&task.id, None, Some(&by_task), false).unwrap();
+        let task = agents.tasks.add("p", "ship it", None, None, crate::tasks::By::Agent, None, vec![]).await.unwrap();
+        agents.tasks.link(&task.id, None, Some(&by_task), false).await.unwrap();
         agents.build_finished(&finished(&by_task, None)).unwrap();
         // Nobody's build.
         agents.build_finished(&finished(stranger, Some("someone"))).unwrap();

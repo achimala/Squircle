@@ -378,7 +378,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         let state = state.clone();
         background.push(tokio::spawn(async move {
             loop {
-                if let Err(error) = tasks.tick(|task| task_signals(&state, task)) {
+                if let Err(error) = tasks.tick(|task| task_signals(&state, task)).await {
                     eprintln!("Tasks not updated: {error:#}");
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -2240,7 +2240,7 @@ async fn spawn_worker(
         .await
         .map_err(agent_error)?;
     if let (Some(task), Some(id)) = (&r.task, worker["id"].as_str()) {
-        tasks_of(&state)?.link(task, Some(id), None, false).map_err(task_error)?;
+        tasks_of(&state)?.link(task, Some(id), None, false).await.map_err(task_error)?;
     }
     Ok(Json(success(worker)))
 }
@@ -2547,6 +2547,7 @@ async fn add_task(
     let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
     let task = tasks_of(&state)?
         .add(&project, &r.ask, r.status, r.note.as_deref(), by, source, vec![])
+        .await
         .map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task),
         "next": "Link its workers and builds as you start them; set its status when it changes."}))))
@@ -2575,7 +2576,7 @@ async fn update_task(
     let current = tasks.get(&id).map_err(ApiError::missing)?;
     let observed = task_signals(&state, &current);
     let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
-    let task = tasks.update(&id, r.update, by, Some(observed)).map_err(task_error)?;
+    let task = tasks.update(&id, r.update, by, Some(observed)).await.map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
 }
 
@@ -2593,7 +2594,7 @@ async fn link_task(
     payload: std::result::Result<Json<LinkTask>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
-    let task = tasks_of(&state)?.link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove).map_err(task_error)?;
+    let task = tasks_of(&state)?.link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove).await.map_err(task_error)?;
     // A build that finished before it was linked (a fast failure) still
     // reaches the agent; one that finished long ago is no news.
     if let Some(view) = r.build.as_deref().filter(|_| !r.remove).and_then(|b| state.jobs.get(b))
@@ -2618,7 +2619,7 @@ async fn attach_task(
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
     let tasks = tasks_of(&state)?;
-    let media = tasks.attach(&id, &r.file, r.caption.as_deref()).map_err(task_error)?;
+    let media = tasks.attach(&id, &r.file, r.caption.as_deref()).await.map_err(task_error)?;
     Ok(Json(success(json!({"id": media.id, "task_id": id, "kind": media.kind, "caption": media.caption,
         "next": "It shows on the task on the phone within a few seconds."}))))
 }

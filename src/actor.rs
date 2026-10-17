@@ -24,6 +24,8 @@
 //! tell any owner. Their senders are request handlers and service loops,
 //! each bounded by the work it does.
 
+use crate::fsm::core::Revision;
+use crate::fsm::core::commit::{Gate, Refusal, Storage};
 use std::{collections::HashMap, future::Future, hash::Hash, sync::Arc};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -106,6 +108,47 @@ impl<T> Clone for Snapshot<T> {
 impl<T> Snapshot<T> {
     pub fn get(&self) -> Arc<T> {
         self.0.borrow().clone()
+    }
+}
+
+/// An owner's commit gate (C00) with its saved value published: readers
+/// see a change only once it is on disk, and from then on.
+pub struct Saved<R, A, S> {
+    gate: Gate<R, A, S>,
+    published: Published<R>,
+    revision: Revision,
+}
+
+impl<R: Clone, A, S: Storage<R>> Saved<R, A, S> {
+    pub fn new(gate: Gate<R, A, S>) -> (Self, Snapshot<R>) {
+        let (published, snapshot) = Published::new(gate.committed().clone());
+        let revision = gate.revision();
+        (Self { gate, published, revision }, snapshot)
+    }
+
+    pub fn committed(&self) -> &R {
+        self.gate.committed()
+    }
+
+    /// Writes a blocked earlier candidate again (see `Gate::resolve`).
+    pub fn resolve(&mut self) -> Result<(), Refusal> {
+        let resolved = self.gate.resolve();
+        self.publish();
+        resolved
+    }
+
+    /// Saves `candidate`, then publishes it (see `Gate::commit`).
+    pub fn commit(&mut self, candidate: R, after: Vec<A>) -> Result<Vec<A>, Refusal> {
+        let committed = self.gate.commit(candidate, after);
+        self.publish();
+        committed
+    }
+
+    fn publish(&mut self) {
+        if self.gate.revision() != self.revision {
+            self.revision = self.gate.revision();
+            self.published.set(self.gate.committed().clone());
+        }
     }
 }
 
