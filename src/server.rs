@@ -2312,14 +2312,14 @@ fn push(state: &AppState) -> ApiResult<Arc<Push>> {
 }
 
 async fn push_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    Ok(Json(success(push(&state)?.status())))
+    Ok(Json(success(push(&state)?.status().await)))
 }
 
 async fn push_register(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::Registration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.register(body(payload)?).map_err(ApiError::bad)?;
+    push(&state)?.register(body(payload)?).await.map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
@@ -2327,7 +2327,7 @@ async fn push_activity(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::ActivityRegistration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.register_activity(body(payload)?).map_err(ApiError::bad)?;
+    push(&state)?.register_activity(body(payload)?).await.map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
@@ -2335,7 +2335,7 @@ async fn push_presence(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::PresenceReport>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.report_presence(body(payload)?).map_err(ApiError::bad)?;
+    push(&state)?.report_presence(body(payload)?).await.map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 

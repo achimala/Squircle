@@ -1201,7 +1201,7 @@ impl Agents {
                 item = shell.recv() => {
                     let Some(item) = item else { break };
                     self.owner.ask(move |s| { s.consume_shell(&item); s.observe_workers(); }).await;
-                    if let Some(push) = self.push.get() { push.apps_changed(self.app_views()); }
+                    if let Some(push) = self.push.get() { push.apps_changed(self.app_views()).await; }
                     self.schedule_flush();
                     self.run_due_resets().await;
                 }
