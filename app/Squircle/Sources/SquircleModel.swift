@@ -1341,7 +1341,7 @@ final class SquircleModel {
                 guard let client else { command(.answered(id: id, attempt: 0, .refused(ClientError.configuration.localizedDescription))); return }
                 do {
                     let revision = try await client.updateTask(id: task, status: status, toTop: toTop)
-                    command(.answered(id: id, attempt: 0, .accepted(revision.map { .number(Double($0)) } ?? .null)))
+                    command(.answered(id: id, attempt: 0, .accepted(.object(revision.map { ["revision": .number(Double($0))] } ?? [:]))))
                 } catch { command(.answered(id: id, attempt: 0, .service(error))) }
                 await readTasks(containing: task)
             }

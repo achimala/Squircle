@@ -134,6 +134,8 @@ enum Commands {
                 effects.append(.dispatch(id: e.intent.id, command: command, attempt: attempt))
             }
         }
+        /// Sends entry `i` (through a copy: `send` reads the session).
+        func send(at i: Int) { var e = s.entries[i]; send(&e); s.entries[i] = e }
         /// Removes entry `i`; the next command waiting for its slot goes.
         func remove(_ i: Int, _ settlement: Settlement?) {
             let e = s.entries.remove(at: i)
@@ -158,7 +160,7 @@ enum Commands {
                     // Not sent yet: the newer one takes its place.
                     effects.append(.settle(id: s.entries[i].intent.id, .superseded))
                     s.entries[i] = Entry(intent: intent, phase: .waiting)
-                    send(&s.entries[i])
+                    send(at: i)
                 } else {
                     if let older = s.queued[slot] { effects.append(.settle(id: older.id, .superseded)) }
                     s.queued[slot] = intent
@@ -192,7 +194,7 @@ enum Commands {
                 case .task(let task, _, _): effects.append(.readTasks(task: task))
                 // Settled by looking at the thread: a resend could stop a newer turn.
                 case .interrupt where s.entries[i].phase == .unknown: break
-                default: if s.session != attempt { send(&s.entries[i]) }
+                default: if s.session != attempt { send(at: i) }
                 }
             }
 
@@ -202,7 +204,7 @@ enum Commands {
                 if case .dispatching(let old) = s.entries[i].phase, old != 0, old != attempt { s.entries[i].phase = .unknown }
                 switch (s.entries[i].phase, s.entries[i].intent.kind) {
                 case (.unknown, .interrupt), (_, .task): continue
-                case (.waiting, _), (.unknown, _): send(&s.entries[i])
+                case (.waiting, _), (.unknown, _): send(at: i)
                 default: continue
                 }
             }
@@ -220,7 +222,7 @@ enum Commands {
                     if sight.runtimeMode == mode.rawValue { resolved(i); applied = true }
                 case .interrupt(_, let turn):
                     if !sight.running || sight.activeTurn != turn { resolved(i); applied = true }
-                    else if s.entries[i].phase == .unknown, s.session != nil { send(&s.entries[i]); applied = true }
+                    else if s.entries[i].phase == .unknown, s.session != nil { send(at: i); applied = true }
                 case .task, .project: break
                 }
             }
@@ -236,7 +238,7 @@ enum Commands {
                     if (sight.revision ?? 0) >= (receipt ?? 0) { resolved(i); applied = true }
                 case .unknown:
                     // An edit sets a value, so sending it again is the same edit.
-                    if let status, sight.status == status { resolved(i) } else { send(&s.entries[i]) }
+                    if let status, sight.status == status { resolved(i) } else { send(at: i) }
                     applied = true
                 case .waiting, .dispatching: break
                 }

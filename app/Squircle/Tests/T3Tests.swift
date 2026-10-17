@@ -811,7 +811,7 @@ final class CommandMachineTests: XCTestCase {
         XCTAssertEqual(reduce(.answered(id: edit.id, attempt: 0, .unknown("lost"))).effects, [.readTasks(task: "k")])
         XCTAssertEqual(reduce(.tasksObserved([.init(id: "k", status: .queued, revision: 3)])).effects,
                        [.editTask(id: edit.id, task: "k", status: .done, toTop: false)])
-        _ = reduce(.answered(id: edit.id, attempt: 0, .accepted(.number(5))))
+        _ = reduce(.answered(id: edit.id, attempt: 0, .accepted(.from(["revision": 5]))))
         XCTAssertEqual(s.taskEdits.count, 1, "held until the list has revision 5")
         _ = reduce(.tasksObserved([.init(id: "k", status: .done, revision: 4)]))
         XCTAssertEqual(s.taskEdits.count, 1)
