@@ -587,7 +587,7 @@ async fn start(
     };
     let response = state.jobs.get(&job.id);
     if let Some(agents) = &state.agents
-        && let Err(error) = agents.build_started(&job.id, request.thread.as_deref())
+        && let Err(error) = agents.build_started(&job.id, request.thread.as_deref()).await
     {
         eprintln!("Build {} start not recorded for its agent: {error:#}", job.id);
     }
@@ -667,7 +667,7 @@ async fn tell_agent(state: &AppState, job: &Job, app: Option<&apps::AppRecord>) 
     };
     let title = app.map(|a| a.name.clone()).or_else(|| job.output().map(|o| o.title.clone())).unwrap_or_else(|| request.scheme.clone());
     let build = crate::agents::FinishedBuild { id: job.id.clone(), thread: request.thread.clone(), app: title, succeeded, reason };
-    if let Err(error) = agents.build_finished(&build) {
+    if let Err(error) = agents.build_finished(&build).await {
         eprintln!("Build {} not queued for its agent: {error:#}", job.id);
     }
 }
@@ -2194,7 +2194,7 @@ async fn agent_context(
     query: std::result::Result<Query<ContextQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
-    Ok(Json(success(json!({"context": agents(&state)?.context(&query.cwd)}))))
+    Ok(Json(success(json!({"context": agents(&state)?.context(&query.cwd).await}))))
 }
 
 #[derive(Deserialize)]

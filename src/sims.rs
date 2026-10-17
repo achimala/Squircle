@@ -261,7 +261,7 @@ impl Host for AgentsHost {
     }
 
     fn wake<'a>(&'a self, thread: &'a str, id: &'a str, text: String) -> Pending<'a, Result<()>> {
-        Box::pin(async move { self.0.notify(thread, id, text, crate::agents::Note::SimReady, json!({"thread": thread})) })
+        Box::pin(self.0.notify(thread, id, text, crate::agents::Note::SimReady, json!({"thread": thread})))
     }
 
     fn waiting(&self, threads: Vec<String>) {
