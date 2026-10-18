@@ -70,4 +70,27 @@ final class SquircleActionTests: XCTestCase {
         XCTAssertTrue(SquircleAction.parse(command: "cat <<EOF > notes.md\nsquircle thread spawn --title x\nEOF\necho done").isEmpty)
         XCTAssertTrue(SquircleAction.parse(command: "xcrun simctl launch $U ai.dreamslate.Squircle").isEmpty)
     }
+
+    func testRunningCommandsReadAsTheirMainProgram() {
+        let cases: [(String, String)] = [
+            (#"DB="file:/tmp/state.sqlite?mode=ro"; sqlite3 "$DB" "select kind from t" | head -5"#, "Querying a database"),
+            ("cd /x && set -euo pipefail && xcodebuild -project A.xcodeproj -scheme A build 2>&1 | tail -20", "Building with xcodebuild"),
+            ("xcodebuild test -scheme Squircle -destination 'id=1' | xcpretty", "Testing with xcodebuild"),
+            ("/bin/zsh -lc 'cd app && rg -n \"func headline\" Sources | head'", "Searching with rg"),
+            ("sed -n 120,200p app/Squircle/Sources/UI/ThreadTimeline.swift", "Reading ThreadTimeline.swift"),
+            ("head -20 a.swift b.swift; wc -l c.swift", "Reading 2 files"),
+            ("cat > notes.md <<'EOF'\nrm -rf everything\nEOF", "Writing notes.md"),
+            ("git -C repo add -A && git commit -q -m \"$(cat <<'EOF'\nFix it\nEOF\n)\"", "Committing"),
+            ("export PATH=/x:$PATH; RUST_LOG=debug cargo test --release -- --nocapture", "Testing with cargo"),
+            ("timeout 60 npx -y tsc --noEmit", "Checking types"),
+            ("npm run build 2>&1 | tail -2", "Building with npm"),
+            ("find . -name '*.swift' | xargs grep -l Shell", "Finding files"),
+            ("if [ -f x ]; then python3 scripts/render.py --out a.png; fi", "Running render.py"),
+            ("for f in *.swift; do echo $f; done", "Running a command"),
+            ("sleep 30", "Waiting"),
+            ("xcrun simctl io booted screenshot /tmp/a.png", "Capturing the simulator"),
+            ("curl -s https://example.com/api | jq .", "Fetching example.com"),
+        ]
+        for (command, label) in cases { XCTAssertEqual(CommandLabel.label(command), label, command) }
+    }
 }
