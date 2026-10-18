@@ -78,21 +78,21 @@ final class StepDetailViewController: UIViewController {
 
     enum Change: Equatable { case same(String), removed(String), added(String) }
 
-    /// Longest-common-subsequence line diff; edits are small enough for it.
+    /// Line diff (Myers, via the standard library); removals before additions, as git shows them.
     static func lineDiff(_ a: [String], _ b: [String]) -> [Change] {
-        guard a.count * b.count <= 400_000 else { return a.map(Change.removed) + b.map(Change.added) }
-        var table = Array(repeating: Array(repeating: 0, count: b.count + 1), count: a.count + 1)
-        for i in stride(from: a.count - 1, through: 0, by: -1) {
-            for j in stride(from: b.count - 1, through: 0, by: -1) {
-                table[i][j] = a[i] == b[j] ? table[i + 1][j + 1] + 1 : max(table[i + 1][j], table[i][j + 1])
+        var removed = Set<Int>(), inserted = Set<Int>()
+        for change in b.difference(from: a) {
+            switch change {
+            case .remove(let offset, _, _): removed.insert(offset)
+            case .insert(let offset, _, _): inserted.insert(offset)
             }
         }
         var changes: [Change] = []
         var i = 0, j = 0
         while i < a.count || j < b.count {
-            if i < a.count, j < b.count, a[i] == b[j] { changes.append(.same(a[i])); i += 1; j += 1 }
-            else if j < b.count, i == a.count || table[i][j + 1] >= table[i + 1][j] { changes.append(.added(b[j])); j += 1 }
-            else { changes.append(.removed(a[i])); i += 1 }
+            if i < a.count, removed.contains(i) { changes.append(.removed(a[i])); i += 1 }
+            else if j < b.count, inserted.contains(j) { changes.append(.added(b[j])); j += 1 }
+            else { changes.append(.same(a[i])); i += 1; j += 1 }
         }
         return changes
     }

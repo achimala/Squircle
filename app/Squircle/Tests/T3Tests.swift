@@ -275,6 +275,44 @@ final class T3Tests: XCTestCase {
         """
         XCTAssertEqual(plain(text), ["text:Results:", "table:Step,Time/Build,12 s/,/Test,", "text:done| a | b |\n|---|---|\n"])
     }
+
+    func testDiffKeepsDashDashAndPlusPlusLinesInsideHunks() {
+        let diff = """
+        diff --git a/q.sql b/q.sql
+        index 1..2 100644
+        --- a/q.sql
+        +++ b/q.sql
+        @@ -1,2 +1,2 @@ select
+         select 1;
+        --- old comment
+        +++i;
+        \\ No newline at end of file
+        @@ -9 +9,2 @@
+        -x
+        +--- rule
+        ++y
+        diff --git a/new b/new
+        new file mode 100644
+        --- /dev/null
+        +++ b/new
+        @@ -0,0 +1 @@
+        +hi
+        """
+        let parsed = ParsedDiff.parse(diff)
+        XCTAssertEqual(parsed.files.map(\.path), ["q.sql", "new"])
+        let q = parsed.files[0]
+        XCTAssertEqual(q.lines.map { "\($0.kind)\($0.old)/\($0.new):\($0.text)" }, [
+            "hunk0/0:@@ -1,2 +1,2 @@ select", "context1/1:select 1;", "removed2/0:-- old comment", "added0/2:++i;",
+            "hunk0/0:@@ -9 +9,2 @@", "removed9/0:x", "added0/9:--- rule", "added0/10:+y",
+        ])
+        XCTAssertEqual([q.additions, q.deletions], [3, 2])
+        XCTAssertEqual(parsed.files[1].lines.last?.text, "hi")
+    }
+
+    func testLineDiffKeepsMovedLinesAndOrder() {
+        XCTAssertEqual(StepDetailViewController.lineDiff(["a", "b", "c"], ["b", "c", "a"]), [.removed("a"), .same("b"), .same("c"), .added("a")])
+        XCTAssertEqual(AgentStep.lineDelta(old: "a\nb\nc", new: "b\nc\na").0, 1)
+    }
 }
 
 // MARK: Native state, transport and caches (W5)

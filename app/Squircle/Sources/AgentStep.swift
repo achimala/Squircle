@@ -173,11 +173,8 @@ struct AgentStep: Equatable {
     static func lineDelta(old: String, new: String) -> (Int, Int) {
         let a = old.isEmpty ? [] : old.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let b = new.isEmpty ? [] : new.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var counts: [String: Int] = [:]
-        for line in a { counts[line, default: 0] += 1 }
-        var common = 0
-        for line in b where (counts[line] ?? 0) > 0 { counts[line]! -= 1; common += 1 }
-        return (b.count - common, a.count - common)
+        let difference = b.difference(from: a)
+        return (difference.insertions.count, difference.removals.count)
     }
 }
 

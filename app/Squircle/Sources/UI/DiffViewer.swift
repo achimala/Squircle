@@ -23,37 +23,45 @@ struct ParsedDiff: Sendable {
         var result = ParsedDiff()
         var current: File?
         var old: Int32 = 0, new: Int32 = 0
+        // Lines the current hunk still owes on each side. Inside a hunk every
+        // line is a change or context, even "-- comment" or "++i"; between
+        // hunks only "@@" matters and headers ("---", "index", …) are skipped.
+        var oldLeft = 0, newLeft = 0
         func flush() { if let current { result.files.append(current) } }
         diff.enumerateLines { raw, _ in
             if raw.hasPrefix("diff --git ") {
                 flush()
                 let path = raw.components(separatedBy: " b/").last ?? raw
                 current = File(path: path)
+                oldLeft = 0; newLeft = 0
                 return
             }
             guard current != nil else { return }
-            if raw.hasPrefix("@@") {
-                // @@ -a,b +c,d @@ context
+            guard oldLeft > 0 || newLeft > 0 else {
+                guard raw.hasPrefix("@@") else { return }
+                // @@ -a,b +c,d @@ context (",b" and ",d" default to 1)
                 let parts = raw.split(separator: " ")
                 if parts.count > 2 {
-                    old = Int32(parts[1].dropFirst().split(separator: ",").first ?? "") ?? 0
-                    new = Int32(parts[2].dropFirst().split(separator: ",").first ?? "") ?? 0
+                    let a = parts[1].dropFirst().split(separator: ",", omittingEmptySubsequences: false)
+                    let c = parts[2].dropFirst().split(separator: ",", omittingEmptySubsequences: false)
+                    old = Int32(a.first ?? "") ?? 0
+                    new = Int32(c.first ?? "") ?? 0
+                    oldLeft = a.count > 1 ? Int(a[1]) ?? 0 : 1
+                    newLeft = c.count > 1 ? Int(c[1]) ?? 0 : 1
                 }
                 current?.lines.append(Line(kind: .hunk, old: 0, new: 0, text: raw))
                 return
             }
-            if raw.hasPrefix("+++") || raw.hasPrefix("---") || raw.hasPrefix("index ") || raw.hasPrefix("\\")
-                || raw.hasPrefix("new file") || raw.hasPrefix("deleted file") || raw.hasPrefix("similarity")
-                || raw.hasPrefix("rename ") || raw.hasPrefix("old mode") || raw.hasPrefix("new mode") { return }
+            if raw.hasPrefix("\\") { return }  // "\ No newline at end of file"
             let body = String(raw.dropFirst().prefix(600)).replacingOccurrences(of: "\t", with: "    ")
             result.widest = max(result.widest, body.count)
             switch raw.first {
             case "+":
-                current?.lines.append(Line(kind: .added, old: 0, new: new, text: body)); new += 1; current?.additions += 1
+                current?.lines.append(Line(kind: .added, old: 0, new: new, text: body)); new += 1; newLeft -= 1; current?.additions += 1
             case "-":
-                current?.lines.append(Line(kind: .removed, old: old, new: 0, text: body)); old += 1; current?.deletions += 1
+                current?.lines.append(Line(kind: .removed, old: old, new: 0, text: body)); old += 1; oldLeft -= 1; current?.deletions += 1
             default:
-                current?.lines.append(Line(kind: .context, old: old, new: new, text: body)); old += 1; new += 1
+                current?.lines.append(Line(kind: .context, old: old, new: new, text: body)); old += 1; new += 1; oldLeft -= 1; newLeft -= 1
             }
         }
         flush()
