@@ -2921,16 +2921,12 @@ impl Agents {
         if !crate::t3steps::valid(thread, &[]) || self.upkeep_blocker(agent).is_some() {
             return Ok(());
         }
-        let latest = |column: &str| {
-            format!(
-                "(select {column} from projection_thread_activities where thread_id='{thread}' \
-            and kind='context-window.updated' order by created_at desc limit 1)"
-            )
-        };
-        let rows = crate::t3steps::query(&format!("select {} reading_at, {} used, max(\
-            coalesce((select max(created_at) from projection_thread_messages where thread_id='{thread}'),''), \
-            coalesce((select max(created_at) from projection_thread_activities where thread_id='{thread}'),'')) last_at",
-            latest("created_at"), latest("json_extract(payload_json,'$.usedTokens')")), crate::t3steps::DETAIL_READ).await?;
+        let rows = crate::t3db::query(
+            crate::t3db::sql::CONTEXT_READING,
+            crate::t3db::params![thread],
+            crate::t3db::DETAIL_READ,
+        )
+        .await?;
         let row = rows.first().context("no reading")?;
         let (Some(reading), Some(used), Some(last)) = (
             row["reading_at"].as_str(),

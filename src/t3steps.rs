@@ -1,23 +1,13 @@
 //! Read-only details of a T3 thread's tool calls that T3 removes from what it
 //! sends to clients: a command's own description, an edit's old and new text
 //! and the screenshots a tool returned. T3 stays the owner of the thread; this
-//! only reads its local state database, through the system `sqlite3` in
-//! read-only mode, and never writes to it.
+//! only reads its local state database through the read-only `t3db` adapter.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
-use std::path::PathBuf;
 
-/// `SQUIRCLE_T3_STATE`, else T3's default `~/.t3/userdata/state.sqlite`.
-pub fn state_path() -> PathBuf {
-    std::env::var_os("SQUIRCLE_T3_STATE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".t3/userdata/state.sqlite")
-        })
-}
+pub use crate::t3db::state_path;
+use crate::t3db::{DETAIL_READ, STEP_READ, params, query, sql};
 
 pub(crate) fn valid(id: &str, extra: &[char]) -> bool {
     !id.is_empty()
@@ -25,50 +15,6 @@ pub(crate) fn valid(id: &str, extra: &[char]) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || extra.contains(&c))
-}
-
-/// A tool result's content blocks, or nothing when the result is plain text;
-/// guarded so free text is never parsed as JSON.
-const CONTENT: &str = "case when json_type(payload_json,'$.data.result.content')='array' \
-    then json_extract(payload_json,'$.data.result.content') else '[]' end";
-const IS_IMAGE: &str = "(case when type='object' then json_extract(value,'$.type') end)='image'";
-
-/// How long a read may take. A Live Activity's step is worth little once
-/// late; a thread's details are read on request.
-const STEP_READ: std::time::Duration = std::time::Duration::from_secs(3);
-pub(crate) const DETAIL_READ: std::time::Duration = std::time::Duration::from_secs(15);
-/// Screenshots arrive as base64 rows; anything larger is not a step detail.
-const MAX_OUTPUT: usize = 64 * 1024 * 1024;
-
-/// One read-only query, supervised like every helper: bounded by `limit` and
-/// `MAX_OUTPUT`, and dropping the future kills `sqlite3`.
-pub(crate) async fn query(sql: &str, limit: std::time::Duration) -> Result<Vec<Value>> {
-    let path = state_path();
-    if !path.exists() {
-        bail!("T3 state database not found at {}", path.display());
-    }
-    let uri = format!("file:{}?mode=ro", path.display());
-    let mut command = tokio::process::Command::new("/usr/bin/sqlite3");
-    command.args(["-readonly", "-json", &uri, sql]);
-    let output = crate::xcode::run_bounded(
-        command,
-        crate::xcode::Sink::Capture(MAX_OUTPUT),
-        crate::xcode::Sink::Capture(64 * 1024),
-        tokio::time::Instant::now() + limit,
-        None,
-    )
-    .await
-    .context("running sqlite3")?;
-    if !output.status.success() {
-        bail!(
-            "sqlite3 failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    if output.stdout.iter().all(u8::is_ascii_whitespace) {
-        return Ok(Vec::new());
-    }
-    serde_json::from_slice(&output.stdout).context("decoding sqlite3 output")
 }
 
 /// Keeps what describes a step; long text is capped so a large file write
@@ -132,14 +78,7 @@ pub async fn current_step(thread: &str) -> Result<Option<String>> {
     if !valid(thread, &[]) {
         bail!("invalid thread ID");
     }
-    let rows = query(&format!(
-        "select json_extract(payload_json,'$.data.toolName') as tool,
-                json_extract(payload_json,'$.data.input') as input,
-                json_extract(payload_json,'$.title') as title
-         from projection_thread_activities
-         where thread_id='{thread}' and kind in ('tool.started','tool.updated','tool.completed','task.progress','task.started')
-         order by sequence desc, created_at desc limit 12"
-    ), STEP_READ).await?;
+    let rows = query(sql::CURRENT_STEP, params![thread], STEP_READ).await?;
     Ok(rows.iter().find_map(|row| {
         let input = row["input"]
             .as_str()
@@ -155,27 +94,7 @@ pub async fn simulator_commands(since: &str) -> Result<Vec<crate::simpool::Activ
     if !since.is_empty() && !valid(since, &[':', '.', 'T', 'Z']) {
         bail!("invalid timestamp");
     }
-    let text = |path: &str| {
-        format!(
-            "case when json_type(payload_json,'{path}')='text' then json_extract(payload_json,'{path}') end"
-        )
-    };
-    let rows = query(
-        &format!(
-            "select thread_id as thread, created_at,
-                coalesce({}, {}, '') as command,
-                coalesce({}, '') as output
-         from projection_thread_activities
-         where created_at > '{since}'
-           and (payload_json like '%simctl %' or payload_json like '%xcodebuild%')
-         order by created_at limit 5000",
-            text("$.data.command"),
-            text("$.data.input.command"),
-            text("$.data.rawOutput.content"),
-        ),
-        DETAIL_READ,
-    )
-    .await?;
+    let rows = query(sql::SIMULATOR_COMMANDS, params![since], DETAIL_READ).await?;
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -247,25 +166,7 @@ pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
         s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "-:.TZ+".contains(c))
     });
-    let since = since
-        .map(|s| format!("and created_at > '{s}'"))
-        .unwrap_or_default();
-    let rows = query(&format!(
-        "select json_extract(payload_json,'$.toolCallId') as id,
-                json_extract(payload_json,'$.data.toolName') as tool,
-                json_extract(payload_json,'$.data.input') as input,
-                (select count(*) from json_each({CONTENT})
-                   where {IS_IMAGE}) as images,
-                created_at, turn_id, kind, tone,
-                json_extract(payload_json,'$.status') as status,
-                case when instr(json_extract(payload_json,'$.data.input.command'),'squircle') > 0
-                     then substr(json_extract(payload_json,'$.data.result.content'),1,4000) end as result
-         from projection_thread_activities
-         where thread_id='{thread}' and kind in ('tool.started','tool.updated','tool.completed') {since}
-           and (json_extract(payload_json,'$.data.input') is not null or images > 0)
-         order by created_at"
-    ), DETAIL_READ)
-    .await?;
+    let rows = query(sql::STEPS, params![thread, since], DETAIL_READ).await?;
     let mut order: Vec<String> = Vec::new();
     let mut steps: std::collections::HashMap<String, Map<String, Value>> = Default::default();
     for row in rows {
@@ -325,18 +226,7 @@ pub async fn image(thread: &str, call: &str, index: usize) -> Result<Option<Valu
     if !valid(thread, &[]) || !valid(call, &['_']) {
         bail!("invalid identifier");
     }
-    let rows = query(
-        &format!(
-            "select json_extract(value,'$.source.media_type') as media_type,
-                json_extract(value,'$.source.data') as data
-         from projection_thread_activities, json_each({CONTENT})
-         where thread_id='{thread}' and json_extract(payload_json,'$.toolCallId')='{call}'
-           and {IS_IMAGE}
-         order by created_at desc, activity_id, json_each.key"
-        ),
-        DETAIL_READ,
-    )
-    .await?;
+    let rows = query(sql::IMAGES, params![thread, call], DETAIL_READ).await?;
     Ok(distinct(rows).into_iter().nth(index).map(|row| {
         json!({
             "media_type": row["media_type"].as_str().unwrap_or("image/png"),
@@ -401,23 +291,7 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
         bail!("invalid project id");
     }
     // Only a prefix of each image is read: enough for its header.
-    let rows = query(
-        &format!(
-            "select a.activity_id as activity, j.key as idx, a.created_at as created_at,
-                json_extract(a.payload_json,'$.data.toolName') as tool,
-                json_extract(j.value,'$.source.media_type') as media_type,
-                substr(json_extract(j.value,'$.source.data'),1,87380) as head
-         from projection_threads t
-         join projection_thread_activities a on a.thread_id=t.thread_id,
-              json_each({CONTENT}) j
-         where t.project_id='{project}' and t.deleted_at is null and a.kind='tool.completed'
-           and json_extract(a.payload_json,'$.data.toolName')='mcp__t3-code__device_screenshot'
-           and (case when j.type='object' then json_extract(j.value,'$.type') end)='image'
-         order by a.created_at desc limit 40"
-        ),
-        DETAIL_READ,
-    )
-    .await?;
+    let rows = query(sql::PROJECT_SCREENSHOTS, params![project], DETAIL_READ).await?;
     let engine = base64::engine::general_purpose::STANDARD;
     for row in rows {
         if !simulator_capture(row["tool"].as_str().unwrap_or_default()) {
@@ -440,10 +314,11 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
             continue;
         }
         let full = query(
-            &format!(
-            "select json_extract(payload_json,'$.data.result.content[{index}].source.data') as data
-             from projection_thread_activities where activity_id='{activity}'"
-        ),
+            sql::SCREENSHOT_DATA,
+            params![
+                activity,
+                format!("$.data.result.content[{index}].source.data")
+            ],
             DETAIL_READ,
         )
         .await?;

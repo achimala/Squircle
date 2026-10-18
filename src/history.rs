@@ -1,12 +1,13 @@
 //! `squircle history`: search and show an app's past where it already lives.
 //! T3 owns conversations (its `state.sqlite`, read-only through the system
-//! `sqlite3`), Squircle owns tasks and builds, git owns commits and the
+//! `t3db`), Squircle owns tasks and builds, git owns commits and the
 //! project's Markdown docs. Nothing is copied or indexed: each search reads
 //! the sources on the fly (tens of milliseconds for messages, a few hundred
 //! for tool activity) and ranks the matches here, so results are short
 //! snippets with a stable reference that `show` expands.
 
-use crate::t3steps::{DETAIL_READ, query, valid};
+use crate::t3db::{DETAIL_READ, params, query, sql};
+use crate::t3steps::valid;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -103,17 +104,9 @@ pub async fn scope(thread: Option<&str>, project: Option<&str>, cwd: &Path) -> R
         title: r["title"].as_str().unwrap_or("").into(),
         root: PathBuf::from(r["workspace_root"].as_str().unwrap_or("")),
     };
-    let projects = "select project_id, title, workspace_root from projection_projects where deleted_at is null";
     if let Some(thread) = thread {
         ensure!(valid(thread, &[]), "Thread ID must be a T3 ID");
-        let rows = query(
-            &format!(
-                "select p.project_id, p.title, p.workspace_root from projection_threads t \
-            join projection_projects p using(project_id) where t.thread_id='{thread}'"
-            ),
-            DETAIL_READ,
-        )
-        .await?;
+        let rows = query(sql::THREAD_PROJECT, params![thread], DETAIL_READ).await?;
         return rows
             .first()
             .map(row)
@@ -121,19 +114,13 @@ pub async fn scope(thread: Option<&str>, project: Option<&str>, cwd: &Path) -> R
     }
     if let Some(project) = project {
         ensure!(valid(project, &[]), "Project ID must be a T3 ID");
-        let rows = query(
-            &format!("{projects} and project_id='{project}'"),
-            DETAIL_READ,
-        )
-        .await?;
+        let rows = query(sql::PROJECT, params![project], DETAIL_READ).await?;
         return rows
             .first()
             .map(row)
             .with_context(|| format!("T3 has no project {project}"));
     }
-    let rows = query(&format!("select project_id, title, workspace_root, workspace_root place from ({projects}) union all \
-        select t.project_id, p.title, p.workspace_root, t.worktree_path from projection_threads t join projection_projects p using(project_id) \
-        where t.worktree_path is not null and t.deleted_at is null and p.deleted_at is null"), DETAIL_READ).await?;
+    let rows = query(sql::PROJECT_PLACES, params![], DETAIL_READ).await?;
     let places: Vec<PathBuf> = rows
         .iter()
         .map(|r| PathBuf::from(r["place"].as_str().unwrap_or("/nonexistent")))
@@ -386,15 +373,6 @@ fn t3_time(text: &str) -> Option<i64> {
     crate::t3::iso_parse(text).map(|s| s as i64)
 }
 
-fn sql_like(column: &str, terms: &[String]) -> String {
-    // `terms` only holds [a-z0-9_-./#+]; `_` is the one LIKE wildcard among them.
-    let any: Vec<String> = terms
-        .iter()
-        .map(|t| format!("{column} like '%{}%' escape '\\'", t.replace('_', "\\_")))
-        .collect();
-    format!("({})", any.join(" or "))
-}
-
 // MARK: Sources
 
 /// Everything matching any term, from the sources asked for.
@@ -410,35 +388,24 @@ async fn gather(
     let project = &scope.project_id;
     ensure!(valid(project, &[]), "Invalid project ID");
     let after_iso = after.map(|a| format!("{}Z", crate::t3::iso_utc(a)));
-    let after_sql = |column: &str| {
-        after_iso
-            .as_ref()
-            .map_or(String::new(), |a| format!(" and {column} >= '{a}'"))
-    };
-    let mut parts = Vec::new();
-    if kinds.contains(&Kind::Message) {
-        parts.push(format!("select * from (select 'msg' src, m.message_id id, m.thread_id thread, t.title title, m.role role, m.created_at at, \
-            substr(m.text,1,8000) text, instr(coalesce(m.context_json,''),'\"squircle-')>0 marked \
-            from projection_thread_messages m join projection_threads t using(thread_id) \
-            where t.project_id='{project}' and t.deleted_at is null and m.role in ('user','assistant'){} and {} \
-            order by m.created_at desc limit 1500)", after_sql("m.created_at"), sql_like("lower(m.text)", terms)));
-    }
-    if kinds.contains(&Kind::Thread) {
-        parts.push(format!("select * from (select 'thread' src, thread_id id, thread_id thread, title, coalesce(branch,'') role, created_at at, \
-            title || ' ' || coalesce(branch,'') text, 0 marked from projection_threads \
-            where project_id='{project}' and deleted_at is null{} and {} order by created_at desc limit 300)",
-            after_sql("updated_at"), sql_like("lower(title || ' ' || coalesce(branch,''))", terms)));
-    }
-    if kinds.contains(&Kind::Activity) {
-        let detail = "coalesce(json_extract(a.payload_json,'$.detail'), json_extract(a.payload_json,'$.message'), '')";
-        parts.push(format!("select * from (select 'act' src, a.activity_id id, a.thread_id thread, t.title title, a.kind role, a.created_at at, \
-            substr(a.summary || ': ' || {detail},1,2000) text, 0 marked \
-            from projection_thread_activities a join projection_threads t using(thread_id) \
-            where t.project_id='{project}' and t.deleted_at is null and a.kind in ('tool.completed','tool.denied','runtime.error'){} and {} \
-            order by a.created_at desc limit 500)", after_sql("a.created_at"), sql_like(&format!("lower(a.summary || ' ' || {detail})"), terms)));
-    }
-    if !parts.is_empty() {
-        match query(&parts.join(" union all "), DETAIL_READ).await {
+    if kinds
+        .iter()
+        .any(|k| matches!(k, Kind::Message | Kind::Thread | Kind::Activity))
+    {
+        match query(
+            sql::SEARCH,
+            params![
+                project,
+                after_iso,
+                serde_json::to_string(terms)?,
+                kinds.contains(&Kind::Message),
+                kinds.contains(&Kind::Thread),
+                kinds.contains(&Kind::Activity)
+            ],
+            DETAIL_READ,
+        )
+        .await
+        {
             Ok(rows) => {
                 for row in rows {
                     let text = |k: &str| row[k].as_str().unwrap_or("").to_string();
@@ -751,12 +718,7 @@ pub async fn show(
     match kind {
         Kind::Message => {
             ensure!(valid(id, &[':', '_', '.']), "Invalid message ID");
-            let rows = query(&format!("select m.message_id, m.thread_id, t.title, m.role, m.created_at, m.text, \
-                (select text from projection_thread_messages p where p.thread_id=m.thread_id and p.created_at<m.created_at and p.role!=m.role and p.role in ('user','assistant') order by p.created_at desc limit 1) before_text, \
-                (select message_id from projection_thread_messages p where p.thread_id=m.thread_id and p.created_at<m.created_at and p.role!=m.role and p.role in ('user','assistant') order by p.created_at desc limit 1) before_id, \
-                (select text from projection_thread_messages p where p.thread_id=m.thread_id and p.created_at>m.created_at and p.role!=m.role and p.role in ('user','assistant') order by p.created_at limit 1) after_text, \
-                (select message_id from projection_thread_messages p where p.thread_id=m.thread_id and p.created_at>m.created_at and p.role!=m.role and p.role in ('user','assistant') order by p.created_at limit 1) after_id \
-                from projection_thread_messages m join projection_threads t using(thread_id) where m.message_id='{id}'"), DETAIL_READ).await?;
+            let rows = query(sql::MESSAGE, params![id], DETAIL_READ).await?;
             let row = rows
                 .first()
                 .with_context(|| format!("T3 has no message {id}"))?;
@@ -794,14 +756,16 @@ pub async fn show(
         }
         Kind::Thread => {
             ensure!(valid(id, &[]), "Invalid thread ID");
-            let thread = query(&format!("select title, branch, created_at, updated_at, archived_at, \
-                (select count(*) from projection_thread_messages m where m.thread_id=t.thread_id and m.role in ('user','assistant')) total \
-                from projection_threads t where thread_id='{id}'"), DETAIL_READ).await?;
+            let thread = query(sql::THREAD, params![id], DETAIL_READ).await?;
             let thread = thread
                 .first()
                 .with_context(|| format!("T3 has no thread {id}"))?;
-            let messages = query(&format!("select * from (select message_id, role, created_at, substr(text,1,2000) text from projection_thread_messages \
-                where thread_id='{id}' and role in ('user','assistant') order by created_at desc limit {}) order by created_at", limit.clamp(1, 500)), DETAIL_READ).await?;
+            let messages = query(
+                sql::MESSAGES,
+                params![id, limit.clamp(1, 500) as i64],
+                DETAIL_READ,
+            )
+            .await?;
             let s = |k: &str| thread[k].as_str().unwrap_or("").to_string();
             let total = thread["total"].as_u64().unwrap_or(0);
             let mut text = format!(
@@ -853,10 +817,7 @@ pub async fn show(
         }
         Kind::Activity => {
             ensure!(valid(id, &[':', '_', '.']), "Invalid activity ID");
-            let rows = query(&format!("select a.thread_id, t.title, a.kind, a.summary, a.created_at, \
-                coalesce(json_extract(a.payload_json,'$.detail'),'') detail, \
-                substr(coalesce(json_extract(a.payload_json,'$.data.input'),''),1,{max_chars}) input \
-                from projection_thread_activities a join projection_threads t using(thread_id) where a.activity_id='{id}'"), DETAIL_READ).await?;
+            let rows = query(sql::ACTIVITY, params![id, max_chars as i64], DETAIL_READ).await?;
             let row = rows
                 .first()
                 .with_context(|| format!("T3 has no activity {id}"))?;

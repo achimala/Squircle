@@ -18,6 +18,15 @@ This is a **publish-after-targeted-cleanup** verdict, not a recommendation to re
   tests pass with local fake-server sockets/process inspection permitted.
   No live service, T3, provider, simulator or signing checks were run.
 
+- **Read-only T3 database adapter (reinvention item 21): done.** The user
+  approved bundled `rusqlite`; `t3db` owns static projection SQL and bound
+  parameters. The system sqlite3 process/JSON decoding and SQL interpolation
+  are deleted. Read-only/no-create flags, a blocking-pool job, cancellation
+  interrupts plus a progress deadline, and bounded output preserve the read
+  contract. Four offline tests cover hostile parameters, writes/missing files,
+  JSON projection queries, aggregate size and stopping long reads. All 218 Rust
+  tests pass; no live T3 database was opened.
+
 ## Scope, method, and verification
 
 Read `AGENTS.md` and `README.md` first. Inventoried all 184 tracked files: 47 Rust files, 71 Swift files, the C overlay loader, project/build configuration, plugin templates, scripts, examples, and documentation. The Rust/Swift/C files total 53,731 lines, including tests. Reviewed subsystem boundaries and representative execution paths, searched the complete tracked tree for references/configuration/secrets, traced superseded implementations through Git, and ran the checks below. This is not a claim that every branch or runtime combination was exercised.

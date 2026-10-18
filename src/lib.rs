@@ -28,6 +28,7 @@ pub mod sims;
 pub mod store;
 pub mod symbolicate;
 pub mod t3;
+mod t3db;
 pub mod t3steps;
 pub mod tasks;
 pub mod upkeep;
