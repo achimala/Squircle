@@ -18,6 +18,11 @@ With no local file the project builds unsigned or for the simulator as
 and the overlay framework's Info.plist carries them to the Rust injector, so
 changing the prefix changes everything together.
 
+The CLI builds the overlay framework from the `app/Squircle/Squircle.xcodeproj`
+of the checkout it was compiled in. A `squircle` binary copied elsewhere needs
+`SQUIRCLE_OVERLAY_PROJECT` pointing at a checkout's project, or
+`build start --no-overlay`.
+
 ## Personal connection
 
 A private connection JSON (normally the ignored `.squircle/client-t3.json`)
