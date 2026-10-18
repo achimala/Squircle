@@ -368,7 +368,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         .open(store.root.join("service.lock"))?;
     // The kernel releases this lock when its holder exits, however it exits,
     // so only a running service can refuse a start; its PID says which.
-    if let Err(error) = fs2::FileExt::try_lock_exclusive(&lock) {
+    if let Err(error) = lock.try_lock() {
         let holder = std::fs::read_to_string(store.root.join("service.lock")).unwrap_or_default();
         return Err(anyhow::Error::new(error).context(format!(
             "Another Squircle service owns this data directory (process {})",

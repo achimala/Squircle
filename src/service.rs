@@ -35,7 +35,7 @@ pub fn holder(root: &Path) -> Result<Option<u32>> {
         Err(error) => return Err(error).context("Cannot read the service lock"),
     };
     // The kernel holds the lock exactly while its owner runs.
-    if fs2::FileExt::try_lock_exclusive(&file).is_ok() {
+    if file.try_lock().is_ok() {
         return Ok(None);
     }
     let pid = std::fs::read_to_string(&path)?;

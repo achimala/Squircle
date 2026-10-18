@@ -17,5 +17,7 @@ disallowed-methods = [
     { path = "tokio::sync::mpsc::UnboundedReceiver::blocking_recv", reason = "waits on a thread; await it instead" },
     { path = "tokio::sync::mpsc::Sender::blocking_send", reason = "waits on a thread; send without waiting instead" },
     { path = "tokio::runtime::Handle::block_on", reason = "a letter or Drop must never wait" },
+    { path = "std::fs::File::lock", reason = "waits on a thread; try_lock and wait asynchronously instead" },
+    { path = "std::fs::File::lock_shared", reason = "waits on a thread; try_lock_shared and wait asynchronously instead" },
     { path = "std::sync::OnceLock::get_or_init", reason = "waits while another thread initializes; set it once at startup" },
 ]

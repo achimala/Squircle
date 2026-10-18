@@ -12,7 +12,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{process::Command, sync::watch, time::Instant};
@@ -226,10 +225,10 @@ async fn lock(path: &Path, deadline: Instant, cancel: &watch::Receiver<bool>) ->
         .write(true)
         .open(path)?;
     loop {
-        match file.try_lock_exclusive() {
+        match file.try_lock() {
             Ok(()) => return Ok(file),
-            Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {}
-            Err(error) => return Err(error).context("cannot lock the overlay cache"),
+            Err(fs::TryLockError::WouldBlock) => {}
+            Err(fs::TryLockError::Error(error)) => return Err(error).context("cannot lock the overlay cache"),
         }
         tokio::select! {
             _ = cancelled(Some(cancel.clone())) => bail!("build cancelled while waiting for the overlay cache"),
