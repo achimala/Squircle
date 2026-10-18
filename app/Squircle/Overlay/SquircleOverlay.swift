@@ -162,29 +162,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private var keyboardTop = CGFloat.greatestFiniteMagnitude
     private weak var previousKey: UIWindow?
     private var observations: [Task<Void, Never>] = []
-    /// Each thread's newest finished turn already accounted for (thread ID
-    /// → turn ID), so only a turn T3 newly reports finished is announced.
-    private var completions: [String: String] = [:]
-    /// Brief news ("Done · …", "2 workers"), shown until it expires and
-    /// then absorbed into the jelly.
-    private struct Notice {
-        let line: Line
-        let expires: ContinuousClock.Instant
-    }
-    private var notice: Notice?
-    private static let noticeDwell = Duration.seconds(4)
-    /// Workers and who needs you as last rendered, so a change is news.
-    private var knownWorkers: Int?
-    private var knownWaiting: String?
-    /// The last turn's outcome until you open the panel: the jelly stays
-    /// happy (done) or slumped (failed) meanwhile.
-    private var unseen: GlassJelly.Mood?
+    /// What the bubble says, and its brief news.
+    private let news = OverlayNews()
+    typealias Line = OverlayNews.Line
+    typealias Activity = OverlayNews.Activity
     /// Up to three of the agent's running workers, as small sprouts tucked
     /// in beside the jelly once its line is absorbed; each fades in and
     /// out on its own spring.
     private let crew = (0..<3).map { _ in (view: JellyView(.worker("", .working), canvas: .roomy(15)), shown: SpringDriver()) }
-    /// Renders again when the notice expires; replaced by a newer one.
-    private var noticeExpiry: Task<Void, Never>?
     private var bubblePan: UIPanGestureRecognizer!
     /// Drags the status line into the jelly (docks it).
     private var pillPan: UIPanGestureRecognizer!
@@ -225,6 +210,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     init(model: SquircleModel) {
         self.model = model
         super.init(nibName: nil, bundle: nil)
+        news.onExpire = { [weak self] in self?.render() }
     }
 
     @available(*, unavailable)
@@ -365,27 +351,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
 
     private var project: AppProject? { model.projects.first }
 
-    /// A status line for the bubble.
-    struct Line: Equatable {
-        var text: String
-        var tone: LiveCapsule.Tone
-        var started: Date?
-    }
-
-    /// What the agent and its workers are doing, read from the model.
-    struct Activity {
-        /// What lasts while it is so: who needs you, else the agent's live
-        /// step (its turn runs).
-        var line: Line?
-        var mood = GlassJelly.Mood.idle
-        /// Workers running: their thread IDs, titles and states.
-        var workers: [(id: String, title: String, mood: JellyLook.Mood)] = []
-    }
-
     private func render() {
         if let project, agent == nil { mountAgent(project) }
         let activity = currentActivity()
-        noticeChanges(activity)
+        news.notice(activity, docked: route.isDocked)
         show(activity)
     }
 
@@ -393,28 +362,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         #if DEBUG
         if let demoActivity { return demoActivity }
         #endif
-        guard let project else {
-            return Activity(line: model.error.map { Line(text: $0, tone: .needsYou) }, mood: model.error == nil ? .idle : .needsYou)
-        }
-        let sessions = model.sessions(for: project, includingAgent: true)
-        let agentID = model.agentThreadID(for: project)
-        func title(_ session: ChatSession) -> String { session.id == agentID ? project.name : session.displayTitle(in: project) }
-        let active = sessions.filter { $0.phase != .idle }
-        noticeCompletions(in: sessions, title: title)
-        var activity = Activity()
-        activity.workers = active.filter { $0.id != agentID }.map { ($0.id, title($0), JellyLook.Mood($0.phase)) }
-        // Whoever needs you, else what the agent is doing (its live step;
-        // with no agent, a thread is the work). Workers running while the
-        // agent's turn has ended say nothing lasting: the jelly shows them.
-        if let waiting = active.first(where: { $0.phase == .needsYou }) {
-            activity.line = Line(text: "Needs you · " + title(waiting), tone: .needsYou)
-            activity.mood = .needsYou
-        } else if let busy = active.first(where: { $0.id == agentID }) ?? (agentID == nil ? active.first : nil) {
-            let live = model.selectedSessionID == busy.id ? liveStatus() : nil
-            activity.line = Line(text: live?.headline ?? title(busy), tone: .working, started: live?.started)
-            activity.mood = .working
-        }
-        return activity
+        return news.activity(model: model, project: project)
     }
 
     /// The bubble and the jelly for `activity`: its lasting line unless
@@ -422,9 +370,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// haven't seen yet when nothing else is going on.
     private func show(_ activity: Activity) {
         var line = route.isDocked ? nil : activity.line
-        if line == nil, let notice, notice.expires > .now { line = notice.line }
+        if line == nil { line = news.line }
         var mood = activity.mood
-        if mood == .idle, let unseen { mood = unseen }
+        if mood == .idle, let unseen = news.unseen { mood = unseen }
         if capture.isStopping {
             (line, mood) = (Line(text: "Finishing recording", tone: .recording), .recording)
         } else if let recording = capture.recording {
@@ -447,63 +395,6 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             UpdateCurtain.show(in: view, build: build) { [weak self] in self?.model.cancelUpdate() }
         }
         retarget()
-    }
-
-    /// News that shows briefly, then is absorbed into the jelly: workers
-    /// starting or finishing (their count) and, docked, a new question.
-    private func noticeChanges(_ activity: Activity) {
-        let count = activity.workers.count
-        if let known = knownWorkers, count != known, count > 0 {
-            announce(Line(text: count == 1 ? "Worker · " + activity.workers[0].title : "\(count) workers", tone: .idle))
-        }
-        knownWorkers = count
-        let waiting = activity.line?.tone == .needsYou ? activity.line?.text : nil
-        if route.isDocked, let waiting, waiting != knownWaiting { announce(Line(text: waiting, tone: .needsYou)) }
-        knownWaiting = waiting
-    }
-
-    /// Shows `line` for `noticeDwell`, then lets it go.
-    private func announce(_ line: Line) {
-        notice = Notice(line: line, expires: .now + Self.noticeDwell)
-        noticeExpiry?.cancel()
-        noticeExpiry = Task { [weak self] in
-            try? await Task.sleep(for: Self.noticeDwell + .milliseconds(100))
-            guard !Task.isCancelled else { return }
-            self?.render()
-        }
-    }
-
-    /// Announces a turn T3 newly reports finished, briefly; the jelly keeps
-    /// its outcome until you open the panel. A thread seen for the first
-    /// time announces only a turn that ended just now; what finished before
-    /// the overlay looked stays quiet.
-    private func noticeCompletions(in sessions: [ChatSession], title: (ChatSession) -> String) {
-        for session in sessions {
-            guard let completion = session.latestTurn?.completion else { continue }
-            let known = completions[session.id]
-            guard known != completion.turnID else { continue }
-            completions[session.id] = completion.turnID
-            let recent = completion.endedAt.map { Date.now.timeIntervalSince($0) < 6 } ?? false
-            guard known != nil || recent else { continue }
-            finished(completion.outcome, title: title(session))
-        }
-    }
-
-    private func finished(_ outcome: TurnCompletion.Outcome, title: String) {
-        let (word, tone, mood): (String, LiveCapsule.Tone, GlassJelly.Mood?) = switch outcome {
-        case .completed: ("Done", .done, .done)
-        case .interrupted: ("Stopped", .idle, nil)
-        case .failed: ("Failed", .idle, .failed)
-        }
-        unseen = mood
-        announce(Line(text: word + " · " + title, tone: tone))
-    }
-
-    private func liveStatus() -> LiveStatus? {
-        ThreadItem.items(messages: model.messages, running: model.isRunning).reversed().lazy.compactMap { item -> LiveStatus? in
-            if case .live(let status) = item { return status }
-            return nil
-        }.first
     }
 
     // MARK: Geometry
@@ -924,7 +815,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         guard !route.isOpen, project != nil else { return }
         Theme.openHaptic()
         makeKey()
-        unseen = nil
+        news.unseen = nil
         route.open()
         render()
         sync()
@@ -963,7 +854,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         flying = Flight(attachmentID: attachment.id, conversation: conversation, start: start, lift: lift, picture: picture)
         conversation?.holdAttachment(attachment.id)
         model.attach(attachment)
-        unseen = nil
+        news.unseen = nil
         route.open()
         makeKey()
         sync()
@@ -1160,7 +1051,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         capture.cancel()
         observations.forEach { $0.cancel() }
         observations = []
-        noticeExpiry?.cancel()
+        news.cancel()
         flight.stop()
         landed()
         unmountThread()
@@ -1458,7 +1349,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             dragStart = frame.value
             frame.hold(dragStart)
             route.undock()
-            notice = nil
+            news.dismiss()
             render()
             undockMoved(travel)
         case .changed:
@@ -1532,7 +1423,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         }
         Theme.selectionHaptic()
         route.dock()
-        notice = nil
+        news.dismiss()
         render()
         retarget(velocity: right ? CGPoint(x: max(0, v), y: 0) : .zero, sizeVelocity: CGSize(width: -max(0, v), height: 0))
     }
@@ -1656,16 +1547,16 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
                 if let (activity, outcome) = held[demo] {
                     guard let self else { return }
                     demoActivity = activity
-                    if let outcome { finished(outcome, title: "Letters Abroad") }
+                    if let outcome { news.finished(outcome, title: "Letters Abroad") }
                     render()
                     return
                 }
                 while true {
-                    self?.unseen = nil
+                    self?.news.unseen = nil
                     for (activity, outcome, pause) in script {
                         guard let self else { return }
                         demoActivity = activity
-                        if let outcome { finished(outcome, title: "Letters Abroad") }
+                        if let outcome { news.finished(outcome, title: "Letters Abroad") }
                         render()
                         try? await Task.sleep(for: .seconds(pause))
                     }

@@ -126,9 +126,11 @@
 		D0653E9C771D6F1905EA9729 /* TaskLists.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4320E3594CE4CB732C719D2 /* TaskLists.swift */; };
 		D3823161D75D25966F363568 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
 		D6A02AFEF384A1D3B5DBC0D8 /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD9D79E5C23223D44EB56B4B /* Link.swift */; };
+		D87D81477EA3899FD287DA46 /* OverlayNews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0406EDDB50C29891750CEB54 /* OverlayNews.swift */; };
 		DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		DF2A9CF739AF15C1A69A09AD /* MediaLoadsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D09985092A609178762E275 /* MediaLoadsTests.swift */; };
+		DFC3F4E287E339E0D2260C29 /* OverlayNews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0406EDDB50C29891750CEB54 /* OverlayNews.swift */; };
 		E1DE053BB794F521C586AAA7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9E1BA05082A949D15835CAAF /* Assets.xcassets */; };
 		E4FEAA0AED1718F8D397F1A7 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AA8EBB035561F94C3724C6D /* Theme.swift */; };
 		E97B8544C8D44C08980511EA /* FrameSpring.swift in Sources */ = {isa = PBXBuildFile; fileRef = 413DFF5E9FEE90218E49E059 /* FrameSpring.swift */; };
@@ -161,6 +163,7 @@
 
 /* Begin PBXFileReference section */
 		03A1A3F89F39409756FF7CA2 /* Commands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Commands.swift; sourceTree = "<group>"; };
+		0406EDDB50C29891750CEB54 /* OverlayNews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlayNews.swift; sourceTree = "<group>"; };
 		0407AC226FCAD5F3DDD755B7 /* ConversationText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationText.swift; sourceTree = "<group>"; };
 		04F9E05172DC12D427E2C642 /* PerfRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfRecorder.swift; sourceTree = "<group>"; };
 		0882163016B1D5C885051FAD /* AppProject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProject.swift; sourceTree = "<group>"; };
@@ -307,6 +310,7 @@
 				5C2A80FAC707271FB5E24DAF /* HostCapture.swift */,
 				0C4FD428C018FB4AA1950164 /* OverlayHost.swift */,
 				27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */,
+				0406EDDB50C29891750CEB54 /* OverlayNews.swift */,
 				04F9E05172DC12D427E2C642 /* PerfRecorder.swift */,
 				8A692004605868DC5DD94E0A /* ScreenRecorder.swift */,
 				CC31297102176DC07450ECF1 /* SquircleOverlay.swift */,
@@ -649,6 +653,7 @@
 				AA8A9A91F09FBF2C0FD99AD9 /* ModelNames.swift in Sources */,
 				5D38AD551C217A205ABE7185 /* MotionAudit.swift in Sources */,
 				F7D9F068163E2C0578B781E7 /* OverlayHost.swift in Sources */,
+				D87D81477EA3899FD287DA46 /* OverlayNews.swift in Sources */,
 				9F3620C86B7294E17D5922F4 /* PendingJournal.swift in Sources */,
 				9D1F202195C47DF92993790B /* PerfRecorder.swift in Sources */,
 				150D982A0801A3F17A5C0630 /* PushCenter.swift in Sources */,
@@ -745,6 +750,7 @@
 				B2B96A36977324FDBFA7E8F7 /* MotionAudit.swift in Sources */,
 				F3F1E7E795F24834F86E91A8 /* OverlayHost.swift in Sources */,
 				2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */,
+				DFC3F4E287E339E0D2260C29 /* OverlayNews.swift in Sources */,
 				91FB48006D79A82C2C6430A6 /* PendingJournal.swift in Sources */,
 				A3A54C0479DF84AA96EE8A82 /* PerfRecorder.swift in Sources */,
 				8E05EDDC1E59BC47FF661B32 /* PushTarget.swift in Sources */,
