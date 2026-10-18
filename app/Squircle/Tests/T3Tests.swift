@@ -248,6 +248,30 @@ final class T3Tests: XCTestCase {
             .text("[docs](https://example.com/x.png) and [notes](/tmp/notes.md)\n```\n![code](/tmp/code.png)\n```")
         ])
     }
+
+    func testMarkdownTablesSplitWithAlignmentEscapesAndRaggedRows() {
+        let text = """
+        Results:
+        | Step | `a \\| b` | Time |
+        |:-----|:---:|---:|
+        | **Build** | yes | 12 s |
+        | Test |
+        Run | it | now | extra
+        done
+        ```
+        | a | b |
+        |---|---|
+        ```
+        Not | a table
+        --- | --- | ---
+        """
+        XCTAssertEqual(Markdown.segments(text), [
+            .text("Results:"),
+            .table(MarkdownTable(header: ["Step", "`a | b`", "Time"], alignments: [.leading, .center, .trailing],
+                                 rows: [["**Build**", "yes", "12 s"], ["Test", "", ""], ["Run", "it", "now"]])),
+            .text("done\n```\n| a | b |\n|---|---|\n```\nNot | a table\n--- | --- | ---")
+        ])
+    }
 }
 
 // MARK: Native state, transport and caches (W5)

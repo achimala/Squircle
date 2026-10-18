@@ -102,6 +102,8 @@ enum ThreadItem: Equatable {
     case gallery(id: String, shots: [Shot])
     /// A picture or clip the agent's text embeds, full width where it sits.
     case figure(id: String, shots: [Shot])
+    /// A table in the agent's text; `quiet` in a note rather than an answer.
+    case table(id: String, table: MarkdownTable, quiet: Bool)
     case summary(TurnSummary)
     /// What the turn changed in the project; opens its diff.
     case changes(TurnChanges, turn: String)
@@ -120,7 +122,7 @@ enum ThreadItem: Equatable {
         case .thought(let message): return message.id
         case .step(let message, _, _): return message.id
         case .earlier(let turn, _): return "earlier:" + turn
-        case .gallery(let id, _), .figure(let id, _): return id
+        case .gallery(let id, _), .figure(let id, _), .table(let id, _, _): return id
         case .summary(let summary): return "summary:" + summary.turn
         case .build(let build, let turn): return "build:\(turn):\(build.id)"
         case .changes(_, let turn): return "changes:" + turn
@@ -367,20 +369,25 @@ enum ThreadItem: Equatable {
         return rows + stepRows(run)
     }
 
-    /// A message cut at the pictures and clips it embeds, each in its place.
+    /// A message cut at the pictures, clips and tables it embeds, each in its place.
     private static func withMedia(_ message: ChatMessage, _ row: (ChatMessage) -> ThreadItem) -> [ThreadItem] {
-        guard message.content.contains("](") else { return [row(message)] }
+        guard message.content.contains("](") || message.content.contains("|") else { return [row(message)] }
         let segments = Markdown.segments(message.content)
-        guard segments.contains(where: { if case .media = $0 { return true }; return false }) else { return [row(message)] }
+        guard segments.contains(where: { if case .text = $0 { return false }; return true }) else { return [row(message)] }
+        let quiet: Bool = { if case .note = row(message) { return true }; return false }()
         var rows: [ThreadItem] = []
+        var named = false
         for (index, segment) in segments.enumerated() {
             switch segment {
             case .text(let text):
                 var part = message
                 part.content = text
                 // The first piece of text keeps the message's identity.
-                if rows.contains(where: { if case .figure = $0 { return false }; return true }) { part.id = message.id + "#\(index)" }
+                if named { part.id = message.id + "#\(index)" }
+                named = true
                 rows.append(row(part))
+            case .table(let table):
+                rows.append(.table(id: "table:\(message.id)#\(index)", table: table, quiet: quiet))
             case .media(let media):
                 let shot = Shot(step: "file:" + media.path, index: 0, title: "", video: media.video, path: media.path)
                 // Pictures with nothing between them share one figure.

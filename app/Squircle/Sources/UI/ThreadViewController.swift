@@ -208,6 +208,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var liveTurn: String?
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
     private var rendered: [String: (source: String, text: NSAttributedString)] = [:]
+    /// Tables measured for the width and text size they show at.
+    private var tableLayouts: [String: (table: MarkdownTable, width: CGFloat, size: UIContentSizeCategory, layout: MarkdownTableLayout)] = [:]
     private var expanded = Set<String>()
     private var pinToBottom = true
     /// The debug overlay's even inset and the safe area its glass will have
@@ -374,6 +376,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.register(StepCell.self, forCellReuseIdentifier: "step")
         table.register(GalleryCell.self, forCellReuseIdentifier: "gallery")
         table.register(FigureCell.self, forCellReuseIdentifier: "figure")
+        table.register(MarkdownTableCell.self, forCellReuseIdentifier: "table")
         table.register(SummaryCell.self, forCellReuseIdentifier: "summary")
         table.register(LiveCell.self, forCellReuseIdentifier: "live")
         table.register(BuildCell.self, forCellReuseIdentifier: "build")
@@ -756,6 +759,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .step, .earlier: return "step"
         case .gallery: return "gallery"
         case .figure: return "figure"
+        case .table: return "table"
         case .summary: return "summary"
         case .live: return "live"
         case .build: return "build"
@@ -1041,6 +1045,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             guard let cell = cell as? FigureCell else { return }
             cell.configure(shots, width: table.bounds.width)
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
+        case .table(let id, let table, let quiet):
+            (cell as? MarkdownTableCell)?.configure(tableLayout(id, table, quiet: quiet), id: id)
         case .summary(let summary):
             (cell as? SummaryCell)?.configure(summary)
         case .live(let status):
@@ -1201,6 +1207,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return text
     }
 
+    private func tableLayout(_ id: String, _ markdown: MarkdownTable, quiet: Bool) -> MarkdownTableLayout {
+        let width = max(200, table.bounds.width - 40), size = traitCollection.preferredContentSizeCategory
+        if let cached = tableLayouts[id], cached.table == markdown, cached.width == width, cached.size == size { return cached.layout }
+        let layout = MarkdownTableLayout(markdown, font: quiet ? Theme.font(.subheadline, 15) : Theme.font(.body, 17),
+                                         color: quiet ? .secondaryLabel : .label, width: width)
+        tableLayouts[id] = (markdown, width, size, layout)
+        return layout
+    }
+
     /// "Task from Squircle agent" over the task, rendered.
     private func agentText(_ message: ChatMessage) -> NSAttributedString {
         let from = message.agent?.from.flatMap { id in model.sessions.first { $0.id == id } }?.displayTitle(in: project)
@@ -1355,6 +1370,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .step, .earlier: return 36
         case .gallery: return GalleryCell.height + 20
         case .figure(_, let shots): return FigureCell.height(shots, width: tableView.bounds.width)
+        case .table(let id, let table, let quiet): return MarkdownTableCell.height(tableLayout(id, table, quiet: quiet))
         case .summary: return 54
         case .live: return 72
         case .build: return 74
