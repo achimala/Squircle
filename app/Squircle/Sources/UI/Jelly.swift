@@ -225,16 +225,7 @@ extension JellyRenderer {
         var textures: [MTLTexture] = []
         for var u in frames {
             guard let texture = device.makeTexture(descriptor: descriptor) else { return [] }
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = texture
-            pass.colorAttachments[0].loadAction = .clear
-            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-            pass.colorAttachments[0].storeAction = .store
-            guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return [] }
-            encoder.setRenderPipelineState(pipeline)
-            encoder.setFragmentBytes(&u, length: MemoryLayout<JellyUniforms>.stride, index: 0)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            encoder.endEncoding()
+            guard encode(&u, into: texture, on: commands, pipeline: pipeline) else { return [] }
             textures.append(texture)
         }
         commands.commit()
@@ -709,16 +700,7 @@ final class JellyHero: UIView {
         var u = JellyRenderer.uniforms(pose, look, canvas: canvas, scale: metal.contentsScale, traits: traitCollection)
         if let drawn, drawn.isClose(to: u) { return }
         guard let drawable = metal.nextDrawable(), let commands = queue.makeCommandBuffer() else { return }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = drawable.texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
-        pass.colorAttachments[0].storeAction = .store
-        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
-        encoder.setRenderPipelineState(pipeline)
-        encoder.setFragmentBytes(&u, length: MemoryLayout<JellyUniforms>.stride, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
+        guard JellyRenderer.encode(&u, into: drawable.texture, on: commands, pipeline: pipeline) else { return }
         commands.present(drawable)
         commands.commit()
         drawn = u

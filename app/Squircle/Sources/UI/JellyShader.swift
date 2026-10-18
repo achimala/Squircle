@@ -71,6 +71,23 @@ enum JellyRenderer {
         return try? device.makeRenderPipelineState(descriptor: descriptor)
     }()
 
+    /// Encodes one jelly into `texture`, cleared first; the caller commits
+    /// and presents as its host needs. False if Metal gave no encoder.
+    static func encode(_ u: inout JellyUniforms, into texture: MTLTexture, on commands: MTLCommandBuffer,
+                       pipeline: MTLRenderPipelineState) -> Bool {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return false }
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentBytes(&u, length: MemoryLayout<JellyUniforms>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        return true
+    }
+
     static let source = """
     #include <metal_stdlib>
     using namespace metal;
