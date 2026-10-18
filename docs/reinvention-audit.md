@@ -1,6 +1,11 @@
 # Reinvention audit (2026-10-18)
 
-**Status: proposal.** This is a read-only audit; no code changed. It covers the
+**Status: proposal; the service items are done.** Items 2, 3, 4, 5, 11, 12
+and the `gzip;q=0` bug were fixed on 2026-10-18 (branch
+`service-reinvention-fixes`): `time` for dates, `src/git.rs` on
+`run_bounded`, `run_bounded_with_input` for perf, std `File::try_lock`,
+`store::write_private`/`publish_private`, and `Snapshot::wait_for`. Item 21
+still waits on the user. The rest of this page is the audit as written. It covers the
 Rust service/CLI (`src/`), the iPhone app, overlay and widgets
 (`app/Squircle`), and `scripts/`, looking for hand-written code that redoes
 what the platform or a maintained package already does well. Markdown parsing
