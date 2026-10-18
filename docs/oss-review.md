@@ -8,7 +8,7 @@ Reviewed 2026-10-18 on `oss-review`, source commit `9c63bec7baf55f1e92a78fc3dcd3
 
 This is a **publish-after-targeted-cleanup** verdict, not a recommendation to rewrite the product. T3 ownership, the agent-neutral CLI, UIKit layout, the Clay design, still device portraits, shared conversations, simulator leases, team-shared overlay credentials, and single-owner Rust state are intentional decisions to preserve.
 
-## Rust cleanup progress (2026-10-18)
+## Rust cleanup progress (2026-10-18–19)
 
 - **Step 6, Rust formatting/lints and Q1 Rust coverage: done.** Rust 2024
   rustfmt baseline is isolated in `2d5ab8a`. Clippy passes with `--all-targets
@@ -65,6 +65,12 @@ This is a **publish-after-targeted-cleanup** verdict, not a recommendation to re
   supervision, host adapters, the single state owner, startup, sessions and
   maintenance. All 74 production functions/methods compare unchanged apart
   from local visibility and formatting; all 219 tests and clippy pass.
+
+- **Step 10, push owner: done.** `push/` separates APNs transport, payloads,
+  device registration, observed projections, the single state owner and
+  delivery. All 59 production functions/methods compare unchanged apart from
+  local visibility and formatting; all 219 tests and clippy pass. No APNs
+  requests were sent.
 
 ## Scope, method, and verification
 
