@@ -540,8 +540,7 @@ final class T3DeviceStream {
 enum SimulatorSurface {
     /// Aspect-fit placement of a `size` picture inside `bounds`.
     static func point(_ point: CGPoint, bounds: CGRect, size: CGSize, orientation: String) -> CGPoint? {
-        let scale = min(bounds.width/size.width,bounds.height/size.height)
-        let rect = CGRect(x:(bounds.width-size.width*scale)/2,y:(bounds.height-size.height*scale)/2,width:size.width*scale,height:size.height*scale)
+        let rect = AVMakeRect(aspectRatio:size,insideRect:CGRect(origin:.zero,size:bounds.size))
         guard rect.contains(point) else { return nil }
         return input(CGPoint(x:(point.x-rect.minX)/rect.width,y:(point.y-rect.minY)/rect.height),size:size,orientation:orientation)
     }

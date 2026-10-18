@@ -214,7 +214,7 @@ struct BoundedCache<Key: Hashable, Value> {
         let c = max(0, cost(value))
         entries[key] = (value, c, clock); total += c
         while total > budget, entries.count > 1,
-              let oldest = entries.filter({ $0.key != key }).min(by: { $0.value.used < $1.value.used })?.key,
+              let oldest = entries.lazy.filter({ $0.key != key }).min(by: { $0.value.used < $1.value.used })?.key,
               let value = removeValue(for: oldest) { dropped.append(value) }
         return dropped
     }

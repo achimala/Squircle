@@ -95,8 +95,9 @@ struct T3ThreadState: Codable {
     /// Conversation in time order. A tool call's started/updated/completed
     /// activities are one step; bookkeeping activities are not conversation.
     var messages: [ChatMessage] {
-        var rows: [(String, ChatMessage)] = thread["messages"].array.compactMap { m in
-            let id = m["id"].string ?? UUID().uuidString
+        // A row without an ID is named by its place, so it keeps one identity on every pass.
+        var rows: [(String, ChatMessage)] = thread["messages"].array.enumerated().compactMap { index, m in
+            let id = m["id"].string ?? "message-\(index)"
             let reasoning = m["role"].string == "system" && id.hasPrefix("reasoning:")
             guard reasoning || m["role"].string != "system" else { return nil }
             var message = ChatMessage(id: id, role: reasoning ? "thinking" : m["role"].string ?? "assistant",
@@ -134,12 +135,12 @@ struct T3ThreadState: Codable {
                     "payload": ["toolCallId": .string(key), "status": .string(finished ?? "inProgress"),
                                 "data": ["toolName": .string(extra["tool"].string ?? "")]]]
         }.sorted { ($0["createdAt"].string ?? "") < ($1["createdAt"].string ?? "") }
-        for a in rebuilt + thread["activities"].array {
+        for (index, a) in (rebuilt + thread["activities"].array).enumerated() {
             let kind = a["kind"].string ?? "", p = a["payload"]
             if ["approval.", "user-input.", "context-window.", "runtime.warning", "checkpoint.captured"].contains(where: kind.hasPrefix) { continue }
             // A background task already appears as the tool call that started it.
             if kind.hasPrefix("task."), p["toolUseId"].string != nil { continue }
-            let key = p["toolCallId"].string ?? p["taskId"].string ?? a["id"].string ?? UUID().uuidString
+            let key = p["toolCallId"].string ?? p["taskId"].string ?? a["id"].string ?? "activity-\(index)"
             let output = [p["data"]["item"]["aggregatedOutput"].string, p["data"]["output"].string,
                           p["data"]["rawOutput"]["content"].string].compactMap { $0 }.first
             let detail = [p["data"]["command"].string ?? p["data"]["item"]["command"].string ?? p["detail"].string, output]
