@@ -3,142 +3,6 @@ import Foundation
 import Network
 import UIKit
 
-/// Which conversation: a T3 thread, or a draft T3 hasn't been told about
-/// yet (each draft its own, so a late send can't land in a later one). Its
-/// identity is the draft or thread ID; the app it belongs to never changes.
-enum ConversationID: Hashable {
-    case draft(UUID, appID: String, agent: Bool)
-    case thread(String, appID: String)
-    var threadID: String? { if case .thread(let id, _) = self { return id }; return nil }
-    var appID: String { switch self { case .draft(_, let app, _), .thread(_, let app): app } }
-    /// A first message to the app's agent.
-    var isAgentDraft: Bool { if case .draft(_, _, true) = self { return true }; return false }
-    static func == (a: Self, b: Self) -> Bool {
-        switch (a, b) {
-        case (.draft(let x, _, _), .draft(let y, _, _)): x == y
-        case (.thread(let x, _), .thread(let y, _)): x == y
-        default: false
-        }
-    }
-    func hash(into hasher: inout Hasher) {
-        switch self {
-        case .draft(let id, _, _): hasher.combine(0); hasher.combine(id)
-        case .thread(let id, _): hasher.combine(1); hasher.combine(id)
-        }
-    }
-}
-
-/// A message on its way to T3, under the conversation that owns it (a
-/// draft's moves to its thread once T3 made it). Its message and command
-/// IDs are chosen before the first attempt and kept for every resend, and
-/// T3 keeps a receipt per command ID, so a lost answer can never turn into
-/// a second message. A refused message is no longer pending.
-struct PendingSend: Equatable {
-    enum Phase: Equatable {
-        /// Recordings on their way to the Mac.
-        case preparing
-        /// T3 making the draft's thread.
-        case creating
-        /// T3 asked to start the turn; asked again on the next connection
-        /// if this one drops before T3 answers.
-        case awaitingAcceptance
-        /// T3 took it; pending until the message shows in the thread.
-        case accepted
-    }
-    let messageID: String
-    let text: String
-    let images: Int
-    /// Its recordings, by their file on the phone until the Mac has them.
-    let captures: [SentCapture]
-    let phase: Phase
-}
-
-/// How a send ended. `conversation` owns the message now: the thread a
-/// draft created, even when the turn then failed.
-enum SendOutcome: Equatable {
-    case accepted(messageID: String, conversation: ConversationID)
-    /// T3 or the Mac refused it, or it never left: the pictures are back in
-    /// the owner's field, the text is the caller's to put back.
-    case rejected(messageID: String, reason: String, conversation: ConversationID)
-    var conversation: ConversationID {
-        switch self { case .accepted(_, let c), .rejected(_, _, let c): c }
-    }
-}
-
-enum SendStart {
-    case started(messageID: String, outcome: Task<SendOutcome, Never>)
-    case refused(String)
-}
-
-/// The connection to T3. Every subscription callback carries the attempt
-/// that made it, so one ending during setup fails that attempt, and one from
-/// an older attempt changes nothing.
-enum ConnectionPhase: Equatable {
-    /// Closed for good, or no configuration.
-    case stopped
-    /// Background time ran out; reconnects on return.
-    case suspended
-    /// T3 refused this build's session; retrying can't help.
-    case refused
-    /// An attempt under way, or the wait before the next one.
-    case connecting(Attempt)
-    case ready(Session)
-    struct Attempt: Equatable {
-        let id: Int
-        /// The first failure in this run of attempts.
-        let failingSince: ContinuousClock.Instant?
-    }
-    struct Session: Equatable {
-        let attempt: Int
-        let since: ContinuousClock.Instant
-    }
-}
-
-/// Something fetched from the Mac and kept fresh: never requested, in
-/// flight, here, or failed with when to try again. Each keeps what it last had.
-enum ResourceState<Value: Equatable>: Equatable {
-    case absent
-    case loading(previous: Value?)
-    case ready(Value, fetchedAt: ContinuousClock.Instant)
-    case failed(previous: Value?, failure: String, retryAt: ContinuousClock.Instant)
-    var value: Value? {
-        switch self {
-        case .absent: nil
-        case .loading(let previous), .failed(let previous, _, _): previous
-        case .ready(let value, _): value
-        }
-    }
-}
-
-/// What a screen needs kept fresh from the Mac while it shows.
-enum RefreshNeed: Hashable {
-    case tasks(appID: String)
-    /// The thread's published media, while the conversation shows.
-    case conversation(ConversationID)
-}
-
-/// Held for as long as a screen needs something refreshed; released on
-/// `end()` or when the lease goes away.
-final class RefreshLease {
-    private var onEnd: (@MainActor () -> Void)?
-    init(_ onEnd: @escaping @MainActor () -> Void) { self.onEnd = onEnd }
-    @MainActor func end() { onEnd?(); onEnd = nil }
-    deinit { if let onEnd { Task { @MainActor in onEnd() } } }
-}
-
-/// Installing a build of this very app: what has been observed of it.
-/// "Transferred" means the Mac sent every byte, not that iOS installed it.
-enum InstallAttempt: Equatable {
-    case none
-    case requestingLink(AppBuild)
-    /// iOS's prompt is up; nothing fetched yet.
-    case prompting(AppBuild, link: URL, deadline: ContinuousClock.Instant)
-    /// iOS is fetching the IPA.
-    case watching(AppBuild, link: URL, deadline: ContinuousClock.Instant)
-    case transferred(AppBuild)
-    case ended(String?)
-}
-
 @MainActor
 final class SquircleModel {
     /// The conversation the model follows: its state, subscription and
@@ -234,11 +98,7 @@ final class SquircleModel {
     private var choices: [ConversationID: LocalChoice] = [:] { didSet { changed() } }
     /// The model you chose last, for new drafts.
     private var preferredModel: JSONValue?
-    /// Each app's tasks as the Mac last sent them (History's newest page).
-    private var observedTasks: [String: AppTasks] = [:] { didSet { if observedTasks != oldValue { changed() } } }
-    /// Older History pages loaded on request, by app.
-    private struct OlderHistory: Equatable { var tasks: [AppTask] = []; var next: String? }
-    private var olderHistory: [String: OlderHistory] = [:] { didSet { changed() } }
+    private var taskLists = TaskLists() { didSet { if taskLists != oldValue { changed() } } }
     private var historyLoads: Set<String> = []
     /// Each app's agent thread, by T3 project ID, from the Mac.
     private(set) var agents: [String: String] = [:] { didSet { if agents != oldValue { shellChanged() } } }
@@ -337,6 +197,12 @@ final class SquircleModel {
     private var debugDrops: Task<Void, Never>?
     private var installWatch: Task<Void, Never>?
     private var media: [JSONValue] { state.media }
+    /// Pictures, recordings and files the open conversation shows.
+    private(set) lazy var conversationMedia = ConversationMedia(
+        client: client, gateway: gateway, base: configuration?.t3URL,
+        thread: { [weak self] in self?.selectedSessionID },
+        message: { [weak self] id in self?.messages.first { $0.id == id } },
+        published: { [weak self] in self?.media ?? [] })
     private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
     private let upload: ((URL, String) async throws -> String)?
     private let preferences: UserDefaults
@@ -368,47 +234,16 @@ final class SquircleModel {
             provider["models"].array.map { ["instanceId": provider["instanceId"], "model": $0["slug"]] }
         }
     }
-    /// Models the picker offers, one section per provider: short names
-    /// ("Opus 5.5", not "Claude Opus 5.5"), newest version first and, within
-    /// a version, larger models first.
+    /// Models the picker offers, one section per provider.
     var modelMenu: [(title: String, choices: [(selection: JSONValue, name: String)])] {
-        availableModelProviders.map { provider in
-            let maker = provider["displayName"].string ?? ""
-            let choices = provider["models"].array.enumerated().compactMap { index, option -> (JSONValue, String, Int)? in
-                guard let slug = option["slug"].string, let instance = provider["instanceId"].string else { return nil }
-                return (["instanceId": .string(instance), "model": .string(slug)], Self.shortName(option["name"].string ?? slug, maker: maker), index)
-            }.sorted { a, b in
-                let x = Self.rank(a.1 + " " + (a.0["model"].string ?? "")), y = Self.rank(b.1 + " " + (b.0["model"].string ?? ""))
-                if x.version != y.version { return x.version > y.version }
-                if x.size != y.size { return x.size > y.size }
-                return a.2 < b.2
-            }.map { (selection: $0.0, name: $0.1) }
-            return (maker, choices)
-        }
-    }
-    /// "Claude Opus 5.5" from provider "Claude" → "Opus 5.5".
-    static func shortName(_ name: String, maker: String) -> String {
-        guard !maker.isEmpty, name.lowercased().hasPrefix(maker.lowercased() + " ") else { return name }
-        return String(name.dropFirst(maker.count + 1))
-    }
-    /// Version number in a model name and a rough size from its family word.
-    static func rank(_ text: String) -> (version: Double, size: Int) {
-        let lower = text.lowercased()
-        var version = 0.0
-        if let range = lower.range(of: #"\d+(?:[.\-]\d+)?"#, options: .regularExpression) {
-            version = Double(lower[range].replacingOccurrences(of: "-", with: ".")) ?? 0
-        }
-        let sizes: [(String, Int)] = [("fable", 5), ("opus", 4), ("sol", 4), ("sonnet", 3), ("astra", 3), ("luna", 2),
-                                      ("haiku", 1), ("flash", 1), ("mini", 1), ("nano", 0)]
-        let size = sizes.first { lower.contains($0.0) }?.1 ?? 2
-        return (version, size)
+        ModelNames.menu(availableModelProviders)
     }
     func shortAgentName(for selection: JSONValue) -> String {
         guard let provider = providers.first(where: { $0["instanceId"] == selection["instanceId"] }) else {
             return selection["model"].string ?? "Model"
         }
         let option = provider["models"].array.first { $0["slug"] == selection["model"] }
-        return Self.shortName(option?["name"].string ?? selection["model"].string ?? "Model", maker: provider["displayName"].string ?? "")
+        return ModelNames.short(option?["name"].string ?? selection["model"].string ?? "Model", maker: provider["displayName"].string ?? "")
     }
     /// Each available provider's default model.
     private var providerDefaults: [JSONValue] {
@@ -634,9 +469,9 @@ final class SquircleModel {
             for await path in NWPathMonitor() {
                 guard let self else { return }
                 defer { previous = path }
-                metered = path.isExpensive || path.isConstrained
+                conversationMedia.metered = path.isExpensive || path.isConstrained
                 #if DEBUG
-                if ProcessInfo.processInfo.environment["SQUIRCLE_METERED"] == "1" { metered = true }
+                if ProcessInfo.processInfo.environment["SQUIRCLE_METERED"] == "1" { conversationMedia.metered = true }
                 #endif
                 guard let before = previous, path.status == .satisfied else { continue }
                 let changed = before.status != .satisfied || before.availableInterfaces.map(\.name) != path.availableInterfaces.map(\.name)
@@ -1443,134 +1278,6 @@ final class SquircleModel {
             return x == y || x.isEmpty || y.isEmpty ? a.offset < b.offset : x < y
         }.map(\.element)
     }
-    /// A recording's file on the phone, downloading it once; its first frame
-    /// becomes the gallery picture.
-    /// Cellular, a personal hotspot or Low Data Mode.
-    private var metered = false
-    /// A turn's recording plays inline once downloaded. On a metered
-    /// network it shows its poster and downloads when tapped (a long session
-    /// is well over 100 MB); an older recording without a poster still
-    /// downloads by itself if it's small.
-    func autoLoadsRecording(_ id: String) -> Bool {
-        guard metered else { return true }
-        guard posterless.contains(id) else { return false }
-        return (media.first { $0["id"].string == id }?["bytes"].double ?? .infinity) <= 10_000_000
-    }
-    /// The poster Squircle took when it stopped recording, if any.
-    func recordingPoster(_ id: String) async -> Data? {
-        let key = "poster:" + id
-        if let data = StepImages.data(for: key, index: 0) { return data }
-        guard !posterless.contains(id), let client, let thread = selectedSessionID else { return nil }
-        do {
-            let data = try await client.mediaPoster(threadID: thread, id: id)
-            StepImages.set(data, for: key, index: 0)
-            return data
-        } catch ClientError.http(_, 404) { posterless.insert(id); return nil }
-        catch { return nil }
-    }
-    /// Recordings made before Squircle took posters.
-    private(set) var posterless = Set<String>()
-    /// A recording or clip as a file to play, downloaded once into the
-    /// media cache, streamed to disk off the main actor.
-    func loadVideo(_ stepID: String) async -> URL? {
-        if let url = StepVideos.url(for: stepID) { return url }
-        if stepID.hasPrefix("file:") {
-            let path = String(stepID.dropFirst("file:".count))
-            guard let gateway, let url = await mediaFileURL(path)?.url else { return nil }
-            return await StepVideos.file(for: stepID) { await gateway.http.authorizedDownload(url, to: $0) }
-        }
-        let id = String(stepID.dropFirst("media:".count))
-        guard let client, let thread = selectedSessionID else { return nil }
-        return await StepVideos.file(for: stepID) { destination in
-            (try? await client.downloadMedia(threadID: thread, id: id, to: destination)) != nil
-        }
-    }
-    func loadStepImage(_ stepID: String, index: Int, attachment: String? = nil) async -> Data? {
-        if let data = StepImages.data(for: stepID, index: index) { return data }
-        if let attachment {
-            guard let data = await attachmentData(attachment) else { return nil }
-            StepImages.set(data, for: stepID, index: index)
-            return data
-        }
-        if stepID.hasPrefix("file:") {
-            var data: Data?
-            if MediaFiles.isVideo(stepID) {
-                if let video = await loadVideo(stepID) { data = await Self.poster(of: video) }
-            } else {
-                data = await mediaFileData(String(stepID.dropFirst("file:".count)))
-            }
-            if let data, let image = UIImage(data: data) {
-                MediaFiles.sizes[stepID] = image.size
-                StepImages.set(data, for: stepID, index: index)
-            }
-            return data
-        }
-        if stepID.hasPrefix("media:") {
-            let message = messages.first { $0.id == stepID }
-            var data: Data?
-            let id = String(stepID.dropFirst("media:".count))
-            if message?.videoID != nil, let poster = await recordingPoster(id) {
-                data = poster
-            } else if message?.videoID != nil, autoLoadsRecording(id), let url = await loadVideo(stepID) {
-                data = await Self.poster(of: url)
-            } else if message?.videoID != nil {
-                data = nil
-            } else if let client, let thread = selectedSessionID {
-                data = try? await client.mediaFile(threadID: thread, id: String(stepID.dropFirst("media:".count)))
-            }
-            if let data { StepImages.set(data, for: stepID, index: index) }
-            return data
-        }
-        guard let client, let thread = selectedSessionID,
-              let data = try? await client.stepImage(threadID: thread, callID: stepID, index: index) else { return nil }
-        StepImages.set(data, for: stepID, index: index)
-        return data
-    }
-    /// An image sent with a message, through a short-lived URL T3 signs.
-    private func attachmentData(_ id: String) async -> Data? {
-        guard let url = await signedURL(["_tag": "attachment", "attachmentId": .string(id)])?.url else { return nil }
-        return await signedData(url)
-    }
-    /// The pixel size of a picture the agent's Markdown shows, from T3
-    /// before its bytes arrive, so its place in the conversation is reserved.
-    func mediaSize(_ stepID: String) async -> CGSize? {
-        if let size = MediaFiles.sizes[stepID] { return size }
-        guard !MediaFiles.isVideo(stepID), let size = await mediaFileURL(String(stepID.dropFirst("file:".count)))?.size else { return nil }
-        MediaFiles.sizes[stepID] = size
-        return size
-    }
-    /// A file on the Mac the agent's Markdown shows. T3 signs a short-lived
-    /// URL for it as it does for its own web client, and only for pictures,
-    /// video and documents it can preview.
-    private func mediaFileURL(_ path: String) async -> (url: URL, size: CGSize?)? {
-        if let signed = MediaFiles.urls[path], signed.expires > .now.addingTimeInterval(30) { return (signed.url, MediaFiles.sizes["file:" + path]) }
-        guard let thread = selectedSessionID,
-              let signed = await signedURL(["_tag": "media-file", "threadId": .string(thread), "path": .string(path)]) else { return nil }
-        if let expires = signed.expires { MediaFiles.urls[path] = (signed.url, expires) }
-        return (signed.url, signed.size)
-    }
-    private func mediaFileData(_ path: String) async -> Data? {
-        guard let url = await mediaFileURL(path)?.url else { return nil }
-        return await signedData(url)
-    }
-    private func signedURL(_ resource: JSONValue) async -> (url: URL, expires: Date?, size: CGSize?)? {
-        guard let gateway, let base = configuration?.t3URL,
-              let asset = try? await gateway.call("assets.createUrl", ["resource": resource]),
-              let relative = asset["relativeUrl"].string, let url = T3HTTP.assetURL(relative, base: base) else { return nil }
-        let size = asset["imageDimensions"]["width"].double.flatMap { width in
-            asset["imageDimensions"]["height"].double.map { CGSize(width: width, height: $0) }
-        }
-        return (url, asset["expiresAt"].double.map { Date(timeIntervalSince1970: $0 / 1000) }, size)
-    }
-    private func signedData(_ url: URL) async -> Data? {
-        await gateway?.http.authorizedData(url)
-    }
-    nonisolated static func poster(of url: URL) async -> Data? {
-        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
-        generator.appliesPreferredTrackTransform = true
-        guard let image = try? await generator.image(at: .zero).image else { return nil }
-        return UIImage(cgImage: image).jpegData(compressionQuality: 0.85)
-    }
     /// One turn's unified diff, from T3's checkpoints.
     func turnDiff(_ change: TurnChanges) async -> String? {
         guard let gateway, let thread = selectedSessionID else { return nil }
@@ -1768,40 +1475,25 @@ final class SquircleModel {
         #if DEBUG
         if let list = demoTasks { return list }
         #endif
-        guard var list = observedTasks[app] else { return AppTasks() }
-        if let older = olderHistory[app] {
-            let seen = Set(list.tasks.map(\.id) + list.history.map(\.id))
-            list.history += older.tasks.filter { !seen.contains($0.id) }
-            list.historyNext = older.next
-        }
-        for edit in commands.taskEdits { list = Self.apply(edit, in: list) }
-        return list
+        return taskLists.list(app: app, edits: commands.taskEdits)
     }
     /// The newest tasks at once, and History from its first page.
     func refreshTasks() async {
         guard let client, let app = selectedProjectID, let list = try? await client.tasks(projectID: app) else { return }
-        olderHistory[app] = nil
-        adoptTasks(list, for: app)
+        adoptTasks(list, for: app, fresh: true)
     }
     /// The next older page of History, after what's loaded.
     func loadMoreHistory(appID app: String) async {
         guard let client, !historyLoads.contains(app) else { return }
-        let cursor: String?
-        if let older = olderHistory[app] { cursor = older.next } else { cursor = observedTasks[app]?.historyNext }
-        guard let cursor else { return }
+        guard let cursor = taskLists.nextPage(app: app) else { return }
         historyLoads.insert(app); defer { historyLoads.remove(app) }
         do {
             let page = try await client.tasks(projectID: app, historyBefore: cursor)
-            // A refresh started over meanwhile: this page follows nothing.
-            let now = olderHistory[app]?.next ?? observedTasks[app]?.historyNext
-            guard now == cursor || olderHistory[app]?.next == cursor else { return }
-            var older = olderHistory[app] ?? OlderHistory()
-            older.tasks += page.history; older.next = page.historyNext
-            olderHistory[app] = older
+            taskLists.append(page, after: cursor, app: app)
         } catch { self.error = error.localizedDescription }
     }
-    private func adoptTasks(_ list: AppTasks, for app: String) {
-        observedTasks[app] = list
+    private func adoptTasks(_ list: AppTasks, for app: String, fresh: Bool = false) {
+        taskLists.adopt(list, for: app, fresh: fresh)
         // An edit the Mac shows is the Mac's now.
         guard commands.entries.contains(where: { if case .task = $0.intent.kind { return true }; return false }) else { return }
         command(.tasksObserved((list.tasks + list.history).map { .init(id: $0.id, status: $0.status, revision: $0.revision) }))
@@ -1809,24 +1501,17 @@ final class SquircleModel {
     /// Reads the list of the app `task` is in (the open app's if not known yet).
     private func readTasks(containing task: String) async {
         guard let client else { return }
-        let app = observedTasks.first { _, list in (list.tasks + list.history).contains { $0.id == task } }?.key ?? selectedProjectID
+        let app = taskLists.app(containing: task) ?? selectedProjectID
         if let app, let list = try? await client.tasks(projectID: app) { adoptTasks(list, for: app) }
     }
     /// A status or Top change made here: shown at once, sent once (M04),
     /// and laid over the Mac's tasks until the Mac shows it.
     func markTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) {
         #if DEBUG
-        if let demo = demoTasks { demoTasks = Self.apply((task.id, status, toTop), in: demo); return }
+        if let demo = demoTasks { demoTasks = TaskLists.apply((task.id, status, toTop), in: demo); return }
         #endif
         guard client != nil else { return }
         taskEditIDs[task.id] = startCommand(.task(id: task.id, status: status, toTop: toTop), command: nil)
-    }
-    private static func apply(_ edit: (id: String, status: AppTask.Status?, toTop: Bool), in list: AppTasks) -> AppTasks {
-        var list = list
-        guard let index = list.tasks.firstIndex(where: { $0.id == edit.id }) else { return list }
-        if let status = edit.status { list.tasks[index].status = status }
-        if edit.toTop { list.tasks.insert(list.tasks.remove(at: index), at: 0) }
-        return list
     }
     /// Sends the edit `markTask` showed (or makes it now) and waits until the Mac took it.
     func updateTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) async {
@@ -2000,39 +1685,6 @@ final class SquircleModel {
             }
             try await ensureOwnProject(record)
         } catch { self.error = error.localizedDescription }
-    }
-}
-
-/// Squircle's copies of Home and of threads on disk, read and written off
-/// the main actor, one at a time. Every write carries a generation; one
-/// older than what a file already holds is dropped, so a slow snapshot never
-/// replaces a newer one.
-actor DiskCache {
-    struct Home: Codable { var shell: JSONValue; var metadata: [AppMetadata] }
-    let root: URL?
-    private var written: [String: UInt64] = [:]
-    init(root: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first) { self.root = root }
-    private var homeURL: URL? { root?.appendingPathComponent("squircle-home.json") }
-    private func threadURL(_ id: String) -> URL? {
-        guard !id.isEmpty, !id.contains("/"), !id.hasPrefix(".") else { return nil }
-        return root?.appendingPathComponent("squircle-threads", isDirectory: true).appendingPathComponent(id + ".json")
-    }
-    func loadHome() -> Home? { read(homeURL) }
-    func saveHome(_ home: Home, generation: UInt64) { write(home, to: homeURL, generation: generation) }
-    /// A copy on disk is never live: T3 confirms or replaces it.
-    func loadThread(_ id: String) -> T3ThreadState? { (read(threadURL(id)) as T3ThreadState?)?.restored }
-    func saveThread(_ id: String, _ state: T3ThreadState, generation: UInt64) { write(state, to: threadURL(id), generation: generation) }
-    private func read<T: Decodable>(_ url: URL?) -> T? {
-        guard let url, let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(T.self, from: data)
-    }
-    /// True if `value` was written.
-    @discardableResult
-    func write<T: Encodable>(_ value: T, to url: URL?, generation: UInt64) -> Bool {
-        guard let url, generation > written[url.path] ?? 0, let data = try? JSONEncoder().encode(value) else { return false }
-        written[url.path] = generation
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        return (try? data.write(to: url, options: .atomic)) != nil
     }
 }
 

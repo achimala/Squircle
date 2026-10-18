@@ -124,7 +124,7 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
                 let data: Data?
                 if media.kind == "video" {
                     guard let url = await model.taskVideo(task: id, media: media.id) else { return nil }
-                    data = await SquircleModel.poster(of: url)
+                    data = await ConversationMedia.poster(of: url)
                 } else {
                     data = await model.taskMediaData(task: id, media: media.id)
                 }

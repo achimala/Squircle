@@ -19,59 +19,6 @@ protocol ConversationHost: AnyObject {
     var showsAgentJelly: Bool { get }
 }
 
-/// The values used most recently, at most `limit`, the least recently used
-/// dropped first. Emptied when the system runs low on memory: everything in
-/// it can be measured or loaded again.
-@MainActor
-final class RecentCache<Key: Hashable, Value> {
-    private let limit: Int
-    private var values: [Key: Value] = [:]
-    private var order: [Key] = []
-    private let pressure: Task<Void, Never>
-
-    init(limit: Int) {
-        self.limit = limit
-        let emptied = WeakBox<RecentCache>()
-        pressure = Task { @MainActor in
-            for await _ in NotificationCenter.default.notifications(named: UIApplication.didReceiveMemoryWarningNotification) {
-                guard let cache = emptied.value else { return }
-                cache.removeAll()
-            }
-        }
-        emptied.value = self
-    }
-
-    deinit { pressure.cancel() }
-
-    func value(for key: Key) -> Value? {
-        guard let value = values[key] else { return nil }
-        touch(key)
-        return value
-    }
-
-    func set(_ value: Value?, for key: Key) {
-        guard let value else { values[key] = nil; order.removeAll { $0 == key }; return }
-        values[key] = value
-        touch(key)
-        while order.count > limit { values[order.removeFirst()] = nil }
-    }
-
-    func removeAll() {
-        values = [:]
-        order = []
-    }
-
-    private func touch(_ key: Key) {
-        order.removeAll { $0 == key }
-        order.append(key)
-    }
-}
-
-@MainActor
-private final class WeakBox<Object: AnyObject> {
-    weak var value: Object?
-}
-
 /// The conversation's table, reporting each layout pass and whether it
 /// began at the content's end.
 final class ConversationTable: UITableView {
@@ -174,15 +121,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if let attachment = ImageAttachment(image) { self?.model.attach(attachment) }
     }
     private let notice = Theme.label("", Theme.font(.footnote, 13), color: Theme.failure, lines: 3)
-    private let request = Theme.glassSurface(cornerRadius: 22)
-    private let requestTitle = Theme.label("", Theme.font(.subheadline, 15, .semibold), lines: 2)
-    private let requestDetail = Theme.label("", Theme.font(.footnote, 12.5, monospaced: true), color: .secondaryLabel, lines: 4)
-    private let requestButtons = UIStackView()
-    private var renderedRequestID: String?
-    /// Progress through the agent's questions in the current request.
-    private var questionIndex = 0
-    private var questionAnswers: [String: JSONValue] = [:]
-    private var questionPicks: [String] = []
+    private let requestCard = RequestCard()
+    private var request: UIVisualEffectView { requestCard.view }
 
     private var flyingID: String?
     /// Your message on its way to the Mac, until T3's thread has it.
@@ -206,9 +146,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// The turn the live line belonged to, so only that turn's own finish pulses.
     private var liveTurn: String?
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
-    private var rendered: [String: (source: AnyHashable, text: NSAttributedString)] = [:]
-    /// Tables measured for the width and text size they show at.
-    private var tableLayouts: [String: (table: MarkdownTable, width: CGFloat, size: UIContentSizeCategory, layout: MarkdownTableLayout)] = [:]
+    /// Row text rendered once per source; tables measured per width and text size.
+    private let rowText = ConversationText()
     private var expanded = Set<String>()
     private var pinToBottom = true
     /// The debug overlay's even inset and the safe area its glass will have
@@ -431,18 +370,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         view.addSubview(more)
         [back, tasks, builds, more].forEach { $0.isHidden = !topControls.contains($0) }
 
-        requestDetail.lineBreakMode = .byTruncatingTail
-        requestButtons.spacing = 8
-        requestButtons.axis = .vertical
-        requestButtons.distribution = .fill
-        let requestStack = UIStackView(arrangedSubviews: [requestTitle, requestDetail, requestButtons])
-        requestStack.axis = .vertical
-        requestStack.spacing = 6
-        requestStack.setCustomSpacing(12, after: requestDetail)
-        requestStack.translatesAutoresizingMaskIntoConstraints = false
-        request.contentView.addSubview(requestStack)
-        request.accessibilityIdentifier = "thread.request"
-        request.isHidden = true
+        requestCard.onRespond = { [weak self] request, decision, answers in
+            Task { await self?.model.respond(to: request, decision: decision, answers: answers) }
+        }
+        requestCard.onResize = { [weak self] in
+            guard let self else { return }
+            view.setNeedsLayout()
+            UIView.animate(withDuration: 0.4) { self.view.layoutIfNeeded() }
+        }
         notice.isHidden = true
         notice.accessibilityIdentifier = "thread.error"
         composer.onSend = { [weak self] in self?.send() }
@@ -487,11 +422,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             jump.bottomAnchor.constraint(equalTo: strip.topAnchor, constant: -8),
             jump.widthAnchor.constraint(equalToConstant: 34), jump.heightAnchor.constraint(equalToConstant: 34),
             notice.bottomAnchor.constraint(equalTo: strip.topAnchor, constant: -8),
-            request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8),
-            requestStack.topAnchor.constraint(equalTo: request.contentView.topAnchor, constant: 14),
-            requestStack.bottomAnchor.constraint(equalTo: request.contentView.bottomAnchor, constant: -12),
-            requestStack.leadingAnchor.constraint(equalTo: request.contentView.leadingAnchor, constant: 16),
-            requestStack.trailingAnchor.constraint(equalTo: request.contentView.trailingAnchor, constant: -12)
+            request.bottomAnchor.constraint(equalTo: notice.topAnchor, constant: -8)
         ])
         if #available(iOS 26.0, *) {
             table.bottomEdgeEffect.style = .soft
@@ -1012,23 +943,23 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .header(let title):
             (cell as? HeaderCell)?.configure(title)
         case .user(let message):
-            (cell as? MessageCell)?.configure(message, style: .user, rendered: text(for: message, style: .user), expanded: true)
+            (cell as? MessageCell)?.configure(message, style: .user, rendered: rowText.message(message, style: .user), expanded: true)
             cell.contentView.alpha = message.id == flyingID ? 0 : 1
         case .update(let message):
-            (cell as? MessageCell)?.configure(message, style: .update, rendered: text(for: message, style: .update), expanded: true)
+            (cell as? MessageCell)?.configure(message, style: .update, rendered: rowText.message(message, style: .update), expanded: true)
         case .agentMessage(let message):
             let open = expanded.contains(message.id)
             (cell as? MessageCell)?.configure(message, style: .agent, rendered: agentText(message), expanded: open)
         case .action(let line):
             let open = expanded.contains(line.id)
             let message = ChatMessage(id: line.id, role: "tool", content: "")
-            (cell as? MessageCell)?.configure(message, style: .action, rendered: actionText(line, expanded: open), expanded: open)
+            (cell as? MessageCell)?.configure(message, style: .action, rendered: ConversationText.action(line, expanded: open, traits: view.traitCollection), expanded: open)
         case .answer(let message):
-            (cell as? MessageCell)?.configure(message, style: .answer, rendered: text(for: message, style: .answer), expanded: true)
+            (cell as? MessageCell)?.configure(message, style: .answer, rendered: rowText.message(message, style: .answer), expanded: true)
         case .note(let message):
-            (cell as? MessageCell)?.configure(message, style: .note, rendered: text(for: message, style: .note), expanded: expanded.contains(message.id))
+            (cell as? MessageCell)?.configure(message, style: .note, rendered: rowText.message(message, style: .note), expanded: expanded.contains(message.id))
         case .thought(let message):
-            (cell as? MessageCell)?.configure(message, style: .thought, rendered: text(for: message, style: .thought), expanded: expanded.contains(message.id))
+            (cell as? MessageCell)?.configure(message, style: .thought, rendered: rowText.message(message, style: .thought), expanded: expanded.contains(message.id))
         case .step(let message, let first, let last):
             (cell as? StepCell)?.configure(message, first: first, last: last)
         case .earlier(_, let count):
@@ -1119,11 +1050,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 }
             case .simulator(let use):
                 guard let recording = use.recordingID, StepVideos.url(for: "media:" + recording) == nil else { continue }
-                if StepImages.data(for: "poster:" + recording, index: 0) == nil, !model.posterless.contains(recording) {
+                if StepImages.data(for: "poster:" + recording, index: 0) == nil, !model.conversationMedia.posterless.contains(recording) {
                     want("poster:" + recording) { [weak self] in await self?.loadPoster(recording, item: item.id) ?? false }
                 }
                 // After the pictures around it.
-                if model.autoLoadsRecording(recording) {
+                if model.conversationMedia.autoLoadsRecording(recording) {
                     want("recording:" + recording, after: reach, whole: true) { [weak self] in
                         await self?.loadRecording("media:" + recording, item: item.id) ?? false
                     }
@@ -1135,12 +1066,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func loadPoster(_ id: String, item: String) async -> Bool {
-        guard await model.recordingPoster(id) != nil else { return false }
+        guard await model.conversationMedia.recordingPoster(id) != nil else { return false }
         if StepVideos.url(for: "media:" + id) == nil { await reconfigure(item) }
         return true
     }
     private func loadRecording(_ stepID: String, item: String) async -> Bool {
-        guard await model.loadVideo(stepID) != nil else { return false }
+        guard await model.conversationMedia.loadVideo(stepID) != nil else { return false }
         await reconfigure(item)
         return true
     }
@@ -1153,7 +1084,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
         guard let id = use.recordingID, presentedViewController == nil else { return }
         Task { [weak self] in
-            guard let self, let url = await model.loadVideo("media:" + id) else { return }
+            guard let self, let url = await model.conversationMedia.loadVideo("media:" + id) else { return }
             present(VideoPlayerViewController(url: url), animated: true)
         }
     }
@@ -1175,163 +1106,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
     private var reportedSimulators = Set<String>()
 
-    private func text(for message: ChatMessage, style: MessageCell.Style) -> NSAttributedString {
-        let key = message.id + "\(style)", source = message.markdown.map(AnyHashable.init) ?? AnyHashable(message.content)
-        if let cached = rendered[key], cached.source == source { return cached.text }
-        let text: NSAttributedString
-        switch style {
-        case .user:
-            text = NSAttributedString(string: message.content, attributes: [.font: Theme.font(.body, 17), .foregroundColor: UIColor.label])
-        case .note, .thought, .action, .agent:
-            text = Markdown.render(markdown(message), font: Theme.font(.subheadline, 15), color: .secondaryLabel)
-        case .answer:
-            text = Markdown.render(markdown(message), font: Theme.font(.body, 17), color: message.failed ? Theme.failure : .label)
-        case .update:
-            let font = Theme.font(.footnote, 13, .medium)
-            let line = NSMutableAttributedString()
-            if let symbol = UIImage(systemName: message.symbol.isEmpty ? "arrow.triangle.merge" : message.symbol, withConfiguration: UIImage.SymbolConfiguration(font: font))?
-                .withTintColor(.secondaryLabel, renderingMode: .alwaysOriginal) {
-                line.append(NSAttributedString(attachment: NSTextAttachment(image: symbol)))
-                line.append(NSAttributedString(string: "  "))
-            }
-            line.append(NSAttributedString(string: message.content))
-            line.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel], range: NSRange(location: 0, length: line.length))
-            text = line
-        }
-        rendered[key] = (source, text)
-        return text
-    }
-
-    private func markdown(_ message: ChatMessage) -> AttributedString {
-        message.markdown ?? Markdown.parse(message.content)
+    /// "Task from Squircle agent" over the task; a piece after one of its
+    /// tables or pictures has no label.
+    private func agentText(_ message: ChatMessage) -> NSAttributedString {
+        let from = message.agent?.from.flatMap { id in model.sessions.first { $0.id == id } }?.displayTitle(in: project)
+        return rowText.agent(message, from: from)
     }
 
     private func tableLayout(_ id: String, _ markdown: MarkdownTable, quiet: Bool) -> MarkdownTableLayout {
-        let width = max(200, table.bounds.width - 40), size = traitCollection.preferredContentSizeCategory
-        if let cached = tableLayouts[id], cached.table == markdown, cached.width == width, cached.size == size { return cached.layout }
-        let layout = MarkdownTableLayout(markdown, font: quiet ? Theme.font(.subheadline, 15) : Theme.font(.body, 17),
-                                         color: quiet ? .secondaryLabel : .label, width: width)
-        tableLayouts[id] = (markdown, width, size, layout)
-        return layout
-    }
-
-    /// "Task from Squircle agent" over the task, rendered; a piece after one
-    /// of its tables or pictures has no label.
-    private func agentText(_ message: ChatMessage) -> NSAttributedString {
-        let from = message.agent?.from.flatMap { id in model.sessions.first { $0.id == id } }?.displayTitle(in: project)
-        let task = message.agent?.kind == .task
-        let label = message.agent == nil ? "" : (task ? "Task from " : "From ") + (from ?? (task ? "the app’s agent" : "an agent"))
-        let key = message.id + "agent", source: AnyHashable = [label, message.markdown.map(AnyHashable.init) ?? AnyHashable(message.content)]
-        if let cached = rendered[key], cached.source == source { return cached.text }
-        let body = Markdown.render(markdown(message), font: Theme.font(.subheadline, 15), color: .label)
-        guard !label.isEmpty else { rendered[key] = (source, body); return body }
-        let font = Theme.font(.footnote, 13, .semibold)
-        let text = NSMutableAttributedString()
-        if let symbol = UIImage(systemName: task ? "list.bullet.rectangle" : "arrow.down.message",
-                                withConfiguration: UIImage.SymbolConfiguration(font: font))?
-            .withTintColor(.secondaryLabel, renderingMode: .alwaysOriginal) {
-            text.append(NSAttributedString(attachment: NSTextAttachment(image: symbol)))
-            text.append(NSAttributedString(string: " "))
-        }
-        text.append(NSAttributedString(string: label + "\n"))
-        let style = NSMutableParagraphStyle()
-        style.paragraphSpacing = 6
-        text.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: style],
-                           range: NSRange(location: 0, length: text.length))
-        text.append(body)
-        rendered[key] = (source, text)
-        return text
-    }
-
-    private static let lineJelly = JellyCanvas.tight(20)
-
-    /// The state a worker line shows its jelly in: what the news said, or
-    /// the worker's live state.
-    private func workerMood(_ line: ActionLine) -> JellyLook.Mood? {
-        if case .news(let news) = line.kind { return JellyLook.Mood(news) }
-        return line.state.map(JellyLook.Mood.init)
-    }
-
-    /// "Started worker · Dark mode  working", with the worker's live state.
-    private func actionText(_ line: ActionLine, expanded: Bool) -> NSAttributedString {
-        let font = Theme.font(.subheadline, 15), bold = Theme.font(.subheadline, 15, .semibold)
-        let name = line.name ?? "a worker"
-        let text = NSMutableAttributedString()
-        func add(_ string: String, _ font: UIFont, _ color: UIColor = .label) {
-            text.append(NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: color]))
-        }
-        let symbol: String
-        var state: (String, UIColor)?
-        switch line.kind {
-        case .news(let news):
-            symbol = news == .needsYou ? "questionmark.bubble" : news == .error ? "exclamationmark.bubble" : "checkmark.bubble"
-            add("From ", bold); add(name, font)
-            state = news == .needsYou ? ("needs you", Theme.warning) : news == .error ? ("stopped with an error", Theme.failure) : ("finished", Theme.success)
-        case .build(let news):
-            symbol = news.succeeded ? "shippingbox" : "xmark.octagon"
-            add("From ", bold); add("Squircle · " + news.app + " build", font)
-            state = news.succeeded ? ("ready", Theme.success) : ("failed", Theme.failure)
-        case .action(let action):
-            symbol = action.symbol
-            switch action.kind {
-            case .spawn:
-                add(action.verb, bold); add(" · " + name, font)
-                if let live = line.state {
-                    let colors: [WorkerState: UIColor] = [.working: Theme.accent, .done: Theme.success, .needsYou: Theme.warning, .error: Theme.failure]
-                    state = (live.word, colors[live] ?? .tertiaryLabel)
-                }
-            case .send, .answer:
-                add(action.verb + " ", bold); add(name, font)
-                if let message = action.text?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty, !expanded {
-                    let first = message.split(whereSeparator: \.isNewline).first.map(String.init) ?? message
-                    add(" · " + first, font, .secondaryLabel)
-                }
-            case .read: add("Read ", bold); add(name + "’s reply", font)
-            case .archive: add("Archived ", bold); add(name, font)
-            case .buildStart:
-                add(action.verb, bold); if let app = action.app { add(" · " + app, font) }
-                switch line.buildStatus {
-                case "queued"?: state = ("queued", .tertiaryLabel)
-                case "running"?: state = ("building", Theme.accent)
-                case "succeeded"?: state = ("ready", Theme.success)
-                case "failed"?: state = ("failed", Theme.failure)
-                case "cancelled"?, "interrupted"?: state = ("stopped", .tertiaryLabel)
-                default: break
-                }
-            default: add(action.verb, bold)
-            }
-        }
-        if line.failed { state = ("failed", Theme.failure) }
-        if let (word, color) = state { add("  " + word, Theme.font(.footnote, 13, .medium), color) }
-        if case .build(let news) = line.kind, !news.succeeded, let reason = news.reason, !reason.isEmpty {
-            add("\n" + reason, Theme.font(.footnote, 13), .secondaryLabel)
-        }
-        // A line about a worker leads with the worker itself: its jelly, in
-        // the state it is in now (a still; the Tasks row is where it moves).
-        var lead: CGFloat = 27
-        if let worker = line.thread?.raw, let mood = workerMood(line),
-           let image = JellySprites.shared.image(.worker(worker, mood), Self.lineJelly, traits: view.traitCollection) {
-            let attachment = NSTextAttachment(image: image)
-            let size = image.size, body = Self.lineJelly.body
-            attachment.bounds = CGRect(x: 0, y: (font.capHeight - Self.lineJelly.size) / 2 - (size.height - body.maxY), width: size.width, height: size.height)
-            text.insert(NSAttributedString(string: " ", attributes: [.font: font]), at: 0)
-            text.insert(NSAttributedString(attachment: attachment), at: 0)
-            lead = size.width + 4
-        } else if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: UIImage.SymbolConfiguration(font: Theme.font(.footnote, 13, .medium)))?
-            .withTintColor(line.failed ? Theme.failure : line.running ? Theme.accent : .secondaryLabel, renderingMode: .alwaysOriginal) {
-            text.insert(NSAttributedString(string: "  ", attributes: [.font: font]), at: 0)
-            text.insert(NSAttributedString(attachment: NSTextAttachment(image: symbol)), at: 0)
-        }
-        // Wrapped lines start under the text, not the icon.
-        let hanging = NSMutableParagraphStyle()
-        hanging.headIndent = lead
-        hanging.paragraphSpacing = 4
-        text.addAttribute(.paragraphStyle, value: hanging, range: NSRange(location: 0, length: text.length))
-        if expanded, let message = line.text?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
-            add("\n", font)
-            text.append(Markdown.render(message, font: Theme.font(.subheadline, 15), color: .secondaryLabel))
-        }
-        return text
+        rowText.table(id, markdown, quiet: quiet, width: max(200, table.bounds.width - 40), size: traitCollection.preferredContentSizeCategory)
     }
 
     private func tappable(_ item: ThreadItem?) -> Bool {
@@ -1452,7 +1235,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func loadImage(_ shot: Shot, item: String) async -> Bool {
-        guard await model.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment) != nil,
+        guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment) != nil,
               await GalleryCell.prepare(shot) != nil else { return false }
         await reconfigure(item)
         return true
@@ -1460,8 +1243,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// Its size first, so the conversation makes room once, then the picture.
     private func loadFigure(_ shot: Shot, item: String) async -> Bool {
-        if MediaFiles.sizes[shot.step] == nil, await model.mediaSize(shot.step) != nil { await reconfigure(item) }
-        guard await model.loadStepImage(shot.step, index: shot.index) != nil, await FigureCell.prepare(shot) != nil else { return false }
+        if MediaFiles.sizes[shot.step] == nil, await model.conversationMedia.mediaSize(shot.step) != nil { await reconfigure(item) }
+        guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index) != nil, await FigureCell.prepare(shot) != nil else { return false }
         await reconfigure(item)
         return true
     }
@@ -1478,7 +1261,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard presentedViewController == nil else { return }
         if shot.video {
             Task { [weak self] in
-                guard let self, let url = await model.loadVideo(shot.step) else { return }
+                guard let self, let url = await model.conversationMedia.loadVideo(shot.step) else { return }
                 present(VideoPlayerViewController(url: url), animated: true)
             }
             return
@@ -1576,156 +1359,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private var debugRequest: JSONValue?
     private func renderRequest() {
-        let current = debugRequest ?? model.requests.first
-        let id = current?["id"].string
-        guard id != renderedRequestID else { return }
-        let appearing = renderedRequestID == nil && current != nil
-        renderedRequestID = id
-        questionIndex = 0
-        questionAnswers = [:]
-        questionPicks = []
-        request.isHidden = current == nil
-        if let current {
-            if (current["kind"].string ?? "").contains("user-input") { renderQuestion(current) } else { renderApproval(current) }
-        }
+        guard let change = requestCard.show(debugRequest ?? model.requests.first) else { return }
         view.setNeedsLayout()
-        guard appearing, !Motion.reduced else { return }
+        guard change == .appeared, !Motion.reduced else { return }
         // The card rises out of the message field.
         view.layoutIfNeeded()
-        request.alpha = 0
-        request.transform = CGAffineTransform(translationX: 0, y: 40).scaledBy(x: 0.94, y: 0.94)
-        UIView.animate(withDuration: 0.65, delay: 0, usingSpringWithDamping: 0.78, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
-            self.request.alpha = 1
-            self.request.transform = .identity
-        }
-        UINotificationFeedbackGenerator().notificationOccurred(.warning)
-    }
-
-    private func requestButton(_ title: String, subtitle: String? = nil, prominent: Bool, leading: Bool = false,
-                               action: @escaping () -> Void) -> UIButton {
-        let button = Theme.glassButton(title: title, prominent: prominent, identifier: "thread.request.\(title)")
-        button.configuration?.subtitle = subtitle
-        button.configuration?.titleLineBreakMode = .byWordWrapping
-        button.configuration?.subtitleLineBreakMode = .byTruncatingTail
-        button.configuration?.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes; attributes.font = Theme.font(.footnote, 13); return attributes
-        }
-        if leading {
-            button.configuration?.titleAlignment = .leading
-            button.contentHorizontalAlignment = .leading
-        }
-        button.addAction(UIAction { _ in Theme.selectionHaptic(); action() }, for: .touchUpInside)
-        requestButtons.addArrangedSubview(button)
-        return button
-    }
-
-    private func renderApproval(_ current: JSONValue) {
-        requestButtons.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let payload = current["payload"]
-        requestTitle.text = current["summary"].string ?? "The agent needs your response"
-        let detail = payload["detail"].string ?? ""
-        if let stack = requestTitle.superview as? UIStackView {
-            stack.insertArrangedSubview(requestDetail, at: 1)
-            stack.setCustomSpacing(6, after: requestTitle)
-            stack.setCustomSpacing(12, after: requestDetail)
-        }
-        requestDetail.font = Theme.font(.footnote, 12.5, monospaced: true)
-        requestDetail.textColor = .secondaryLabel
-        requestDetail.text = detail
-        requestDetail.isHidden = detail.isEmpty
-        if payload["options"].array.isEmpty {
-            _ = requestButton("Decline", prominent: false) { [weak self] in Task { await self?.model.respond(to: current, decision: "decline") } }
-            _ = requestButton("Allow", prominent: true) { [weak self] in Task { await self?.model.respond(to: current, decision: "accept") } }
-        } else {
-            for option in payload["options"].array {
-                _ = requestButton(option["label"].string ?? "Choose", subtitle: option["warning"].string,
-                                  prominent: ["accept", "acceptForSession", "acceptAlways"].contains(option["decision"].string ?? "")) { [weak self] in
-                    Task { await self?.model.respond(to: current, decision: option["decision"].string) }
-                }
-            }
-        }
-    }
-
-    /// One of the agent's questions at a time, answered by tapping a choice
-    /// or typing; the card slides to the next question.
-    private func renderQuestion(_ current: JSONValue, advancing: Bool = false) {
-        let questions = current["payload"]["questions"].array
-        guard questionIndex < questions.count else {
-            let answers = questionAnswers
-            requestButtons.arrangedSubviews.forEach { $0.isUserInteractionEnabled = false }
-            Task { await model.respond(to: current, answers: answers) }
-            return
-        }
-        if advancing, !Motion.reduced {
-            let slide = CATransition()
-            slide.type = .push
-            slide.subtype = .fromRight
-            slide.duration = 0.35
-            slide.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
-            request.contentView.layer.add(slide, forKey: "question")
-        }
-        requestButtons.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let question = questions[questionIndex]
-        let id = question["id"].string ?? question["header"].string ?? "answer"
-        let multiple = question["multiSelect"].bool
-        var caption = (question["header"].string ?? "Question").uppercased()
-        if questions.count > 1 { caption += "  ·  \(questionIndex + 1) OF \(questions.count)" }
-        if let stack = requestTitle.superview as? UIStackView {
-            stack.insertArrangedSubview(requestDetail, at: 0)
-            stack.setCustomSpacing(4, after: requestDetail)
-            stack.setCustomSpacing(14, after: requestTitle)
-        }
-        requestDetail.font = Theme.font(.caption1, 12, .semibold)
-        requestDetail.textColor = Theme.accent
-        requestDetail.text = caption
-        requestDetail.isHidden = false
-        requestTitle.text = question["question"].string ?? "The agent has a question"
-        func answer(_ value: String) {
-            questionAnswers[id] = .string(value)
-            questionPicks = []
-            questionIndex += 1
-            renderQuestion(current, advancing: true)
-            view.setNeedsLayout()
-            UIView.animate(withDuration: 0.4) { self.view.layoutIfNeeded() }
-        }
-        for option in question["options"].array {
-            let label = option["label"].string ?? option.string ?? "Option"
-            let picked = questionPicks.contains(label)
-            _ = requestButton(label, subtitle: option["description"].string, prominent: picked, leading: true) { [weak self] in
-                guard let self else { return }
-                guard multiple else { answer(option["value"].string ?? label); return }
-                if let index = questionPicks.firstIndex(of: label) { questionPicks.remove(at: index) } else { questionPicks.append(label) }
-                renderQuestion(current)
-            }
-        }
-        let field = UITextField()
-        field.placeholder = "Something else…"
-        field.font = Theme.font(.body, 16)
-        field.returnKeyType = .send
-        field.accessibilityIdentifier = "thread.request.other"
-        field.addAction(UIAction { [weak field] _ in
-            let text = field?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !text.isEmpty { field?.resignFirstResponder(); answer(multiple ? (self.questionPicks + [text]).joined(separator: ", ") : text) }
-        }, for: .editingDidEndOnExit)
-        let wrap = UIView()
-        wrap.backgroundColor = .tertiarySystemFill
-        wrap.layer.cornerRadius = 20
-        wrap.layer.cornerCurve = .continuous
-        field.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(field)
-        NSLayoutConstraint.activate([
-            wrap.heightAnchor.constraint(equalToConstant: 44),
-            field.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 16),
-            field.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -16),
-            field.centerYAnchor.constraint(equalTo: wrap.centerYAnchor)
-        ])
-        requestButtons.addArrangedSubview(wrap)
-        if multiple {
-            let next = requestButton(questionIndex == questions.count - 1 ? "Send" : "Next", prominent: true) {
-                answer(self.questionPicks.joined(separator: ", "))
-            }
-            next.isEnabled = !questionPicks.isEmpty
-        }
+        requestCard.rise()
     }
 
     /// Removed from the screen for good: stops everything that could still

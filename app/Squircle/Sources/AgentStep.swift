@@ -187,52 +187,6 @@ struct StepDiff: Equatable {
     let new: String
 }
 
-/// A least-recently-used store with a total cost budget. Entries over the
-/// budget are evicted oldest first; `evicted` hears about each one.
-struct BoundedCache<Key: Hashable, Value> {
-    let budget: Int
-    private let cost: (Value) -> Int
-    private var entries: [Key: (value: Value, cost: Int, used: UInt64)] = [:]
-    private var clock: UInt64 = 0
-    private(set) var total = 0
-    init(budget: Int, cost: @escaping (Value) -> Int = { _ in 1 }) { self.budget = budget; self.cost = cost }
-    var count: Int { entries.count }
-    mutating func value(for key: Key) -> Value? {
-        guard let entry = entries[key] else { return nil }
-        clock += 1; entries[key]?.used = clock
-        return entry.value
-    }
-    /// Without counting as a use.
-    func peek(_ key: Key) -> Value? { entries[key]?.value }
-    /// Stores `value`; returns the values that no longer fit, the replaced
-    /// one included.
-    @discardableResult
-    mutating func set(_ value: Value, for key: Key) -> [Value] {
-        var dropped: [Value] = []
-        if let old = removeValue(for: key) { dropped.append(old) }
-        clock += 1
-        let c = max(0, cost(value))
-        entries[key] = (value, c, clock); total += c
-        while total > budget, entries.count > 1,
-              let oldest = entries.lazy.filter({ $0.key != key }).min(by: { $0.value.used < $1.value.used })?.key,
-              let value = removeValue(for: oldest) { dropped.append(value) }
-        return dropped
-    }
-    @discardableResult
-    mutating func removeValue(for key: Key) -> Value? {
-        guard let entry = entries.removeValue(forKey: key) else { return nil }
-        total -= entry.cost
-        return entry.value
-    }
-    /// Empties the cache; returns what it held.
-    @discardableResult
-    mutating func removeAll() -> [Value] {
-        let values = entries.values.map(\.value)
-        entries.removeAll(); total = 0
-        return values
-    }
-}
-
 /// Recordings and clips as files for AVFoundation: one cache on disk for
 /// every download (conversation recordings, clips agents link, task clips).
 /// Files are named by what they are, so a later launch finds them again;
