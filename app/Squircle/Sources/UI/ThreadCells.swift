@@ -481,6 +481,7 @@ final class ShotView: UIControl {
         accessibilityLabel = "Screenshot: " + shot.title
         accessibilityIdentifier = "thread.media"
         updateBorder()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.updateBorder() }
     }
 
     @available(*, unavailable)
@@ -528,11 +529,6 @@ final class ShotView: UIControl {
         playerLayer.player = queue
         player = queue
         queue.play()
-    }
-
-    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-        super.traitCollectionDidChange(previous)
-        updateBorder()
     }
 
     private func updateBorder() { image.layer.borderColor = UIColor.label.withAlphaComponent(0.85).cgColor }
@@ -692,6 +688,7 @@ final class FigureTile: UIControl {
         accessibilityLabel = shot.video ? "Recording" : "Image"
         accessibilityIdentifier = "thread.figure"
         updateBorder()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitDisplayScale.self]) { (self: Self, _) in self.updateBorder() }
     }
 
     @available(*, unavailable)
@@ -743,11 +740,6 @@ final class FigureTile: UIControl {
                 self.transform = self.isHighlighted ? CGAffineTransform(scaleX: 0.97, y: 0.97) : .identity
             }
         }
-    }
-
-    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-        super.traitCollectionDidChange(previous)
-        updateBorder()
     }
 
     private func updateBorder() {

@@ -1038,7 +1038,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? 56 : 20, id: id,
                            trailing: id.hasPrefix("gallery:sent:"))
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
-        case .figure(let id, let shots):
+        case .figure(_, let shots):
             guard let cell = cell as? FigureCell else { return }
             cell.configure(shots, width: table.bounds.width)
             cell.onTap = { [weak self] shot in self?.showImage(shot) }

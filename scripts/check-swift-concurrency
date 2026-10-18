@@ -1,7 +1,8 @@
 #!/bin/sh
 # Swift concurrency only: no Combine, no Dispatch in the iPhone client.
 # Existing uses are recorded in app/Squircle/concurrency-baseline.txt and may
-# only go down. The app's build runs this; a new use fails the build.
+# only go down. It covers every target's sources (app, overlay, widgets,
+# tests); the app's build runs it, and a new use fails the build.
 #   scripts/check-swift-concurrency            check (exit 1 on any increase)
 #   scripts/check-swift-concurrency --update   rewrite the baseline; refuses
 #                                              to raise any file's count
@@ -11,7 +12,7 @@ APP="$ROOT/app/Squircle"
 BASELINE="$APP/concurrency-baseline.txt"
 PATTERN='import Combine|DispatchQueue|DispatchGroup|DispatchSemaphore|DispatchWorkItem|AnyCancellable|\.sink[ ({]|@Published|ObservableObject|PassthroughSubject|CurrentValueSubject|\.debounce\(|\.receive\(on'
 
-current=$(cd "$APP" && grep -rcE "$PATTERN" --include='*.swift' Sources Overlay Tests UITests 2>/dev/null \
+current=$(cd "$APP" && grep -rcE "$PATTERN" --include='*.swift' Sources App Shared Overlay Widgets Tests \
   | awk -F: '$2 > 0 { print $2 " " $1 }' | sort -k2)
 
 allowed() { awk -v f="$1" '$2 == f { print $1; found = 1 } END { if (!found) print 0 }' "$BASELINE" 2>/dev/null || echo 0; }
