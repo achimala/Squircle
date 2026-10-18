@@ -332,11 +332,6 @@ final class ThreadRow: UIControl {
     private var date: Date?
     private var agent = ""
     private var phase = ChatSession.Phase.idle
-    private static let formatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter
-    }()
 
     /// `compact` rows fit the debug overlay's card.
     init(sessionID: String, compact: Bool = false) {
@@ -412,7 +407,7 @@ final class ThreadRow: UIControl {
     }
 
     func updateDetail() {
-        let time = date.flatMap { $0.timeIntervalSince1970 > 0 ? Self.formatter.localizedString(for: $0, relativeTo: .now) : nil }
+        let time = date.flatMap { $0.timeIntervalSince1970 > 0 ? Theme.relativeDate.localizedString(for: $0, relativeTo: .now) : nil }
         let text: String
         switch phase {
         case .working: text = "Working"

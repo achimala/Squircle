@@ -262,9 +262,7 @@ final class StepCell: TimelineCell {
         railUp.isHidden = first
         railDown.isHidden = last
         let added = step.step?.added ?? 0, removed = step.step?.removed ?? 0
-        let text = NSMutableAttributedString()
-        if added > 0 { text.append(NSAttributedString(string: "+\(added)", attributes: [.foregroundColor: Theme.success])) }
-        if removed > 0 { text.append(NSAttributedString(string: (added > 0 ? " " : "") + "−\(removed)", attributes: [.foregroundColor: Theme.failure])) }
+        let text = Theme.lineCounts(added: added, removed: removed, omittingZeros: true)
         stats.attributedText = text
         stats.isHidden = text.length == 0
         setPulsing(step.isStreaming)
@@ -793,9 +791,7 @@ final class ChangesCell: TimelineCell {
 
     func configure(_ changes: TurnChanges) {
         label.text = "\(changes.files.count) file\(changes.files.count == 1 ? "" : "s")"
-        let text = NSMutableAttributedString(string: "+\(changes.additions)", attributes: [.foregroundColor: Theme.success])
-        text.append(NSAttributedString(string: " −\(changes.deletions)", attributes: [.foregroundColor: Theme.failure]))
-        stats.attributedText = text
+        stats.attributedText = Theme.lineCounts(added: changes.additions, removed: changes.deletions)
         accessibilityLabel = "Changes: \(label.text ?? ""), \(changes.additions) added, \(changes.deletions) removed"
     }
 }

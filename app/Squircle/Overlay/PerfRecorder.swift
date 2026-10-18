@@ -32,7 +32,7 @@ final class PerfRecorder: CaptureProducer {
         touches = TouchTracker(origin: started)
         frames.reserveCapacity(8_000)
         sampler.start()
-        let link = CADisplayLink(target: Ticker { [weak self] link in self?.tick(link) }, selector: #selector(Ticker.tick(_:)))
+        let link = CADisplayLink(target: DisplayLinkProxy { [weak self] link in self?.tick(link) }, selector: #selector(DisplayLinkProxy.tick(_:)))
         // At the display's full rate: a default link runs at 60 Hz on
         // ProMotion and would miss every other frame of a 120 Hz scroll.
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
@@ -204,13 +204,6 @@ struct FrameGap: Equatable, Sendable {
         for frame in frames { counts[(1 / frame.period).rounded(), default: 0] += 1 }
         return counts.max { $0.value < $1.value }?.key ?? 60
     }
-}
-
-/// CADisplayLink holds its target strongly; this breaks the cycle.
-final class Ticker: NSObject {
-    private let action: (CADisplayLink) -> Void
-    init(_ action: @escaping (CADisplayLink) -> Void) { self.action = action }
-    @objc func tick(_ link: CADisplayLink) { MainActor.assumeIsolated { action(link) } }
 }
 
 /// Sees every touch in the app's windows without taking part: it never

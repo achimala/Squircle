@@ -139,9 +139,34 @@ enum Motion {
     }
 }
 
+extension Theme {
+    /// "+12 −3" in the success and failure colours; `omittingZeros` leaves out a zero count.
+    static func lineCounts(added: Int, removed: Int, omittingZeros: Bool = false) -> NSAttributedString {
+        let text = NSMutableAttributedString()
+        if added > 0 || !omittingZeros { text.append(NSAttributedString(string: "+\(added)", attributes: [.foregroundColor: success])) }
+        if removed > 0 || !omittingZeros {
+            text.append(NSAttributedString(string: (text.length > 0 ? " " : "") + "−\(removed)", attributes: [.foregroundColor: failure]))
+        }
+        return text
+    }
+    /// "5 min. ago", for rows that say when something happened.
+    @MainActor static let relativeDate: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        return formatter
+    }()
+}
+
 extension CGFloat {
     func clamped(_ lower: CGFloat = 0, _ upper: CGFloat = 1) -> CGFloat { Swift.min(upper, Swift.max(lower, self)) }
     static func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
+}
+
+extension CGRect {
+    static func lerp(_ a: CGRect, _ b: CGRect, _ t: CGFloat) -> CGRect {
+        CGRect(x: .lerp(a.minX, b.minX, t), y: .lerp(a.minY, b.minY, t),
+               width: .lerp(a.width, b.width, t), height: .lerp(a.height, b.height, t))
+    }
 }
 
 extension UIView {

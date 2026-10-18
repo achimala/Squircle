@@ -1016,8 +1016,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let (lift, picture, start) = (flying.lift, flying.picture, flying.start)
         let t = flight.value
         let target = route.isOpen ? flying.conversation?.attachmentFrame(flying.attachmentID, in: view) ?? bubbleFrame : frame.value
-        lift.frame = CGRect(x: .lerp(start.minX, target.minX, t), y: .lerp(start.minY, target.minY, t),
-                            width: .lerp(start.width, target.width, t), height: .lerp(start.height, target.height, t))
+        lift.frame = .lerp(start, target, t)
         picture.frame = lift.bounds
         // Full screen it hides under the display's own corners.
         let radius = CGFloat.lerp(start == view.bounds ? 44 : min(22, start.height / 2), 12, t.clamped())
@@ -1881,12 +1880,5 @@ extension OverlayController: ConversationHost {
     var showsAgentJelly: Bool { false }
     func expandSimulator(_ use: SimulatorUse) {}
     func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>) {}
-}
-
-private extension CGRect {
-    static func lerp(_ a: CGRect, _ b: CGRect, _ t: CGFloat) -> CGRect {
-        CGRect(x: .lerp(a.minX, b.minX, t), y: .lerp(a.minY, b.minY, t),
-               width: .lerp(a.width, b.width, t), height: .lerp(a.height, b.height, t))
-    }
 }
 #endif

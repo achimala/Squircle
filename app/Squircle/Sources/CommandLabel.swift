@@ -48,7 +48,7 @@ enum CommandLabel {
     /// Codex runs everything as `/bin/zsh -lc '…'`.
     private static func unwrapped(_ command: String) -> String {
         let words = Shell.commands(command).first ?? []
-        if words.count == 3, ["zsh", "bash", "sh"].contains(file(words[0])), ["-lc", "-c"].contains(words[1]) { return words[2] }
+        if words.count == 3, ["zsh", "bash", "sh"].contains(AgentStep.file(words[0])), ["-lc", "-c"].contains(words[1]) { return words[2] }
         return command
     }
 
@@ -64,11 +64,11 @@ enum CommandLabel {
                 variables[String(first[..<eq])] = String(first[first.index(after: eq)...])
                 words = words.dropFirst(); continue
             }
-            var name = file(first)
+            var name = AgentStep.file(first)
             if first.hasPrefix("$") {
                 let variable = first.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: "{}"))
                 guard let value = variables[variable], let program = Shell.commands(value).first?.first else { return nil }
-                name = file(program)
+                name = AgentStep.file(program)
             }
             // An array's elements (`T=(--platform ios)`), not a command.
             if name.hasPrefix("-") { return nil }
@@ -98,7 +98,7 @@ enum CommandLabel {
         let sub = p.subcommand ?? ""
         let paths = p.operands.filter(looksLikeFile)
         func files(_ verb: String) -> String {
-            paths.count == 1 ? verb + " " + file(paths[0]) : paths.isEmpty ? "Running \(p.name)" : "\(verb) \(paths.count) files"
+            paths.count == 1 ? verb + " " + AgentStep.file(paths[0]) : paths.isEmpty ? "Running \(p.name)" : "\(verb) \(paths.count) files"
         }
         switch p.name {
         case "xcodebuild":
@@ -116,7 +116,7 @@ enum CommandLabel {
             if operands.starts(with: ["pr", "create"]) { return "Opening a pull request" }
             return "Running gh" + (operands.first.map { " " + $0 } ?? "")
         case "cat", "head", "tail", "less", "more", "bat", "nl", "wc":
-            if let output = p.output, p.name == "cat" { return "Writing " + file(output) }
+            if let output = p.output, p.name == "cat" { return "Writing " + AgentStep.file(output) }
             return files(p.name == "wc" ? "Counting lines in" : "Reading")
         case "sed":
             if p.arguments.contains(where: { $0 == "-i" || $0.hasPrefix("-i") }) { return files("Editing") }
@@ -128,7 +128,7 @@ enum CommandLabel {
         case "curl", "wget", "http", "xh":
             let host = p.operands.lazy.compactMap { URL(string: $0)?.host }.first
             return "Fetching " + (host ?? "a URL")
-        case "open": return "Opening " + (p.operands.first.map(file) ?? "a file")
+        case "open": return "Opening " + (p.operands.first.map(AgentStep.file) ?? "a file")
         case "rm", "trash": return "Removing files"
         case "mkdir": return "Creating folders"
         case "cp", "ditto", "rsync": return "Copying files"
@@ -138,7 +138,7 @@ enum CommandLabel {
         case "agent-device": return "Using the simulator"
         case "python", "python3", "node", "ruby", "perl", "bash", "zsh", "sh":
             if let script = p.arguments.first(where: { !$0.hasPrefix("-") }), looksLikeFile(script), !p.arguments.contains("-c"), !p.arguments.contains("-e") {
-                return "Running " + file(script)
+                return "Running " + AgentStep.file(script)
             }
             return "Running " + (p.name == "python3" ? "python" : p.name)
         case "pip", "pip3", "brew", "pod", "gem":
@@ -154,7 +154,7 @@ enum CommandLabel {
         if ["npm", "pnpm", "yarn", "bun", "deno"].contains(name), ["run", "task"].contains(sub) { action = p.operands.dropFirst().first ?? "" }
         if name == "make", action.isEmpty { return "Building with make" }
         if name == "xcodegen" { return "Generating the Xcode project" }
-        if looksLikeFile(action) { return "Running " + file(action) }
+        if looksLikeFile(action) { return "Running " + AgentStep.file(action) }
         switch action {
         case "build", "b", "assemble", "compile", "package", "publish": return "Building with \(name)"
         case "test", "t", "nextest": return "Testing with \(name)"
@@ -211,11 +211,6 @@ enum CommandLabel {
         case "list": return "Checking simulators"
         default: return "Using the simulator"
         }
-    }
-
-    /// "a/b/Theme.swift" → "Theme.swift".
-    private static func file(_ path: String) -> String {
-        path.split(separator: "/").last.map(String.init) ?? path
     }
 
     /// A path or a name with an extension, not a pattern or an expression.

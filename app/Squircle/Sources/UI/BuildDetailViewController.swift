@@ -123,7 +123,7 @@ final class BuildDetailViewController: UIViewController {
                 render()
             }
         }
-        let (name, tint) = Self.symbol(for: build.status)
+        let (name, tint) = BuildRow.symbol(for: build.status)
         symbol.image = name.map { UIImage(systemName: $0) } ?? nil
         symbol.tintColor = tint
         if name == nil { spinner.startAnimating() } else { spinner.stopAnimating() }
@@ -134,17 +134,6 @@ final class BuildDetailViewController: UIViewController {
         if build.canInstall, !build.version.isEmpty { install.configuration?.title = "Install \(build.version)" }
         renderFacts()
         renderReason()
-    }
-
-    private static func symbol(for status: String) -> (String?, UIColor) {
-        switch status {
-        case "succeeded": return ("checkmark.circle.fill", Theme.success)
-        case "failed": return ("xmark.octagon.fill", Theme.failure)
-        case "cancelled", "interrupted": return ("minus.circle.fill", .secondaryLabel)
-        case "queued": return ("clock.fill", .secondaryLabel)
-        case "running": return (nil, .secondaryLabel)
-        default: return ("circle.dashed", .secondaryLabel)
-        }
     }
 
     private static let dateFormatter: DateFormatter = {

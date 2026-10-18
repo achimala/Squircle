@@ -211,11 +211,6 @@ final class BuildRow: UIControl {
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
     private let separator = UIView()
     private let highlight = UIView()
-    private static let formatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter
-    }()
 
     init(buildID: String) {
         self.buildID = buildID
@@ -268,6 +263,18 @@ final class BuildRow: UIControl {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// A build state's symbol and colour; nil while it runs (a spinner shows).
+    static func symbol(for status: String) -> (String?, UIColor) {
+        switch status {
+        case "succeeded": return ("checkmark.circle.fill", Theme.success)
+        case "failed": return ("xmark.octagon.fill", Theme.failure)
+        case "cancelled", "interrupted": return ("minus.circle.fill", .secondaryLabel)
+        case "queued": return ("clock.fill", .secondaryLabel)
+        case "running": return (nil, .secondaryLabel)
+        default: return ("circle.dashed", .secondaryLabel)
+        }
+    }
+
     static func statusText(for build: AppBuild) -> String {
         switch build.status {
         case "queued": return "Queued"
@@ -284,16 +291,7 @@ final class BuildRow: UIControl {
         guard build != self.build else { updateDate(); return }
         self.build = build
         titleLabel.text = build.version.isEmpty ? build.title : build.version
-        let symbolName: String?
-        let tint: UIColor
-        switch build.status {
-        case "succeeded": symbolName = "checkmark.circle.fill"; tint = Theme.success
-        case "failed": symbolName = "xmark.octagon.fill"; tint = Theme.failure
-        case "cancelled", "interrupted": symbolName = "minus.circle.fill"; tint = .secondaryLabel
-        case "queued": symbolName = "clock.fill"; tint = .secondaryLabel
-        case "running": symbolName = nil; tint = .secondaryLabel
-        default: symbolName = "circle.dashed"; tint = .secondaryLabel
-        }
+        let (symbolName, tint) = Self.symbol(for: build.status)
         symbol.image = symbolName.map { UIImage(systemName: $0) } ?? nil
         symbol.tintColor = tint
         if symbolName == nil { spinner.startAnimating() } else { spinner.stopAnimating() }
@@ -304,7 +302,7 @@ final class BuildRow: UIControl {
         guard let build else { return }
         var parts = [Self.statusText(for: build)]
         if build.previewState == "pending" || build.previewState == "running" { parts.append("Capturing screenshot") }
-        if build.date.timeIntervalSince1970 > 0 { parts.append(Self.formatter.localizedString(for: build.date, relativeTo: .now)) }
+        if build.date.timeIntervalSince1970 > 0 { parts.append(Theme.relativeDate.localizedString(for: build.date, relativeTo: .now)) }
         let detail = parts.joined(separator: " · ")
         if detailLabel.text != detail { detailLabel.text = detail }
         accessibilityLabel = [titleLabel.text, detail].compactMap { $0 }.joined(separator: ", ")

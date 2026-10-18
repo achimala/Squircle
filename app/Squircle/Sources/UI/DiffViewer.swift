@@ -278,9 +278,7 @@ final class DiffFileHeader: UITableViewHeaderFooterView {
 
     func show(path: String, additions: Int, deletions: Int, collapsed: Bool, visibleWidth: CGFloat, action: @escaping () -> Void) {
         name.text = path
-        let text = NSMutableAttributedString(string: "+\(additions)", attributes: [.foregroundColor: Theme.success])
-        text.append(NSAttributedString(string: " −\(deletions)", attributes: [.foregroundColor: Theme.failure]))
-        stats.attributedText = text
+        stats.attributedText = Theme.lineCounts(added: additions, removed: deletions)
         chevron.transform = collapsed ? CGAffineTransform(rotationAngle: -.pi / 2) : .identity
         self.visibleWidth = visibleWidth
         self.action = action

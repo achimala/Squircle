@@ -563,14 +563,14 @@ final class SimulatorDock: UIView {
         let isPresented = use.id == presented
         var frame: CGRect, alpha: CGFloat, shade: CGFloat = 0
         if let index {
-            frame = deckFrame(index, top: deck.first).lerp(to: fanFrame(index, of: deck.count, use: use), f)
+            frame = .lerp(deckFrame(index, top: deck.first), fanFrame(index, of: deck.count, use: use), f)
             alpha = index <= 2 ? 1 : f
             shade = 0.18 * CGFloat(min(index, 2)) * (1 - f)
         } else {
             frame = deckFrame(0, top: deck.first)
             alpha = 0
         }
-        if isPresented { frame = frame.lerp(to: bigFrame, e) }
+        if isPresented { frame = .lerp(frame, bigFrame, e) }
         alpha = isPresented ? 1 : alpha * (1 - e)
         let caption: CGFloat = isPresented && e > 0.05 ? 0 : deck.count > 1 ? f : (showsCaption(use) ? 1 : 0)
         let ownsInput = route.expanded == use.id
@@ -966,11 +966,4 @@ final class SimulatorCell: TimelineCell {
     }
 
     private func updateBorder() { frameView.layer.borderColor = UIColor.label.resolvedColor(with: traitCollection).withAlphaComponent(0.85).cgColor }
-}
-
-private extension CGRect {
-    func lerp(to other: CGRect, _ t: CGFloat) -> CGRect {
-        CGRect(x: .lerp(minX, other.minX, t), y: .lerp(minY, other.minY, t),
-               width: .lerp(width, other.width, t), height: .lerp(height, other.height, t))
-    }
 }

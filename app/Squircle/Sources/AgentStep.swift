@@ -150,9 +150,7 @@ struct AgentStep: Equatable {
     }
 
     /// "/a/b/Theme.swift" → "Theme.swift".
-    static func file(_ path: String) -> String {
-        path.split(separator: "/").last.map(String.init) ?? path
-    }
+    static func file(_ path: String) -> String { (path as NSString).lastPathComponent }
 
     static func sentence(_ text: String) -> String {
         let line = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
@@ -176,6 +174,11 @@ struct AgentStep: Equatable {
         let difference = b.difference(from: a)
         return (difference.insertions.count, difference.removals.count)
     }
+}
+
+extension Sequence where Element == UInt8 {
+    /// Lowercase hex, two digits a byte.
+    var hex: String { map { String(format: "%02x", $0) }.joined() }
 }
 
 struct StepDiff: Equatable {
@@ -316,7 +319,7 @@ enum MediaFileStore {
 
     /// A stable file name for a step ID, keeping a video's extension.
     static func name(for id: String) -> String {
-        let digest = SHA256.hash(data: Data(id.utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
+        let digest = SHA256.hash(data: Data(id.utf8)).prefix(16).hex
         let ext = (id as NSString).pathExtension.lowercased()
         return digest + "." + (["mp4", "mov", "m4v"].contains(ext) ? ext : "mp4")
     }

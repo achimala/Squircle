@@ -247,14 +247,8 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
     /// `aps-environment` (ad hoc and App Store builds say production).
     /// Simulator and Xcode-run builds use the sandbox.
     static let environment: String = {
-        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-              let data = try? Data(contentsOf: url),
-              let start = data.range(of: Data("<?xml".utf8)),
-              let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
-              let plist = try? PropertyListSerialization.propertyList(from: data[start.lowerBound..<end.upperBound], format: nil) as? [String: Any],
-              let entitlements = plist["Entitlements"] as? [String: Any],
-              let value = entitlements["aps-environment"] as? String else { return "development" }
-        return value == "production" ? "production" : "development"
+        let entitlements = AppConfiguration.Shared.provisioningProfile?["Entitlements"] as? [String: Any]
+        return entitlements?["aps-environment"] as? String == "production" ? "production" : "development"
     }()
 
     private func log(_ message: String) {
@@ -262,8 +256,4 @@ final class PushCenter: NSObject, UNUserNotificationCenterDelegate {
         NSLog("SQUIRCLE-PUSH %@", message)
         #endif
     }
-}
-
-private extension Data {
-    var hex: String { map { String(format: "%02x", $0) }.joined() }
 }

@@ -36,14 +36,15 @@ struct AppConfiguration: Decodable {
     enum Shared {
         private static let service = "ai.dreamslate.squircle.shared.client"
         /// Team ID from the installed profile. App Store builds have none.
-        static let teamID: String? = {
+        static let teamID = (provisioningProfile?["TeamIdentifier"] as? [String])?.first
+        /// The installed provisioning profile's plist (it sits inside a CMS
+        /// signature). Simulator and Xcode-run builds have none.
+        static let provisioningProfile: [String: Any]? = {
             guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
                   let data = try? Data(contentsOf: url),
                   let start = data.range(of: Data("<?xml".utf8)),
-                  let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
-                  let plist = try? PropertyListSerialization.propertyList(from: data[start.lowerBound..<end.upperBound], format: nil),
-                  let teams = (plist as? [String: Any])?["TeamIdentifier"] as? [String] else { return nil }
-            return teams.first
+                  let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex) else { return nil }
+            return try? PropertyListSerialization.propertyList(from: data[start.lowerBound..<end.upperBound], format: nil) as? [String: Any]
         }()
         private static var query: [String: Any]? {
             teamID.map { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,

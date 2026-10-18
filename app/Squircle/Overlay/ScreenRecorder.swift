@@ -51,7 +51,7 @@ final class ScreenRecorder: CaptureProducer {
         self.overlay = overlay
         touches = TouchTracker(origin: started)
         touches.attach(to: overlay.windowScene?.windows.filter { $0 !== overlay } ?? [])
-        let link = CADisplayLink(target: Ticker { [weak self] _ in self?.tick() }, selector: #selector(Ticker.tick(_:)))
+        let link = CADisplayLink(target: DisplayLinkProxy { [weak self] _ in self?.tick() }, selector: #selector(DisplayLinkProxy.tick(_:)))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
         link.add(to: .main, forMode: .common)
         self.link = link
