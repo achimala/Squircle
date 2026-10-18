@@ -35,6 +35,28 @@ in the same place.
   recording; 7–9 ms a frame off the main thread for two windows; 30 fps
   output, overlay absent. If the private call is missing the recorder does
   not start. Not yet measured on the phone.
+  **2026-10-18 (user: make the pipeline itself efficient):** one
+  render-server pass per frame in `kCASnapshotModeExcludeContextList` mode
+  (the whole display minus the overlay's context, transform in display
+  points), so the keyboard, which iOS 27 draws in another process and which
+  is not one of the app's windows, alerts and the status bar are now in the
+  recording (the window-by-window path never had the keyboard). Then one
+  Metal compute pass reads that BGRA surface, draws the finger dots and writes
+  the 420v (BT.709 video range) buffer the writer takes; no CPU lock, blend,
+  CGContext or poster readback (the poster was unused: the thumbnail is the
+  snapshot taken at stop). Findings in the simulator (iOS 27.1, iPhone 402×874
+  pt): VideoToolbox there encodes in software in-process and converted BGRA
+  with vImage on the CPU (its hottest leaf); writing 420v directly from the
+  render server (layer mode) aborted the simulator's backboardd, so it is
+  not used; the render server's frame counters can't tell an unchanged
+  screen (one advances every vsync, the dirty count stays 0), so frames are
+  taken at 30 fps regardless; never faster (intervals ≥ 30 ms). Measured
+  with the keyboard up and two moving touches, 10 s windows, 3 interleaved
+  runs: app 43% → 35% of a core (11% idle; 12% with encoding switched off,
+  so capture + conversion ≈ 1%), recorder thread 0.9 → 0.3 ms CPU a frame,
+  Metal pass 0.06–0.09 ms GPU a frame, render server 26% → 28% (it now
+  draws the keyboard). Not yet measured on the phone, where H.264 is in
+  hardware.
 - Performance (`PerfRecorder`, `MainThreadSampler`): display-link frame times
   (hitch = frame more than 1.5 periods apart), main-thread stack every ~1 ms
   (suspend, `thread_get_state`, frame-pointer walk bounded to the main

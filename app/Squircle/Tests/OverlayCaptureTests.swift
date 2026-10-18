@@ -39,7 +39,7 @@ final class OverlayCaptureTests: XCTestCase {
     }
 
     func testScreenRecordingWithoutAnyPictureIsStoppedAndRemoved() async {
-        let producer = FakeProducer { .screen(url: $0, duration: 3, poster: nil) }
+        let producer = FakeProducer { .screen(url: $0, duration: 3) }
         let capture = session(producer)
         XCTAssertTrue(capture.start(.screen, below: UIWindow()))
         let attachment = await capture.stop(snapshot: nil)
@@ -61,7 +61,7 @@ final class OverlayCaptureTests: XCTestCase {
     }
 
     func testClosingTheOwnerStopsARunningRecording() {
-        let producer = FakeProducer { .screen(url: $0, duration: 1, poster: UIImage()) }
+        let producer = FakeProducer { .screen(url: $0, duration: 1) }
         let capture = session(producer)
         XCTAssertTrue(capture.start(.screen, below: UIWindow()))
         capture.cancel()

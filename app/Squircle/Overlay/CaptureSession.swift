@@ -3,13 +3,13 @@ import UIKit
 
 /// What a recorder hands over when it stops.
 enum CaptureOutput {
-    /// A video and, if it drew a frame, its first picture.
-    case screen(url: URL, duration: Double, poster: UIImage?)
+    /// A video; its thumbnail is the app as it looked when it stopped.
+    case screen(url: URL, duration: Double)
     case performance(url: URL, duration: Double, gaps: [FrameGap], hitches: Int)
 
     var url: URL {
         switch self {
-        case .screen(let url, _, _), .performance(let url, _, _, _): url
+        case .screen(let url, _), .performance(let url, _, _, _): url
         }
     }
 }
@@ -99,8 +99,8 @@ final class CaptureSession {
         switch output {
         case nil:
             return nil
-        case .screen(let url, let duration, let poster):
-            guard let poster = snapshot ?? poster else {
+        case .screen(let url, let duration):
+            guard let poster = snapshot else {
                 try? FileManager.default.removeItem(at: url)
                 return nil
             }
