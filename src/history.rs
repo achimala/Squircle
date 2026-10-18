@@ -348,7 +348,7 @@ async fn gather(root: &Path, scope: &Scope, terms: &[String], kinds: &[Kind], af
         }
     }
     if kinds.contains(&Kind::Commit) {
-        match git(&scope.root, &["log", "-n", "3000", "--format=%H%x1f%at%x1f%s%x1f%b%x1e"]).await {
+        match crate::git::text(&scope.root, &["log", "-n", "3000", "--format=%H%x1f%at%x1f%s%x1f%b%x1e"]).await {
             Ok(log) => for record in log.split('\x1e') {
                 let mut fields = record.trim_start_matches('\n').split('\x1f');
                 let (Some(sha), Some(at), Some(subject)) = (fields.next(), fields.next(), fields.next()) else { continue };
@@ -363,7 +363,7 @@ async fn gather(root: &Path, scope: &Scope, terms: &[String], kinds: &[Kind], af
         }
     }
     if kinds.contains(&Kind::Doc) && after.is_none() {
-        match git(&scope.root, &["ls-files", "-z", "--", "*.md"]).await {
+        match crate::git::text(&scope.root, &["ls-files", "-z", "--", "*.md"]).await {
             Ok(files) => for file in files.split('\0').filter(|f| !f.is_empty()).take(500) {
                 let path = scope.root.join(file);
                 if std::fs::metadata(&path).map_or(true, |m| m.len() > 2 * 1024 * 1024) { continue; }
@@ -382,21 +382,6 @@ async fn gather(root: &Path, scope: &Scope, terms: &[String], kinds: &[Kind], af
     Ok((items, unavailable))
 }
 
-/// Reads with git, running nothing else. The project's config and attributes
-/// can name an fsmonitor and external diff and text-conversion programs
-/// (callers pass `--no-ext-diff --no-textconv` where git would diff), and
-/// `GIT_*` variables can reconfigure or redirect git; none are honoured.
-async fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let mut command = tokio::process::Command::new("git");
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("GIT_") { command.env_remove(name); }
-    }
-    let output = command.env("GIT_TERMINAL_PROMPT", "0")
-        .args(["-c", "core.fsmonitor=false", "--no-pager", "-C"]).arg(root).args(args)
-        .stdin(std::process::Stdio::null()).kill_on_drop(true).output().await.context("running git")?;
-    ensure!(output.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
 
 /// A Markdown section: from a heading to the next heading of any level.
 #[derive(Debug, PartialEq)]
@@ -574,9 +559,9 @@ pub async fn show(root: &Path, scope: Option<&Scope>, reference: &str, max_chars
         Kind::Commit => {
             let scope = scope.context("Pass --thread or --project, or run in the app's folder, to show a commit")?;
             ensure!(!id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_hexdigit()), "A commit reference is a hex SHA");
-            let mut text = git(&scope.root, &["show", "--no-ext-diff", "--no-textconv", "--stat", "--format=commit %H%nDate: %ad%n%n%B", "--date=iso", id]).await?;
+            let mut text = crate::git::text(&scope.root, &["show", "--no-ext-diff", "--no-textconv", "--stat", "--format=commit %H%nDate: %ad%n%n%B", "--date=iso", id]).await?;
             if max_chars > text.len() {
-                let patch = git(&scope.root, &["show", "--no-ext-diff", "--no-textconv", "--format=", "--patch", id]).await.unwrap_or_default();
+                let patch = crate::git::text(&scope.root, &["show", "--no-ext-diff", "--no-textconv", "--format=", "--patch", id]).await.unwrap_or_default();
                 text += &format!("\n{}", cap(&patch, max_chars - text.len()));
             }
             let text = cap(&text, max_chars);

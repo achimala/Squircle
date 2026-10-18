@@ -961,11 +961,7 @@ pub fn cli_invocation(root: &Path, server: &str) -> String {
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let output = Process::new("git").arg("-C").arg(dir).args(args).output().await?;
-    if !output.status.success() {
-        bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(crate::git::text(dir, args).await?.trim().to_string())
 }
 
 /// The project root that contains `cwd` most closely, comparing resolved

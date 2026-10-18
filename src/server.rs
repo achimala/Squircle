@@ -1199,15 +1199,8 @@ async fn source_provenance(project: &std::path::Path) -> (Option<String>, Option
     let Some(directory) = project.parent() else {
         return (None, None);
     };
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let Some(revision) = git_output(
-        directory,
-        &["rev-parse", "--verify", "HEAD^{commit}"],
-        128,
-        deadline,
-    )
-    .await
-    else {
+    let limit = std::time::Duration::from_secs(5);
+    let Ok(revision) = crate::git::run(directory, &["rev-parse", "--verify", "HEAD^{commit}"], limit, 128).await else {
         return (None, None);
     };
     let Ok(revision) = String::from_utf8(revision) else {
@@ -1218,67 +1211,9 @@ async fn source_provenance(project: &std::path::Path) -> (Option<String>, Option
     {
         return (None, None);
     }
-    let dirty = git_output(
-        directory,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=normal",
-            "--ignore-submodules=none",
-        ],
-        1024 * 1024,
-        deadline,
-    )
-    .await
-    .map(|output| !output.is_empty());
+    let status = ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"];
+    let dirty = crate::git::run(directory, &status, limit, 1024 * 1024).await.ok().map(|output| !output.is_empty());
     (Some(revision.to_owned()), dirty)
-}
-
-async fn git_output(
-    directory: &std::path::Path,
-    arguments: &[&str],
-    max_bytes: u64,
-    deadline: tokio::time::Instant,
-) -> Option<Vec<u8>> {
-    use tokio::io::AsyncReadExt;
-    tokio::time::timeout_at(deadline, async {
-        let mut command = tokio::process::Command::new("/usr/bin/git");
-        command
-            .args(["-c", "core.fsmonitor=false"])
-            .arg("-C")
-            .arg(directory)
-            .args(arguments)
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .env_remove("GIT_COMMON_DIR")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true);
-        let mut child = command.spawn().ok()?;
-        let mut bytes = Vec::new();
-        child
-            .stdout
-            .take()?
-            .take(max_bytes + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .ok()?;
-        if bytes.len() as u64 > max_bytes {
-            let _ = child.kill().await;
-            return None;
-        }
-        if child.wait().await.ok()?.success() {
-            Some(bytes)
-        } else {
-            None
-        }
-    })
-    .await
-    .ok()
-    .flatten()
 }
 
 async fn cancel(
