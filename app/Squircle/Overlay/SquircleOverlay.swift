@@ -6,7 +6,8 @@ import UIKit
 enum OverlayRoute: Equatable {
     /// The bubble; tapped, it opens the panel where you left it. `docked`:
     /// you dragged its status line into the jelly, which keeps it in (only
-    /// brief news comes out) until you next open and close the panel.
+    /// brief news comes out) until you pull it back out or next open and
+    /// close the panel.
     case bubble(resume: Panel, docked: Bool)
     case panel(Panel)
 
@@ -29,6 +30,7 @@ enum OverlayRoute: Equatable {
     mutating func open() { self = .panel(panel) }
     mutating func close() { self = .bubble(resume: panel, docked: false) }
     mutating func dock() { if !isOpen { self = .bubble(resume: panel, docked: true) } }
+    mutating func undock() { if !isOpen { self = .bubble(resume: panel, docked: false) } }
 }
 
 /// The app's agent, over the app. One piece of glass is the bubble (what the
@@ -186,6 +188,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private var bubblePan: UIPanGestureRecognizer!
     /// Drags the status line into the jelly (docks it).
     private var pillPan: UIPanGestureRecognizer!
+    /// Pulls the docked line back out of the jelly (undocks it).
+    private var undockPan: UIPanGestureRecognizer!
     private var bubbleTap: UITapGestureRecognizer!
     private var bubblePress: UILongPressGestureRecognizer!
     /// A long press captures the app: the screen flashes, and its picture
@@ -280,13 +284,14 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         bubbleTap = UITapGestureRecognizer(target: self, action: #selector(openTapped))
         bubblePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
         pillPan = UIPanGestureRecognizer(target: self, action: #selector(pillDragged(_:)))
+        undockPan = UIPanGestureRecognizer(target: self, action: #selector(undockDragged(_:)))
         movePan = UIPanGestureRecognizer(target: self, action: #selector(glassDragged(_:)))
         backPan = UIPanGestureRecognizer(target: self, action: #selector(backDragged(_:)))
         bubblePress = UILongPressGestureRecognizer(target: self, action: #selector(bubblePressed(_:)))
         bubblePress.minimumPressDuration = 0.35
         // A tap waits only for the finger to lift before the press fails.
         bubbleTap.require(toFail: bubblePress)
-        for gesture in [bubbleTap, bubblePress, bubblePan, pillPan, movePan, backPan] as [UIGestureRecognizer] {
+        for gesture in [bubbleTap, bubblePress, bubblePan, pillPan, undockPan, movePan, backPan] as [UIGestureRecognizer] {
             gesture.delegate = self
             glass.addGestureRecognizer(gesture)
         }
@@ -1205,10 +1210,13 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         if gesture === bubblePress { return !route.isOpen && capture.recording == nil }
         if gesture === bubbleTap { return !route.isOpen }
         // A sideways drag from the line toward the jelly docks the line;
+        // docked, a sideways drag away from the jelly pulls it back out;
         // any other drag moves the bubble.
-        if gesture === bubblePan || gesture === pillPan {
+        if gesture === bubblePan || gesture === pillPan || gesture === undockPan {
             guard !route.isOpen else { return false }
-            return (gesture === pillPan) == startsDocking(gesture as! UIPanGestureRecognizer)
+            let pan = gesture as! UIPanGestureRecognizer
+            let docking = startsDocking(pan), undocking = !docking && startsUndocking(pan)
+            return gesture === pillPan ? docking : gesture === undockPan ? undocking : !docking && !undocking
         }
         // Where the finger went down, not where it is once the pan is
         // recognized: a quick drag has already left the strip by then.
@@ -1427,6 +1435,66 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         return onLine && v.x * (right ? 1 : -1) > abs(v.y)
     }
 
+    /// Whether a pan on the docked jelly pulls its line back out: there is a
+    /// line to show, the jelly holds nothing else just now (no news), and
+    /// the finger heads sideways away from the jelly's edge.
+    private func startsUndocking(_ pan: UIPanGestureRecognizer) -> Bool {
+        guard route.isDocked, capture.recording == nil, bubble.headline?.isEmpty != false,
+              currentActivity().line != nil else { return false }
+        let v = pan.velocity(in: glass)
+        return v.x * (anchor?.right ?? true ? -1 : 1) > abs(v.y)
+    }
+
+    /// The reverse of docking: the line comes out of the jelly with the
+    /// finger, the pill growing from the jelly's neck; past its full length
+    /// it gives a little. Let go past halfway (or flung), it springs out
+    /// with the finger's speed; otherwise it is sucked back in, docked.
+    /// The route says undocked from the first frame (that is what shows the
+    /// line) and docks again only if the pull falls short.
+    @objc private func undockDragged(_ gesture: UIPanGestureRecognizer) {
+        let away: CGFloat = anchor?.right ?? true ? -1 : 1
+        let travel = gesture.translation(in: view).x * away
+        switch gesture.state {
+        case .began:
+            dragStart = frame.value
+            frame.hold(dragStart)
+            route.undock()
+            notice = nil
+            render()
+            undockMoved(travel)
+        case .changed:
+            undockMoved(travel)
+            glass.look(at: gesture.location(in: glass))
+        case .ended, .cancelled, .failed:
+            undockReleased(travel, velocity: gesture.velocity(in: view).x * away, undocking: gesture.state == .ended)
+        default: break
+        }
+    }
+
+    /// The line `travel` points out of the jelly (negative: pushed back in).
+    private func undockMoved(_ travel: CGFloat) {
+        let right = anchor?.right ?? true, room = max(1, bubbleFrame.width - dragStart.width)
+        // Out as far as the line is long; beyond it, a little give.
+        let shift = travel <= room ? max(0, travel) : room + 12 * tanh((travel - room) / 80)
+        let width = dragStart.width + shift
+        frame.hold(CGRect(x: right ? dragStart.maxX - width : dragStart.minX, y: dragStart.minY, width: width, height: dragStart.height))
+    }
+
+    private func undockReleased(_ travel: CGFloat, velocity v: CGFloat, undocking: Bool) {
+        let right = anchor?.right ?? true, room = max(1, bubbleFrame.width - dragStart.width)
+        frame.release()
+        // The edge away from the jelly moves with the finger: on the right,
+        // the frame's origin; on the left, only its width.
+        let out = undocking && travel + v * 0.15 > room * 0.5
+        if out {
+            Theme.selectionHaptic()
+        } else {
+            route.dock()
+            render()
+        }
+        retarget(velocity: right ? CGPoint(x: -v, y: 0) : .zero, sizeVelocity: CGSize(width: v, height: 0))
+    }
+
     /// The line follows the finger into the jelly, shortening from its far
     /// end; let go past halfway (or flung), it is sucked in with the
     /// finger's speed and stays docked until the panel next opens and
@@ -1607,8 +1675,8 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         }
         // `SQUIRCLE_OVERLAY_GESTURES=1`: drags as a finger would, through
         // the gestures' own steps (the simulator can't be touched by a
-        // script here): the line into the jelly, then open, the top edge
-        // up and down, the bottom edge up and down, close.
+        // script here): the line into the jelly and back out, then open,
+        // the top edge up and down, the bottom edge up and down, close.
         if environment["SQUIRCLE_OVERLAY_GESTURES"] == "1" {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(6))
@@ -1670,7 +1738,19 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let room = dragStart.width - Self.creatureCell
         await frames(50) { self.pillMoved(room * 0.7 * $0) }
         pillReleased(room * 0.7, velocity: 300, docking: true)
-        try? await Task.sleep(for: .seconds(3))
+        try? await Task.sleep(for: .seconds(2))
+        // Pulled out a little: it is sucked back in. Then pulled past its
+        // length (it gives) and let go: it comes out.
+        for (reach, velocity) in [(0.3, 0.0), (1.25, 0.0)] as [(CGFloat, CGFloat)] {
+            dragStart = frame.value
+            frame.hold(dragStart)
+            route.undock()
+            render()
+            let out = bubbleFrame.width - dragStart.width
+            await frames(50) { self.undockMoved(out * reach * $0) }
+            undockReleased(out * reach, velocity: velocity, undocking: true)
+            try? await Task.sleep(for: .seconds(2))
+        }
         open()
         try? await Task.sleep(for: .seconds(2.5))
         for (edge, dy) in [(Edge.top, -160.0), (.top, 160), (.bottom, -150), (.bottom, 150)] as [(Edge, CGFloat)] {
