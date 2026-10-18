@@ -104,12 +104,12 @@ final class CaptureSession {
                 try? FileManager.default.removeItem(at: url)
                 return nil
             }
-            let label = Self.clock(duration)
+            let label = Elapsed.clock(duration.rounded())
             return ImageAttachment(capture: .init(kind: .video, file: url, label: label),
                                    thumbnail: Self.badge(poster, text: label, symbol: "play.fill"))
         case .performance(let url, let duration, let gaps, let hitches):
             let count = hitches == 1 ? "1 hitch" : "\(hitches) hitches"
-            return ImageAttachment(capture: .init(kind: .performance, file: url, label: Self.clock(duration) + " · " + count),
+            return ImageAttachment(capture: .init(kind: .performance, file: url, label: Elapsed.clock(duration.rounded()) + " · " + count),
                                    thumbnail: Self.chart(gaps, duration: duration, hitches: count))
         }
     }
@@ -127,11 +127,6 @@ final class CaptureSession {
             break
         }
         state = .idle
-    }
-
-    static func clock(_ seconds: Double) -> String {
-        let whole = Int(seconds.rounded())
-        return String(format: "%d:%02d", whole / 60, whole % 60)
     }
 
     /// The screen's top, wide enough for the field's tray to show, with a
@@ -181,7 +176,7 @@ final class CaptureSession {
             // Top left, clear of the field's remove button at the top right.
             let title = NSMutableAttributedString(string: hitches, attributes: [
                 .font: Theme.font(.subheadline, 15, .semibold), .foregroundColor: UIColor.label])
-            title.append(NSAttributedString(string: "  " + clock(duration), attributes: [
+            title.append(NSAttributedString(string: "  " + Elapsed.clock(duration.rounded()), attributes: [
                 .font: UIFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium), .foregroundColor: UIColor.secondaryLabel]))
             title.draw(at: CGPoint(x: 10, y: 10))
         }

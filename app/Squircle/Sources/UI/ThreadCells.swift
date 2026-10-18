@@ -1257,8 +1257,7 @@ final class LiveCapsule: UIView {
 
     private func tick() {
         guard let started else { elapsed.text = nil; return }
-        let seconds = max(0, Date.now.timeIntervalSince(started))
-        let text = String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+        let text = Elapsed.clock(Date.now.timeIntervalSince(started))
         if elapsed.text != text {
             elapsed.text = text
             setNeedsLayout()

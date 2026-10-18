@@ -14,18 +14,26 @@ struct TurnSummary: Equatable {
 
     var title: String {
         guard let duration, duration >= 1 else { return "Worked" }
-        return "Worked for " + TurnSummary.format(duration)
+        return "Worked for " + Elapsed.words(duration)
     }
     var detail: String {
         var parts = ["\(steps) step\(steps == 1 ? "" : "s")"]
         if files > 0 { parts.append("\(files) file\(files == 1 ? "" : "s") changed") }
         return parts.joined(separator: " · ")
     }
-    static func format(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds.rounded())
-        if total < 60 { return "\(total)s" }
-        if total < 3600 { return "\(total / 60)m \(total % 60)s" }
-        return "\(total / 3600)h \(total % 3600 / 60)m"
+}
+
+/// How long something took or has been running.
+enum Elapsed {
+    /// "45s", "1m 5s", "2m", "1h 15m".
+    static func words(_ seconds: TimeInterval) -> String {
+        Duration.seconds(Int(seconds.rounded()))
+            .formatted(.units(allowed: [.hours, .minutes, .seconds], width: .narrow, maximumUnitCount: 2))
+    }
+    /// "0:07", "12:34", "1:15:03".
+    static func clock(_ seconds: TimeInterval) -> String {
+        let whole = Int(max(0, seconds))
+        return Duration.seconds(whole).formatted(.time(pattern: whole < 3600 ? .minuteSecond : .hourMinuteSecond))
     }
 }
 
