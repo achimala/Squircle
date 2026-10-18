@@ -35,7 +35,7 @@ pub fn captures_dir(root: &Path) -> PathBuf {
 pub fn store(root: &Path, kind: &str, bytes: &[u8]) -> Result<PathBuf> {
     ensure!(!bytes.is_empty() && bytes.len() <= MAX_UPLOAD_BYTES, "A capture must be between 1 byte and 300 MB");
     let staged = staging_path(root)?;
-    let stored = crate::media::create_private(&staged)
+    let stored = crate::store::create_private(&staged)
         .and_then(|mut file| Ok(file.write_all(bytes)?))
         .and_then(|_| store_file(root, kind, &staged));
     if stored.is_err() {
@@ -81,12 +81,7 @@ pub fn store_file(root: &Path, kind: &str, staged: &Path) -> Result<PathBuf> {
         _ => bail!("kind must be video or performance"),
     };
     let path = private_captures(root)?.join(format!("{}.{extension}", uuid::Uuid::new_v4()));
-    fs::rename(staged, &path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    }
+    crate::store::publish_private(staged, &path)?;
     Ok(path)
 }
 

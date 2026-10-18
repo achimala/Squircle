@@ -714,6 +714,27 @@ pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 fn persist_json(path: &Path, value: &impl Serialize, replace: bool) -> Result<bool> {
+    write_private(path, replace, |file| {
+        serde_json::to_writer_pretty(&mut *file, value)?;
+        Ok(file.write_all(b"\n")?)
+    })
+}
+
+/// A new private file (0600); fails if anything, a symlink included, is
+/// already at `path`.
+pub(crate) fn create_private(path: &Path) -> Result<File> {
+    private_options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("Creating {}", path.display()))
+}
+
+/// Writes a private file whole: `write` fills a hidden file beside `path`,
+/// which is synced and then moved in with its directory synced, so a reader
+/// or a crash sees the old contents or the new, never part. With `replace`
+/// false an existing `path` is kept and `false` returned.
+pub(crate) fn write_private(path: &Path, replace: bool, write: impl FnOnce(&mut File) -> Result<()>) -> Result<bool> {
     let parent = path.parent().context("storage path has no parent")?;
     check_dir(parent)?;
     if let Ok(metadata) = fs::symlink_metadata(path) {
@@ -724,12 +745,8 @@ fn persist_json(path: &Path, value: &impl Serialize, replace: bool) -> Result<bo
     }
     let temporary = parent.join(format!(".{}.tmp", Uuid::new_v4()));
     let result = (|| -> Result<bool> {
-        let mut file = private_options()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        serde_json::to_writer_pretty(&mut file, value)?;
-        file.write_all(b"\n")?;
+        let mut file = create_private(&temporary)?;
+        write(&mut file)?;
         file.sync_all()?;
         if replace {
             fs::rename(&temporary, path)?;
@@ -749,6 +766,16 @@ fn persist_json(path: &Path, value: &impl Serialize, replace: bool) -> Result<bo
     })();
     let _ = fs::remove_file(&temporary);
     result
+}
+
+/// Moves a finished file (written elsewhere on the same volume) to `path` as
+/// a private file, durably: synced, renamed, and its new directory synced.
+pub(crate) fn publish_private(finished: &Path, path: &Path) -> Result<()> {
+    let file = private_options().read(true).open(finished)?;
+    check_private_file(&file)?;
+    file.sync_all()?;
+    fs::rename(finished, path)?;
+    sync_dir(path.parent().context("storage path has no parent")?)
 }
 
 fn sync_dir(path: &Path) -> Result<()> {

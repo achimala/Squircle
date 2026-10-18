@@ -5,7 +5,7 @@
 //! reported unavailable and a new publication repairs it.
 use crate::{
     model::{BuildRequest, Job, PreviewArtifact, PreviewSource, PreviewState, now},
-    store::{Store, atomic_json, check_dir, open_private_read, private_dir, read_json},
+    store::{Store, atomic_json, check_dir, open_private_read, private_dir, read_json, write_private},
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -329,19 +329,8 @@ pub fn stage_preview(root: &Path, id: &str, file: &Path) -> Result<StagedPreview
     private_dir(&previews)?;
     let preview_id = Uuid::new_v4().to_string();
     let path = preview_path(&directory, &preview_id);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut output = options.open(&path)?;
-    let staged = StagedPreview { id: preview_id, path: Some(path) };
-    output.write_all(&bytes)?;
-    output.sync_all()?;
-    File::open(&previews)?.sync_all()?;
-    Ok(staged)
+    ensure!(write_private(&path, false, |output| Ok(output.write_all(&bytes)?))?, "preview already exists");
+    Ok(StagedPreview { id: preview_id, path: Some(path) })
 }
 
 /// Points the app at a staged preview. Works when the previous preview's bytes

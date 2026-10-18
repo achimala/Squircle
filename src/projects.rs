@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     ffi::OsString,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -451,15 +451,7 @@ pub fn import_inspected(store: &Store, inspection: &Inspection, name: &str) -> R
         }
         let mut bytes = Vec::new();
         plist::Value::Dictionary(dict).to_writer_xml(&mut bytes)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        File::open(&directory)?.sync_all()?;
+        crate::store::write_private(&path, false, |file| Ok(file.write_all(&bytes)?))?;
         path
     };
     apps::set_build_request(

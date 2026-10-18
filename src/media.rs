@@ -61,19 +61,6 @@ fn private_directory(root: &Path, thread: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// A new private file (0600); fails if anything, a symlink included, is
-/// already at `path`.
-pub(crate) fn create_private(path: &Path) -> Result<File> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    options.open(path).with_context(|| format!("Creating {}", path.display()))
-}
-
 fn kind(path: &Path) -> Result<(&'static str, &'static str)> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
     Ok(match ext.as_str() {
@@ -123,24 +110,11 @@ fn store_in(dir: &Path, thread: &str, file: &Path, caption: Option<&str>, simula
     let id = uuid::Uuid::new_v4().to_string();
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_ascii_lowercase();
     let stored = dir.join(format!("{id}.{ext}"));
-    let partial = dir.join(format!(".{id}.partial"));
     if take {
-        fs::rename(file, &stored).context("Moving the recording into media")?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&stored, fs::Permissions::from_mode(0o600))?;
-        }
+        crate::store::publish_private(file, &stored).context("Moving the recording into media")?;
     } else {
-        let copied = (|| -> Result<()> {
-            std::io::copy(&mut File::open(file)?, &mut create_private(&partial)?)?;
-            Ok(fs::rename(&partial, &stored)?)
-        })()
-        .context("Copying media");
-        if copied.is_err() {
-            let _ = fs::remove_file(&partial);
-        }
-        copied?;
+        crate::store::write_private(&stored, true, |out| Ok(std::io::copy(&mut File::open(file)?, out).map(|_| ())?))
+            .context("Copying media")?;
     }
     // A recording belongs where its session began.
     let created_at = match &simulator {
@@ -159,9 +133,8 @@ fn store_in(dir: &Path, thread: &str, file: &Path, caption: Option<&str>, simula
         simulator,
     };
     let record = dir.join(format!("{id}.json"));
-    let partial = dir.join(format!(".{id}.json.partial"));
-    create_private(&partial)?.write_all(&serde_json::to_vec_pretty(&media)?)?;
-    fs::rename(&partial, &record)?;
+    let bytes = serde_json::to_vec_pretty(&media)?;
+    crate::store::write_private(&record, true, |out| Ok(out.write_all(&bytes)?))?;
     Ok(media)
 }
 

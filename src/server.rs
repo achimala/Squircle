@@ -1557,7 +1557,7 @@ async fn upload_capture(
     }
     let root = state.files.root.clone();
     let staged = crate::perf::staging_path(&root).map_err(ApiError::internal)?;
-    let file = crate::media::create_private(&staged).map_err(ApiError::internal)?;
+    let file = crate::store::create_private(&staged).map_err(ApiError::internal)?;
     // Removes the staged file unless it was published; also on cancellation.
     let guard = StagedFile(Some(staged.clone()));
     write_bounded(request.into_body(), tokio::fs::File::from_std(file), max).await?;

@@ -186,10 +186,8 @@ pub async fn capture(
     .await?;
     let bytes = fs::read(&temporary)?;
     validate_png(&bytes)?;
-    fs::File::open(&temporary)?.sync_all()?;
     let path = job_dir.join("preview.png");
-    fs::rename(&temporary, &path)?;
-    fs::File::open(job_dir)?.sync_all()?;
+    crate::store::publish_private(&temporary, &path)?;
     Ok(Capture {
         path,
         captured_at: now(),
