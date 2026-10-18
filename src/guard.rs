@@ -623,9 +623,7 @@ mod tests {
             format!("env {cli} history search x"),
             format!("{cli} history search x --server http://evil"),
             format!("{cli} history search x --data-dir=/tmp/d"),
-            format!(
-                "/tmp/squircle --data-dir /Users/me/.squircle --server http://127.0.0.1:8787 history search x"
-            ),
+            "/tmp/squircle --data-dir /Users/me/.squircle --server http://127.0.0.1:8787 history search x".to_string(),
             format!("{cli} notes add 'x'"),
             format!("{cli} thread spawn --coordinator t --title x --branch b --prompt p"),
             format!("{cli} task update t --status done"),
@@ -640,7 +638,7 @@ mod tests {
             format!("{cli} history search $HOME"),
             format!("{cli} history search *"),
             format!("{cli} history search 'unterminated"),
-            format!("{cli}"),
+            cli.to_string(),
             "cat AGENTS.md".into(),
             "rg --pre ./run x".into(),
             "codex exec 'summarize'".into(),

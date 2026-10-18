@@ -8,6 +8,16 @@ Reviewed 2026-10-18 on `oss-review`, source commit `9c63bec7baf55f1e92a78fc3dcd3
 
 This is a **publish-after-targeted-cleanup** verdict, not a recommendation to rewrite the product. T3 ownership, the agent-neutral CLI, UIKit layout, the Clay design, still device portraits, shared conversations, simulator leases, team-shared overlay credentials, and single-owner Rust state are intentional decisions to preserve.
 
+## Rust cleanup progress (2026-10-18)
+
+- **Step 6, Rust formatting/lints and Q1 Rust coverage: done.** Rust 2024
+  rustfmt baseline is isolated in `2d5ab8a`. Clippy passes with `--all-targets
+  -- -D warnings`; only three documented inline-state size allowances remain.
+  The ownership scan parses test-module spans rather than discarding the file
+  suffix; a regression covers later and nested production code. Locked offline
+  tests pass with local fake-server sockets/process inspection permitted.
+  No live service, T3, provider, simulator or signing checks were run.
+
 ## Scope, method, and verification
 
 Read `AGENTS.md` and `README.md` first. Inventoried all 184 tracked files: 47 Rust files, 71 Swift files, the C overlay loader, project/build configuration, plugin templates, scripts, examples, and documentation. The Rust/Swift/C files total 53,731 lines, including tests. Reviewed subsystem boundaries and representative execution paths, searched the complete tracked tree for references/configuration/secrets, traced superseded implementations through Git, and ran the checks below. This is not a claim that every branch or runtime combination was exercised.

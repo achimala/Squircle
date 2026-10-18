@@ -875,6 +875,12 @@ struct State {
     threads: Option<Arc<dyn Threads>>,
 }
 
+type DeliveryPlan = (
+    Vec<(u32, Outgoing)>,
+    Vec<(String, StepKey)>,
+    Option<Instant>,
+);
+
 impl State {
     /// A phone that could show this app's activity: one running or starting,
     /// or a start token while Squircle isn't open on it.
@@ -1023,14 +1029,7 @@ impl State {
 
     /// One pass of the reconciler: the sends and step lookups due now, and
     /// when the next pass is due.
-    fn reconcile(
-        &mut self,
-        timing: Timing,
-    ) -> (
-        Vec<(u32, Outgoing)>,
-        Vec<(String, StepKey)>,
-        Option<Instant>,
-    ) {
+    fn reconcile(&mut self, timing: Timing) -> DeliveryPlan {
         let now = Instant::now();
         let mut next: Option<Instant> = None;
         let mut due = |at: Instant| next = Some(next.map_or(at, |n: Instant| n.min(at)));

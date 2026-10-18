@@ -68,7 +68,7 @@ pub(crate) async fn query(sql: &str, limit: std::time::Duration) -> Result<Vec<V
     if output.stdout.iter().all(u8::is_ascii_whitespace) {
         return Ok(Vec::new());
     }
-    Ok(serde_json::from_slice(&output.stdout).context("decoding sqlite3 output")?)
+    serde_json::from_slice(&output.stdout).context("decoding sqlite3 output")
 }
 
 /// Keeps what describes a step; long text is capped so a large file write

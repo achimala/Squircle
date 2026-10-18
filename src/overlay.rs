@@ -322,12 +322,12 @@ pub async fn inject(
     // 60 Hz on ProMotion iPhones unless the app opts in.
     const FRAME_RATE_KEY: &str = "CADisableMinimumFrameDurationOnPhone";
     let mut info = info;
-    if let Some(dict) = info.as_dictionary_mut() {
-        if dict.get(FRAME_RATE_KEY).and_then(|v| v.as_boolean()) != Some(true) {
-            dict.insert(FRAME_RATE_KEY.into(), true.into());
-            info.to_file_binary(app.join("Info.plist"))?;
-            writeln!(log, "Allowed 120 Hz display links ({FRAME_RATE_KEY})")?;
-        }
+    if let Some(dict) = info.as_dictionary_mut()
+        && dict.get(FRAME_RATE_KEY).and_then(|v| v.as_boolean()) != Some(true)
+    {
+        dict.insert(FRAME_RATE_KEY.into(), true.into());
+        info.to_file_binary(app.join("Info.plist"))?;
+        writeln!(log, "Allowed 120 Hz display links ({FRAME_RATE_KEY})")?;
     }
 
     let destination = app.join("Frameworks").join(FRAMEWORK);

@@ -34,6 +34,10 @@ fn is_queued(d: &Delivery) -> bool {
 /// exist without the fresh start it belongs to.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(tag = "state", rename_all = "kebab-case")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "One value per app; keep the durable replacement plan inline rather than allocating every transition."
+)]
 pub enum Lifecycle {
     /// Reserved before T3 is asked to create the thread, so a retry or a
     /// restart finishes that thread instead of creating a second agent.
@@ -150,6 +154,10 @@ pub enum Order {
 }
 
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Short-lived reducer input; boxing the plan would add allocation to every handoff."
+)]
 pub enum Event {
     /// Creation: whether T3's shell has the reserved thread, and the
     /// creation a first attempt sends.

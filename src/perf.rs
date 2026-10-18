@@ -384,10 +384,10 @@ async fn symbol_file(
         }
     }
     let binary = Path::new(&image.path);
-    if binary.is_file() {
-        if let Some(found) = matching(binary, &uuid, uuids).await {
-            return Ok((found, "the binary on this Mac".into()));
-        }
+    if binary.is_file()
+        && let Some(found) = matching(binary, &uuid, uuids).await
+    {
+        return Ok((found, "the binary on this Mac".into()));
     }
     Err(if given.is_empty() {
         String::new()
@@ -468,17 +468,17 @@ async fn atos((file, arch): &Symbols, load: &str, addresses: &[u64]) -> Vec<Opti
 /// "Foo.bar() (in App) (Foo.swift:12)" → "Foo.bar() Foo.swift:12".
 fn tidy(atos_line: &str) -> String {
     let mut name = atos_line.to_owned();
-    if let Some(start) = name.find(" (in ") {
-        if let Some(end) = name[start + 5..].find(')') {
-            name.replace_range(start..start + 5 + end + 1, "");
-        }
+    if let Some(start) = name.find(" (in ")
+        && let Some(end) = name[start + 5..].find(')')
+    {
+        name.replace_range(start..start + 5 + end + 1, "");
     }
-    if name.ends_with(')') {
-        if let Some(open) = name.rfind(" (") {
-            let location = name[open + 2..name.len() - 1].to_owned();
-            if location.contains(':') {
-                name = format!("{} {}", &name[..open], location);
-            }
+    if name.ends_with(')')
+        && let Some(open) = name.rfind(" (")
+    {
+        let location = name[open + 2..name.len() - 1].to_owned();
+        if location.contains(':') {
+            name = format!("{} {}", &name[..open], location);
         }
     }
     name

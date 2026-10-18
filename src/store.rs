@@ -28,6 +28,9 @@ pub struct Store {
     pub settings: Settings,
 }
 
+/// Loaded jobs and rejected files, reported separately without hiding corruption.
+pub type JobScan = (Vec<Job>, Vec<(String, anyhow::Error)>);
+
 impl Store {
     pub fn open(root: PathBuf) -> Result<Self> {
         private_dir(&root)?;
@@ -99,7 +102,7 @@ impl Store {
     }
 
     /// Valid job records, newest first, and the invalid ones with their errors.
-    pub fn scan_jobs(&self) -> Result<(Vec<Job>, Vec<(String, anyhow::Error)>)> {
+    pub fn scan_jobs(&self) -> Result<JobScan> {
         let mut jobs = Vec::new();
         let mut invalid = Vec::new();
         for entry in fs::read_dir(self.root.join("jobs"))? {

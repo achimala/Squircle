@@ -181,7 +181,7 @@ pub fn list(root: &Path, thread: &str) -> Result<Vec<Media>> {
 }
 
 pub fn list_in(dir: &Path) -> Result<Vec<Media>> {
-    let Ok(entries) = fs::read_dir(&dir) else {
+    let Ok(entries) = fs::read_dir(dir) else {
         return Ok(Vec::new());
     };
     let mut items: Vec<Media> = entries

@@ -33,20 +33,42 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// The file without its test module (`#[cfg(test)]` then `mod tests`).
-fn without_tests(text: &str) -> &str {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.iter().enumerate().find(|(i, line)| {
-        line.trim() == "#[cfg(test)]"
-            && lines[i + 1..]
-                .iter()
-                .take(4)
-                .any(|l| l.trim_start().starts_with("mod tests"))
-    });
-    match start {
-        Some((i, _)) => &text[..lines[..i].iter().map(|l| l.len() + 1).sum::<usize>()],
-        None => text,
+/// Skip only the parsed test modules, including nested ones. A suffix after a
+/// test module is still production code. Parsing avoids braces inside strings,
+/// comments and macro bodies accidentally hiding that suffix.
+fn test_lines(text: &str) -> Vec<std::ops::RangeInclusive<usize>> {
+    use syn::{spanned::Spanned, visit::Visit};
+    #[derive(Default)]
+    struct Tests(Vec<std::ops::RangeInclusive<usize>>);
+    impl<'ast> Visit<'ast> for Tests {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            let test_only = item.attrs.iter().any(|attr| {
+                attr.path().is_ident("cfg")
+                    && attr
+                        .parse_args::<syn::Path>()
+                        .is_ok_and(|p| p.is_ident("test"))
+            });
+            if test_only {
+                self.0
+                    .push(item.span().start().line..=item.span().end().line);
+            } else {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
     }
+    let mut tests = Tests::default();
+    tests.visit_file(&syn::parse_file(text).expect("valid Rust source"));
+    tests.0
+}
+
+#[test]
+fn test_exclusion_keeps_later_production_code() {
+    let source = "#[cfg(test)]\nmod tests { const S: &str = r#\"}\"#; }\nfn later() {}\nmod nested {\n#[cfg(test)] mod tests {}\nfn also_later() {}\n}";
+    let skipped = test_lines(source);
+    assert!(skipped.iter().any(|r| r.contains(&2)));
+    assert!(!skipped.iter().any(|r| r.contains(&3)));
+    assert!(skipped.iter().any(|r| r.contains(&5)));
+    assert!(!skipped.iter().any(|r| r.contains(&6)));
 }
 
 #[test]
@@ -62,7 +84,11 @@ fn the_service_shares_state_only_through_owners() {
             .to_string_lossy()
             .into_owned();
         let text = std::fs::read_to_string(&file).unwrap();
-        for (number, line) in without_tests(&text).lines().enumerate() {
+        let skipped = test_lines(&text);
+        for (number, line) in text.lines().enumerate() {
+            if skipped.iter().any(|range| range.contains(&(number + 1))) {
+                continue;
+            }
             let code = line.split("//").next().unwrap_or("");
             for word in BANNED.iter().filter(|word| code.contains(*word)) {
                 if !ALLOWED

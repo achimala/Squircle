@@ -154,7 +154,7 @@ fn issue(line: &str, root: Option<&str>) -> Option<Issue> {
         });
     }
     // A tool prefix such as `clang` or `xcodebuild`; anything with spaces is prose.
-    (!location.contains(' ')).then(|| Issue {
+    (!location.contains(' ')).then_some(Issue {
         message,
         file: None,
         line: None,

@@ -1008,10 +1008,10 @@ async fn install_evidence_requires_a_complete_transfer() {
         let read = socket.read(&mut buffer).await.unwrap();
         assert!(read > 0, "connection closed early");
         received.extend_from_slice(&buffer[..read]);
-        if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
-            if received.len() >= end + 4 + fixture.ipa_bytes.len() {
-                break end + 4;
-            }
+        if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n")
+            && received.len() >= end + 4 + fixture.ipa_bytes.len()
+        {
+            break end + 4;
         }
     };
     assert_eq!(&received[head_end..], fixture.ipa_bytes.as_slice());

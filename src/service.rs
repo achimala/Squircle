@@ -201,7 +201,9 @@ fn invocation(pid: u32) -> Result<Invocation> {
 /// `KERN_PROCARGS2`: argc, the executable path and NUL padding, then argc
 /// arguments and the environment, each NUL-terminated; an empty string ends
 /// the environment (the kernel's own strings follow).
-fn parse_procargs(raw: &[u8]) -> Result<(Vec<OsString>, Vec<(OsString, OsString)>)> {
+type ProcessArgs = (Vec<OsString>, Vec<(OsString, OsString)>);
+
+fn parse_procargs(raw: &[u8]) -> Result<ProcessArgs> {
     ensure!(raw.len() >= 4, "Truncated process arguments");
     let argc = i32::from_ne_bytes(raw[..4].try_into()?) as usize;
     let mut strings = raw[4..].split(|b| *b == 0);

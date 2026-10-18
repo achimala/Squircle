@@ -87,6 +87,10 @@ pub struct Provenance {
 /// A job's lifecycle. Each phase carries exactly what it has: only a
 /// succeeded job has artifacts, and only it can have a preview.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The job owns its result inline; the queue is capped and splitting storage obscures that ownership."
+)]
 pub enum JobPhase {
     Queued,
     Running,

@@ -38,5 +38,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit"] }
 http-body-util = "0.1"
 tempfile = "3"
