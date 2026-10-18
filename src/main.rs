@@ -693,12 +693,7 @@ enum ServiceCommand {
 /// Whether `server` is a service on this Mac, which local-only commands
 /// (`media`) can stand in for by writing its data directory.
 fn local_server(server: &str) -> bool {
-    url::Url::parse(server).is_ok_and(|url| match url.host() {
-        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    })
+    url::Url::parse(server).is_ok_and(|url| url.host().is_some_and(|host| squircle::origin::loopback(&host)))
 }
 
 fn root(cli: &Cli) -> Result<PathBuf> {
@@ -780,15 +775,7 @@ async fn request(
     } else {
         store.settings.control_token
     };
-    let url = url::Url::parse(&cli.server)?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        bail!("Invalid service URL");
-    }
+    let origin = squircle::origin::credential_origin(&cli.server, "--server")?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(60))
@@ -796,7 +783,7 @@ async fn request(
     let mut request = client
         .request(
             method,
-            format!("{}{}", cli.server.trim_end_matches('/'), path),
+            format!("{origin}{path}"),
         )
         .bearer_auth(key);
     if let Some(payload) = payload {

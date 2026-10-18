@@ -34,7 +34,9 @@ impl T3Config {
         if !path.try_exists()? {
             bail!("Squircle is not paired with T3. Run: squircle t3 connect --url http://127.0.0.1:3773 (reads a T3 pairing token on stdin)");
         }
-        read_json(&path)
+        let config: Self = read_json(&path)?;
+        crate::origin::credential_origin(&config.url, "T3 URL in t3.json")?;
+        Ok(config)
     }
 }
 
@@ -48,11 +50,7 @@ fn http_client() -> Result<reqwest::Client> {
 /// Exchanges a one-time T3 pairing token for a session scoped to orchestration
 /// read/operate, and saves it privately.
 pub async fn pair(root: &Path, url: &str, pairing_token: &str) -> Result<T3Config> {
-    let url = url.trim_end_matches('/').to_string();
-    let parsed = url::Url::parse(&url).context("Invalid T3 URL")?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.path() != "/" && !parsed.path().is_empty() {
-        bail!("T3 URL must be an origin such as http://127.0.0.1:3773");
-    }
+    let url = crate::origin::credential_origin(url, "T3 URL")?;
     let response = http_client()?
         .post(format!("{url}/oauth/token"))
         .form(&[
