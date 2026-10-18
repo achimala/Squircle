@@ -54,7 +54,7 @@ clients cannot connect to nightly servers. [Stable release](https://github.com/p
 1. **Prove stock T3 before replacing the client.** Run a disposable T3 environment
    against a test checkout, connect its iPhone app using the existing private
    network, and record server/client/provider versions. Configure Codex's binary
-   as `/Users/anshu/.local/bin/codex`. Verify ChatGPT and Claude Max logins in the
+   explicitly if an older one is earlier on PATH. Verify ChatGPT and Claude subscription logins in the
    actual server context and check inherited API-key overrides. Keep existing
    services and routes intact; use a separate endpoint for the trial.
 2. **Run one complete task per provider.** Make a visible UI change, build and

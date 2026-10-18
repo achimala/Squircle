@@ -368,7 +368,7 @@ Paths in this section are relative to `app/Squircle/`.
 
 **Severity: low · Effort: M**
 
-**Evidence:** `Sources/SquircleModel.swift:694` and `:899-901` embed `/Users/anshu/Documents/ChatGPT/RemoteAppDev/...` in worker prompts. By contrast, `src/agents.rs:160-165` constructs an invocation for the actual executable, data root and server.
+**Evidence:** `Sources/SquircleModel.swift:694` and `:899-901` embed the maintainer's absolute checkout path in worker prompts. By contrast, `src/agents.rs:160-165` constructs an invocation for the actual executable, data root and server.
 
 **Impact:** a client paired to a relocated checkout/service or another Mac can send workers to a nonexistent binary or the wrong data store. Two instruction generators also drift independently.
 

@@ -18,7 +18,7 @@ HTTP contract tests cover token separation, imported IPA byte preservation, mani
 
 ## Signing and build evidence
 
-The probe's signed archive and `release-testing` export succeeded under Xcode 27.1. The exported app passed `codesign --verify --deep --strict`; its arm64 binary and dSYM UUIDs match. The profile belongs to Dreamslate Inc. (`2F26US4NAU`), includes one device, expires 2027-07-25 and has `get-task-allow=false`. Subsequent phone installation was separately confirmed with Wi-Fi off. [Exact evidence](validation.md)
+The probe's signed archive and `release-testing` export succeeded under Xcode 27.1. The exported app passed `codesign --verify --deep --strict`; its arm64 binary and dSYM UUIDs match. The profile belongs to the maintainer's team (`TEAMID`), includes one device, expires 2027-07-25 and has `get-task-allow=false`. Subsequent phone installation was separately confirmed with Wi-Fi off. [Exact evidence](validation.md)
 
 Other apps still need program membership, registered devices, matching identifiers/entitlements, certificates/private keys and profiles. Verify signing access in the actual service context. Provisioning changes require an explicit opt-in; successful setup for this probe is not universal signing readiness.
 

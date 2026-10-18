@@ -20,9 +20,9 @@ Verified on 2026-10-05 against the actual Hermes redesign conversation
 - The live native chat test separately passed send, tool-result inspection,
   controls and persistent-thread reopening with the new detail sheet.
 - Authentication from the actual running Hermes terminal reports `claude.ai`
-  and `max` after the supported Claude settings fix. A fresh minimal Claude
-  request completed with no API-key source. The old run reported $11.7172548
-  and remains labeled API-billed. See [authentication evidence](coding-visibility.md).
+  after the supported Claude settings fix. A fresh minimal Claude
+  request completed with no API-key source; an earlier run had been API-billed
+  because of an inherited API-key variable. See [coding visibility](coding-visibility.md).
 - Native Hermes request/heartbeat tests were not rerun for this presentation
   change; their version 7 evidence remains below. The current test suite skips
   those opt-in network tests by default.
@@ -96,7 +96,7 @@ was added. [Message coverage, Mac lifecycle and remaining limits](hermes-client.
 - Optimized stripped arm64 executable: approximately **5 MB**.
   This measures the executable, not Xcode, dependencies or retained build data.
 - Probe: SwiftUI, PLCrashReporter **1.12.2** pinned through Swift Package Manager.
-- Approved signing team: **Dreamslate Inc. (`2F26US4NAU`)**.
+- Approved signing team: **the maintainer's team (`TEAMID`)**.
 - At the user's explicit request, the existing Tailscale connection was started
   and private HTTPS routes were configured: port 8443 for Squircle, 8444 for
   stock Hermes. The existing port-443 route was preserved. This is this Mac's
@@ -251,7 +251,7 @@ shapes, missing-team handling, export options and bounded subprocess cleanup.
 The iOS flow is **+ → browse the Mac or enter a path → choose scheme/name → Add**.
 It imports through the same service and enables builds from the saved recipe.
 Import does not start compilation. The real API inspected Squircle Probe and
-identified its iOS app scheme, bundle, Dreamslate team and existing export plist.
+identified its iOS app scheme, bundle, team and existing export plist.
 
 `.verification/ImportV5.xcresult` passed **36 unit tests and 2 UI tests** covering
 invalid-path recovery, actual import, stable app identity on duplicate import,
@@ -273,7 +273,7 @@ Automatic preview publication succeeded; the actual verified Mac browser PNG
 was subsequently selected as the featured app preview. The job retains its own
 capture, whose source is `current_working_tree`.
 
-Archive and IPA signatures verify under team `2F26US4NAU`; their arm64 binaries
+Archive and IPA signatures verify under team `TEAMID`; their arm64 binaries
 and the dSYM share UUID `6DD13129-FD87-36FF-98EB-DA64AA4884B3`.
 IPA SHA-256: `0e0f22fb7c2194e4fdf100ca5f2ece26548ed4fee75cbf859f0f999802ef15c3`.
 Evidence: `.verification/squircle-v5-final-status.json`,
@@ -318,7 +318,7 @@ Automatic preview publication succeeded; afterward the agent selected the actual
 verified thread-list PNG as the featured app preview. Build capture remains
 attached to the job. Preview source is `current_working_tree`.
 
-Archive and exported IPA signatures verify. Distribution team: `2F26US4NAU`.
+Archive and exported IPA signatures verify. Distribution team: `TEAMID`.
 Archive, IPA and dSYM share arm64 UUID `F7BCE3FC-2636-3FDA-9B1E-05A8E8165A42`.
 IPA SHA-256: `9aff08ce073cfc746f14584004c479502fce54632e5c61c20b2efef739705b1f`.
 Evidence: `.verification/squircle-v4-final-status.json`, `squircle-v4-signing-proof.json`
@@ -346,7 +346,7 @@ The private HTTPS install page returned 200; its manifest identified
 `ai.dreamslate.Squircle`. The downloaded **347,184-byte IPA** matched the exported
 file: SHA-256 `110a3548f5a5ded61eb76aed4221d942738210b1301ccdda2a29a1b6c260b74e`.
 Both archive and exported app passed `codesign --verify --deep --strict`; the
-IPA uses Apple Distribution for Dreamslate team `2F26US4NAU`. Archive, exported
+IPA uses Apple Distribution for team `TEAMID`. Archive, exported
 binary and dSYM share arm64 UUID `13CE61CD-7CCD-370E-ABED-BE26F8EE40C1`.
 Signing evidence: `.verification/squircle-v3-signing-proof.json`.
 Evidence: `.verification/squircle-v3-final-status.json`, `squircle-v3-catalog.json`
@@ -391,7 +391,7 @@ Device artifacts:
 - Exported app passed `codesign --verify --deep --strict`.
 - Binary and dSYM share arm64 UUID **0811D7A2-48A4-320E-812B-5E88E9C767B7**,
   checked using `xcrun dwarfdump --uuid`.
-- Embedded ad-hoc profile belongs to team `2F26US4NAU`, includes **one device**,
+- Embedded ad-hoc profile belongs to team `TEAMID`, includes **one device**,
   has `get-task-allow=false`, and expires **2027-07-25 01:00:17 UTC**.
 
 The updated device build also passed exported-signature verification and has
@@ -438,8 +438,7 @@ service is required for the verified distribution path.
 
 ## Version 9: delegated Claude and Codex, 2026-10-05
 
-Hermes's default model/runtime remains unchanged (`gpt-6.1-sol`, `openai-codex`,
-general-assistant loop). Neither the tested alternate Codex-runtime profile nor
+Hermes's default model/runtime remains unchanged (general-assistant loop). Neither the tested alternate Codex-runtime profile nor
 an experimental Claude model provider is part of the delivered integration.
 The unused test profile was removed using stock Hermes.
 
@@ -457,7 +456,7 @@ Hermes messages, test log and before-completion screenshots in
 `.verification/coding-live/`. Live Claude and Codex UI tests passed in 63.1 and
 69.8 seconds respectively. The first Codex attempt correctly stopped because
 Hermes's PATH resolved an older incompatible Homebrew CLI; user skill instructions
-now select the existing `/Users/anshu/.local/bin/codex` 0.159.0. An initial Claude
+now select the current Codex CLI (0.159.0) explicitly. An initial Claude
 wait probe was blocked by Claude and is not counted as a successful task; the
 replacement file task completed without permission denials.
 

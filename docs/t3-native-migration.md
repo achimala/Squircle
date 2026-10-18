@@ -320,7 +320,7 @@ Two targeted native tests passed, zero failures, in
 reconnect and thread navigation; real Claude tool execution/reply and persisted
 history in thread `6157c318-6538-4ebb-b2bf-14330b211a71`.
 An initial sandboxed `claude auth status` incorrectly suggested signed-out state.
-Outside the sandbox, the installed CLI confirmed Claude Max subscription login,
+Outside the sandbox, the installed CLI confirmed a Claude subscription login,
 and T3 successfully executed the real turn. No login or server changes were needed.
 
 Signed 0.2.0 (14), job `99f5eb12-42fa-43a2-9edf-1f9558134da5`,
@@ -667,7 +667,7 @@ the Keychain.
 
 Evidence (Xcode 27.1, iOS SDK 27.1): Squircle Probe build `6b8961c0-697a-4932-bfa5-8ac521bcea96`
 exported with the overlay; `codesign --verify --deep --strict` passes; the
-export re-signed the framework with Apple Distribution (2F26US4NAU); entitlements
+export re-signed the framework with Apple Distribution (TEAMID); entitlements
 list both Keychain groups. Overlay binary 1.4 MB; the IPA grew from 165 KB to 776 KB.
 Squircle build `1bd05d40-3585-4341-ac0a-86572806af82` carries the shared group.
 **Not yet validated:** overlay launch and use on the phone.
@@ -1877,7 +1877,7 @@ working, needs you, done. Not yet checked with a real key or on the phone.
 ### Creating the APNs key
 
 0. Xcode → Settings → Accounts: sign in with the Apple ID of team
-   `2F26US4NAU`, so signing can give Squircle's App ID the Push capability.
+   `TEAMID`, so signing can give Squircle's App ID the Push capability.
    Then in `project.yml` point `CODE_SIGN_ENTITLEMENTS` at
    `Resources/SquirclePush.entitlements`, add the `SquircleWidgets`
    dependency (commented there) and build.
@@ -1886,9 +1886,9 @@ working, needs you, done. Not yet checked with a real key or on the phone.
    (APNs)**, Configure: environment **Sandbox & Production**, key
    restriction **Team Scoped (All Topics)**. Save, Continue, Register.
 3. Download `AuthKey_XXXXXXXXXX.p8` (only possible once). Note the **Key
-   ID**; the **Team ID** is under Membership details (`2F26US4NAU`).
+   ID**; the **Team ID** is under Membership details (`TEAMID`).
 4. On the Mac: `squircle push setup --key-file ~/Downloads/AuthKey_XXXXXXXXXX.p8
-   --key-id XXXXXXXXXX --team-id 2F26US4NAU`, then delete the download.
+   --key-id XXXXXXXXXX --team-id TEAMID`, then delete the download.
 5. Install the new Squircle build, open it, Allow notifications, then
    `squircle push test --live-activity`.
 ## 2026-10-15 simulator leases and cleanup

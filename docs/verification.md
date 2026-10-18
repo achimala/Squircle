@@ -38,7 +38,7 @@ requests cancellation. Simulator builds cannot produce an OTA install link.
 
 ## Archive and export for a registered iPhone
 
-The sample uses the user-approved Dreamslate team `2F26US4NAU`. Check its settings
+The sample uses the user-approved team `TEAMID`. Check its settings
 before using another account. Signing certificates, profiles and device
 registration must be available to the service's user.
 
