@@ -185,7 +185,7 @@ evidence that the stock path is insufficient.
 
 The active target removes Hermes transport, attachments, conversation reducers,
 question adapters and delegated trace polling. Stock Hermes remains untouched.
-Read historical `docs/validation.md` as earlier-build evidence only.
+Read historical `docs/archive/validation.md` as earlier-build evidence only.
 
 
 ## Simulator lifecycle hardening: 2026-10-05, build 12

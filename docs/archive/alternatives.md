@@ -1,10 +1,12 @@
 # Alternatives and why they are deferred
 
+> **Archived.** Superseded research from 2026-10-04/05, before T3 was chosen. See [T3 research](../direct-agents-plan.md).
+
 Latest research: **2026-10-05**. The user's direct-agent/live-simulator request
 changes the recommendation to a trial of **stock T3 Code**, keeping the Squircle
 CLI for signed builds and installation. Its stable v0.0.45 device guide documents
 remote simulator streaming/control, including mobile access. See the
-[replacement plan](direct-agents-plan.md) for versioned sources, gaps and acceptance
+[replacement plan](../direct-agents-plan.md) for versioned sources, gaps and acceptance
 checks. The historical comparison below predates this direction; T3 and Paseo are
 no longer deferred merely because Hermes was previously selected.
 
@@ -12,7 +14,7 @@ Historical research snapshot: **2026-10-04**. These are architectural judgments 
 
 ## Accepted direction
 
-Use **stock Hermes, an agent-neutral iOS development CLI, and our own native client**. UIKit/Core Animation supersedes the first SwiftUI presentation. Hermes supplies identity, native memory, sessions and orchestration. The user refined the earlier plugin-first design to make the development tooling reusable by other agents. Hermes plugins are optional adapters. [CLI design](cli.md), [Hermes client API](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server).
+Use **stock Hermes, an agent-neutral iOS development CLI, and our own native client**. UIKit/Core Animation supersedes the first SwiftUI presentation. Hermes supplies identity, native memory, sessions and orchestration. The user refined the earlier plugin-first design to make the development tooling reusable by other agents. Hermes plugins are optional adapters. [CLI design](../cli.md), [Hermes client API](https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server).
 
 ## Other agent hosts
 
@@ -32,4 +34,4 @@ Start with Hermes's identity files, curated memory, searchable session history a
 
 **TestFlight remains an alternative** when its distribution convenience outweighs App Store Connect setup and processing delay. Direct remote device debugging is a separate capability from distributing a build.
 
-Probe uses PLCrashReporter and a bounded upload queue; the simulator crash path is verified. [Pulse](https://github.com/kean/Pulse), [SwiftLoggerServer](https://github.com/krugazor/SwiftLoggerServer) and [GlitchTip](https://glitchtip.com/documentation/install/) remain optional alternatives for broader inspection or diagnostics. None is an additional dependency. Remaining phone checks are in [the remote workflow](remote-ios.md).
+Probe uses PLCrashReporter and a bounded upload queue; the simulator crash path is verified. [Pulse](https://github.com/kean/Pulse), [SwiftLoggerServer](https://github.com/krugazor/SwiftLoggerServer) and [GlitchTip](https://glitchtip.com/documentation/install/) remain optional alternatives for broader inspection or diagnostics. None is an additional dependency. Remaining phone checks are in [the remote workflow](../remote-ios.md).

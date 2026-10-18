@@ -1,7 +1,7 @@
 # Agent-friendly CLI
 
 Status: implemented Rust prototype, 2026-10-04. Executable name: `squircle`.
-See [workflow](verification.md) for runnable examples and [evidence](validation.md)
+See [workflow](verification.md) for runnable examples and [evidence](archive/validation.md)
 for the distinction between implemented and physically verified behavior.
 
 ## Boundary and discovery
@@ -171,7 +171,7 @@ preserves the IPA and any previous image. Simulator builds reuse their product;
 archive previews rebuild the current working tree, so they must not claim to be
 pixels from a frozen archived revision. App synchronization accepts only newer
 captures and does not overwrite edited names/summaries. End-to-end validation of
-the new catalog/client flow is tracked in [validation evidence](validation.md).
+the new catalog/client flow is tracked in [validation evidence](archive/validation.md).
 
 ## Output and persistence contract
 
@@ -211,4 +211,4 @@ Automated CLI tests run with an empty `PATH`, without an agent executable or
 running service for discovery. HTTP tests exercise the same core implementation
 used by the phone. Actual stock Hermes CLI and API runs have invoked Squircle
 successfully; OpenClaw invocation remains pending. No agent installation is
-required to use Squircle directly. See [validation](validation.md).
+required to use Squircle directly. See [validation](archive/validation.md).

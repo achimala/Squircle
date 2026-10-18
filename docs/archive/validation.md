@@ -1,8 +1,10 @@
 # Validation evidence
 
+> **Archived.** Historical evidence for Hermes-era builds; not evidence for the current T3 client. Current evidence is in the [migration record](../t3-native-migration.md).
+
 Recorded 2026-10-04 on this Mac. This page records observed results, not claims
 that the entire proposed product works. Local artifacts and credentials are
-ignored by Git. Reproduce with the [walkthrough](verification.md).
+ignored by Git. Reproduce with the [walkthrough](../verification.md).
 
 ## Readable coding activity — version 8
 

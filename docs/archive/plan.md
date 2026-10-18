@@ -1,8 +1,10 @@
 # Implementation status and next checks
 
+> **Archived.** Superseded: the status of the 0.2.0 native client in October 2026. Current state is in the [README](../../README.md) and [history](../history.md).
+
 **2026-10-05:** native frontend for stock T3, signed **0.2.0 (13)** and directly
 installed on the paired iPhone. Existing agent-neutral build/install service remains
-intact. See [migration evidence](t3-native-migration.md).
+intact. See [migration evidence](../t3-native-migration.md).
 
 ## Completed
 

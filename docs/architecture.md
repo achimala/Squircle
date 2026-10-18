@@ -3,7 +3,7 @@
 **2026-10-05:** native client on the user's existing, unmodified T3 Code 0.0.45
 server. The active Hermes integration has been removed. Implementation evidence
 and limits are in [native migration](t3-native-migration.md); earlier Hermes
-milestones remain in [historical validation](validation.md) and Git history.
+milestones remain in [historical validation](archive/validation.md) and Git history.
 
 ## Ownership
 

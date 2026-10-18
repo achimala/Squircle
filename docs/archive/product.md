@@ -1,11 +1,13 @@
 # Product decisions
 
+> **Archived.** Superseded by the T3 migration (2026-10-05): Hermes and the live 3D picker are gone. Current decisions are in [AGENTS.md](../../AGENTS.md) and the [README](../../README.md).
+
 Status: the user changed the intended experience on **2026-10-05** to direct
 coding-agent selection, live work/simulator visibility, optional remote simulator
 interaction, and finished phone builds. Hermes coordination is no longer a
 requirement for the new path. The user accepted a fresh native client on stock T3,
-reusing the build/install core and useful motion code. [Migration](t3-native-migration.md),
-[research and trial](direct-agents-plan.md).
+reusing the build/install core and useful motion code. [Migration](../t3-native-migration.md),
+[research and trial](../direct-agents-plan.md).
 The decisions below describe the previous direction and current implementation;
 the replacement has not been implemented or tested.
 

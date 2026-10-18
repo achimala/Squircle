@@ -1,5 +1,7 @@
 # Coding activity and subscription authentication
 
+> **Archived.** Superseded: describes the Hermes-era coding-log reader, removed in the T3 migration. T3 now supplies live agent events.
+
 The phone is a client of stock Hermes. It does not launch an alternative coding
 backend. The client presents **Claude Code's standard `stream-json` and Codex's `exec --json` events**:
 commands, read/write/edit actions, text, failures and results are displayed as a

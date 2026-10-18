@@ -7,7 +7,7 @@ itself as a login service or change Tailscale.
 The personal native client already embeds this Mac's connection settings and
 needs no token entry. Its installation/chat path is verified; the commands here
 are for rebuilding and exercising the development tools. See the
-[app guide](../app/Squircle/README.md) and [current evidence](validation.md).
+[app guide](../app/Squircle/README.md) and [current evidence](archive/validation.md).
 
 ## Build and inspect
 
@@ -101,7 +101,7 @@ as an Apple-text `.crash` file and use the retained dSYM:
 This invokes the selected Xcode's `symbolicatecrash`. Inspect the resulting app
 frames; command completion alone does not prove symbol resolution. JSON `.ips`
 is unsupported. See [Probe instructions](../examples/SquircleProbe/README.md)
-for its test crash workflow and [validation evidence](validation.md) for what
+for its test crash workflow and [validation evidence](archive/validation.md) for what
 has actually been exercised.
 
 ## Limits and lifecycle

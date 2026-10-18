@@ -231,7 +231,7 @@ See the evidence page for the scope of rendered transition checks.
 | How do agents build and deliver apps? | [CLI design](docs/cli.md) |
 | How does cellular installation work? | [Remote iOS workflow](docs/remote-ios.md) |
 | How does the phone record the screen or performance for the agent? | [Performance capture](docs/perf-capture.md) |
-| What was verified before the T3 replacement? | [Historical validation](docs/validation.md) |
+| What was verified before the T3 replacement? | [Historical validation](docs/archive/validation.md) |
 | What did the October 2026 review find, and what is fixed? | [Code review](docs/code-review-2026-10.md) |
 | What did the second review find, and what is fixed? | [Second code review](docs/code-review-2026-10-b.md) |
 | What is proposed for the jelly as the design language (not built)? | [Jelly design proposal](docs/design-jelly-language.md) |

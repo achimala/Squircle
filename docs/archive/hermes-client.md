@@ -1,5 +1,7 @@
 # Native Hermes client protocol
 
+> **Archived.** Superseded: the Hermes client was removed in the T3 migration (2026-10-05). Kept as a record; nothing here runs today.
+
 ## Decision
 
 The phone uses the WebSocket JSON-RPC protocol served by **unmodified `hermes
