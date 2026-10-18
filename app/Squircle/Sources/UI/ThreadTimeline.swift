@@ -187,8 +187,13 @@ enum ThreadItem: Equatable {
             else if turns.isEmpty { turns.append((nil, [message])) }
             else { turns[turns.count - 1].rest.append(message) }
         }
-        // Each simulator use belongs to the last turn that began before it.
-        let starts = turns.map { $0.user.flatMap { date($0.createdAt) } ?? .distantPast }
+        // Each simulator use belongs to the last turn that began before it. A
+        // turn without your message (the conversation's first) begins with
+        // its first message, so nothing from before the conversation shown
+        // (a fresh start's earlier turns) lands in it.
+        let starts = turns.map { turn in
+            (turn.user ?? turn.rest.first).flatMap { date($0.createdAt) } ?? .distantPast
+        }
         var used: [Int: [SimulatorUse]] = [:]
         for use in simulators {
             let index = starts.lastIndex { $0 <= use.started } ?? 0
@@ -226,8 +231,8 @@ enum ThreadItem: Equatable {
         var startedLines: [Int: [AppBuild]] = [:]
         if let thread = inputs.thread {
             for build in builds.reversed() where build.agentThread == thread && !startedHere.contains(build.id.lowercased()) {
-                let index = starts.lastIndex { $0 <= build.date } ?? 0
-                guard index < made.count else { continue }
+                // A build begun before the first turn shown has no line here.
+                guard let index = starts.lastIndex(where: { $0 <= build.date }) else { continue }
                 startedLines[index, default: []].append(build)
                 if cardTurn[build.id.lowercased()] == nil, let end = finished(build) { cardTurn[build.id.lowercased()] = max(index, end) }
             }
