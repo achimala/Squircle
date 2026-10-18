@@ -1,5 +1,26 @@
 import AVFoundation
+import ImageIO
 import UIKit
+
+/// Pictures decoded off the main thread straight at the size they show
+/// (ImageIO thumbnailing): the full-resolution bitmap is never made.
+enum Downsample {
+    /// `scale(pixelSize)`: the fraction of the file's size needed; never above 1.
+    static func image(_ data: Data, scale: @escaping @Sendable (CGSize) -> CGFloat) async -> UIImage? {
+        await Task.detached(priority: .userInitiated) { () -> UIImage? in
+            guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+                  let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+                  let height = properties[kCGImagePropertyPixelHeight] as? CGFloat else { return nil }
+            let fit = min(1, scale(CGSize(width: width, height: height)))
+            let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                            kCGImageSourceCreateThumbnailWithTransform: true,
+                                            kCGImageSourceShouldCacheImmediately: true,
+                                            kCGImageSourceThumbnailMaxPixelSize: max(1, (max(width, height) * fit).rounded(.up))]
+            return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary).map { UIImage(cgImage: $0) }
+        }.value
+    }
+}
 
 /// Text with a band of light sweeping across it while something is live.
 final class ShimmerLabel: UIView {
@@ -349,11 +370,7 @@ final class GalleryCell: TimelineCell {
         if let cached = image(for: shot) { return cached }
         guard let data = StepImages.data(for: shot.step, index: shot.index) else { return nil }
         let height = Self.height
-        let thumbnail = await Task.detached(priority: .userInitiated) { () -> UIImage? in
-            guard let image = UIImage(data: data) else { return nil }
-            let scale = 2 * height / max(1, image.size.height)
-            return image.preparingThumbnail(of: CGSize(width: image.size.width * scale, height: image.size.height * scale)) ?? image
-        }.value
+        let thumbnail = await Downsample.image(data) { 2 * height / max(1, $0.height) }
         if let thumbnail { cache.setObject(thumbnail, forKey: "\(shot.step):\(shot.index)" as NSString) }
         return thumbnail
     }
@@ -607,11 +624,7 @@ final class FigureCell: TimelineCell {
     static func prepare(_ shot: Shot) async -> UIImage? {
         if let cached = image(for: shot) { return cached }
         guard let data = StepImages.data(for: shot.step, index: shot.index) else { return nil }
-        let picture = await Task.detached(priority: .userInitiated) { () -> UIImage? in
-            guard let image = UIImage(data: data) else { return nil }
-            let fit = min(1, 1200 / max(1, max(image.size.width, image.size.height)))
-            return image.preparingThumbnail(of: CGSize(width: image.size.width * fit, height: image.size.height * fit)) ?? image
-        }.value
+        let picture = await Downsample.image(data) { 1200 / max(1, $0.width, $0.height) }
         if let picture { cache.setObject(picture, forKey: shot.step as NSString) }
         return picture
     }

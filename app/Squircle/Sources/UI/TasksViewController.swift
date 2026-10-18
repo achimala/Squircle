@@ -121,9 +121,16 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             }
             cell.loadThumbnail = { [weak self] media in
                 guard let self else { return nil }
-                guard media.kind == "video" else { return await model.taskMediaData(task: id, media: media.id).flatMap(UIImage.init) }
-                guard let url = await model.taskVideo(task: id, media: media.id) else { return nil }
-                return await SquircleModel.poster(of: url).flatMap(UIImage.init)
+                let data: Data?
+                if media.kind == "video" {
+                    guard let url = await model.taskVideo(task: id, media: media.id) else { return nil }
+                    data = await SquircleModel.poster(of: url)
+                } else {
+                    data = await model.taskMediaData(task: id, media: media.id)
+                }
+                // Enough pixels to fill a 96 × 72 point thumbnail.
+                guard let data else { return nil }
+                return await Downsample.image(data) { max(96 * 3 / $0.width, 72 * 3 / $0.height) }
             }
             return cell
         }
