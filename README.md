@@ -5,6 +5,12 @@ for your existing **unmodified T3 Code server**. T3 owns coding agents, projects
 threads and execution; the Mac runs Xcode. The independent Rust `squircle` CLI
 supplies signed builds, installation links, app screenshots and diagnostics.
 
+> **Status: very early alpha.** Squircle is a personal project that changes
+> daily. Expect breaking changes, rough edges and missing setup steps. It comes
+> with no guarantees or support; see [LICENSE](LICENSE) (MIT). If you're
+> thinking about using it at a company, I'd love to hear from you, but you
+> don't need to ask.
+
 ## Current state
 
 **2026-10-17: no locks in the service.** After a deadlock froze the
