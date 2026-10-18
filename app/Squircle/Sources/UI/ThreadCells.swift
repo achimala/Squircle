@@ -1309,3 +1309,90 @@ final class LiveCapsule: UIView {
         mark.layer.add(group, forKey: "working")
     }
 }
+
+/// A table the agent wrote, in the message's own type with hairlines
+/// between rows. One too wide for the screen scrolls sideways.
+final class MarkdownTableCell: TimelineCell {
+    private let scroll = UIScrollView()
+    private let grid = MarkdownTableView()
+    private var height: NSLayoutConstraint!
+    private var shown: String?
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        scroll.showsHorizontalScrollIndicator = false
+        scroll.showsVerticalScrollIndicator = false
+        scroll.alwaysBounceVertical = false
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentInset = UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.addSubview(grid)
+        contentView.addSubview(scroll)
+        height = scroll.heightAnchor.constraint(equalToConstant: 0)
+        height.priority = .defaultHigh + 1
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            scroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            scroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            height
+        ])
+        isAccessibilityElement = true
+        accessibilityIdentifier = "thread.table"
+    }
+
+    static func height(_ layout: MarkdownTableLayout) -> CGFloat { layout.size.height + 12 }
+
+    func configure(_ layout: MarkdownTableLayout, id: String) {
+        grid.layout = layout
+        grid.frame = CGRect(origin: .zero, size: layout.size)
+        scroll.contentSize = layout.size
+        scroll.isScrollEnabled = layout.overflows
+        height.constant = layout.size.height
+        // A different table starts at its first column.
+        if shown != id { scroll.contentOffset = CGPoint(x: -scroll.contentInset.left, y: 0) }
+        shown = id
+        accessibilityLabel = layout.cells.map { $0.map(\.string).joined(separator: ", ") }.joined(separator: ". ")
+    }
+
+    override func setPressed(_ pressed: Bool) {}
+}
+
+/// Draws a `MarkdownTableLayout`; nothing is measured here.
+final class MarkdownTableView: UIView {
+    var layout: MarkdownTableLayout? { didSet { setNeedsDisplay() } }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        contentMode = .redraw
+        isUserInteractionEnabled = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ rect: CGRect) {
+        guard let layout, let context = UIGraphicsGetCurrentContext() else { return }
+        let hairline = 1 / max(1, traitCollection.displayScale)
+        var y: CGFloat = 0
+        for (row, cells) in layout.cells.enumerated() {
+            let height = layout.heights[row]
+            defer { y += height }
+            if row > 0 {
+                // The header's rule is a touch stronger than the rows'.
+                (row == 1 ? UIColor.separator : UIColor.separator.withAlphaComponent(0.45)).setFill()
+                context.fill(CGRect(x: 0, y: y - hairline / 2, width: bounds.width, height: hairline))
+            }
+            guard y < rect.maxY, y + height > rect.minY else { continue }
+            var x: CGFloat = 0
+            for (column, cell) in cells.enumerated() {
+                let width = layout.widths[column]
+                cell.draw(with: CGRect(x: x, y: y + MarkdownTableLayout.padding, width: width, height: height),
+                          options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+                x += width + MarkdownTableLayout.gap
+            }
+        }
+    }
+}
