@@ -12,13 +12,14 @@ use std::{
     fs,
     path::{Path, PathBuf},
     io::{Read as _, Write as _},
-    process::{Command, Stdio},
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+use tokio::process::Command;
 
 use crate::store::Store;
 
@@ -235,46 +236,23 @@ fn app_image(image: &Image) -> bool {
     image.main || (image.path.contains(".app/") && !image.path.contains("SquircleOverlay.framework"))
 }
 
-/// Runs a symbol tool in its own process group with a deadline, so a wedged
-/// `atos` or `dwarfdump` cannot hang `perf show`; its stdout, or nothing if it
-/// failed, timed out or wrote more than 16 MiB. The leader is reaped only
-/// after its group is killed (as in `xcode::run_bounded`), so nothing it started
-/// outlives it and the output is read within the same deadline.
-fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> Option<Vec<u8>> {
-    use std::os::unix::process::CommandExt as _;
-    const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
-    let deadline = Instant::now() + limit;
-    let mut child = command
-        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .ok()?;
-    let pid = child.id() as libc::pid_t;
-    if let (Some(mut stdin), Some(input)) = (child.stdin.take(), input) {
-        std::thread::spawn(move || { let _ = stdin.write_all(&input); });
-    }
-    let (sender, output) = std::sync::mpsc::channel();
-    let stdout = child.stdout.take()?;
-    std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let read = stdout.take(MAX_OUTPUT + 1).read_to_end(&mut out);
-        let _ = sender.send(read.ok().filter(|_| out.len() as u64 <= MAX_OUTPUT).map(|_| out));
-    });
-    let ended = loop {
-        if crate::xcode::leader_exited(pid) {
-            break true;
-        }
-        if Instant::now() >= deadline {
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
-    crate::xcode::kill_group(pid);
-    let status = child.wait().ok()?;
-    let out = output.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()??;
-    (ended && status.success()).then_some(out)
+/// Runs a symbol tool under `xcode::run_bounded`, so a wedged `atos` or
+/// `dwarfdump` cannot hang `perf show` and nothing it started outlives it; its
+/// stdout, or nothing if it failed, timed out or wrote more than 16 MiB.
+async fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> Option<Vec<u8>> {
+    // Callers build it in place; run_bounded takes it whole.
+    let command = std::mem::replace(command, Command::new("/usr/bin/false"));
+    let finished = crate::xcode::run_bounded_with_input(
+        command,
+        input,
+        crate::xcode::Sink::Capture(16 * 1024 * 1024),
+        crate::xcode::Sink::Discard,
+        tokio::time::Instant::now() + limit,
+        None,
+    )
+    .await
+    .ok()?;
+    finished.status.success().then_some(finished.stdout)
 }
 
 /// A symbol file whose identity matches the image: the file, and the
@@ -282,8 +260,8 @@ fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> Option
 type Symbols = (PathBuf, String);
 
 /// `dwarfdump --uuid`: each slice's (UUID, architecture).
-fn dwarf_uuids(path: &Path) -> Vec<(String, String)> {
-    run(Command::new("xcrun").arg("dwarfdump").arg("--uuid").arg(path), None, Duration::from_secs(30))
+async fn dwarf_uuids(path: &Path) -> Vec<(String, String)> {
+    run(Command::new("xcrun").arg("dwarfdump").arg("--uuid").arg(path), None, Duration::from_secs(30)).await
         .map(|out| parse_uuids(&String::from_utf8_lossy(&out)))
         .unwrap_or_default()
 }
@@ -302,50 +280,54 @@ fn parse_uuids(text: &str) -> Vec<(String, String)> {
 
 /// `file` (a DWARF file or binary) or the DWARF files in a dSYM bundle, if
 /// one has `uuid`. A file is checked like a bundle: a path is no identity.
-fn matching(path: &Path, uuid: &str, uuids: &dyn Fn(&Path) -> Vec<(String, String)>) -> Option<Symbols> {
+async fn matching(path: &Path, uuid: &str, uuids: &impl AsyncFn(&Path) -> Vec<(String, String)>) -> Option<Symbols> {
     let candidates: Vec<PathBuf> = if path.is_file() {
         vec![path.to_path_buf()]
     } else {
         fs::read_dir(path.join("Contents/Resources/DWARF")).ok()?.flatten().map(|e| e.path()).collect()
     };
-    candidates.into_iter().find_map(|file| {
-        let arch = uuids(&file).into_iter().find(|(u, _)| u == uuid)?.1;
-        Some((file, arch))
-    })
+    for file in candidates {
+        if let Some((_, arch)) = uuids(&file).await.into_iter().find(|(u, _)| u == uuid) {
+            return Some((file, arch));
+        }
+    }
+    None
 }
 
 /// Where `image`'s symbols come from: a given dSYM, a Squircle build's, one
 /// Spotlight knows, or the binary itself when it is on this Mac (simulator).
 /// Each must carry the image's UUID. `Err` names given files that didn't.
-fn symbol_file(image: &Image, given: &[PathBuf], store: Option<&Store>, preferred_job: Option<&str>) -> Result<(Symbols, String), String> {
+async fn symbol_file(image: &Image, given: &[PathBuf], store: Option<&Store>, preferred_job: Option<&str>) -> Result<(Symbols, String), String> {
     let uuid = image.uuid.to_uppercase();
     if uuid.is_empty() {
         return Err(String::new());
     }
     let uuids = &dwarf_uuids;
-    if let Some(found) = given.iter().find_map(|dsym| matching(dsym, &uuid, uuids)) {
-        return Ok((found, "given dSYM".into()));
+    for dsym in given {
+        if let Some(found) = matching(dsym, &uuid, uuids).await {
+            return Ok((found, "given dSYM".into()));
+        }
     }
     if let Some(store) = store {
         let mut jobs = store.list_jobs().unwrap_or_default();
         jobs.sort_by_key(|j| preferred_job != Some(j.id.as_str()));
         for job in jobs {
             for dsym in job.output().into_iter().flat_map(|o| o.dsym_paths.iter()) {
-                if let Some(found) = matching(dsym, &uuid, uuids) {
+                if let Some(found) = matching(dsym, &uuid, uuids).await {
                     return Ok((found, format!("dSYM of build {}", job.id)));
                 }
             }
         }
     }
-    let spotlight = run(Command::new("mdfind").arg(format!("com_apple_xcode_dsym_uuids == {uuid}")), None, Duration::from_secs(15));
+    let spotlight = run(Command::new("mdfind").arg(format!("com_apple_xcode_dsym_uuids == {uuid}")), None, Duration::from_secs(15)).await;
     for line in String::from_utf8_lossy(&spotlight.unwrap_or_default()).lines() {
-        if let Some(found) = matching(Path::new(line), &uuid, uuids) {
+        if let Some(found) = matching(Path::new(line), &uuid, uuids).await {
             return Ok((found, "dSYM found by Spotlight".into()));
         }
     }
     let binary = Path::new(&image.path);
     if binary.is_file() {
-        if let Some(found) = matching(binary, &uuid, uuids) {
+        if let Some(found) = matching(binary, &uuid, uuids).await {
             return Ok((found, "the binary on this Mac".into()));
         }
     }
@@ -366,24 +348,26 @@ fn device_support(image: &Image, device: &DeviceInfo) -> Option<PathBuf> {
 }
 
 /// Symbols for a system image, only from a file with its UUID.
-fn system_file(image: &Image, device: &DeviceInfo) -> Option<Symbols> {
+async fn system_file(image: &Image, device: &DeviceInfo) -> Option<Symbols> {
     let uuid = image.uuid.to_uppercase();
     if uuid.is_empty() {
         return None;
     }
     let local = Path::new(&image.path);
-    device_support(image, device)
-        .into_iter()
-        .chain(local.is_file().then(|| local.to_path_buf()))
-        .find_map(|file| matching(&file, &uuid, &dwarf_uuids))
+    for file in device_support(image, device).into_iter().chain(local.is_file().then(|| local.to_path_buf())) {
+        if let Some(found) = matching(&file, &uuid, &dwarf_uuids).await {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// `atos` for one image's addresses; one name per address, in order.
-fn atos((file, arch): &Symbols, load: &str, addresses: &[u64]) -> Vec<Option<String>> {
+async fn atos((file, arch): &Symbols, load: &str, addresses: &[u64]) -> Vec<Option<String>> {
     let mut names = Vec::with_capacity(addresses.len());
     for chunk in addresses.chunks(400) {
         let output = run(Command::new("xcrun").args(["atos", "-arch", arch, "-o"]).arg(file).args(["-l", load])
-            .args(chunk.iter().map(|a| format!("{a:#x}"))), None, Duration::from_secs(60));
+            .args(chunk.iter().map(|a| format!("{a:#x}"))), None, Duration::from_secs(60)).await;
         let lines: Vec<String> = output.map(|o| String::from_utf8_lossy(&o).lines().map(str::to_owned).collect()).unwrap_or_default();
         for i in 0..chunk.len() {
             let line = lines.get(i).cloned().unwrap_or_default();
@@ -419,7 +403,7 @@ struct Resolved {
     missing: Vec<String>,
 }
 
-fn resolve_frames(capture: &Capture, given: &[PathBuf], store: Option<&Store>) -> Resolved {
+async fn resolve_frames(capture: &Capture, given: &[PathBuf], store: Option<&Store>) -> Resolved {
     let mut by_image: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
     for (key, symbol) in &capture.symbols {
         if let Some(address) = parse_hex(key) {
@@ -435,7 +419,7 @@ fn resolve_frames(capture: &Capture, given: &[PathBuf], store: Option<&Store>) -
         let Some(image) = capture.images.get(*index) else { continue };
         let app = app_image(image);
         let file = if app {
-            match symbol_file(image, given, store, preferred) {
+            match symbol_file(image, given, store, preferred).await {
                 Ok((file, source)) => {
                     sources.push(format!("{}: {source}", image.name));
                     Some(file)
@@ -450,9 +434,9 @@ fn resolve_frames(capture: &Capture, given: &[PathBuf], store: Option<&Store>) -
                 }
             }
         } else {
-            system_file(image, &capture.device)
+            system_file(image, &capture.device).await
         };
-        let names = file.as_ref().map(|f| atos(f, &image.load_address, addresses)).unwrap_or_default();
+        let names = match &file { Some(f) => atos(f, &image.load_address, addresses).await, None => Vec::new() };
         for (i, address) in addresses.iter().enumerate() {
             let exact = names.get(i).cloned().flatten();
             let phone = capture.symbols.get(&format!("{address:#x}"));
@@ -464,19 +448,19 @@ fn resolve_frames(capture: &Capture, given: &[PathBuf], store: Option<&Store>) -
             frames.insert(*address, Frame { symbol, image: image.name.clone(), app, exact: exact.is_some() });
         }
     }
-    demangle(&mut frames);
+    demangle(&mut frames).await;
     Resolved { frames, sources, missing }
 }
 
 /// The phone only knows mangled exported names; make Swift and C++ ones readable.
-fn demangle(frames: &mut HashMap<u64, Frame>) {
+async fn demangle(frames: &mut HashMap<u64, Frame>) {
     for (tool, args, prefixes) in [("swift-demangle", vec!["--simplified"], vec!["$s", "_$s"]), ("c++filt", vec![], vec!["_Z", "__Z"])] {
         let keys: Vec<u64> = frames.iter().filter(|(_, f)| prefixes.iter().any(|p| f.symbol.starts_with(p))).map(|(k, _)| *k).collect();
         if keys.is_empty() {
             continue;
         }
         let input: String = keys.iter().map(|k| frames[k].symbol.clone() + "\n").collect();
-        let Some(output) = run(Command::new("xcrun").arg(tool).args(&args), Some(input.into_bytes()), Duration::from_secs(30)) else { continue };
+        let Some(output) = run(Command::new("xcrun").arg(tool).args(&args), Some(input.into_bytes()), Duration::from_secs(30)).await else { continue };
         for (key, line) in keys.iter().zip(String::from_utf8_lossy(&output).lines()) {
             if let Some(frame) = frames.get_mut(key) {
                 frame.symbol = line.to_owned();
@@ -551,14 +535,14 @@ fn top_functions(stacks: &[&[u64]], frames: &HashMap<u64, Frame>, only_app: bool
     out
 }
 
-pub fn show(root: &Path, which: &str, given: &[PathBuf]) -> Result<(String, Value)> {
+pub async fn show(root: &Path, which: &str, given: &[PathBuf]) -> Result<(String, Value)> {
     let path = resolve(root, which)?;
     let bytes = fs::read(&path).with_context(|| format!("Reading {}", path.display()))?;
     ensure!(bytes.len() <= MAX_PERF_BYTES, "Capture too large");
     let capture: Capture = serde_json::from_slice(&bytes).context("Not a Squircle performance capture")?;
     ensure!(capture.format == "squircle-perf", "Not a Squircle performance capture");
     let store = Store::open(root.to_path_buf()).ok();
-    let resolved = resolve_frames(&capture, given, store.as_ref());
+    let resolved = resolve_frames(&capture, given, store.as_ref()).await;
     let frames = &resolved.frames;
     let stacks: Vec<Vec<u64>> = capture.stacks.iter().map(|s| s.iter().filter_map(|a| parse_hex(a)).collect()).collect();
     let samples: Vec<(f64, &[u64])> = capture.samples.iter()
@@ -704,25 +688,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn symbol_tools_finish_within_their_deadline_and_leave_nothing_running() {
-        let started = Instant::now();
-        // The background sleep holds stdout after the shell exits.
-        let out = run(Command::new("/bin/sh").args(["-c", "cat; sleep 30 & echo $!"]), Some(b"in ".to_vec()), Duration::from_secs(10)).unwrap();
-        assert!(started.elapsed() < Duration::from_secs(5));
-        let out = String::from_utf8(out).unwrap();
-        let left: libc::pid_t = out.trim_start_matches("in ").trim().parse().unwrap();
-        let gone = (0..150).any(|_| {
-            std::thread::sleep(Duration::from_millis(20));
-            (unsafe { libc::kill(left, 0) }) != 0
-        });
-        assert!(gone);
-
-        let started = Instant::now();
-        assert!(run(Command::new("/bin/sleep").arg("30"), None, Duration::from_millis(300)).is_none());
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    #[test]
     fn heaviest_path_follows_the_busiest_child() {
         // Leaf first, as captured: main → a → b (3 samples), main → c (1).
         let s1: &[u64] = &[3, 2, 1];
@@ -731,8 +696,8 @@ mod tests {
         assert_eq!(path, vec![(1, 4), (2, 3), (3, 3)]);
     }
 
-    #[test]
-    fn symbol_files_must_carry_the_image_uuid() {
+    #[tokio::test]
+    async fn symbol_files_must_carry_the_image_uuid() {
         let dir = tempfile::tempdir().unwrap();
         let wrong = dir.path().join("Old");
         let right = dir.path().join("App.dSYM/Contents/Resources/DWARF/App");
@@ -741,12 +706,12 @@ mod tests {
         fs::write(&right, b"").unwrap();
         let text = "UUID: 1111AAAA-0000-0000-0000-000000000000 (arm64) x\nUUID: 2222bbbb-0000-0000-0000-000000000000 (arm64e) x";
         assert_eq!(parse_uuids(text)[1], ("2222BBBB-0000-0000-0000-000000000000".into(), "arm64e".into()));
-        let uuids = |p: &Path| -> Vec<(String, String)> {
+        let uuids = async |p: &Path| -> Vec<(String, String)> {
             if p.ends_with("App") { parse_uuids(text) } else { vec![("9999".into(), "arm64".into())] }
         };
-        assert_eq!(matching(&wrong, "1111AAAA-0000-0000-0000-000000000000", &uuids), None, "A given file from another build is not used.");
+        assert_eq!(matching(&wrong, "1111AAAA-0000-0000-0000-000000000000", &uuids).await, None, "A given file from another build is not used.");
         let bundle = dir.path().join("App.dSYM");
-        assert_eq!(matching(&bundle, "2222BBBB-0000-0000-0000-000000000000", &uuids), Some((right, "arm64e".into())));
+        assert_eq!(matching(&bundle, "2222BBBB-0000-0000-0000-000000000000", &uuids).await, Some((right, "arm64e".into())));
     }
 
     #[test]

@@ -391,7 +391,7 @@ fn is_cancelled(cancel: &watch::Receiver<bool>) -> bool {
 /// Whether a helper's leader has exited, without reaping it. Until it is
 /// reaped, even as a zombie, its pid stays reserved, and with it the id of the
 /// group it leads.
-pub(crate) fn leader_exited(pid: libc::pid_t) -> bool {
+fn leader_exited(pid: libc::pid_t) -> bool {
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let found = unsafe {
         libc::waitid(
@@ -408,7 +408,7 @@ pub(crate) fn leader_exited(pid: libc::pid_t) -> bool {
 /// Kills every process left in a group whose leader is not yet reaped. The
 /// child creates its own group before exec, and a negative pid only addresses
 /// that group, never the server's.
-pub(crate) fn kill_group(leader: libc::pid_t) {
+fn kill_group(leader: libc::pid_t) {
     if leader > 0 {
         unsafe {
             libc::kill(-leader, libc::SIGKILL);
@@ -537,7 +537,21 @@ async fn read_limited(
 /// and output limits. Whatever stops it early, including dropping this future,
 /// kills the whole group. A nonzero exit is returned, not an error.
 pub(crate) async fn run_bounded(
+    command: Command,
+    stdout: Sink,
+    stderr: Sink,
+    deadline: Instant,
+    cancel: Option<watch::Receiver<bool>>,
+) -> Result<Finished, RunError> {
+    run_bounded_with_input(command, None, stdout, stderr, deadline, cancel).await
+}
+
+/// [`run_bounded`], writing `input` to the helper's stdin (then closing it)
+/// instead of giving it none. A helper that exits without reading it all is
+/// not an error.
+pub(crate) async fn run_bounded_with_input(
     mut command: Command,
+    input: Option<Vec<u8>>,
     stdout: Sink,
     stderr: Sink,
     deadline: Instant,
@@ -553,7 +567,8 @@ pub(crate) async fn run_bounded(
     let failed = |error: std::io::Error| RunError::Failed(error.into());
     let (out, out_limit) = stdout.stdio().map_err(failed)?;
     let (err, err_limit) = stderr.stdio().map_err(failed)?;
-    command.stdin(Stdio::null()).stdout(out).stderr(err);
+    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
+    command.stdin(stdin).stdout(out).stderr(err);
     // Registered before the spawn so the leader's exit cannot be missed.
     let mut sigchld =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
@@ -564,18 +579,26 @@ pub(crate) async fn run_bounded(
         )
     })?;
     let leader = group.leader.as_mut().expect("a spawned group holds its leader");
-    let (out, err) = (leader.stdout.take(), leader.stderr.take());
+    let (out, err, pipe) = (leader.stdout.take(), leader.stderr.take(), leader.stdin.take());
     let work = async {
+        let write = async {
+            use tokio::io::AsyncWriteExt;
+            if let (Some(mut pipe), Some(input)) = (pipe, input) {
+                let _ = pipe.write_all(&input).await;
+            }
+            Ok(())
+        };
         let ended = async {
             group.leader_exit(&mut sigchld).await;
             // Descendants still holding the pipes would otherwise outlive it.
             group.kill();
             Ok(())
         };
-        let (stdout, stderr, ()) = tokio::try_join!(
+        let (stdout, stderr, (), ()) = tokio::try_join!(
             read_limited(out, out_limit),
             read_limited(err, err_limit),
-            ended
+            ended,
+            write
         )?;
         Ok::<_, anyhow::Error>((stdout, stderr))
     };
@@ -973,6 +996,17 @@ mod tests {
         assert_eq!(finished.status.code(), Some(3));
         assert_eq!(finished.stdout, b"out\n");
         assert_eq!(finished.stderr, b"err\n");
+    }
+
+    #[tokio::test]
+    async fn input_reaches_stdin_and_an_unread_one_does_not_hang() {
+        let run = |program: &str, input: Vec<u8>| {
+            run_bounded_with_input(Command::new(program), Some(input), Sink::Capture(1024), Sink::Discard,
+                                   Instant::now() + Duration::from_secs(5), None)
+        };
+        assert_eq!(run("/bin/cat", b"in".to_vec()).await.unwrap().stdout, b"in");
+        // More than a pipe holds, to a helper that exits without reading.
+        assert!(run("/usr/bin/true", vec![0; 1 << 20]).await.unwrap().status.success());
     }
 
     fn gone(pid: libc::pid_t) -> bool {

@@ -1127,7 +1127,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             let root = root(cli)?;
             match command {
                 PerfCommand::Show { capture, dsym } => {
-                    let (text, data) = squircle::perf::show(&root, capture, dsym)?;
+                    let (text, data) = squircle::perf::show(&root, capture, dsym).await?;
                     if !cli.json {
                         print!("{text}");
                         return Ok(None);
