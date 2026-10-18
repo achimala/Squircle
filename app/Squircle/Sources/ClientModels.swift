@@ -71,6 +71,9 @@ struct ChatMessage: Identifiable, Equatable {
     /// "user", "assistant", "thinking" (reasoning summary) or "tool".
     let role: String
     var content: String
+    /// One piece of a message cut at its tables and pictures, already
+    /// parsed; `content` is then its plain text.
+    var markdown: AttributedString?
     var isStreaming = false
     var detail: String = ""
     var activity: String?

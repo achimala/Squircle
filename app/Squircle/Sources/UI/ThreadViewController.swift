@@ -207,7 +207,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// The turn the live line belonged to, so only that turn's own finish pulses.
     private var liveTurn: String?
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
-    private var rendered: [String: (source: String, text: NSAttributedString)] = [:]
+    private var rendered: [String: (source: AnyHashable, text: NSAttributedString)] = [:]
     /// Tables measured for the width and text size they show at.
     private var tableLayouts: [String: (table: MarkdownTable, width: CGFloat, size: UIContentSizeCategory, layout: MarkdownTableLayout)] = [:]
     private var expanded = Set<String>()
@@ -1181,16 +1181,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var reportedSimulators = Set<String>()
 
     private func text(for message: ChatMessage, style: MessageCell.Style) -> NSAttributedString {
-        let key = message.id + "\(style)"
-        if let cached = rendered[key], cached.source == message.content { return cached.text }
+        let key = message.id + "\(style)", source = message.markdown.map(AnyHashable.init) ?? AnyHashable(message.content)
+        if let cached = rendered[key], cached.source == source { return cached.text }
         let text: NSAttributedString
         switch style {
         case .user:
             text = NSAttributedString(string: message.content, attributes: [.font: Theme.font(.body, 17), .foregroundColor: UIColor.label])
         case .note, .thought, .action, .agent:
-            text = Markdown.render(message.content, font: Theme.font(.subheadline, 15), color: .secondaryLabel)
+            text = Markdown.render(markdown(message), font: Theme.font(.subheadline, 15), color: .secondaryLabel)
         case .answer:
-            text = Markdown.render(message.content, font: Theme.font(.body, 17), color: message.failed ? Theme.failure : .label)
+            text = Markdown.render(markdown(message), font: Theme.font(.body, 17), color: message.failed ? Theme.failure : .label)
         case .update:
             let font = Theme.font(.footnote, 13, .medium)
             let line = NSMutableAttributedString()
@@ -1203,8 +1203,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             line.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel], range: NSRange(location: 0, length: line.length))
             text = line
         }
-        rendered[key] = (message.content, text)
+        rendered[key] = (source, text)
         return text
+    }
+
+    private func markdown(_ message: ChatMessage) -> AttributedString {
+        message.markdown ?? Markdown.parse(message.content)
     }
 
     private func tableLayout(_ id: String, _ markdown: MarkdownTable, quiet: Bool) -> MarkdownTableLayout {
@@ -1216,13 +1220,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return layout
     }
 
-    /// "Task from Squircle agent" over the task, rendered.
+    /// "Task from Squircle agent" over the task, rendered; a piece after one
+    /// of its tables or pictures has no label.
     private func agentText(_ message: ChatMessage) -> NSAttributedString {
         let from = message.agent?.from.flatMap { id in model.sessions.first { $0.id == id } }?.displayTitle(in: project)
         let task = message.agent?.kind == .task
-        let label = (task ? "Task from " : "From ") + (from ?? (task ? "the app’s agent" : "an agent"))
-        let key = message.id + "agent"
-        if let cached = rendered[key], cached.source == label + message.content { return cached.text }
+        let label = message.agent == nil ? "" : (task ? "Task from " : "From ") + (from ?? (task ? "the app’s agent" : "an agent"))
+        let key = message.id + "agent", source: AnyHashable = [label, message.markdown.map(AnyHashable.init) ?? AnyHashable(message.content)]
+        if let cached = rendered[key], cached.source == source { return cached.text }
+        let body = Markdown.render(markdown(message), font: Theme.font(.subheadline, 15), color: .label)
+        guard !label.isEmpty else { rendered[key] = (source, body); return body }
         let font = Theme.font(.footnote, 13, .semibold)
         let text = NSMutableAttributedString()
         if let symbol = UIImage(systemName: task ? "list.bullet.rectangle" : "arrow.down.message",
@@ -1236,9 +1243,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         style.paragraphSpacing = 6
         text.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: style],
                            range: NSRange(location: 0, length: text.length))
-        text.append(Markdown.render(message.content.trimmingCharacters(in: .whitespacesAndNewlines),
-                                    font: Theme.font(.subheadline, 15), color: .label))
-        rendered[key] = (label + message.content, text)
+        text.append(body)
+        rendered[key] = (source, text)
         return text
     }
 

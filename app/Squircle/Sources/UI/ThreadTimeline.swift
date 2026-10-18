@@ -90,7 +90,8 @@ enum ThreadItem: Equatable {
     case user(ChatMessage)
     /// Squircle telling an app agent that workers finished: a quiet line.
     case update(ChatMessage)
-    /// What an agent sent this thread: a worker's task or a message.
+    /// What an agent sent this thread: a worker's task or a message. A
+    /// piece after one of its tables or pictures has no `agent`, so no label.
     case agentMessage(ChatMessage)
     case action(ActionLine)
     case answer(ChatMessage)
@@ -295,7 +296,9 @@ enum ThreadItem: Equatable {
                 .action(ActionLine(id: "\(user.id)#\(index)", kind: .news(news.state), thread: WorkerID(news.id), title: news.title))
             }
         } else if let user = turn.user, !user.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            items.append(user.isUpdate ? .update(user) : user.agent != nil ? .agentMessage(user) : .user(user))
+            if user.isUpdate { items.append(.update(user)) }
+            else if user.agent != nil { items += withMedia(user, ThreadItem.agentMessage) }
+            else { items.append(.user(user)) }
         }
         // A performance capture is for the agent; you see that it went.
         for (index, capture) in (turn.user?.captures ?? []).enumerated() where !capture.isVideo {
@@ -374,16 +377,17 @@ enum ThreadItem: Equatable {
         guard message.content.contains("](") || message.content.contains("|") else { return [row(message)] }
         let segments = Markdown.segments(message.content)
         guard segments.contains(where: { if case .text = $0 { return false }; return true }) else { return [row(message)] }
-        let quiet: Bool = { if case .note = row(message) { return true }; return false }()
+        let quiet: Bool = { if case .answer = row(message) { return false }; return true }()
         var rows: [ThreadItem] = []
         var named = false
         for (index, segment) in segments.enumerated() {
             switch segment {
             case .text(let text):
                 var part = message
-                part.content = text
+                part.content = String(text.characters)
+                part.markdown = text
                 // The first piece of text keeps the message's identity.
-                if named { part.id = message.id + "#\(index)" }
+                if named { part.id = message.id + "#\(index)"; part.agent = nil }
                 named = true
                 rows.append(row(part))
             case .table(let table):
