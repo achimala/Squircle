@@ -99,6 +99,8 @@ Before changing repository visibility, inspect the exact refs/archive to publish
 
 #### P3a — Non-loopback HTTP accepts sensitive credentials
 
+**Fixed 2026-10-18.** `src/origin.rs` is the one origin policy for the CLI's `--server` requests and T3 pairing (and a saved `t3.json` on load): plain HTTP only to loopback (127.0.0.0/8, ::1, `localhost`) or Tailscale addresses (100.64.0.0/10, fd7a:115c:a1e0::/48, `*.ts.net`), whose traffic Tailscale already encrypts; HTTPS for every other host; userinfo, query, fragment and any path are refused with an error naming what to use instead. Redirects stay disabled. Offline URL-policy tests cover IPv4/IPv6 loopback, Tailscale ranges, LAN HTTP and hostile forms. The original finding follows.
+
 **High priority, source-proven.** `src/main.rs:783-801` accepts either `http` or `https` for any host and then attaches the control/diagnostic bearer. `local_server` already recognizes loopback (`src/main.rs:693-701`) but this request path does not apply it. `src/t3.rs:50-68` similarly accepts a non-loopback HTTP origin and sends the one-time pairing token to it.
 
 A contributor setting `--server http://remote-mac:8787` or pairing against an HTTP LAN endpoint can send credentials without transport encryption. The default loopback URL is appropriate; the problem is accepting remote plaintext without a boundary. This is a configuration-triggered exposure, not a demonstrated unauthenticated server compromise. No credentials were sent to a remote endpoint during review.
@@ -300,7 +302,7 @@ Estimates are rough focused engineering effort, not calendar promises. Each numb
 | Order | Deliverable | Size / risk | Acceptance evidence |
 | --- | --- | --- | --- |
 | 1 | Choose license, provenance/notice policy, public/private publication set; sanitize docs and plan any history export (P1/P2). | Small docs work, about 0.5–1 day; history publication itself has high irreversible risk and is a separate operation. | Reviewed license/provenance inventory; dedicated scan of exact public refs/artifacts; no real credentials or unapproved personal logs. |
-| 2 | Fix remote-origin transport policy (P3a). | Small, about 0.5 day; low/medium risk. | Offline URL-policy cases pass; loopback setup remains valid; remote HTTP rejected before credentials leave. |
+| 2 | ~~Fix remote-origin transport policy (P3a).~~ Done 2026-10-18. | Small, about 0.5 day; low/medium risk. | Offline URL-policy cases pass; loopback setup remains valid; remote HTTP rejected before credentials leave. |
 | 3 | Close the history guard's external-helper escape (P3b). | Small/medium, about 0.5–1.5 days; medium compatibility risk. | Harmless marker reproducer refused; allowed history operations still work without external command execution. |
 | 4 | One configurable signing/namespace contract and explicit personal-credential embedding; source-resource distribution policy (P2/P4). | Medium, about 1–2 days; high signing/keychain compatibility risk. Coordinate with overlay owner. | Different test namespace generates and compiles; existing personal identity remains usable; public artifacts contain no connection JSON; moved CLI behavior is explicit. |
 | 5 | Rewrite current README/setup and active CLI help, archive superseded docs, fix capability inventory (P4, Q2–Q9). | Small/medium, about 1 day; low runtime risk. | Another account/environment follows it; required tools and optional features are explicit; capabilities reflect commands. |

@@ -13,6 +13,7 @@ pub mod history;
 pub mod media;
 pub mod model;
 pub mod notes;
+pub mod origin;
 pub mod overlay;
 pub mod perf;
 pub mod preview;
