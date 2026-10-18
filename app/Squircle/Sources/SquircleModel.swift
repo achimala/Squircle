@@ -1424,8 +1424,6 @@ final class SquircleModel {
     private nonisolated static func conversation(_ state: T3ThreadState) async -> [ChatMessage] {
         let rows = state.messages, media = state.media
         guard media.contains(where: { $0["simulator"]["session_id"].string == nil }) else { return rows }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let clips = media.compactMap { item -> ChatMessage? in
             // Simulator recordings show as the turn's simulator instead.
             guard item["simulator"]["session_id"].string == nil,
@@ -1434,7 +1432,7 @@ final class SquircleModel {
             let video = item["kind"].string == "video"
             var message = ChatMessage(id: "media:" + id, role: "tool", content: caption ?? (video ? "Recording" : "Image"),
                                       symbol: video ? "record.circle" : "photo",
-                                      createdAt: formatter.string(from: Date(timeIntervalSince1970: seconds)))
+                                      createdAt: ISODate.format(Date(timeIntervalSince1970: seconds)))
             message.step = AgentStep(kind: .device, title: message.content, symbol: message.symbol)
             message.imageCount = 1
             message.videoID = video ? id : nil

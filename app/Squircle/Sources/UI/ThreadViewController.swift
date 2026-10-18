@@ -857,7 +857,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         var messages = model.messages
         guard let pending = pendingSend, !messages.contains(where: { $0.id == pending.messageID }) else { return messages }
         var message = ChatMessage(id: pending.messageID, role: "user", content: pending.text,
-                                  createdAt: ISO8601DateFormatter().string(from: .now))
+                                  createdAt: ISODate.format(.now))
         message.attachments = (0..<pending.images).map { "local-\($0)" }
         message.captures = pending.captures
         messages.append(message)

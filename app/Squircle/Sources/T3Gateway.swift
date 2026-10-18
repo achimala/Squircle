@@ -11,8 +11,11 @@ extension JSONValue {
 enum ISODate {
     static func parse(_ text: String) -> Date? {
         var text = text
-        return text.withUTF8 { parse(utf8: $0) } ?? fallback.date(from: text)
+        return text.withUTF8 { parse(utf8: $0) } ?? (try? Date(text, strategy: .iso8601))
     }
+    /// The way T3 writes dates: "2026-10-15T09:41:07.123Z".
+    static func format(_ date: Date) -> String { date.formatted(style) }
+    private static let style = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
 
     private static func parse(utf8 b: UnsafeBufferPointer<UInt8>) -> Date? {
         func digits(_ at: Int, _ count: Int) -> Int? {
@@ -63,8 +66,6 @@ enum ISODate {
         let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset
         return Date(timeIntervalSince1970: Double(seconds) + fraction)
     }
-
-    private nonisolated(unsafe) static let fallback = ISO8601DateFormatter()
 }
 
 /// Verification only (DEBUG, `SQUIRCLE_PERF=1`): timed connection marks

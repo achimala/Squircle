@@ -44,9 +44,7 @@ struct CommandIdentity: Codable, Hashable {
     let id: String
     let createdAt: String
     static func fresh(at date: Date = .now) -> Self {
-        let format = ISO8601DateFormatter()
-        format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return Self(id: UUID().uuidString.lowercased(), createdAt: format.string(from: date))
+        Self(id: UUID().uuidString.lowercased(), createdAt: ISODate.format(date))
     }
     /// `command` with this identity, exactly as T3 is sent it.
     func stamp(_ command: [String: JSONValue]) -> JSONValue {
