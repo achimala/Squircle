@@ -207,7 +207,7 @@ for phone access. See [lifecycle limits](verification.md#limits-and-lifecycle).
 
 Automated CLI tests run with an empty `PATH`, without an agent executable or
 running service for discovery. HTTP tests exercise the same core implementation
-used by the phone. T3's app agents and workers use it for builds, simulators and tasks; earlier
-Hermes runs used it too
+used by the phone. T3's app agents and workers use it for builds, simulators
+and tasks; earlier Hermes runs used it too
 ([archived evidence](archive/validation.md)). OpenClaw invocation has not been
 tried. No agent installation is required to use Squircle directly.

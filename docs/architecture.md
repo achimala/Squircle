@@ -449,8 +449,7 @@ attach Apple's viewer during the normal workflow.
 
 ## Deployment boundary
 
-The Mac's existing T3 desktop owns its server. The existing build service uses
-loopback plus an already configured HTTPS route. Tailscale remains user-managed;
-this implementation made no network setup changes. Packaged startup supervision
-is still pending. Do not change the independently installed Hermes or other
-services simply because the iPhone client no longer uses them.
+T3 (its desktop app or server) owns its server. The Squircle service listens
+on loopback; HTTPS routes for the phone are user-managed (for example with
+Tailscale Serve), and Squircle makes no network setup changes. Packaged
+startup supervision is still pending.
