@@ -46,6 +46,14 @@ This is a **publish-after-targeted-cleanup** verdict, not a recommendation to re
   the already-consolidated hardened Git adapter is preserved. Full locked tests
   and clippy pass. This was a move, not a change to process ownership.
 
+- **Step 10, HTTP/application services: done.** `server/` separates runtime
+  wiring, router, common authentication/error/compression handling, endpoint
+  families, build orchestration and catalog import/publication. Extractor and
+  response wrapping stay in routes; application services take ordinary values.
+  All 219 tests and clippy pass, including HTTP envelope/auth/upload/build
+  idempotency contracts. U1's server side already used `model::success` and
+  `failure_with`; the shared HTTP boundary preserves that one envelope.
+
 ## Scope, method, and verification
 
 Read `AGENTS.md` and `README.md` first. Inventoried all 184 tracked files: 47 Rust files, 71 Swift files, the C overlay loader, project/build configuration, plugin templates, scripts, examples, and documentation. The Rust/Swift/C files total 53,731 lines, including tests. Reviewed subsystem boundaries and representative execution paths, searched the complete tracked tree for references/configuration/secrets, traced superseded implementations through Git, and ran the checks below. This is not a claim that every branch or runtime combination was exercised.

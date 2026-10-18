@@ -38,17 +38,19 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
 /// comments and macro bodies accidentally hiding that suffix.
 fn test_lines(text: &str) -> Vec<std::ops::RangeInclusive<usize>> {
     use syn::{spanned::Spanned, visit::Visit};
+    fn test_only(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("cfg")
+                && attr
+                    .parse_args::<syn::Path>()
+                    .is_ok_and(|p| p.is_ident("test"))
+        })
+    }
     #[derive(Default)]
     struct Tests(Vec<std::ops::RangeInclusive<usize>>);
     impl<'ast> Visit<'ast> for Tests {
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-            let test_only = item.attrs.iter().any(|attr| {
-                attr.path().is_ident("cfg")
-                    && attr
-                        .parse_args::<syn::Path>()
-                        .is_ok_and(|p| p.is_ident("test"))
-            });
-            if test_only {
+            if test_only(&item.attrs) {
                 self.0
                     .push(item.span().start().line..=item.span().end().line);
             } else {
@@ -57,13 +59,18 @@ fn test_lines(text: &str) -> Vec<std::ops::RangeInclusive<usize>> {
         }
     }
     let mut tests = Tests::default();
-    tests.visit_file(&syn::parse_file(text).expect("valid Rust source"));
+    let file = syn::parse_file(text).expect("valid Rust source");
+    if test_only(&file.attrs) {
+        return std::iter::once(1..=text.lines().count()).collect();
+    }
+    tests.visit_file(&file);
     tests.0
 }
 
 #[test]
 fn test_exclusion_keeps_later_production_code() {
     let source = "#[cfg(test)]\nmod tests { const S: &str = r#\"}\"#; }\nfn later() {}\nmod nested {\n#[cfg(test)] mod tests {}\nfn also_later() {}\n}";
+    assert_eq!(test_lines("#![cfg(test)]\nfn fake() {}"), vec![1..=2]);
     let skipped = test_lines(source);
     assert!(skipped.iter().any(|r| r.contains(&2)));
     assert!(!skipped.iter().any(|r| r.contains(&3)));
