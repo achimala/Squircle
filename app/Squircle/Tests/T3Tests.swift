@@ -892,14 +892,22 @@ final class CommandMachineTests: XCTestCase {
     }
 
     /// Only a typed T3 failure is a refusal; an InternalError (a defect, an
-    /// interruption while T3 shuts down) may have run.
-    func testT3OutcomeDecoding() {
-        func exit(_ value: [String: Any]) -> JSONValue { .from(value) }
-        XCTAssertEqual(CommandOutcome.t3(exit: exit(["_tag": "Success", "value": ["sequence": 4]])), .accepted(.from(["sequence": 4])))
-        guard case .refused = CommandOutcome.t3(exit: exit(["_tag": "Success", "value": ["status": "rejected"]])) else { return XCTFail() }
-        guard case .refused = CommandOutcome.t3(exit: exit(["_tag": "Failure", "cause": [["_tag": "Fail", "error": ["_tag": "OrchestrationCommandPreviouslyRejectedError"]]]])) else { return XCTFail() }
-        guard case .unknown = CommandOutcome.t3(exit: exit(["_tag": "Failure", "cause": [["_tag": "Fail", "error": ["_tag": "InternalError"]]]])) else { return XCTFail() }
-        guard case .unknown = CommandOutcome.t3(exit: exit(["_tag": "Failure", "cause": ["_tag": "Die", "defect": "boom"]])) else { return XCTFail() }
+    /// interruption while T3 shuts down) may have run. The cases are shared
+    /// with the service's tests (tests/fixtures/t3).
+    func testT3OutcomeDecoding() throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../../tests/fixtures/t3/dispatch-exits.json")
+        let cases = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: fixture))["cases"].array
+        XCTAssertFalse(cases.isEmpty)
+        for example in cases {
+            let outcome = switch CommandOutcome.t3(exit: example["exit"]) {
+            case .accepted(let value): value == example["exit"]["value"] ? "accepted" : "accepted with \(value)"
+            case .refused: "refused"
+            case .unknown: "unknown"
+            case .notSent: "not sent"
+            }
+            XCTAssertEqual(outcome, example["outcome"].string, example["name"].string ?? "")
+        }
         guard case .unknown = CommandOutcome.service(ClientError.connection("Squircle")) else { return XCTFail() }
         guard case .unknown = CommandOutcome.service(ClientError.backend("Squircle", 503, "busy")) else { return XCTFail() }
         guard case .refused = CommandOutcome.service(ClientError.backend("Squircle", 404, "gone")) else { return XCTFail() }
