@@ -1,4 +1,3 @@
-import AVKit
 import UIKit
 
 /// What a conversation needs from whatever shows it (the app or the debug
@@ -1157,9 +1156,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard let id = use.recordingID, presentedViewController == nil else { return }
         Task { [weak self] in
             guard let self, let url = await model.loadVideo("media:" + id) else { return }
-            let player = AVPlayerViewController()
-            player.player = AVPlayer(url: url)
-            present(player, animated: true) { player.player?.play() }
+            present(VideoPlayerViewController(url: url), animated: true)
         }
     }
 
@@ -1478,9 +1475,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if shot.video {
             Task { [weak self] in
                 guard let self, let url = await model.loadVideo(shot.step) else { return }
-                let player = AVPlayerViewController()
-                player.player = AVPlayer(url: url)
-                present(player, animated: true) { player.player?.play() }
+                present(VideoPlayerViewController(url: url), animated: true)
             }
             return
         }
