@@ -235,8 +235,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Back swipes start anywhere along the left edge.
     func allowsBackSwipe(at point: CGPoint) -> Bool { true }
 
-    func focusComposer() { composer.input.becomeFirstResponder() }
-
     /// The debug overlay's agent closes the overlay instead of going back.
     func setBackButton(symbol: String, label: String) {
         loadViewIfNeeded()

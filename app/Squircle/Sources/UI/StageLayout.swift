@@ -5,8 +5,6 @@ import UIKit
 struct StageLayout: Equatable {
     var size: CGSize
     var safe: UIEdgeInsets
-    /// Height of one line of the app name.
-    var titleHeight: CGFloat
     var reducedMotion: Bool
 
 

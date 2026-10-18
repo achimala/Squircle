@@ -457,8 +457,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     private func makeLayout() -> StageLayout {
-        StageLayout(size: view.bounds.size, safe: view.safeAreaInsets, titleHeight: ceil(Theme.appNameFont().lineHeight),
-                    reducedMotion: Motion.reduced)
+        StageLayout(size: view.bounds.size, safe: view.safeAreaInsets, reducedMotion: Motion.reduced)
     }
 
     private var layout: StageLayout { laidOut ?? makeLayout() }

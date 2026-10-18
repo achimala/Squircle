@@ -534,12 +534,6 @@ final class T3DeviceStream {
     func touch(_ phase:String,point:CGPoint) {
         if case .running(_,_,.interactive(let channel)) = lifetime { channel.touch(phase,point:point) }
     }
-    #if DEBUG
-    /// Exercises real input loss in integration tests without changing the host.
-    func disconnectInputForTesting() {
-        if case .running(_,_,.interactive(let channel)) = lifetime { channel.socket.cancel(with:.goingAway,reason:nil) }
-    }
-    #endif
 }
 /// Coordinate mapping between a displayed simulator picture and T3's input
 /// contract. The picture itself is drawn flat by `SimulatorScreen`.

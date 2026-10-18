@@ -17,36 +17,6 @@ enum Theme {
     static let pressedFill = UIColor { trait in
         trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.07) : UIColor(white: 0, alpha: 0.045)
     }
-    /// The studio light behind a device, tinted by its app's own colors.
-    static func glow(for color: UIColor, dark: Bool) -> UIColor {
-        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        color.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
-        return dark ? UIColor(hue: h, saturation: min(0.85, s * 1.1), brightness: 0.62, alpha: 0.50)
-                    : UIColor(hue: h, saturation: min(0.55, s * 0.8), brightness: 1, alpha: 0.85)
-    }
-
-    /// Saturation-weighted mean of an image: the color an app is known by.
-    /// Nil for monochrome captures, which keep the neutral studio light.
-    nonisolated static func characteristicColor(of image: UIImage) -> UIColor? {
-        guard let source = image.cgImage else { return nil }
-        let side = 24
-        var pixels = [UInt8](repeating: 0, count: side * side * 4)
-        guard let context = CGContext(data: &pixels, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
-                                      space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        context.interpolationQuality = .medium
-        context.draw(source, in: CGRect(x: 0, y: 0, width: side, height: side))
-        var r = 0.0, g = 0.0, b = 0.0, total = 0.0
-        for index in stride(from: 0, to: pixels.count, by: 4) {
-            let pr = Double(pixels[index]) / 255, pg = Double(pixels[index + 1]) / 255, pb = Double(pixels[index + 2]) / 255
-            let high = max(pr, pg, pb), low = min(pr, pg, pb)
-            let weight = (high - low) * (high - low)
-            r += pr * weight; g += pg * weight; b += pb * weight; total += weight
-        }
-        guard total / Double(side * side) > 0.004 else { return nil }
-        return UIColor(red: r / total, green: g / total, blue: b / total, alpha: 1)
-    }
-
     /// Olive, ochre and crimson, apart from the terracotta accent.
     static let success = dynamic(rgb(0.36, 0.53, 0.24), rgb(0.60, 0.78, 0.44))
     static let warning = dynamic(rgb(0.72, 0.55, 0.06), rgb(0.95, 0.78, 0.34))
@@ -69,7 +39,6 @@ enum Theme {
 
     /// App names: plain SF, like the rest of the interface (the user rejected
     /// both SF Rounded and New York here).
-    static func appNameFont() -> UIFont { font(.largeTitle, 34, .bold) }
     static func appCaptionFont() -> UIFont { font(.headline, 15, .semibold) }
 
     static func label(_ text: String = "", _ font: UIFont, color: UIColor = .label, lines: Int = 1) -> UILabel {
@@ -133,25 +102,6 @@ enum Theme {
             view.clipsToBounds = true
         }
         return view
-    }
-
-    /// The glass material itself, for materializing a surface in an animation.
-    static func glassEffect(interactive: Bool = false) -> UIVisualEffect {
-        if #available(iOS 26.0, *) {
-            let effect = UIGlassEffect(style: .regular)
-            effect.isInteractive = interactive
-            return effect
-        }
-        return UIBlurEffect(style: .systemThinMaterial)
-    }
-
-    /// Rounds a glass surface made by `glassSurface` to a new radius.
-    static func setGlassCorner(_ view: UIVisualEffectView, radius: CGFloat) {
-        if #available(iOS 26.0, *) {
-            view.cornerConfiguration = .corners(radius: .fixed(radius))
-        } else {
-            view.layer.cornerRadius = radius
-        }
     }
 
     /// Lets adjacent glass shapes blend and morph as one native group.

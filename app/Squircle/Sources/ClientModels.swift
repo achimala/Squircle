@@ -335,14 +335,6 @@ struct BuildLogPage: Decodable {
     enum CodingKeys: String, CodingKey { case text, size, nextOffset = "next_offset", hasMore = "has_more" }
 }
 
-struct AgentApproval: Identifiable, Equatable {
-    let id: String
-    let runID: String
-    let prompt: String
-    let command: String
-    let choices: [String]
-}
-
 /// JSON content can be text or multimodal blocks. Reasoning fields are never projected.
 enum JSONValue: Codable, Equatable {
     case string(String), number(Double), bool(Bool), object([String: JSONValue]), array([JSONValue]), null
