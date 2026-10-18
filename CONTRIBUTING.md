@@ -31,7 +31,7 @@ scripts/check-swift-concurrency        # no new Combine or Dispatch in the app
 xcodegen generate --spec app/Squircle/project.yml
 xcodebuild -project app/Squircle/Squircle.xcodeproj -scheme Squircle \
   -configuration Release -destination 'generic/platform=iOS' \
-  CODE_SIGNING_ALLOWED=NO SQUIRCLE_CLIENT_CONFIG=/dev/null build
+  CODE_SIGNING_ALLOWED=NO SQUIRCLE_EMBED_CONNECTION= build
 ```
 
 The app's unit tests run on a simulator you started through Squircle

@@ -70,12 +70,15 @@ xcodegen generate --spec app/Squircle/project.yml
 
 To put the app on your phone, write the phone's connection file
 (`.squircle/client-t3.json`, described in the [app guide](app/Squircle/README.md)),
-set your own signing team and identifiers, and start a signed build with
+copy `app/Squircle/Config/Local.example.xcconfig` to `Local.xcconfig` with
+your signing team, bundle ID prefix and that file as
+`SQUIRCLE_EMBED_CONNECTION`, and start a signed build with
 `squircle build start`. Install it from the link the service gives you, then
 open it. `squircle help workflow` walks through builds, install links and
 diagnostics; `squircle capabilities --json` lists every command.
 
-The personal build embeds that connection file, so **never share its IPA**.
+A build that embeds that connection file is for your own devices: **never
+share its IPA**. Leave `SQUIRCLE_EMBED_CONNECTION` empty for anything else.
 
 ## How it fits together
 
