@@ -1,3 +1,7 @@
+//! Implementation shared by Squircle’s CLI, service and integration tests.
+//! The supported product interfaces are the CLI and HTTP protocols. Public
+//! Rust modules enable those internal consumers; they are not a stable Rust SDK.
+
 // No locks or blocking waits: state is shared only through single owners
 // (see `actor` and clippy.toml).
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]

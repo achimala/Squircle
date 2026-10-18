@@ -66,19 +66,6 @@ pub enum Dispatched {
     Unknown(String),
 }
 
-impl Dispatched {
-    /// For callers that keep no intent of their own: anything but acceptance
-    /// is an error, with what is known about it.
-    pub fn into_result(self) -> anyhow::Result<Value> {
-        match self {
-            Self::Accepted(value) => Ok(value),
-            Self::Refused(detail) | Self::NotSent(detail) | Self::Unknown(detail) => {
-                Err(anyhow::anyhow!(detail))
-            }
-        }
-    }
-}
-
 /// A command a caller waits for (`thread send`, `thread answer`), saved
 /// with its identity before it is sent. `purpose` is the request itself
 /// (its thread, kind and text): the same request asked again while T3 has

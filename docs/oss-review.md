@@ -72,6 +72,12 @@ This is a **publish-after-targeted-cleanup** verdict, not a recommendation to re
   local visibility and formatting; all 219 tests and clippy pass. No APNs
   requests were sent.
 
+- **D7: done.** Removed the unused 13-line `Dispatched::into_result`
+  implementation; durable callers keep distinct refused/not-sent/unknown
+  outcomes. Crate documentation makes the public-API policy explicit: CLI and
+  HTTP are product interfaces; Rust modules are internal shared implementation,
+  not a stable SDK. Existing public entry paths otherwise remain intact.
+
 ## Scope, method, and verification
 
 Read `AGENTS.md` and `README.md` first. Inventoried all 184 tracked files: 47 Rust files, 71 Swift files, the C overlay loader, project/build configuration, plugin templates, scripts, examples, and documentation. The Rust/Swift/C files total 53,731 lines, including tests. Reviewed subsystem boundaries and representative execution paths, searched the complete tracked tree for references/configuration/secrets, traced superseded implementations through Git, and ran the checks below. This is not a claim that every branch or runtime combination was exercised.
