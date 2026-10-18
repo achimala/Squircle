@@ -2447,6 +2447,15 @@ the way, and the blob alone to say working / idle / status.
   in (lasting lines: working, needs you) until the panel next opens and
   closes; brief news, including a new question, still shows. Recording can't
   be docked.
+- **Undocking (user, 2026-10-18).** Docked (the jelly alone, a lasting line
+  waiting), a sideways drag away from the screen edge pulls the line back
+  out: the glass widens after the finger and the pill grows out of the
+  jelly's neck, giving a little past the line's length; let go past halfway
+  (or flung) it springs out with the finger's speed, else it is sucked back
+  in. The route says undocked from the drag's first frame (that is what
+  shows the line) and docks again only if the pull falls short; either
+  spring can be caught by the other drag. Docked, a mostly sideways drag
+  toward the middle is therefore an undock, not a move.
 - **The blob alone** (`GlassJelly.Mood`): working is full terracotta, eyes
   reading along, a quick small kneading; idle is half-strength terracotta,
   heavy lids, slow breath, rare slow blinks; needs you is ochre, worried,
