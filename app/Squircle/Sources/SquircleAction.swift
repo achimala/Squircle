@@ -326,11 +326,22 @@ struct SquircleAction: Equatable {
 /// Just enough of a POSIX shell's word splitting to read the commands an
 /// agent ran: quotes, escapes, `$( … )`, heredocs, comments and operators.
 enum Shell {
+    /// One simple command: its words, whether a pipe feeds it, and the
+    /// file its output goes to (`> path`, not a descriptor or /dev/null).
+    struct Command: Equatable {
+        var words: [String]
+        var piped = false
+        var output: String?
+    }
+
     /// Simple commands, as words with their quoting removed. A `$(cat <<EOF …)`
     /// argument becomes its heredoc's text.
-    static func commands(_ source: String) -> [[String]] {
+    static func commands(_ source: String) -> [[String]] { parse(source).map(\.words) }
+
+    static func parse(_ source: String) -> [Command] {
         let chars = Array(source)
-        var commands: [[String]] = [], words: [String] = []
+        var commands: [Command] = [], words: [String] = []
+        var piped = false, output: String?
         var word = "", inWord = false
         var heredocs: [(delimiter: String, strip: Bool)] = []
         var i = 0
@@ -340,8 +351,8 @@ enum Shell {
         }
         func endCommand() {
             endWord()
-            if !words.isEmpty { commands.append(words) }
-            words = []
+            if !words.isEmpty { commands.append(Command(words: words, piped: piped, output: output)) }
+            words = []; piped = false; output = nil
         }
         /// Skips heredoc bodies that start after a newline.
         func skipHeredocs() {
@@ -408,10 +419,14 @@ enum Shell {
                     endWord(); words.append("()"); i += 2; continue
                 }
                 endCommand()
+                // `a | b` feeds b; `a || b` does not.
+                if c == "|", i + 1 < chars.count, chars[i + 1] == "|" { i += 2; continue }
+                piped = c == "|"
                 i += 1
             case "<", ">":
                 // Redirections and their targets are not arguments.
-                if inWord, word.allSatisfy(\.isNumber) { word = ""; inWord = false }
+                var descriptor = "1"
+                if inWord, word.allSatisfy(\.isNumber) { descriptor = word; word = ""; inWord = false }
                 endWord()
                 if c == "<", i + 1 < chars.count, chars[i + 1] == "<" {
                     i += 2
@@ -423,9 +438,11 @@ enum Shell {
                     continue
                 }
                 i += 1
-                while i < chars.count, ">&|".contains(chars[i]) { i += 1 }
+                var duplicates = false
+                while i < chars.count, ">&|".contains(chars[i]) { duplicates = duplicates || chars[i] == "&"; i += 1 }
                 skipBlanks(chars, &i)
-                _ = rawWord(chars, &i)
+                let target = rawWord(chars, &i)
+                if c == ">", descriptor == "1", !duplicates, target != "/dev/null", !target.isEmpty { output = target }
             case " ", "\t":
                 endWord()
                 i += 1

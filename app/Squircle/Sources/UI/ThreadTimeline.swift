@@ -463,7 +463,7 @@ enum ThreadItem: Equatable {
         guard let last = work.last else { return "Starting" }
         switch last.role {
         case "thinking": return "Thinking"
-        case "tool": return last.isStreaming ? last.content : "Working"
+        case "tool": return last.isStreaming ? last.step?.live ?? last.content : "Working"
         default: return "Working"
         }
     }

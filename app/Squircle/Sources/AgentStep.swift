@@ -9,6 +9,9 @@ struct AgentStep: Equatable {
     var kind: Kind
     var title: String
     var symbol: String
+    /// What it is doing while it runs ("Reading Theme.swift"), when that
+    /// reads differently from what it did.
+    var live: String?
     /// Shown in a monospaced face because it is literally a command.
     var literal = false
     var added = 0
@@ -50,11 +53,12 @@ struct AgentStep: Equatable {
             if let description = args["description"].string, !description.isEmpty {
                 return AgentStep(kind: .command, title: sentence(description), symbol: "terminal")
             }
-            return AgentStep(kind: .command, title: humanCommand(command), symbol: "terminal", literal: true)
+            return AgentStep(kind: .command, title: humanCommand(command), symbol: "terminal", live: CommandLabel.label(command), literal: true)
         case "Read":
             let path = args["file_path"].string ?? ""
             let image = ["png", "jpg", "jpeg", "heic", "gif"].contains(path.split(separator: ".").last?.lowercased() ?? "")
-            return AgentStep(kind: .read, title: (image ? "Looked at " : "Read ") + file(path), symbol: image ? "photo" : "doc.text")
+            return AgentStep(kind: .read, title: (image ? "Looked at " : "Read ") + file(path), symbol: image ? "photo" : "doc.text",
+                             live: (image ? "Looking at " : "Reading ") + file(path))
         case "Edit", "MultiEdit", "NotebookEdit":
             let path = args["file_path"].string ?? args["notebook_path"].string ?? ""
             var old = args["old_string"].string ?? "", new = args["new_string"].string ?? args["new_source"].string ?? ""
@@ -63,29 +67,30 @@ struct AgentStep: Equatable {
                 new += (new.isEmpty ? "" : "\n") + (edit["new_string"].string ?? "")
             }
             let (added, removed) = lineDelta(old: old, new: new)
-            return AgentStep(kind: .edit, title: "Edited " + file(path), symbol: "pencil.line", added: added, removed: removed,
+            return AgentStep(kind: .edit, title: "Edited " + file(path), symbol: "pencil.line", live: "Editing " + file(path), added: added, removed: removed,
                              diff: StepDiff(path: path, old: old, new: new))
         case "Write":
             let path = args["file_path"].string ?? ""
             let content = args["content"].string ?? ""
             let lines = content.isEmpty ? 0 : content.split(separator: "\n", omittingEmptySubsequences: false).count
-            return AgentStep(kind: .edit, title: "Wrote " + file(path), symbol: "doc.badge.plus", added: lines,
+            return AgentStep(kind: .edit, title: "Wrote " + file(path), symbol: "doc.badge.plus", live: "Writing " + file(path), added: lines,
                              diff: StepDiff(path: path, old: "", new: content))
         case "Grep":
-            return AgentStep(kind: .search, title: "Searched for “\(args["pattern"].string ?? "")”", symbol: "magnifyingglass")
+            return AgentStep(kind: .search, title: "Searched for “\(args["pattern"].string ?? "")”", symbol: "magnifyingglass",
+                             live: "Searching for “\(args["pattern"].string ?? "")”")
         case "Glob":
-            return AgentStep(kind: .search, title: "Looked for \(args["pattern"].string ?? "files")", symbol: "magnifyingglass")
+            return AgentStep(kind: .search, title: "Looked for \(args["pattern"].string ?? "files")", symbol: "magnifyingglass", live: "Looking for files")
         case "WebSearch":
-            return AgentStep(kind: .web, title: "Searched the web for “\(args["query"].string ?? "")”", symbol: "globe")
+            return AgentStep(kind: .web, title: "Searched the web for “\(args["query"].string ?? "")”", symbol: "globe", live: "Searching the web")
         case "WebFetch":
             let host = URL(string: args["url"].string ?? "")?.host ?? "a web page"
-            return AgentStep(kind: .web, title: "Read \(host)", symbol: "globe")
+            return AgentStep(kind: .web, title: "Read \(host)", symbol: "globe", live: "Reading \(host)")
         case "Agent", "Task":
             return AgentStep(kind: .agent, title: sentence(args["description"].string ?? "Asked a helper agent"), symbol: "person.2")
         case "TodoWrite":
-            return AgentStep(kind: .plan, title: "Updated the plan", symbol: "checklist")
+            return AgentStep(kind: .plan, title: "Updated the plan", symbol: "checklist", live: "Updating the plan")
         case "Skill":
-            return AgentStep(kind: .other, title: "Used \(args["skill"].string ?? "a skill")", symbol: "sparkles")
+            return AgentStep(kind: .other, title: "Used \(args["skill"].string ?? "a skill")", symbol: "sparkles", live: "Using \(args["skill"].string ?? "a skill")")
         case "ToolSearch", "ListMcpResourcesTool":
             return AgentStep(kind: .other, title: "Loaded tools", symbol: "wrench.and.screwdriver", hidden: true)
         default: break
@@ -95,10 +100,10 @@ struct AgentStep: Equatable {
             if name.contains("device_") {
                 let action = name.components(separatedBy: "device_").last ?? ""
                 switch action {
-                case "open": return AgentStep(kind: .device, title: "Opened the simulator", symbol: "iphone")
-                case "screenshot": return AgentStep(kind: .device, title: "Looked at the simulator", symbol: "camera.viewfinder")
-                case "close": return AgentStep(kind: .device, title: "Closed the simulator", symbol: "iphone.slash")
-                case "list": return AgentStep(kind: .device, title: "Checked simulators", symbol: "iphone")
+                case "open": return AgentStep(kind: .device, title: "Opened the simulator", symbol: "iphone", live: "Opening the simulator")
+                case "screenshot": return AgentStep(kind: .device, title: "Looked at the simulator", symbol: "camera.viewfinder", live: "Looking at the simulator")
+                case "close": return AgentStep(kind: .device, title: "Closed the simulator", symbol: "iphone.slash", live: "Closing the simulator")
+                case "list": return AgentStep(kind: .device, title: "Checked simulators", symbol: "iphone", live: "Checking simulators")
                 default: break
                 }
             }
@@ -117,24 +122,27 @@ struct AgentStep: Equatable {
             let actions = item["commandActions"].array
             if !actions.isEmpty, actions.allSatisfy({ $0["type"].string == "read" }) {
                 let names = actions.compactMap { $0["name"].string ?? $0["path"].string.map(file) }
-                return AgentStep(kind: .read, title: "Read " + names.joined(separator: ", "), symbol: "doc.text")
+                return AgentStep(kind: .read, title: "Read " + names.joined(separator: ", "), symbol: "doc.text",
+                                 live: names.count == 1 ? "Reading " + names[0] : "Reading \(names.count) files")
             }
             if let search = actions.first(where: { $0["type"].string == "search" }), let query = search["query"].string {
-                return AgentStep(kind: .search, title: "Searched for “\(query)”", symbol: "magnifyingglass")
+                return AgentStep(kind: .search, title: "Searched for “\(query)”", symbol: "magnifyingglass", live: "Searching for “\(query)”")
             }
             if actions.count == 1, actions[0]["type"].string == "listFiles" {
-                return AgentStep(kind: .search, title: "Listed files", symbol: "folder")
+                return AgentStep(kind: .search, title: "Listed files", symbol: "folder", live: "Listing files")
             }
-            return AgentStep(kind: .command, title: humanCommand(command), symbol: "terminal", literal: true)
+            return AgentStep(kind: .command, title: humanCommand(command), symbol: "terminal", live: CommandLabel.label(command), literal: true)
         }
         switch p["itemType"].string {
         case "file_change":
             let paths = item["changes"].array.compactMap { $0["path"].string }
             let title = paths.isEmpty ? "Edited files" : "Edited " + paths.map(file).joined(separator: ", ")
-            return AgentStep(kind: .edit, title: title, symbol: "pencil.line")
-        case "web_search": return AgentStep(kind: .web, title: "Searched the web", symbol: "globe")
+            let live = paths.count == 1 ? "Editing " + file(paths[0]) : paths.isEmpty ? "Editing files" : "Editing \(paths.count) files"
+            return AgentStep(kind: .edit, title: title, symbol: "pencil.line", live: live)
+        case "web_search": return AgentStep(kind: .web, title: "Searched the web", symbol: "globe", live: "Searching the web")
         case "image_view":
-            return AgentStep(kind: .read, title: "Looked at " + file(data["imagePath"].string ?? "an image"), symbol: "photo")
+            let name = file(data["imagePath"].string ?? "an image")
+            return AgentStep(kind: .read, title: "Looked at " + name, symbol: "photo", live: "Looking at " + name)
         default: break
         }
         let fallback = p["title"].string ?? activity["summary"].string ?? "Worked"
