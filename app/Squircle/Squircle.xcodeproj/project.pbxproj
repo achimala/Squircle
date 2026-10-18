@@ -199,6 +199,7 @@
 		CD5E21CCB017A11F8E69752C /* GlassJelly.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassJelly.swift; sourceTree = "<group>"; };
 		D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildDetailViewController.swift; sourceTree = "<group>"; };
 		D59CC13D19074BC8BE174399 /* MediaAudio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaAudio.swift; sourceTree = "<group>"; };
+		D666DF156762FC10515B6792 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		D6CA0B4F6A4E9C1D996CA7D7 /* Squircle.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Squircle.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotBinding.swift; sourceTree = "<group>"; };
 		DB495D800CF688C469BFF725 /* AppProjectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppProjectTests.swift; sourceTree = "<group>"; };
@@ -259,6 +260,7 @@
 			isa = PBXGroup;
 			children = (
 				A21006BF9B278457A1BE32AA /* App */,
+				BD2A0123807412F46DA2BDED /* Config */,
 				4910BC6CADEA4B125D88BB76 /* Overlay */,
 				6D3DA7CA0BBB806DCB782EA9 /* Resources */,
 				EA1947F310C56959A7266C62 /* Shared */,
@@ -358,6 +360,14 @@
 			path = App;
 			sourceTree = "<group>";
 		};
+		BD2A0123807412F46DA2BDED /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				D666DF156762FC10515B6792 /* Signing.xcconfig */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
 		EA1947F310C56959A7266C62 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
@@ -385,7 +395,7 @@
 			buildConfigurationList = 8BE83FE460EEE1FC4F4C69A4 /* Build configuration list for PBXNativeTarget "Squircle" */;
 			buildPhases = (
 				944297A9792502448F1AC38C /* Swift concurrency only (no new Combine or Dispatch) */,
-				2B02C2EDDCC2CC2BD51A06F6 /* Bundle private Mac connection */,
+				22E883CFB1EDB00D60E4DA27 /* Embed private Mac connection (opt-in) */,
 				134999952B6C50207950C0F0 /* Sources */,
 				B126382FE9DBCDE2575964E4 /* Resources */,
 			);
@@ -463,18 +473,18 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					48CB356BF6191F55960F572B = {
-						DevelopmentTeam = 2F26US4NAU;
+						DevelopmentTeam = "$(SQUIRCLE_TEAM_ID)";
 						ProvisioningStyle = Automatic;
 					};
 					5CCAAE598C4761D920524F63 = {
-						DevelopmentTeam = 2F26US4NAU;
+						DevelopmentTeam = "$(SQUIRCLE_TEAM_ID)";
 						ProvisioningStyle = Automatic;
 					};
 					8288D750D29F968E2804D1E8 = {
-						DevelopmentTeam = 2F26US4NAU;
+						DevelopmentTeam = "$(SQUIRCLE_TEAM_ID)";
 					};
 					90E1BAD7755E3E809A136B1C = {
-						DevelopmentTeam = 2F26US4NAU;
+						DevelopmentTeam = "$(SQUIRCLE_TEAM_ID)";
 					};
 				};
 			};
@@ -520,7 +530,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		2B02C2EDDCC2CC2BD51A06F6 /* Bundle private Mac connection */ = {
+		22E883CFB1EDB00D60E4DA27 /* Embed private Mac connection (opt-in) */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -530,14 +540,14 @@
 			);
 			inputPaths = (
 			);
-			name = "Bundle private Mac connection";
+			name = "Embed private Mac connection (opt-in)";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\ndestination=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/client.json\"\nmkdir -p \"$(dirname \"$destination\")\"\nif [ -f \"${SQUIRCLE_CLIENT_CONFIG}\" ]; then\n  cp \"${SQUIRCLE_CLIENT_CONFIG}\" \"$destination\"\n  chmod 644 \"$destination\"\nelse\n  rm -f \"$destination\"\nfi\n";
+			shellScript = "set -eu\ndestination=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/client.json\"\nmkdir -p \"$(dirname \"$destination\")\"\nrm -f \"$destination\"\n[ -n \"${SQUIRCLE_EMBED_CONNECTION:-}\" ] || exit 0\nif [ ! -f \"${SQUIRCLE_EMBED_CONNECTION}\" ]; then\n  echo \"error: SQUIRCLE_EMBED_CONNECTION names ${SQUIRCLE_EMBED_CONNECTION}, which doesn't exist.\"\n  exit 1\nfi\ncp \"${SQUIRCLE_EMBED_CONNECTION}\" \"$destination\"\nchmod 644 \"$destination\"\necho \"warning: this build embeds your private Mac connection; install it only on your own devices.\"\n";
 		};
 		944297A9792502448F1AC38C /* Swift concurrency only (no new Combine or Dispatch) */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -736,7 +746,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_APP_BUNDLE_ID)";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -754,14 +764,13 @@
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "Squircle Overlay";
+				INFOPLIST_FILE = "Generated/Overlay-Info.plist";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleOverlay;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_BUNDLE_PREFIX).SquircleOverlay";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				STRIP_INSTALLED_PRODUCT = YES;
@@ -784,7 +793,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle.Widgets;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_APP_BUNDLE_ID).Widgets";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -802,7 +811,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle.Widgets;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_APP_BUNDLE_ID).Widgets";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -811,6 +820,7 @@
 		};
 		7A0EE604B9984F30375FDA9E /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D666DF156762FC10515B6792 /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -845,7 +855,6 @@
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 75;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -863,7 +872,6 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SQUIRCLE_BUILD_ID = "";
-				SQUIRCLE_CLIENT_CONFIG = "$(SRCROOT)/../../.squircle/client-t3.json";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
@@ -882,14 +890,13 @@
 				DYLIB_COMPATIBILITY_VERSION = 1;
 				DYLIB_CURRENT_VERSION = 1;
 				DYLIB_INSTALL_NAME_BASE = "@rpath";
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "Squircle Overlay";
+				INFOPLIST_FILE = "Generated/Overlay-Info.plist";
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleOverlay;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_BUNDLE_PREFIX).SquircleOverlay";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
 				STRIP_INSTALLED_PRODUCT = YES;
@@ -911,7 +918,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_APP_BUNDLE_ID).Tests";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Squircle.app/Squircle";
@@ -920,6 +927,7 @@
 		};
 		D7F01227085CD5DED1734155 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = D666DF156762FC10515B6792 /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -954,7 +962,6 @@
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 75;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -979,7 +986,6 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SQUIRCLE_BUILD_ID = "";
-				SQUIRCLE_CLIENT_CONFIG = "$(SRCROOT)/../../.squircle/client-t3.json";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -1000,7 +1006,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.Squircle;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_APP_BUNDLE_ID)";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -1016,7 +1022,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_APP_BUNDLE_ID).Tests";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Squircle.app/Squircle";

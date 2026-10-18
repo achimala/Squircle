@@ -1,0 +1,8 @@
+// Copy to Local.xcconfig (git-ignored) and fill in. Signing.xcconfig
+// explains each setting.
+SQUIRCLE_TEAM_ID = ABCDE12345
+SQUIRCLE_BUNDLE_PREFIX = com.yourname
+
+// Only for builds you install on your own phone or simulator: they carry
+// your Mac's connection credentials.
+// SQUIRCLE_EMBED_CONNECTION = $(SRCROOT)/../../.squircle/client-t3.json

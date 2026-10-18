@@ -1,16 +1,18 @@
 name: Squircle
 options:
-  bundleIdPrefix: ai.dreamslate
   deploymentTarget:
     iOS: "18.0"
+# Team, bundle IDs, the shared Keychain group and the embedded connection
+# come from Config/Signing.xcconfig and your git-ignored Config/Local.xcconfig.
+configFiles:
+  Debug: Config/Signing.xcconfig
+  Release: Config/Signing.xcconfig
 settings:
   base:
-    DEVELOPMENT_TEAM: 2F26US4NAU
     SWIFT_VERSION: "5.0"
     CURRENT_PROJECT_VERSION: 75
     MARKETING_VERSION: 0.3.0
     SQUIRCLE_BUILD_ID: ""
-    SQUIRCLE_CLIENT_CONFIG: $(SRCROOT)/../../.squircle/client-t3.json
 targets:
   Squircle:
     type: application
@@ -29,7 +31,7 @@ targets:
     #     - target: SquircleWidgets
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: ai.dreamslate.Squircle
+        PRODUCT_BUNDLE_IDENTIFIER: $(SQUIRCLE_APP_BUNDLE_ID)
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
@@ -45,18 +47,23 @@ targets:
         basedOnDependencyAnalysis: false
         script: |
           "${SRCROOT}/../../scripts/check-swift-concurrency"
-      - name: Bundle private Mac connection
+      # Only when Config/Local.xcconfig names a connection file: such a build
+      # carries your Mac's credentials and is for your own devices.
+      - name: Embed private Mac connection (opt-in)
         basedOnDependencyAnalysis: false
         script: |
           set -eu
           destination="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/client.json"
           mkdir -p "$(dirname "$destination")"
-          if [ -f "${SQUIRCLE_CLIENT_CONFIG}" ]; then
-            cp "${SQUIRCLE_CLIENT_CONFIG}" "$destination"
-            chmod 644 "$destination"
-          else
-            rm -f "$destination"
+          rm -f "$destination"
+          [ -n "${SQUIRCLE_EMBED_CONNECTION:-}" ] || exit 0
+          if [ ! -f "${SQUIRCLE_EMBED_CONNECTION}" ]; then
+            echo "error: SQUIRCLE_EMBED_CONNECTION names ${SQUIRCLE_EMBED_CONNECTION}, which doesn't exist."
+            exit 1
           fi
+          cp "${SQUIRCLE_EMBED_CONNECTION}" "$destination"
+          chmod 644 "$destination"
+          echo "warning: this build embeds your private Mac connection; install it only on your own devices."
     info:
       path: Generated/Info.plist
       properties:
@@ -70,12 +77,14 @@ targets:
         CADisableMinimumFrameDurationOnPhone: YES
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         SquircleBuildID: $(SQUIRCLE_BUILD_ID)
+        SquircleAppBundleID: $(SQUIRCLE_APP_BUNDLE_ID)
+        SquircleSharedKeychainGroup: $(SQUIRCLE_SHARED_KEYCHAIN_GROUP)
         NSLocalNetworkUsageDescription: Connect to your Mac for agent conversations and app builds.
         NSCameraUsageDescription: Take a photo to send to the coding agent.
         NSSupportsLiveActivities: YES
         NSSupportsLiveActivitiesFrequentUpdates: YES
         CFBundleURLTypes:
-          - CFBundleURLName: ai.dreamslate.Squircle
+          - CFBundleURLName: $(PRODUCT_BUNDLE_IDENTIFIER)
             CFBundleURLSchemes: [squircle]
   # The Live Activity (Lock Screen and Dynamic Island); the Mac drives it by push.
   SquircleWidgets:
@@ -86,7 +95,7 @@ targets:
       - path: Shared
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: ai.dreamslate.Squircle.Widgets
+        PRODUCT_BUNDLE_IDENTIFIER: $(SQUIRCLE_APP_BUNDLE_ID).Widgets
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
@@ -110,9 +119,7 @@ targets:
       - path: Overlay
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: ai.dreamslate.SquircleOverlay
-        GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Squircle Overlay
+        PRODUCT_BUNDLE_IDENTIFIER: $(SQUIRCLE_BUNDLE_PREFIX).SquircleOverlay
         SKIP_INSTALL: YES
         CODE_SIGNING_ALLOWED: NO
         DEFINES_MODULE: NO
@@ -122,6 +129,14 @@ targets:
         STRIP_STYLE: non-global
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
         SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) SQUIRCLE_OVERLAY
+    # The injector reads the shared Keychain group from here, so it always
+    # matches what the overlay was compiled with.
+    info:
+      path: Generated/Overlay-Info.plist
+      properties:
+        CFBundleDisplayName: Squircle Overlay
+        SquircleAppBundleID: $(SQUIRCLE_APP_BUNDLE_ID)
+        SquircleSharedKeychainGroup: $(SQUIRCLE_SHARED_KEYCHAIN_GROUP)
   SquircleTests:
     type: bundle.unit-test
     platform: iOS
@@ -130,6 +145,7 @@ targets:
       - target: Squircle
     settings:
       base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(SQUIRCLE_APP_BUNDLE_ID).Tests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   Squircle:

@@ -14,7 +14,7 @@ xcodebuild -project SquircleProbe.xcodeproj -scheme SquircleProbe \
   -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO build
 ```
 
-The project declares team `2F26US4NAU` (Dreamslate Inc.) and bundle ID `ai.dreamslate.SquircleProbe`. `ExportOptions.plist` selects Xcode's `release-testing` export method for registered devices. Device signing/export requires valid certificates and profiles; this scaffold does not create or update them. Do not add `-allowProvisioningUpdates` without coordinating that setup.
+The team and bundle ID prefix come from `app/Squircle/Config/Signing.xcconfig` and your git-ignored `Local.xcconfig` beside it (copy `Local.example.xcconfig`); the bundle ID is `<prefix>.SquircleProbe`. `ExportOptions.plist` selects Xcode's `release-testing` export method for registered devices. Device signing/export requires valid certificates and profiles; this scaffold does not create or update them. Do not add `-allowProvisioningUpdates` without coordinating that setup.
 
 Pass `SQUIRCLE_BUILD_ID=<id>` when archiving to embed the server build ID; otherwise enter and save the ID in the app. Capture starts as soon as that identity is known, independently of the server URL, token or Keychain availability. Preserve the archive/dSYMs for that exact binary. Run queue and transport tests against an available simulator:
 

@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 extension JSONValue {
     var date: Date { string.flatMap(ISODate.parse) ?? .distantPast }
@@ -130,9 +129,6 @@ final class T3HTTP {
         let socket = c.copy() as! URLSessionConfiguration
         socket.timeoutIntervalForRequest = .infinity
         socketSession = URLSession(configuration: socket, delegate: RefuseRedirects(), delegateQueue: nil)
-        // Earlier builds kept a copy of the T3 credential that nothing reads.
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
-                       kSecAttrService as String: "ai.dreamslate.Squircle.T3"] as CFDictionary)
     }
     deinit { session.invalidateAndCancel(); socketSession.invalidateAndCancel() }
     /// Cancels everything under way; the sessions can't be used again.

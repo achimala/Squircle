@@ -21,9 +21,10 @@ use crate::xcode::run_command;
 
 pub const FRAMEWORK: &str = "SquircleOverlay.framework";
 const LOAD_PATH: &str = "@executable_path/Frameworks/SquircleOverlay.framework/SquircleOverlay";
-const SHARED_GROUP: &str = "ai.dreamslate.squircle.shared";
-/// Squircle itself is the source of the shared connection, never a host.
-const SQUIRCLE_BUNDLE_ID: &str = "ai.dreamslate.Squircle";
+/// Info.plist keys naming Squircle's namespace (app/Squircle/Config): the
+/// app and the overlay framework both carry them.
+const APP_BUNDLE_ID_KEY: &str = "SquircleAppBundleID";
+const SHARED_GROUP_KEY: &str = "SquircleSharedKeychainGroup";
 
 /// Export methods whose builds carry a provisioning profile and stay off the
 /// App Store.
@@ -34,8 +35,20 @@ pub fn allowed_method(method: &str) -> bool {
     )
 }
 
-pub fn skips_bundle(bundle_id: &str) -> bool {
-    bundle_id == SQUIRCLE_BUNDLE_ID
+fn info_string(info: &plist::Value, key: &str) -> Option<String> {
+    info.as_dictionary()?
+        .get(key)?
+        .as_string()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// Squircle itself is the source of the shared connection, never a host: an
+/// app whose Info.plist names itself as Squircle's app.
+pub fn is_squircle(app: &Path) -> Result<bool> {
+    let info = plist::Value::from_file(app.join("Info.plist"))?;
+    let own = info_string(&info, APP_BUNDLE_ID_KEY);
+    Ok(own.is_some() && own == info_string(&info, "CFBundleIdentifier"))
 }
 
 fn overlay_project() -> PathBuf {
@@ -87,7 +100,7 @@ fn cache_key(project: &Path, toolchain: &str) -> Result<String> {
                 walk(&path, files)?;
             } else if matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("swift" | "c" | "h" | "metal")
+                Some("swift" | "c" | "h" | "metal" | "xcconfig")
             ) {
                 files.push(path);
             }
@@ -96,6 +109,8 @@ fn cache_key(project: &Path, toolchain: &str) -> Result<String> {
     }
     walk(&root.join("Sources"), &mut files)?;
     walk(&root.join("Overlay"), &mut files)?;
+    // The namespace the framework is compiled with.
+    walk(&root.join("Config"), &mut files)?;
     files.push(project.join("project.pbxproj"));
     files.sort();
     let mut hash = Sha256::new();
@@ -370,7 +385,10 @@ pub async fn inject(
     if groups.is_empty() {
         groups.push(application.into());
     }
-    let shared = format!("{team}.{SHARED_GROUP}");
+    let framework_info = plist::Value::from_file(framework.join("Info.plist"))?;
+    let group = info_string(&framework_info, SHARED_GROUP_KEY)
+        .with_context(|| format!("overlay framework's Info.plist has no {SHARED_GROUP_KEY}"))?;
+    let shared = format!("{team}.{group}");
     if !groups.iter().any(|g| g.as_string() == Some(&shared)) {
         groups.push(shared.into());
     }
@@ -774,6 +792,8 @@ mod tests {
             fs::create_dir_all(root.path().join(dir)).unwrap();
             fs::write(root.path().join(dir).join("A.swift"), dir).unwrap();
         }
+        fs::create_dir_all(root.path().join("Config")).unwrap();
+        fs::write(root.path().join("Config/Signing.xcconfig"), "A = 1").unwrap();
         (root, project)
     }
 
@@ -790,8 +810,12 @@ mod tests {
             cache_key(&project, "Xcode 26.1\nBuild 17B1\n23B1\n").unwrap()
         );
         fs::write(root.path().join("Overlay/A.swift"), "changed").unwrap();
+        let changed = cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap();
+        assert_ne!(key, changed);
+        // A different namespace is a different framework.
+        fs::write(root.path().join("Config/Local.xcconfig"), "B = 2").unwrap();
         assert_ne!(
-            key,
+            changed,
             cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap()
         );
     }
@@ -848,6 +872,24 @@ mod tests {
         assert!(!allowed_method("app-store-connect"));
         assert!(!allowed_method("enterprise"));
         assert!(allowed_method("release-testing"));
-        assert!(skips_bundle("ai.dreamslate.Squircle"));
+    }
+
+    #[test]
+    fn only_squircle_itself_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |id: &str, own: Option<&str>| {
+            let mut info = plist::Dictionary::new();
+            info.insert("CFBundleIdentifier".into(), id.into());
+            if let Some(own) = own {
+                info.insert(APP_BUNDLE_ID_KEY.into(), own.into());
+            }
+            plist::Value::Dictionary(info)
+                .to_file_xml(dir.path().join("Info.plist"))
+                .unwrap();
+            is_squircle(dir.path()).unwrap()
+        };
+        assert!(write("com.example.Squircle", Some("com.example.Squircle")));
+        assert!(!write("com.example.Other", None));
+        assert!(!write("com.example.Other", Some("")));
     }
 }

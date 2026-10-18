@@ -148,10 +148,9 @@ pub async fn build(
                 children_with_extension(&archive.join("Products/Applications"), "app", true)?,
                 "archived application",
             )?;
-            let bundle_id = read_app_metadata(&archived, &request.scheme)?.bundle_id;
             let overlay = !request.no_overlay
                 && overlay::allowed_method(&export_method(&options)?)
-                && !overlay::skips_bundle(&bundle_id);
+                && !overlay::is_squircle(&archived)?;
             if overlay {
                 let data_root = job_dir
                     .parent()

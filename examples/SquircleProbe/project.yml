@@ -1,15 +1,18 @@
 name: SquircleProbe
 options:
-  bundleIdPrefix: ai.dreamslate
   deploymentTarget:
     iOS: "18.0"
 packages:
   PLCrashReporter:
     url: https://github.com/microsoft/plcrashreporter.git
     exactVersion: 1.12.2
+# Team and bundle prefix: the app's Config/Signing.xcconfig and your
+# git-ignored Config/Local.xcconfig there.
+configFiles:
+  Debug: ../../app/Squircle/Config/Signing.xcconfig
+  Release: ../../app/Squircle/Config/Signing.xcconfig
 settings:
   base:
-    DEVELOPMENT_TEAM: 2F26US4NAU
     SWIFT_VERSION: "5.0"
     CURRENT_PROJECT_VERSION: 1
     MARKETING_VERSION: 0.1.0
@@ -24,7 +27,7 @@ targets:
         product: CrashReporter
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: ai.dreamslate.SquircleProbe
+        PRODUCT_BUNDLE_IDENTIFIER: $(SQUIRCLE_BUNDLE_PREFIX).SquircleProbe
         CODE_SIGN_STYLE: Automatic
         TARGETED_DEVICE_FAMILY: "1"
         DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
@@ -44,6 +47,7 @@ targets:
       - target: SquircleProbe
     settings:
       base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(SQUIRCLE_BUNDLE_PREFIX).SquircleProbeTests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   SquircleProbe:

@@ -5,3 +5,4 @@ DerivedData/
 client.json
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
+Config/Local.xcconfig

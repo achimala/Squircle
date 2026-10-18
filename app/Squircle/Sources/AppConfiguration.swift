@@ -30,11 +30,22 @@ struct AppConfiguration: Decodable {
         return configuration
     }
 
+    /// Squircle's own bundle ID and shared Keychain group, set in
+    /// Config/Signing.xcconfig and read from the Info.plist of whichever
+    /// bundle this code is in: the app, or the overlay framework in a host app.
+    enum Namespace {
+        private final class Marker {}
+        private static let info = Bundle(for: Marker.self).infoDictionary ?? [:]
+        static let appBundleID = info["SquircleAppBundleID"] as? String ?? ""
+        static let sharedKeychainGroup = info["SquircleSharedKeychainGroup"] as? String ?? ""
+    }
+
     /// Squircle leaves its paired connection in a team-shared Keychain group,
     /// so the debug overlay Squircle injects into apps it builds reaches the
     /// same Mac with no setup (user decision, 2026-10-06).
     enum Shared {
-        private static let service = "ai.dreamslate.squircle.shared.client"
+        private static let group = Namespace.sharedKeychainGroup
+        private static let service = "\(group).client"
         /// Team ID from the installed profile. App Store builds have none.
         static let teamID = (provisioningProfile?["TeamIdentifier"] as? [String])?.first
         /// The installed provisioning profile's plist (it sits inside a CMS
@@ -47,9 +58,10 @@ struct AppConfiguration: Decodable {
             return try? PropertyListSerialization.propertyList(from: data[start.lowerBound..<end.upperBound], format: nil) as? [String: Any]
         }()
         private static var query: [String: Any]? {
-            teamID.map { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+            guard !group.isEmpty else { return nil }
+            return teamID.map { [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                           kSecAttrAccount as String: "client.json",
-                          kSecAttrAccessGroup as String: "\($0).ai.dreamslate.squircle.shared"] }
+                          kSecAttrAccessGroup as String: "\($0).\(group)"] }
         }
         enum StoreResult: Equatable {
             case stored

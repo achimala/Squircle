@@ -4,7 +4,7 @@ import Security
 enum TokenStore {
     private static var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: "ai.dreamslate.SquircleProbe.diagnostics",
+         kSecAttrService as String: "\(Bundle.main.bundleIdentifier ?? "SquircleProbe").diagnostics",
          kSecAttrAccount as String: "diagnostic-token"]
     }
 

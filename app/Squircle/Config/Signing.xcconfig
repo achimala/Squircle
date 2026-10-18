@@ -1,0 +1,19 @@
+// Signing and namespace for the Squircle app, its overlay, widgets and the
+// Probe example. Don't edit this file: put your own values in Local.xcconfig
+// beside it (git-ignored; copy Local.example.xcconfig).
+
+// Apple team that signs device builds. Empty: unsigned and simulator builds only.
+SQUIRCLE_TEAM_ID =
+// Reverse-DNS prefix of every bundle ID and of the Keychain group Squircle
+// shares with the debug overlay in apps it signs.
+SQUIRCLE_BUNDLE_PREFIX = com.example
+// A private connection JSON (see README.md) to copy into the app as
+// client.json. Empty, the default, embeds nothing: builds for anyone else,
+// CI or publishing must leave it empty.
+SQUIRCLE_EMBED_CONNECTION =
+
+#include? "Local.xcconfig"
+
+DEVELOPMENT_TEAM = $(SQUIRCLE_TEAM_ID)
+SQUIRCLE_APP_BUNDLE_ID = $(SQUIRCLE_BUNDLE_PREFIX).Squircle
+SQUIRCLE_SHARED_KEYCHAIN_GROUP = $(SQUIRCLE_BUNDLE_PREFIX).squircle.shared

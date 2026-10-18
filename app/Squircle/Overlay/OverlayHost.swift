@@ -7,7 +7,7 @@ import UIKit
 @_cdecl("squircle_overlay_start")
 public func squircleOverlayStart() {
     let bundleID = Bundle.main.bundleIdentifier ?? ""
-    guard AppConfiguration.Shared.teamID != nil, !bundleID.isEmpty, bundleID != "ai.dreamslate.Squircle" else { return }
+    guard AppConfiguration.Shared.teamID != nil, !bundleID.isEmpty, bundleID != AppConfiguration.Namespace.appBundleID else { return }
     // Squircle's paired connection; without it the overlay stays off.
     guard let configuration = try? AppConfiguration.Shared.load() else { return }
     Task { @MainActor in OverlayHost.shared.start(bundleID: bundleID, configuration: configuration) }

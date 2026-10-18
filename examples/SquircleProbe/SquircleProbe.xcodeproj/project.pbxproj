@@ -31,6 +31,7 @@
 		143C44FB30B29CB344964FC5 /* ProbeModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProbeModel.swift; sourceTree = "<group>"; };
 		724D4D1EDB7DD8F21676CD5D /* SquircleProbe.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SquircleProbe.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7B06F92271743681F9F4BC6E /* DiagnosticEvent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticEvent.swift; sourceTree = "<group>"; };
+		7FA3E58B895C8AFF1B832D1B /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		9F202F3FDD12ED61B5D79189 /* DiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsTests.swift; sourceTree = "<group>"; };
 		AC4A39969464EA6B23443B68 /* DiagnosticsTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsTransport.swift; sourceTree = "<group>"; };
 		CA2696E5E96924A7A4E80A02 /* TokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenStore.swift; sourceTree = "<group>"; };
@@ -72,9 +73,19 @@
 			path = Tests;
 			sourceTree = "<group>";
 		};
+		931835AA54DF63AE3BDA7BB0 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				7FA3E58B895C8AFF1B832D1B /* Signing.xcconfig */,
+			);
+			name = Config;
+			path = ../../app/Squircle/Config;
+			sourceTree = "<group>";
+		};
 		DDEFFD2DC1F754F258F52F56 = {
 			isa = PBXGroup;
 			children = (
+				931835AA54DF63AE3BDA7BB0 /* Config */,
 				7FF6BFF2B0AA8896CEC5A216 /* Sources */,
 				8EEB40BAD55080F5FD65F74B /* Tests */,
 				EE82ECDC2A72F03016D7A404 /* Products */,
@@ -140,11 +151,11 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					59915197D03A87C138FE87A1 = {
-						DevelopmentTeam = 2F26US4NAU;
+						DevelopmentTeam = "$(SQUIRCLE_TEAM_ID)";
 						ProvisioningStyle = Automatic;
 					};
 					B24938CCD92373462B1BEFCA = {
-						DevelopmentTeam = 2F26US4NAU;
+						DevelopmentTeam = "$(SQUIRCLE_TEAM_ID)";
 					};
 				};
 			};
@@ -206,6 +217,7 @@
 /* Begin XCBuildConfiguration section */
 		02E5635A7FD561440981B07F /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7FA3E58B895C8AFF1B832D1B /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -240,7 +252,6 @@
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -281,7 +292,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleProbeTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_BUNDLE_PREFIX).SquircleProbeTests";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SquircleProbe.app/SquircleProbe";
@@ -290,6 +301,7 @@
 		};
 		9BBB1C7D57E88BB3A35D13EC /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7FA3E58B895C8AFF1B832D1B /* Signing.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -324,7 +336,6 @@
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = 2F26US4NAU;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -360,7 +371,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleProbe;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_BUNDLE_PREFIX).SquircleProbe";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -378,7 +389,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleProbe;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_BUNDLE_PREFIX).SquircleProbe";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -394,7 +405,7 @@
 					"@executable_path/Frameworks",
 					"@loader_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = ai.dreamslate.SquircleProbeTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(SQUIRCLE_BUNDLE_PREFIX).SquircleProbeTests";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SquircleProbe.app/SquircleProbe";

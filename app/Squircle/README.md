@@ -5,9 +5,23 @@ server. T3 owns agent processes, projects, threads, live activity and persistenc
 Squircle's Rust service owns builds, installation links, app metadata and launch
 diagnostics. The Hermes integration has been removed from the active target.
 
+## Signing and namespace
+
+`Config/Signing.xcconfig` is the one place for the Apple team, the bundle ID
+prefix (the app, widgets, overlay, tests and the Probe example are
+`<prefix>.Squircle`, `<prefix>.Squircle.Widgets`, `<prefix>.SquircleOverlay`,
+…) and the Keychain group the app shares with the debug overlay
+(`<prefix>.squircle.shared`). Put your own values in the git-ignored
+`Config/Local.xcconfig` (copy `Local.example.xcconfig`); then run XcodeGen.
+With no local file the project builds unsigned or for the simulator as
+`com.example`. The entitlements, Info.plist and Swift read these settings,
+and the overlay framework's Info.plist carries them to the Rust injector, so
+changing the prefix changes everything together.
+
 ## Personal connection
 
-The ignored `.squircle/client-t3.json` supplies these keys:
+A private connection JSON (normally the ignored `.squircle/client-t3.json`)
+supplies these keys:
 
 ```json
 {
@@ -23,8 +37,13 @@ Use T3's ordinary pairing CLI/token exchange, scoped to `orchestration:read
 orchestration:operate`. Do not borrow the desktop's session or mutate T3's
 SQLite store. The current paired session expires after 30 days; when it expires,
 create a new standard pairing and rebuild the personal client. Self-service
-pairing/refresh UI is not implemented yet. This personal build embeds private
-connection credentials; do not distribute its IPA to others.
+pairing/refresh UI is not implemented yet.
+
+The app embeds it as `client.json` only when `Config/Local.xcconfig` sets
+`SQUIRCLE_EMBED_CONNECTION` to its path; the build fails if that file is
+missing and warns that it carries credentials. Such a build is for your own
+phone and simulator: never distribute its IPA. Leave the setting empty for
+CI, unsigned checks and anything you publish.
 
 The paired session is stored in the iPhone Keychain. HTTPS requests reject
 redirects. The RPC WebSocket sends the session's bearer; the device input socket uses
