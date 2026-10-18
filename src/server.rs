@@ -232,7 +232,7 @@ async fn compact_json(request: Request, next: Next) -> Response {
         .headers()
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.split(',').any(|e| e.split(';').next().is_some_and(|e| e.trim() == "gzip")));
+        .is_some_and(accepts_gzip);
     let response = next.run(request).await;
     let json = response
         .headers()
@@ -266,6 +266,18 @@ async fn compact_json(request: Request, next: Next) -> Response {
         }
     }
     Response::from_parts(parts, Body::from(bytes))
+}
+
+/// Whether an Accept-Encoding value allows gzip: listed (or `*` when gzip
+/// isn't) with a nonzero quality, so `gzip;q=0` refuses it.
+fn accepts_gzip(header: &str) -> bool {
+    let quality = |coding: &str| header.split(',').find_map(|entry| {
+        let mut parts = entry.split(';');
+        if !parts.next()?.trim().eq_ignore_ascii_case(coding) { return None; }
+        let q = parts.find_map(|p| p.trim().strip_prefix("q=").or_else(|| p.trim().strip_prefix("Q=")));
+        Some(q.map_or(Some(1.0), |q| q.trim().parse::<f32>().ok()).unwrap_or(0.0))
+    });
+    quality("gzip").or_else(|| quality("*")).is_some_and(|q| q > 0.0)
 }
 
 pub fn router(state: AppState) -> Router {
@@ -1722,6 +1734,13 @@ async fn build_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gzip_quality_zero_refuses_gzip() {
+        assert!(accepts_gzip("gzip, deflate, br") && accepts_gzip("br;q=1.0, GZIP;q=0.5") && accepts_gzip("*"));
+        assert!(!accepts_gzip("gzip;q=0") && !accepts_gzip("gzip; q=0.000, *") && !accepts_gzip("deflate"));
+        assert!(!accepts_gzip("*;q=0") && !accepts_gzip("xgzip"));
+    }
 
     #[tokio::test]
     async fn polled_json_revalidates_and_compresses() {
