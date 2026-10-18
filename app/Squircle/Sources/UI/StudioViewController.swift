@@ -198,17 +198,19 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         #if !SQUIRCLE_OVERLAY
         MotionAudit.shared.note("gallery.visible", values: ["since_launch_ms": (CACurrentMediaTime() - SquircleApp.launchedAt) * 1000])
         #endif
-        startVerificationHooks()
+        if !hooksStarted { hooksStarted = true; startVerificationHooks() }
         #endif
     }
 
     #if DEBUG
+    /// Once per launch: a full-screen movie or sheet closing shows this again.
+    private var hooksStarted = false
     /// Verification only (never in Release). Holds real states still for a
     /// screen capture: `SQUIRCLE_GRID` (grid scroll in points), `SQUIRCLE_APP`
     /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it)
     /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` (or a simulator's name) brings
     /// the first (or that) simulator large; `SQUIRCLE_BUILDS=1` shows the app's builds and
-    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads` opens Tasks on either tab (`SQUIRCLE_DEMO_TASKS=1` shows made-up tasks, `SQUIRCLE_DEMO_TICKS=1` ticks five of them fast, then Undo). `SQUIRCLE_OPEN_TARGET` opens a notification payload; `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_STRESS=1`
+    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads` opens Tasks on either tab (`SQUIRCLE_DEMO_TASKS=1` shows made-up tasks, `SQUIRCLE_DEMO_TICKS=1` ticks five of them fast, then Undo). `SQUIRCLE_OPEN_TARGET` opens a notification payload; `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_DEMO_VIDEO=PATH` opens a movie full screen; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
@@ -273,6 +275,33 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if scrub < 1 { hold(spring, at: scrub) }
             if environment["SQUIRCLE_THEN_BACK"] == "1" {
                 Task { [weak self] in try? await Task.sleep(for: .seconds(5)); self?.closeThread() }
+            }
+        }
+        // `SQUIRCLE_DEMO_VIDEO=PATH`: that movie full screen, as a recording opens.
+        if let path = environment["SQUIRCLE_DEMO_VIDEO"] {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                let video = VideoPlayerViewController(url: URL(fileURLWithPath: path))
+                self?.present(video, animated: true)
+                // `SQUIRCLE_DEMO_UNMUTE=1`: unmute, mute, unmute, pause, play and
+                // close, as its controls would, then open it again (still unmuted).
+                guard environment["SQUIRCLE_DEMO_UNMUTE"] == "1" else { return }
+                for step in ["unmute", "mute", "unmute", "pause", "play", "close"] {
+                    try? await Task.sleep(for: .seconds(3))
+                    NSLog("SQUIRCLE-AUDIO demo %@", step)
+                    switch step {
+                    case "unmute": video.player?.isMuted = false
+                    case "mute": video.player?.isMuted = true
+                    case "pause": video.player?.pause()
+                    case "play": video.player?.play()
+                    default: video.dismiss(animated: true)
+                    }
+                }
+                try? await Task.sleep(for: .seconds(3))
+                let again = VideoPlayerViewController(url: URL(fileURLWithPath: path))
+                self?.present(again, animated: true)
+                try? await Task.sleep(for: .seconds(4))
+                again.dismiss(animated: true)
             }
         }
         if let wanted = environment["SQUIRCLE_SIM_EXPAND"] {

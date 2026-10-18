@@ -2473,3 +2473,40 @@ Checked in the simulator (iPhone 18 Pro Max, iOS 27) from screenshots of
 every state and a frame sequence of the scripted dock and resizes; jelly
 stress 66 actions, 0 unsettled, 0 violations. Not yet on the phone, and the
 real touch path of the new pans was not exercised.
+
+## 2026-10-18 videos never take your audio
+
+User request: Squircle paused or ducked their music and podcasts; videos
+should be muted by default.
+
+- Cause: the app never set an audio session, so it ran in the default
+  `soloAmbient` category (non-mixing, so it silences other apps once
+  playback activates it), and full-screen recordings opened with sound.
+- The app sets `.ambient` at launch (mixes with others, activates nothing).
+  Inline clips and simulator recordings in the conversation stay muted,
+  looping previews; the live simulator feed is video only.
+- Full screen (`VideoPlayerViewController`, every recording and task clip)
+  opens muted. Only while the user has unmuted it with the player's own
+  mute button and it is playing does the app switch to `.playback` and
+  activate; muting, pausing or closing deactivates with
+  `.notifyOthersOnDeactivation` and returns to `.ambient`. The last choice
+  holds for the rest of the launch.
+- The overlay (`SQUIRCLE_OVERLAY`) never touches the host app's session;
+  its clips play muted and full screen opens muted too.
+- DEBUG: `SQUIRCLE_DEMO_VIDEO=PATH` opens a movie full screen;
+  `SQUIRCLE_DEMO_UNMUTE=1` then unmutes, mutes, unmutes, pauses, plays,
+  closes and reopens it. Logs are `SQUIRCLE-AUDIO`. Verification hooks
+  now start once per launch, not again whenever Home reappears.
+
+Checked in the simulator (iOS 27) while a scratch app played a
+non-mixable tone: the session is `Ambient` from launch, inline recordings
+autoplayed, the tone kept running, and the full-screen player opened with
+its mute icon on. The scripted run logged `Playback` only while unmuted
+and playing, `Ambient` again after mute, pause and close, the unmuted
+choice held on reopen, and there were no session errors. Limits: this
+simulator doesn't arbitrate audio between apps (even a forced activation
+by another app didn't interrupt the tone, and `isOtherAudioPlaying` read
+false), so actually being interrupted can only be checked on the phone.
+Simulated taps on AVKit's mute button changed nothing, also in a bare
+test app, so the button itself is untested; the code follows the player's
+`isMuted`, which that button is expected to set (unconfirmed).

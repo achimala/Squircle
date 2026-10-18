@@ -8,6 +8,7 @@ final class SquircleApp: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         _ = Self.launchedAt
         PushCenter.shared.install()
+        MediaAudio.install()
         return true
     }
 

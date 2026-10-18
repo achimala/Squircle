@@ -1,4 +1,3 @@
-import AVKit
 import UIKit
 
 /// The app's tasks beside its agent: what you asked for, grouped by what
@@ -430,9 +429,7 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             guard let self else { return }
             if media.kind == "video" {
                 guard let url = await model.taskVideo(task: task.id, media: media.id) else { return }
-                let player = AVPlayerViewController()
-                player.player = AVPlayer(url: url)
-                present(player, animated: true) { player.player?.play() }
+                present(VideoPlayerViewController(url: url), animated: true)
             } else if let data = await model.taskMediaData(task: task.id, media: media.id), let image = UIImage(data: data) {
                 present(ImageViewController(image: image, title: media.caption.isEmpty ? task.ask : media.caption), animated: true)
             }
