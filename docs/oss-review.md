@@ -40,6 +40,12 @@ This is a **publish-after-targeted-cleanup** verdict, not a recommendation to re
   separate transport, output, discovery and polling modules. Locked tests,
   rustfmt and clippy pass after the mechanical move.
 
+- **Step 9, U3 process boundary: done.** The existing bounded process-group
+  runner and its cancellation/reaping tests moved from `xcode` to private
+  `process.rs`. Git, symbolication, perf, previews and overlay builds use it;
+  the already-consolidated hardened Git adapter is preserved. Full locked tests
+  and clippy pass. This was a move, not a change to process ownership.
+
 ## Scope, method, and verification
 
 Read `AGENTS.md` and `README.md` first. Inventoried all 184 tracked files: 47 Rust files, 71 Swift files, the C overlay loader, project/build configuration, plugin templates, scripts, examples, and documentation. The Rust/Swift/C files total 53,731 lines, including tests. Reviewed subsystem boundaries and representative execution paths, searched the complete tracked tree for references/configuration/secrets, traced superseded implementations through Git, and ran the checks below. This is not a claim that every branch or runtime combination was exercised.

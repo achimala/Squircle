@@ -230,7 +230,7 @@ fn validate_png(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 async fn cancelled(cancel: watch::Receiver<bool>) {
-    xcode::cancelled(Some(cancel)).await
+    crate::process::cancelled(Some(cancel)).await
 }
 
 async fn command(
@@ -243,18 +243,20 @@ async fn command(
     writeln!(log, "\n$ /usr/bin/xcrun simctl {args:?}")?;
     let mut command = Command::new("/usr/bin/xcrun");
     command.arg("simctl").args(args);
-    let finished = xcode::run_bounded(
+    let finished = crate::process::run_bounded(
         command,
-        xcode::Sink::Capture(1024 * 1024),
-        xcode::Sink::File(log.try_clone()?),
+        crate::process::Sink::Capture(1024 * 1024),
+        crate::process::Sink::File(log.try_clone()?),
         deadline,
         Some(cancel),
     )
     .await
     .map_err(|error| match error {
-        xcode::RunError::Cancelled => anyhow::anyhow!("Preview cancelled"),
-        xcode::RunError::TimedOut => anyhow::anyhow!("Simulator preview command timed out"),
-        xcode::RunError::Failed(error) => error.context("simctl command did not complete"),
+        crate::process::RunError::Cancelled => anyhow::anyhow!("Preview cancelled"),
+        crate::process::RunError::TimedOut => {
+            anyhow::anyhow!("Simulator preview command timed out")
+        }
+        crate::process::RunError::Failed(error) => error.context("simctl command did not complete"),
     })?;
     ensure!(
         finished.status.success(),

@@ -10,8 +10,6 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use tokio::{io::AsyncReadExt, process::Command, time::Instant};
 
-use crate::xcode;
-
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -155,22 +153,24 @@ async fn capture(
     label: &str,
     deadline: Instant,
     limit: usize,
-) -> Result<xcode::Finished> {
+) -> Result<crate::process::Finished> {
     // The group is killed on timeout or when the containing server task is
     // dropped: symbolicatecrash can launch its own dwarfdump/atos subprocesses.
-    let output = xcode::run_bounded(
+    let output = crate::process::run_bounded(
         command,
-        xcode::Sink::Capture(limit),
-        xcode::Sink::Capture(limit),
+        crate::process::Sink::Capture(limit),
+        crate::process::Sink::Capture(limit),
         deadline,
         None,
     )
     .await
     .map_err(|error| match error {
-        xcode::RunError::TimedOut | xcode::RunError::Cancelled => {
+        crate::process::RunError::TimedOut | crate::process::RunError::Cancelled => {
             anyhow::anyhow!("{label}: symbolication exceeded its 60-second timeout")
         }
-        xcode::RunError::Failed(error) => error.context(format!("{label} did not complete")),
+        crate::process::RunError::Failed(error) => {
+            error.context(format!("{label} did not complete"))
+        }
     })?;
     ensure!(
         output.stdout.len() + output.stderr.len() <= limit,

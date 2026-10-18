@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{process::Command, sync::watch, time::Instant};
 
-use crate::xcode::{Finished, RunError, Sink, cancelled, run_bounded, run_command};
+use crate::process::{Finished, RunError, Sink, cancelled, run_bounded};
+use crate::xcode::run_command;
 
 pub const FRAMEWORK: &str = "SquircleOverlay.framework";
 const LOAD_PATH: &str = "@executable_path/Frameworks/SquircleOverlay.framework/SquircleOverlay";

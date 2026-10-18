@@ -264,17 +264,17 @@ fn app_image(image: &Image) -> bool {
         || (image.path.contains(".app/") && !image.path.contains("SquircleOverlay.framework"))
 }
 
-/// Runs a symbol tool under `xcode::run_bounded`, so a wedged `atos` or
+/// Runs a symbol tool under `crate::process::run_bounded`, so a wedged `atos` or
 /// `dwarfdump` cannot hang `perf show` and nothing it started outlives it; its
 /// stdout, or nothing if it failed, timed out or wrote more than 16 MiB.
 async fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> Option<Vec<u8>> {
     // Callers build it in place; run_bounded takes it whole.
     let command = std::mem::replace(command, Command::new("/usr/bin/false"));
-    let finished = crate::xcode::run_bounded_with_input(
+    let finished = crate::process::run_bounded_with_input(
         command,
         input,
-        crate::xcode::Sink::Capture(16 * 1024 * 1024),
-        crate::xcode::Sink::Discard,
+        crate::process::Sink::Capture(16 * 1024 * 1024),
+        crate::process::Sink::Discard,
         tokio::time::Instant::now() + limit,
         None,
     )

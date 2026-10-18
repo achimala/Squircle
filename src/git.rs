@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 const LIMIT: Duration = Duration::from_secs(120);
 const MAX_OUTPUT: usize = 32 * 1024 * 1024;
 
-/// Runs `/usr/bin/git -C dir args…` under `xcode::run_bounded` (deadline,
+/// Runs `/usr/bin/git -C dir args…` under `crate::process::run_bounded` (deadline,
 /// output cap, its whole process group killed if dropped), configured by
 /// nothing but the repository: `GIT_*` variables are removed, a configured
 /// fsmonitor is not started, there is no pager or prompt, and optional index
@@ -32,10 +32,10 @@ pub(crate) async fn run(
         .args(["-c", "core.fsmonitor=false", "--no-pager", "-C"])
         .arg(dir)
         .args(args);
-    let output = crate::xcode::run_bounded(
+    let output = crate::process::run_bounded(
         command,
-        crate::xcode::Sink::Capture(max_output),
-        crate::xcode::Sink::Capture(64 * 1024),
+        crate::process::Sink::Capture(max_output),
+        crate::process::Sink::Capture(64 * 1024),
         tokio::time::Instant::now() + limit,
         None,
     )
