@@ -109,6 +109,13 @@ impl<T> Snapshot<T> {
     pub fn get(&self) -> Arc<T> {
         self.0.borrow().clone()
     }
+
+    /// The first published value, the current one included, for which
+    /// `ready` holds; `None` once the owner has stopped without one.
+    pub async fn wait_for(&self, mut ready: impl FnMut(&T) -> bool) -> Option<Arc<T>> {
+        let mut receiver = self.0.clone();
+        receiver.wait_for(|value| ready(value)).await.ok().map(|value| value.clone())
+    }
 }
 
 /// An owner's commit gate (C00) with its saved value published: readers

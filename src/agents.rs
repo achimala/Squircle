@@ -579,6 +579,15 @@ impl Link {
     }
 }
 
+/// A receipt if `shell` is current and shows the thread's session stopped,
+/// or no such thread.
+fn stopped_in(shell: &Shell, id: &str) -> Option<StopReceipt> {
+    match shell.observe(id).current()? {
+        Some(now) if now.execution != Execution::Stopped => None,
+        _ => Some(StopReceipt(())),
+    }
+}
+
 impl Shell {
     fn current(&self) -> bool {
         matches!(self.link, Link::Current { .. })
@@ -1299,13 +1308,14 @@ impl Agents {
 
     async fn ready(&self) -> Result<Arc<dyn Peer>> {
         let client = self.client().await?;
-        for _ in 0..50 {
-            if self.shell().current() {
-                return Ok(client);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        bail!("T3 has not sent its thread list yet; try again")
+        self.view_when(Duration::from_secs(5), |v| v.shell.current()).await
+            .context("T3 has not sent its thread list yet; try again")?;
+        Ok(client)
+    }
+
+    /// The first view, within `limit`, for which `ready` holds.
+    async fn view_when(&self, limit: Duration, ready: impl FnMut(&View) -> bool) -> Option<Arc<View>> {
+        tokio::time::timeout(limit, self.view.wait_for(ready)).await.ok().flatten()
     }
 
     // MARK: Wake-ups
@@ -2344,13 +2354,8 @@ impl Agents {
 
     /// A thread from the live shell; one just created takes a moment to arrive.
     async fn wait_thread(&self, id: &str) -> Result<Value> {
-        for _ in 0..100 {
-            if let Some(thread) = self.thread(id) {
-                return Ok(thread);
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        bail!("T3 has no thread {id}")
+        let view = self.view_when(Duration::from_secs(5), |v| v.shell.threads.contains_key(id)).await;
+        view.and_then(|v| v.shell.thread(id)).with_context(|| format!("T3 has no thread {id}"))
     }
 
     pub async fn send(&self, thread_id: &str, text: &str) -> Result<()> {
@@ -2561,22 +2566,14 @@ impl Agents {
     /// A receipt if the live shell shows the thread's session stopped, or
     /// no such thread.
     fn stopped(&self, id: &str) -> Option<StopReceipt> {
-        match self.observe(id).current()? {
-            Some(now) if now.execution != Execution::Stopped => None,
-            _ => Some(StopReceipt(())),
-        }
+        stopped_in(&self.shell(), id)
     }
 
     /// Waits for T3 to report a stopped worker's session stopped. A thread
     /// still waiting on the user, or a disconnected shell, does not count.
     async fn wait_stopped(&self, id: &str) -> Result<StopReceipt> {
-        for _ in 0..300 {
-            if let Some(receipt) = self.stopped(id) {
-                return Ok(receipt);
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        bail!("The worker did not stop within 30 seconds; nothing was removed")
+        let view = self.view_when(Duration::from_secs(30), |v| stopped_in(&v.shell, id).is_some()).await;
+        view.and_then(|v| stopped_in(&v.shell, id)).context("The worker did not stop within 30 seconds; nothing was removed")
     }
 
     /// Archives the coordinator's finished workers whose work is merged,
