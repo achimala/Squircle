@@ -1,13 +1,11 @@
 # Verify Squircle
 
-Squircle is a Rust CLI and local service. The commands below operate on this Mac.
-Keep the service running in a separate terminal. This prototype does not install
-itself as a login service or change Tailscale.
+Squircle is a Rust CLI and local service. The commands below run on your Mac and
+exercise the build, install and diagnostics path with the bundled sample app.
+Keep the service running in a separate terminal. Squircle does not install
+itself as a login service and does not configure Tailscale or HTTPS.
 
-The personal native client already embeds this Mac's connection settings and
-needs no token entry. Its installation/chat path is verified; the commands here
-are for rebuilding and exercising the development tools. See the
-[app guide](../app/Squircle/README.md) and [current evidence](archive/validation.md).
+For the iPhone app's own setup see the [app guide](../app/Squircle/README.md).
 
 ## Build and inspect
 
@@ -38,9 +36,9 @@ requests cancellation. Simulator builds cannot produce an OTA install link.
 
 ## Archive and export for a registered iPhone
 
-The sample uses the user-approved team `TEAMID`. Check its settings
-before using another account. Signing certificates, profiles and device
-registration must be available to the service's user.
+The sample's project and `ExportOptions.plist` name a signing team; set them to
+your own team first. Signing certificates, profiles and device registration
+must be available to the user the service runs as.
 
 ```sh
 ./target/debug/squircle build start \
@@ -101,8 +99,7 @@ as an Apple-text `.crash` file and use the retained dSYM:
 This invokes the selected Xcode's `symbolicatecrash`. Inspect the resulting app
 frames; command completion alone does not prove symbol resolution. JSON `.ips`
 is unsupported. See [Probe instructions](../examples/SquircleProbe/README.md)
-for its test crash workflow and [validation evidence](archive/validation.md) for what
-has actually been exercised.
+for its test crash workflow.
 
 ## Limits and lifecycle
 

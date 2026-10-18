@@ -1,14 +1,13 @@
 # Agent-friendly CLI
 
-Status: implemented Rust prototype, 2026-10-04. Executable name: `squircle`.
-See [workflow](verification.md) for runnable examples and [evidence](archive/validation.md)
-for the distinction between implemented and physically verified behavior.
+Executable name: `squircle`. See [workflow](verification.md) (also
+`squircle help workflow`) for runnable examples.
 
 ## Boundary and discovery
 
-The same deterministic build/install/diagnostic operations serve Hermes, OpenClaw,
-coding agents, CI, and a human terminal. Callers need access to this Mac and its
-signing environment. The coordinator supplies planning, identity, and memory.
+The same deterministic build/install/diagnostic operations serve T3's app agents and
+workers, other agents such as OpenClaw, CI, and a human terminal. Callers need access to this Mac and its
+signing environment. The calling agent supplies planning, identity, and memory.
 
 1. `squircle --help`: purpose, command groups, next help command.
 2. `squircle build start --help`: arguments and side effects.
@@ -170,8 +169,7 @@ as Xcode, and requires a dedicated simulator configured by UUID. Capture failure
 preserves the IPA and any previous image. Simulator builds reuse their product;
 archive previews rebuild the current working tree, so they must not claim to be
 pixels from a frozen archived revision. App synchronization accepts only newer
-captures and does not overwrite edited names/summaries. End-to-end validation of
-the new catalog/client flow is tracked in [validation evidence](archive/validation.md).
+captures and does not overwrite edited names/summaries. 
 
 ## Output and persistence contract
 
@@ -209,6 +207,7 @@ for phone access. See [lifecycle limits](verification.md#limits-and-lifecycle).
 
 Automated CLI tests run with an empty `PATH`, without an agent executable or
 running service for discovery. HTTP tests exercise the same core implementation
-used by the phone. Actual stock Hermes CLI and API runs have invoked Squircle
-successfully; OpenClaw invocation remains pending. No agent installation is
-required to use Squircle directly. See [validation](archive/validation.md).
+used by the phone. T3's app agents and workers use it for builds, simulators and tasks; earlier
+Hermes runs used it too
+([archived evidence](archive/validation.md)). OpenClaw invocation has not been
+tried. No agent installation is required to use Squircle directly.

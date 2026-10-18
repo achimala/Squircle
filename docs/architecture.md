@@ -76,7 +76,9 @@ resets; a persisted reservation finishes under the same thread ID. `POST
 /v1/agents` takes an optional `runtime_mode` (`approval-required`,
 `auto-accept-edits`, `auto`, `full-access`; default `full-access`), applied
 when the thread is created; a fresh start keeps its predecessor's mode;
-workers run `full-access`. `GET /v1/agents` returns `cli`, the service's own
+workers run in their agent's mode unless `thread spawn --runtime-mode`
+overrides it, mapped per provider (`auto` stays auto on Claude, Codex,
+Cursor and Grok; Antigravity takes auto-edit). `GET /v1/agents` returns `cli`, the service's own
 invocation, which the phone uses in worker prompts. Wake-ups go through a
 persisted outbox with stable message IDs (M16, `src/fsm/coordinator/`):
 each attempt's command ID is saved before it is sent; a lost answer goes
