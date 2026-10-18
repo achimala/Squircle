@@ -2367,12 +2367,19 @@ copies T3's or the providers' stores.
   for calls inside it (Claude Code 2.1.300 sends `agent_id` and
   `agent_type: "squircle:history"` with a subagent's tool calls; the
   `--agent` main thread has `agent_type` but no `agent_id`, checked with a
-  probe plugin), allows only Read/Grep/Glob and Bash whose every command reads:
-  `squircle history|notes show|task list/show|thread read/status|build
-  list/status/log|app list/show`, git `log/show/diff/grep/blame/status/…`
-  without `-c` or `--output`, `rg` without `--pre`, `cat/head/tail/grep/wc/ls/jq`,
-  and no output to a file. Edit, Write and NotebookEdit joined the hook's
-  matcher for this.
+  probe plugin), allows only Read/Grep/Glob and Bash that is one plain call
+  of Squircle's own lookups: `squircle history search/show|notes show|task
+  list/show|thread read/status|build list/status/log|app list/show|agent
+  list`. **2026-10-18 (oss-review P3b):** this was a filter over shell
+  (read-only git, `rg`, `cat`, …), and `GIT_EXTERNAL_DIFF=helper git diff`
+  ran a writer through it. It is now an allowlist: the command must be the
+  exact Squircle invocation the hook was installed with (same binary,
+  `--data-dir` and `--server`, none overridden), with no assignments,
+  expansions, redirections, globs or chaining; no other program runs.
+  Commits are read through `history search --in commits` and `history show
+  commit:`, whose git calls drop `GIT_*` variables, disable fsmonitor and pass
+  `--no-ext-diff --no-textconv`. Edit, Write and NotebookEdit joined the
+  hook's matcher for this.
 - **Notes** (`squircle notes show|add|edit|remove`, `src/notes.rs`): a few
   durable lines per app (`<data>/notes/<project>.json`, at most 300 characters
   each and 4000 in all) for preferences, decisions and gotchas, listed in each

