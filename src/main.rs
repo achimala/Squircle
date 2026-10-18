@@ -740,7 +740,7 @@ enum AppCommand {
     },
     /// List persistent app metadata and current preview versions.
     List,
-    /// Read one app's metadata. Hermes still owns conversations.
+    /// Read one app's metadata. T3 owns conversations.
     Show { app_id: String },
     /// Update app-facing metadata after implementation work.
     Update {
@@ -791,7 +791,7 @@ fn root(cli: &Cli) -> Result<PathBuf> {
 
 #[tokio::main]
 async fn main() {
-    let machine = std::env::args().any(|s| s == "--json");
+    let machine = std::env::args_os().any(|s| s == "--json");
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
@@ -925,7 +925,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             })
         }
         Commands::Capabilities => success(
-            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":["doctor","app.browse","app.inspect","app.import","app.register","app.list","app.show","app.update","app.preview","build.start","build.list","build.status","build.wait","build.cancel","build.log","build.import","preview.capture","install-link","media.add","media.list","sim.start","sim.stop","sim.status","sim.devices","sim.cleanup","t3.connect","t3.status","agent.setup","agent.start","agent.list","agent.restart","agent.fresh","agent.context","thread.spawn","thread.send","thread.status","thread.read","thread.answer","thread.archive","thread.cleanup","task.add","task.update","task.link","task.attach","task.list","task.show","logs","crashes","symbolicate","diagnostics.send","perf.show","perf.list","push.setup","push.test","push.status","service.restart","service.stop"],"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"},
+            json!({"name":"Squircle","version":env!("CARGO_PKG_VERSION"),"schema_version":SCHEMA_VERSION,"operations":operations(),"build_modes":["archive","simulator"],"preview":{"build_opt_in":"capture_preview / build start --preview","default_simulator_env":"SQUIRCLE_SIMULATOR_ID","download":"GET /v1/builds/{id}/preview; control bearer; image/png","source":"simulator jobs reuse their product; archive previews rebuild current working tree, not a frozen source snapshot"},"max_concurrent_builds":1,"max_queued_or_running_builds":16,"diagnostic_event_max_bytes":1048576,"diagnostics_storage_max_bytes_per_build":67108864,"requires_local_http_service":true,"manages_tailscale":false,"remote_launch":false,"lldb":false,"crash_symbolication":"local Xcode symbolicatecrash; Apple-text reports; frame resolution must be checked","cellular_install_verified":false,"app_agents":{"instance":"squircle","wake_ups":"service sends a [worker update] turn to the app agent when a worker finishes, errors or needs input"},
                 "invocation":squircle::agents::cli_invocation(&std::path::absolute(root(cli)?)?, &cli.server)}),
         ),
         Commands::App { command } => match command {
@@ -1027,49 +1027,9 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             }
             BuildCommand::Wait { build_id, timeout } => {
                 valid_id(build_id)?;
-                if *timeout > 86400 {
-                    bail!("Timeout cannot exceed 86400 seconds");
-                }
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(*timeout);
-                loop {
-                    let response = match tokio::time::timeout_at(
-                        deadline,
-                        get(cli, &format!("/v1/builds/{build_id}")),
-                    )
-                    .await
-                    {
-                        Ok(response) => response?,
-                        Err(_) => break wait_timeout(),
-                    };
-                    if response["ok"] == false {
-                        break response;
-                    }
-                    let state = response["data"]["job"]["state"].as_str().unwrap_or("");
-                    let preview_busy = matches!(
-                        response["data"]["job"]["output"]["preview_state"].as_str(),
-                        Some("pending" | "running")
-                    );
-                    if state == "succeeded" && !preview_busy {
-                        break response;
-                    }
-                    if ["failed", "cancelled", "interrupted"].contains(&state) {
-                        let mut error = failure(
-                            "build_not_succeeded",
-                            format!("Build {build_id} is {state}"),
-                            "Read build status and build log before retrying.",
-                        );
-                        error["data"] = response["data"].clone();
-                        break error;
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        break wait_timeout();
-                    }
-                    tokio::time::sleep_until(
-                        (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline),
-                    )
-                    .await;
-                }
+                poll(cli, build_id, deadline(*timeout)?, WaitFor::Build).await?
             }
+
             BuildCommand::Cancel { build_id } => {
                 post(
                     cli,
@@ -1116,13 +1076,10 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 },
         } => {
             valid_id(build_id)?;
-            if *timeout > 86400 {
-                bail!("Timeout cannot exceed 86400 seconds");
-            }
             if let Some(simulator) = simulator {
                 uuid::Uuid::parse_str(simulator).context("Simulator ID must be a UUID")?;
             }
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(*timeout);
+            let deadline = deadline(*timeout)?;
             let submitted = tokio::time::timeout_at(
                 deadline,
                 post(
@@ -1133,42 +1090,10 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
             )
             .await;
             match submitted {
-                Err(_) => preview_wait_timeout(),
+                Err(_) => WaitFor::Preview.timeout(),
                 Ok(Err(error)) => return Err(error),
                 Ok(Ok(value)) if value["ok"] == false => value,
-                Ok(Ok(_)) => loop {
-                    let response = match tokio::time::timeout_at(
-                        deadline,
-                        get(cli, &format!("/v1/builds/{build_id}")),
-                    )
-                    .await
-                    {
-                        Ok(value) => value?,
-                        Err(_) => break preview_wait_timeout(),
-                    };
-                    if response["ok"] == false {
-                        break response;
-                    }
-                    match response["data"]["job"]["output"]["preview_state"].as_str() {
-                        Some("succeeded") => break response,
-                        Some("failed") => {
-                            let mut failure = failure(
-                                "preview_failed",
-                                response["data"]["job"]["output"]["preview_error"]
-                                    .as_str()
-                                    .unwrap_or("Preview failed"),
-                                "Inspect build log and simulator; the signed IPA is unchanged.",
-                            );
-                            failure["data"] = response["data"].clone();
-                            break failure;
-                        }
-                        _ => {}
-                    }
-                    tokio::time::sleep_until(
-                        (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline),
-                    )
-                    .await;
-                },
+                Ok(Ok(_)) => poll(cli, build_id, deadline, WaitFor::Preview).await?,
             }
         }
         Commands::Logs {
@@ -1436,19 +1361,125 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
     Ok(Some(data))
 }
 
-fn wait_timeout() -> Value {
-    failure(
-        "wait_timeout",
-        "Wait timed out; the build was not cancelled",
-        "Call build status or wait again with the same build ID.",
-    )
+/// clap owns the public command tree and help metadata. Discovery walks that
+/// same tree so adding a command cannot silently omit it from capabilities.
+fn operations() -> Vec<String> {
+    fn collect(command: &clap::Command, prefix: &str, out: &mut Vec<String>) {
+        for child in command.get_subcommands().filter(|c| !c.is_hide_set()) {
+            let name = if prefix.is_empty() {
+                child.get_name().to_owned()
+            } else {
+                format!("{prefix}.{}", child.get_name())
+            };
+            if child.has_subcommands() {
+                collect(child, &name, out);
+            } else {
+                out.push(name);
+            }
+        }
+    }
+    let mut operations = Vec::new();
+    collect(&Cli::command(), "", &mut operations);
+    operations
 }
-fn preview_wait_timeout() -> Value {
-    failure(
-        "wait_timeout",
-        "Preview wait timed out; accepted capture was not cancelled",
-        "Call build status or build cancel with the same build ID; do not resubmit blindly.",
-    )
+
+#[derive(Clone, Copy)]
+enum WaitFor {
+    Build,
+    Preview,
+}
+impl WaitFor {
+    fn timeout(self) -> Value {
+        match self {
+            Self::Build => failure(
+                "wait_timeout",
+                "Wait timed out; the build was not cancelled",
+                "Call build status or wait again with the same build ID.",
+            ),
+            Self::Preview => failure(
+                "wait_timeout",
+                "Preview wait timed out; accepted capture was not cancelled",
+                "Call build status or build cancel with the same build ID; do not resubmit blindly.",
+            ),
+        }
+    }
+    fn terminal(self, response: Value, build_id: &str) -> Option<Value> {
+        if response["ok"] == false {
+            return Some(response);
+        }
+        let job = &response["data"]["job"];
+        match self {
+            Self::Build => {
+                let state = job["state"].as_str().unwrap_or("");
+                let preview_busy = matches!(
+                    job["output"]["preview_state"].as_str(),
+                    Some("pending" | "running")
+                );
+                if state == "succeeded" && !preview_busy {
+                    return Some(response);
+                }
+                if ["failed", "cancelled", "interrupted"].contains(&state) {
+                    let mut error = failure(
+                        "build_not_succeeded",
+                        format!("Build {build_id} is {state}"),
+                        "Read build status and build log before retrying.",
+                    );
+                    error["data"] = response["data"].clone();
+                    return Some(error);
+                }
+            }
+            Self::Preview => match job["output"]["preview_state"].as_str() {
+                Some("succeeded") => return Some(response),
+                Some("failed") => {
+                    let mut error = failure(
+                        "preview_failed",
+                        job["output"]["preview_error"]
+                            .as_str()
+                            .unwrap_or("Preview failed"),
+                        "Inspect build log and simulator; the signed IPA is unchanged.",
+                    );
+                    error["data"] = response["data"].clone();
+                    return Some(error);
+                }
+                _ => {}
+            },
+        }
+        None
+    }
+}
+
+fn deadline(seconds: u64) -> Result<tokio::time::Instant> {
+    ensure!(seconds <= 86400, "Timeout cannot exceed 86400 seconds");
+    Ok(tokio::time::Instant::now() + Duration::from_secs(seconds))
+}
+
+/// One fetch/sleep deadline mechanism. Completion and failure policy stay
+/// distinct; submission is outside this loop and is never repeated.
+async fn poll(
+    cli: &Cli,
+    build_id: &str,
+    deadline: tokio::time::Instant,
+    policy: WaitFor,
+) -> Result<Value> {
+    loop {
+        let response =
+            match tokio::time::timeout_at(deadline, get(cli, &format!("/v1/builds/{build_id}")))
+                .await
+            {
+                Ok(response) => response?,
+                Err(_) => return Ok(policy.timeout()),
+            };
+        if let Some(done) = policy.terminal(response, build_id) {
+            return Ok(done);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(policy.timeout());
+        }
+        tokio::time::sleep_until(
+            (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline),
+        )
+        .await;
+    }
 }
 
 fn doctor(cli: &Cli) -> Value {

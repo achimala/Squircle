@@ -27,6 +27,14 @@ This is a **publish-after-targeted-cleanup** verdict, not a recommendation to re
   JSON projection queries, aggregate size and stopping long reads. All 218 Rust
   tests pass; no live T3 database was opened.
 
+- **Q4/Q5 and U4 discovery/polling: done.** Help names T3. Capabilities walk
+  clap's public command tree (70 operations, including history, notes and
+  compact), removing the second inventory. One deadline loop serves distinct
+  build/preview completion policies; preview submission is still once only.
+  Invalid non-UTF-8 arguments now produce the normal JSON error. All 219 tests
+  pass, including the existing hung-request/deadline contracts; compiled help
+  and capability output were inspected without a service.
+
 ## Scope, method, and verification
 
 Read `AGENTS.md` and `README.md` first. Inventoried all 184 tracked files: 47 Rust files, 71 Swift files, the C overlay loader, project/build configuration, plugin templates, scripts, examples, and documentation. The Rust/Swift/C files total 53,731 lines, including tests. Reviewed subsystem boundaries and representative execution paths, searched the complete tracked tree for references/configuration/secrets, traced superseded implementations through Git, and ran the checks below. This is not a claim that every branch or runtime combination was exercised.
