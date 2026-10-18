@@ -394,7 +394,7 @@ private final class SimulatorChannel {
         inputTail = Task { [weak self] in
             await previous?.value
             guard let self, !Task.isCancelled else { return }
-            do { try await self.send(tag:3,payload:.from(["type":phase,"x":point.x,"y":point.y])) }
+            do { try await self.send(tag:3,payload:["type": .string(phase), "x": .number(Double(point.x)), "y": .number(Double(point.y))]) }
             catch { self.close() }
         }
     }
@@ -484,7 +484,7 @@ final class T3DeviceStream {
             URLQueryItem(name:"device",value:target.deviceID),URLQueryItem(name:"hostId",value:target.hostID)]))
         attempt.socket = ws; ws.resume()
         let channel = SimulatorChannel(socket:ws,video:video)
-        try await channel.send(tag:0x0d,payload:.from(["enabled":false]))
+        try await channel.send(tag:0x0d,payload:["enabled": false])
         // The helper's config confirms that HID is ready; a cached picture alone
         // never enables input. Video keeps playing meanwhile.
         while true {

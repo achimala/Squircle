@@ -366,6 +366,8 @@ enum JSONValue: Codable, Equatable {
         case .array(let v): try c.encode(v)
         }
     }
+    /// A whole number as JSON holds it.
+    static func int(_ value: some BinaryInteger) -> Self { .number(Double(value)) }
     var bool: Bool { if case .bool(let v) = self { return v }; return false }
     var int: Int? { if case .number(let v) = self { return Int(v) }; return nil }
     var double: Double? { if case .number(let v) = self { return v }; return nil }
@@ -394,6 +396,17 @@ enum JSONValue: Codable, Equatable {
     }
 }
 
+/// Payloads are written as literals (`["type": "x", "id": .string(id)]`), so
+/// a value JSON can't hold doesn't compile instead of becoming `null`.
+extension JSONValue: ExpressibleByDictionaryLiteral, ExpressibleByArrayLiteral, ExpressibleByStringInterpolation,
+                     ExpressibleByBooleanLiteral, ExpressibleByIntegerLiteral, ExpressibleByFloatLiteral {
+    init(dictionaryLiteral elements: (String, JSONValue)...) { self = .object(Dictionary(elements) { _, last in last }) }
+    init(arrayLiteral elements: JSONValue...) { self = .array(elements) }
+    init(stringLiteral value: String) { self = .string(value) }
+    init(booleanLiteral value: Bool) { self = .bool(value) }
+    init(integerLiteral value: Int) { self = .number(Double(value)) }
+    init(floatLiteral value: Double) { self = .number(value) }
+}
 
 /// One thing the user asked an app's agent for, and where it stands
 /// (`squircle task`). Linked threads and builds come with their state.

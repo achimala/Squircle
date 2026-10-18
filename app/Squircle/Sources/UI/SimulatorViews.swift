@@ -216,7 +216,7 @@ final class SimulatorFeeds {
 
     func home(_ target: SimulatorTarget) {
         guard let stream = feeds[target]?.stream else { return }
-        Task { try? await stream.send(tag: 4, payload: .from(["button": "home"])) }
+        Task { try? await stream.send(tag: 4, payload: ["button": "home"]) }
     }
 }
 

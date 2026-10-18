@@ -86,9 +86,9 @@ final class LinkRuntime {
                     switch scope {
                     case .shell:
                         // With a shell already held, T3 sends only what changed since (or a fresh snapshot).
-                        var request: [String: Any] = ["requestCompletionMarker": true]
-                        if let sequence = host?.shellCursor { request["afterSequence"] = sequence }
-                        try await gateway.subscribe("orchestration.subscribeShell", .from(request), receive: { [weak self] item in
+                        var request: [String: JSONValue] = ["requestCompletionMarker": true]
+                        if let sequence = host?.shellCursor { request["afterSequence"] = .int(sequence) }
+                        try await gateway.subscribe("orchestration.subscribeShell", .object(request), receive: { [weak self] item in
                             guard let self, socketAttempt == attempt else { return }
                             host?.linkReceived(shell: item)
                             if item["kind"].string == "synchronized" { send(.synchronized(attempt: attempt, .shell, now: .now)) }
@@ -133,10 +133,10 @@ final class LinkRuntime {
                 let cursor = await self?.host?.threadCursor(id)
                 guard let self, state.follow?.generation == generation, socketAttempt == attempt else { return }
                 // Holding the thread up to some point, T3 sends only the events since, or a snapshot when it can't.
-                var request: [String: Any] = ["threadId": id, "requestCompletionMarker": true]
-                if let cursor { request["afterSequence"] = cursor }
+                var request: [String: JSONValue] = ["threadId": .string(id), "requestCompletionMarker": true]
+                if let cursor { request["afterSequence"] = .int(cursor) }
                 do {
-                    let subscription = try await gateway.subscribe("orchestration.subscribeThread", .from(request), receive: { [weak self] item in
+                    let subscription = try await gateway.subscribe("orchestration.subscribeThread", .object(request), receive: { [weak self] item in
                         guard let self, state.follow?.generation == generation else { return }
                         host?.linkReceived(thread: id, item)
                     }, ended: { [weak self] failure in

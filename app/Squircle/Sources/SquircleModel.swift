@@ -365,7 +365,7 @@ final class SquircleModel {
     }
     var availableModelSelections: [JSONValue] {
         availableModelProviders.flatMap { provider in
-            provider["models"].array.map { .from(["instanceId": provider["instanceId"].string!, "model": $0["slug"].string!]) }
+            provider["models"].array.map { ["instanceId": provider["instanceId"], "model": $0["slug"]] }
         }
     }
     /// Models the picker offers, one section per provider: short names
@@ -376,7 +376,7 @@ final class SquircleModel {
             let maker = provider["displayName"].string ?? ""
             let choices = provider["models"].array.enumerated().compactMap { index, option -> (JSONValue, String, Int)? in
                 guard let slug = option["slug"].string, let instance = provider["instanceId"].string else { return nil }
-                return (.from(["instanceId": instance, "model": slug]), Self.shortName(option["name"].string ?? slug, maker: maker), index)
+                return (["instanceId": .string(instance), "model": .string(slug)], Self.shortName(option["name"].string ?? slug, maker: maker), index)
             }.sorted { a, b in
                 let x = Self.rank(a.1 + " " + (a.0["model"].string ?? "")), y = Self.rank(b.1 + " " + (b.0["model"].string ?? ""))
                 if x.version != y.version { return x.version > y.version }
@@ -414,7 +414,7 @@ final class SquircleModel {
     private var providerDefaults: [JSONValue] {
         availableModelProviders.compactMap { provider in
             guard let option = provider["models"].array.first(where: { $0["isDefault"].bool }) ?? provider["models"].array.first else { return nil }
-            return JSONValue.from(["instanceId":provider["instanceId"].string!,"model":option["slug"].string!])
+            return ["instanceId": provider["instanceId"], "model": option["slug"]]
         }
     }
     var quickModelSelections: [JSONValue] {
@@ -442,7 +442,7 @@ final class SquircleModel {
         if let preferredModel, isValidModel(preferredModel) { return preferredModel }
         // An agent draft keeps your preferred model on Squircle's instance.
         if open.isAgentDraft, let model = preferredModel?["model"].string {
-            let agentChoice = JSONValue.from(["instanceId": Self.agentInstance, "model": model])
+            let agentChoice: JSONValue = ["instanceId": .string(Self.agentInstance), "model": .string(model)]
             if isValidModel(agentChoice) { return agentChoice }
         }
         return providerDefaults.first ?? availableModelSelections.first ?? .null
@@ -827,7 +827,7 @@ final class SquircleModel {
     func setRuntimeMode(_ mode: T3RuntimeMode) async {
         guard let open else { return }
         guard let thread = open.threadID else { chooseRuntimeMode(mode); return }
-        await propose(.mode(thread: thread, mode), command: ["type": "thread.runtime-mode.set", "threadId": thread, "runtimeMode": mode.rawValue])
+        await propose(.mode(thread: thread, mode), command: ["type": "thread.runtime-mode.set", "threadId": .string(thread), "runtimeMode": .string(mode.rawValue)])
     }
     // MARK: Caches on disk
 
@@ -1296,11 +1296,11 @@ final class SquircleModel {
 
     /// Proposes a command and waits until it is taken, refused or replaced.
     @discardableResult
-    private func propose(_ kind: Commands.Kind, command body: [String: Any]?) async -> Commands.Settlement {
+    private func propose(_ kind: Commands.Kind, command body: [String: JSONValue]?) async -> Commands.Settlement {
         let id = startCommand(kind, command: body)
         return await settlement(of: id)
     }
-    private func startCommand(_ kind: Commands.Kind, command body: [String: Any]?) -> String {
+    private func startCommand(_ kind: Commands.Kind, command body: [String: JSONValue]?) -> String {
         let identity = CommandIdentity.fresh()
         let intent = Commands.Intent(identity: identity, kind: kind, command: body.map(identity.stamp))
         if command(.propose(intent)) != .applied { settle(intent.id, .superseded) }
@@ -1530,7 +1530,7 @@ final class SquircleModel {
     }
     /// An image sent with a message, through a short-lived URL T3 signs.
     private func attachmentData(_ id: String) async -> Data? {
-        guard let url = await signedURL(["_tag":"attachment","attachmentId":id])?.url else { return nil }
+        guard let url = await signedURL(["_tag": "attachment", "attachmentId": .string(id)])?.url else { return nil }
         return await signedData(url)
     }
     /// The pixel size of a picture the agent's Markdown shows, from T3
@@ -1547,7 +1547,7 @@ final class SquircleModel {
     private func mediaFileURL(_ path: String) async -> (url: URL, size: CGSize?)? {
         if let signed = MediaFiles.urls[path], signed.expires > .now.addingTimeInterval(30) { return (signed.url, MediaFiles.sizes["file:" + path]) }
         guard let thread = selectedSessionID,
-              let signed = await signedURL(["_tag":"media-file","threadId":thread,"path":path]) else { return nil }
+              let signed = await signedURL(["_tag": "media-file", "threadId": .string(thread), "path": .string(path)]) else { return nil }
         if let expires = signed.expires { MediaFiles.urls[path] = (signed.url, expires) }
         return (signed.url, signed.size)
     }
@@ -1555,9 +1555,9 @@ final class SquircleModel {
         guard let url = await mediaFileURL(path)?.url else { return nil }
         return await signedData(url)
     }
-    private func signedURL(_ resource: [String:Any]) async -> (url: URL, expires: Date?, size: CGSize?)? {
+    private func signedURL(_ resource: JSONValue) async -> (url: URL, expires: Date?, size: CGSize?)? {
         guard let gateway, let base = configuration?.t3URL,
-              let asset = try? await gateway.call("assets.createUrl", .from(["resource":resource])),
+              let asset = try? await gateway.call("assets.createUrl", ["resource": resource]),
               let relative = asset["relativeUrl"].string, let url = T3HTTP.assetURL(relative, base: base) else { return nil }
         let size = asset["imageDimensions"]["width"].double.flatMap { width in
             asset["imageDimensions"]["height"].double.map { CGSize(width: width, height: $0) }
@@ -1577,8 +1577,8 @@ final class SquircleModel {
     func turnDiff(_ change: TurnChanges) async -> String? {
         guard let gateway, let thread = selectedSessionID else { return nil }
         do {
-            let result = try await gateway.call("orchestration.getTurnDiff", .from(["threadId": thread,
-                "fromTurnCount": max(0, change.count - 1), "toTurnCount": change.count]))
+            let result = try await gateway.call("orchestration.getTurnDiff", ["threadId": .string(thread),
+                "fromTurnCount": .int(max(0, change.count - 1)), "toTurnCount": .int(change.count)])
             return result["diff"].string
         } catch { self.error = error.localizedDescription; return nil }
     }
@@ -1586,19 +1586,19 @@ final class SquircleModel {
     func stop() async {
         guard let id = selectedSessionID else { return }
         await propose(.interrupt(thread: id, turn: state.thread["session"]["activeTurnId"].string),
-                      command: ["type": "thread.turn.interrupt", "threadId": id])
+                      command: ["type": "thread.turn.interrupt", "threadId": .string(id)])
     }
     /// Answers a request. It leaves `requests` while the answer is on its
     /// way and for good once T3 reports it resolved; back only if T3 refuses.
     /// An approval needs its decision: none is ever assumed.
-    func respond(to request: JSONValue, decision: String? = nil, answers: [String:Any]? = nil) async {
+    func respond(to request: JSONValue, decision: String? = nil, answers: [String: JSONValue]? = nil) async {
         guard let id = selectedSessionID, let requestID = request["payload"]["requestId"].string, !commands.answering.contains(requestID) else { return }
-        var c: [String: Any] = ["threadId": id, "requestId": requestID]
+        var c: [String: JSONValue] = ["threadId": .string(id), "requestId": .string(requestID)]
         let kind: Commands.Kind
         if let answers {
-            kind = .answer(thread: id, request: requestID, answers: .from(answers)); c["type"] = "thread.user-input.respond"; c["answers"] = answers
+            kind = .answer(thread: id, request: requestID, answers: .object(answers)); c["type"] = "thread.user-input.respond"; c["answers"] = .object(answers)
         } else if let decision {
-            kind = .approval(thread: id, request: requestID, decision: decision); c["type"] = "thread.approval.respond"; c["decision"] = decision
+            kind = .approval(thread: id, request: requestID, decision: decision); c["type"] = "thread.approval.respond"; c["decision"] = .string(decision)
         } else { log("Request \(requestID) offered no decision; nothing sent"); return }
         await propose(kind, command: c)
     }
@@ -1981,11 +1981,11 @@ final class SquircleModel {
         }
         let id = UUID().uuidString.lowercased()
         if case .refused(let reason) = await propose(.project(id: id, root: root),
-                                                     command: ["type": "project.create", "projectId": id, "title": record.name, "workspaceRoot": root]) {
+                                                     command: ["type": "project.create", "projectId": .string(id), "title": .string(record.name), "workspaceRoot": .string(root)]) {
             throw ClientError.backend("T3", 0, reason)
         }
         // HTTP shell gives an immediate authoritative result after the write.
-        if let gateway { shell = try await gateway.http.json("/api/orchestration/shell"); consumeShell(.from(["kind":"snapshot","snapshot":shell.foundation])) }
+        if let gateway { shell = try await gateway.http.json("/api/orchestration/shell"); consumeShell(["kind": "snapshot", "snapshot": shell]) }
     }
     /// Inside an app's overlay, that app is always present: one Squircle
     /// built but never gave a T3 project gets one, as Add app would.
@@ -1998,7 +1998,7 @@ final class SquircleModel {
         do {
             if shell["projects"] == .null, let gateway {
                 shell = try await gateway.http.json("/api/orchestration/shell")
-                consumeShell(.from(["kind":"snapshot","snapshot":shell.foundation]))
+                consumeShell(["kind": "snapshot", "snapshot": shell])
             }
             try await ensureOwnProject(record)
         } catch { self.error = error.localizedDescription }

@@ -332,20 +332,20 @@ enum Delivery {
     /// `thread.turn.start` exactly as T3 gets it, every time.
     static func turnCommand(_ intent: Intent, text: String, threadID: String) -> JSONValue {
         // T3 stores each picture under its attachments folder and hands the provider its path.
-        let uploads: [[String: Any]] = intent.pictures.enumerated().map { index, picture in
-            ["type": "image", "name": "image-\(index + 1).jpg", "mimeType": "image/jpeg", "sizeBytes": picture.jpeg.count,
-             "dataUrl": "data:image/jpeg;base64," + picture.jpeg.base64EncodedString()]
+        let uploads: [JSONValue] = intent.pictures.enumerated().map { index, picture in
+            ["type": "image", "name": "image-\(index + 1).jpg", "mimeType": "image/jpeg", "sizeBytes": .int(picture.jpeg.count),
+             "dataUrl": .string("data:image/jpeg;base64," + picture.jpeg.base64EncodedString())]
         }
-        return intent.turn.stamp(["type": "thread.turn.start", "threadId": threadID,
-            "message": ["messageId": intent.messageID, "role": "user", "text": text + intent.context, "attachments": uploads],
-            "modelSelection": intent.selection.foundation, "runtimeMode": intent.mode,
-            "interactionMode": "default", "titleSeed": intent.titleSeed])
+        return intent.turn.stamp(["type": "thread.turn.start", "threadId": .string(threadID),
+            "message": ["messageId": .string(intent.messageID), "role": "user", "text": .string(text + intent.context), "attachments": .array(uploads)],
+            "modelSelection": intent.selection, "runtimeMode": .string(intent.mode),
+            "interactionMode": "default", "titleSeed": .string(intent.titleSeed)])
     }
     /// A draft's `thread.create`, made when it is sent.
     static func createCommand(threadID: String, projectID: String, selection: JSONValue, mode: String, identity: CommandIdentity) -> JSONValue {
-        identity.stamp(["type": "thread.create", "threadId": threadID, "projectId": projectID, "title": "New thread",
-                        "modelSelection": selection.foundation, "runtimeMode": mode, "interactionMode": "default",
-                        "branch": NSNull(), "worktreePath": NSNull()])
+        identity.stamp(["type": "thread.create", "threadId": .string(threadID), "projectId": .string(projectID), "title": "New thread",
+                        "modelSelection": selection, "runtimeMode": .string(mode), "interactionMode": "default",
+                        "branch": .null, "worktreePath": .null])
     }
 
     /// What must hold after every event.

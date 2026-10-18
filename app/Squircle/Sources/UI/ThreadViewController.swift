@@ -181,7 +181,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var renderedRequestID: String?
     /// Progress through the agent's questions in the current request.
     private var questionIndex = 0
-    private var questionAnswers: [String: Any] = [:]
+    private var questionAnswers: [String: JSONValue] = [:]
     private var questionPicks: [String] = []
 
     private var flyingID: String?
@@ -1683,7 +1683,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         requestDetail.isHidden = false
         requestTitle.text = question["question"].string ?? "The agent has a question"
         func answer(_ value: String) {
-            questionAnswers[id] = value
+            questionAnswers[id] = .string(value)
             questionPicks = []
             questionIndex += 1
             renderQuestion(current, advancing: true)
@@ -1749,12 +1749,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     #if DEBUG
     /// Verification only: a sample agent question, never sent to T3.
     func debugShowQuestion() {
-        debugRequest = .from(["id": "debug-question", "kind": "user-input.requested", "payload": ["requestId": "debug", "questions": [
+        debugRequest = ["id": "debug-question", "kind": "user-input.requested", "payload": ["requestId": "debug", "questions": [
             ["id": "effects", "header": "Effects", "question": "How bold should the glass effects be?", "multiSelect": false, "options": [
                 ["label": "Bold and flashy", "description": "Flowing spectrum glow, shimmer and ripples"],
                 ["label": "Calm", "description": "Soft shimmer, restrained glow"]]],
             ["id": "media", "header": "Media", "question": "What should appear inline?", "multiSelect": true, "options": [
-                ["label": "Screenshots"], ["label": "Recordings"], ["label": "Diffs"]]]]]])
+                ["label": "Screenshots"], ["label": "Recordings"], ["label": "Diffs"]]]]]]
         renderRequest()
     }
     /// Verification only: types and sends a real message, as the composer does.

@@ -129,10 +129,10 @@ struct T3ThreadState: Codable {
         let rebuilt: [JSONValue] = details.compactMap { key, extra in
             guard !sent.contains(key), let at = extra["started_at"].string, extra["input"] != .null else { return nil }
             let finished = extra["finished"].string
-            return .from(["id": key, "kind": finished == nil ? "tool.updated" : "tool.completed", "createdAt": at,
-                          "tone": finished == "failed" ? "error" : "tool", "turnId": extra["turn_id"].string ?? "",
-                          "payload": ["toolCallId": key, "status": finished ?? "inProgress",
-                                      "data": ["toolName": extra["tool"].string ?? ""]]])
+            return ["id": .string(key), "kind": finished == nil ? "tool.updated" : "tool.completed", "createdAt": .string(at),
+                    "tone": finished == "failed" ? "error" : "tool", "turnId": .string(extra["turn_id"].string ?? ""),
+                    "payload": ["toolCallId": .string(key), "status": .string(finished ?? "inProgress"),
+                                "data": ["toolName": .string(extra["tool"].string ?? "")]]]
         }.sorted { ($0["createdAt"].string ?? "") < ($1["createdAt"].string ?? "") }
         for a in rebuilt + thread["activities"].array {
             let kind = a["kind"].string ?? "", p = a["payload"]

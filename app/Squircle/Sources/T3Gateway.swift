@@ -2,11 +2,6 @@ import Foundation
 import Security
 
 extension JSONValue {
-    static func from(_ value: Any) -> Self {
-        guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]),
-              let json = try? JSONDecoder().decode(Self.self, from: data) else { return .null }
-        return json
-    }
     var date: Date { string.flatMap(ISODate.parse) ?? .distantPast }
 }
 
@@ -348,7 +343,7 @@ final class T3Gateway {
                 pending[id] = continuation
                 // T3 answers every request; a socket that dies first ends it.
                 Task {
-                    do { try await write(.from(["_tag":"Request", "id":id, "tag":method, "payload":payload.foundation, "headers":[]]), request: true) }
+                    do { try await write(["_tag": "Request", "id": .string(id), "tag": .string(method), "payload": payload, "headers": []], request: true) }
                     catch is NotWritten { pending.removeValue(forKey: id)?.resume(returning: .notSent) }
                     catch { pending.removeValue(forKey: id)?.resume(returning: .lost(error)) }
                 }
@@ -383,7 +378,7 @@ final class T3Gateway {
     func subscribe(_ method: String, _ payload: JSONValue = .object([:]), receive: @escaping (JSONValue) -> Void,
                    ended: @escaping (Error?) -> Void) async throws -> String {
         let id = UUID().uuidString; track(id, receive: receive, ended: ended)
-        do { try await write(.from(["_tag":"Request","id":id,"tag":method,"payload":payload.foundation,"headers":[]]), request: true) }
+        do { try await write(["_tag": "Request", "id": .string(id), "tag": .string(method), "payload": payload, "headers": []], request: true) }
         catch { subscriptions.removeValue(forKey: id); throw error is NotWritten ? ClientError.connection("T3") : error }
         return id
     }
@@ -393,7 +388,7 @@ final class T3Gateway {
     var subscriptionCount: Int { subscriptions.count }
     func unsubscribe(_ id: String?) async {
         guard let id else { return }; subscriptions.removeValue(forKey: id)
-        try? await write(.from(["_tag":"Interrupt","requestId":id]))
+        try? await write(["_tag": "Interrupt", "requestId": .string(id)])
     }
     /// No socket to write on: nothing left the phone.
     private struct NotWritten: Error {}
@@ -410,30 +405,23 @@ final class T3Gateway {
     private func ping() async throws {
         guard socket != nil else { throw ClientError.connection("T3") }
         pings.append(queuedBytes)
-        try await write(.from(["_tag":"Ping"]))
+        try await write(["_tag": "Ping"])
     }
     func receive(_ frame: JSONValue) {
         let id = frame["requestId"].identifier ?? ""
         switch frame["_tag"].string {
         case "Chunk":
             for value in frame["values"].array { subscriptions[id]?.receive(value) }
-            Task { try? await write(.from(["_tag":"Ack","requestId":id])) }
+            Task { try? await write(["_tag": "Ack", "requestId": .string(id)]) }
         case "Exit":
             let exit = frame["exit"]
             pending.removeValue(forKey: id)?.resume(returning: .exit(exit))
             let failure = exit["_tag"].string == "Success" ? nil
                 : ClientError.backend("T3",0,"T3 rejected the request: \(exit["cause"].formatted.prefix(700))")
             subscriptions.removeValue(forKey:id)?.ended(failure)
-        case "Ping": Task { try? await write(.from(["_tag":"Pong"])) }
+        case "Ping": Task { try? await write(["_tag": "Pong"]) }
         case "Pong": if !pings.isEmpty { readBytes = max(readBytes, pings.removeFirst()) }
         default: break
         }
-    }
-}
-
-extension JSONValue {
-    var foundation: Any {
-        switch self { case .null: return NSNull(); case .bool(let x): return x; case .number(let x): return x; case .string(let x): return x
-        case .array(let x): return x.map(\.foundation); case .object(let x): return x.mapValues(\.foundation) }
     }
 }

@@ -2,6 +2,13 @@ import XCTest
 import UIKit
 @testable import Squircle
 
+/// Fixtures written as Foundation values; a value JSON can't hold fails the test.
+extension JSONValue {
+    static func from(_ value: Any) -> Self {
+        try! JSONDecoder().decode(Self.self, from: JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]))
+    }
+}
+
 final class T3Tests: XCTestCase {
     @MainActor
     func testRejectedApprovalModeChangeRestoresSelection() async {
@@ -29,11 +36,11 @@ final class T3Tests: XCTestCase {
     func testExistingThreadOnlyAllowsItsProviderAndPreservesModelChoice() async {
         let model = SquircleModel(configuration:nil, preferences:UserDefaults(suiteName:UUID().uuidString)!)
         model.consumeConfig(modelConfig)
-        let codex = JSONValue.from(["instanceId":"codex","model":"sol"])
-        let astra = JSONValue.from(["instanceId":"codex","model":"astra"])
-        let claude = JSONValue.from(["instanceId":"claudeAgent","model":"fable"])
+        let codex: JSONValue = ["instanceId":"codex","model":"sol"]
+        let astra: JSONValue = ["instanceId":"codex","model":"astra"]
+        let claude: JSONValue = ["instanceId":"claudeAgent","model":"fable"]
         func snapshot(_ selection:JSONValue, sequence:Int) -> JSONValue {
-            .from(["kind":"snapshot","snapshot":["snapshotSequence":sequence,"thread":["modelSelection":selection.foundation]]])
+            ["kind":"snapshot","snapshot":["snapshotSequence":.int(sequence),"thread":["modelSelection":selection]]]
         }
         await model.open(.thread("first", appID: "app"))
         XCTAssertTrue(model.availableModelSelections.isEmpty, "Do not offer other providers while the thread loads")

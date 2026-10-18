@@ -49,9 +49,9 @@ struct CommandIdentity: Codable, Hashable {
         return Self(id: UUID().uuidString.lowercased(), createdAt: format.string(from: date))
     }
     /// `command` with this identity, exactly as T3 is sent it.
-    func stamp(_ command: [String: Any]) -> JSONValue {
-        var c = command; c["commandId"] = id; c["createdAt"] = createdAt
-        return .from(c)
+    func stamp(_ command: [String: JSONValue]) -> JSONValue {
+        var c = command; c["commandId"] = .string(id); c["createdAt"] = .string(createdAt)
+        return .object(c)
     }
 }
 
