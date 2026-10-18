@@ -1,9 +1,11 @@
 # Squircle
 
-Build and iterate on iOS apps from your iPhone. Squircle is a native UIKit client
-for your existing **unmodified T3 Code server**. T3 owns coding agents, projects,
-threads and execution; the Mac runs Xcode. The independent Rust `squircle` CLI
-supplies signed builds, installation links, app screenshots and diagnostics.
+Build and iterate on iOS apps from your iPhone. Squircle is a native UIKit
+iPhone client for your own, unmodified [T3 Code](https://github.com/pingdotgg/t3code)
+server, plus a small Rust service on the Mac. T3 owns the coding agents,
+projects and threads; the Mac runs Xcode. You talk to one agent per app from
+the phone, watch it work (including the simulator it uses), and install the
+signed builds it makes, over cellular if your Mac is reachable.
 
 > **Status: very early alpha.** Squircle is a personal project that changes
 > daily. Expect breaking changes, rough edges and missing setup steps. It comes
@@ -11,235 +13,102 @@ supplies signed builds, installation links, app screenshots and diagnostics.
 > thinking about using it at a company, I'd love to hear from you, but you
 > don't need to ask.
 
-## Current state
+## What works today
 
-**2026-10-17: no locks in the service.** After a deadlock froze the
-service, every piece of shared state became a single owner reached by
-messages, readers read published snapshots, and long work waits only in
-ranked lanes, so a deadlock can't be written; clippy and a test fail on
-any lock. Behavior and wire formats are unchanged; not yet run against live
-T3 or the phone. See
-[owners](docs/fsm-architecture.md#owners-and-who-may-wait-for-whom-implemented-2026-10-17).
+- **Home:** a grid of your apps as device portraits made from real simulator
+  screenshots. Tapping one opens that app's agent.
+- **One agent per app:** a T3 thread on a Claude instance with Squircle's
+  plugin. It answers you, runs ordinary T3 worker threads in their own
+  worktrees, and is woken when they finish. You tell it how to work.
+- **Tasks:** the agent keeps a list of what you asked for and where each stands.
+- **Simulators:** while an agent uses one, it floats over the conversation as
+  a live, touchable picture; the recording lands in the agent's turn.
+- **Builds:** signed device builds you install from the phone; builds of
+  other apps can carry a small debug overlay that opens Squircle inside them.
+- **Notifications and a Live Activity**, sent from the Mac with your own APNs key.
 
-**2026-10-15: agent memory.** An app agent looks up the past through a
-read-only Haiku subagent backed by `squircle history` (T3's conversations,
-tasks, builds, git and docs, read where they live, nothing copied), keeps a
-few durable notes (`squircle notes`) that ride in every turn, and the Mac
-compacts or starts fresh idle agents whose context grew large. See
-[agent memory](docs/t3-native-migration.md#2026-10-15-agent-memory).
+Not done: a pairing screen on the phone (credentials are built into your
+personal build), a packaged login service for the Mac, LLDB or remote launch.
+The full dated record is in [history](docs/history.md).
 
-**2026-10-15: second code review fixes (W1–W8).** The
-[second review](docs/code-review-2026-10-b.md)'s service and app fixes are
-merged: workers saved before they start and stopped before their files go,
-resets that never stop a newer turn, tasks that follow new turns and come
-back from History, retried notifications, messages with a stable ID and an
-honest "not delivered" with Try Again, a file cache for clips and one route
-for the simulator dock. Rust tests pass; not yet checked in the simulator or
-on the phone. See
-[contracts](docs/architecture.md#state-ownership-contracts-review-b-2026-10-15).
+## Requirements
 
-**2026-10-14: code review fixes, source version 0.3.0 (56).** The October
-[code review](docs/code-review-2026-10.md)'s fixes are merged: authentication
-before uploads, one JSON error shape with `retryable`, honest install evidence
-(download started vs every byte sent), one agent per app under concurrent
-sends with the chosen approval mode, safe worker cleanup, durable wake-ups,
-simulator recordings that stop with the service, thread-addressed sends and
-bounded caches on the phone. Not yet checked on the phone. See
-[boundaries](docs/architecture.md#boundaries-after-the-october-2026-review).
+- A Mac with Xcode (tested with 27.1), [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+  and a Rust toolchain (tested with 1.99; install with [rustup](https://rustup.rs)).
+- [T3 Code](https://github.com/pingdotgg/t3code) installed and running (tested
+  with 0.0.45), with Claude Code signed in. Codex is optional, for workers.
+- An iPhone on iOS 18 or later, and an Apple Developer team that can sign
+  for it. The app compiles unsigned without one.
+- For use away from home: HTTPS routes from the phone to T3 and to the
+  Squircle service. [Tailscale](https://tailscale.com) Serve works well;
+  you set it up yourself, Squircle never installs or configures it.
 
-**2026-10-14: notifications and Live Activity, version 0.3.0 (51).** The Mac
-sends notifications (agent replied or asks, worker finished/needs
-you/errored, build done) and a Live Activity with the agent's current step
-straight to Apple with your own APNs key (`squircle push setup`). See
-[notifications](docs/t3-native-migration.md#2026-10-14-notifications-and-the-live-activity-030-51).
+Squircle is macOS only.
 
-**2026-10-14: tasks, version 0.3.0 (53).** Each app keeps a list of what you
-asked its agent for and where each stands: the agent adds and updates them
-(`squircle task`), linked workers and builds move them on, and old ones age
-into History. On the phone, Tasks replaces the Threads button (Threads is a
-tab inside) and a strip above the field counts what needs you. See
-[tasks](docs/task-tracking.md).
-
-**2026-10-14: restart and start fresh, version 0.3.0 (46).** An app's agent
-can be restarted (same history, current instructions) or started fresh (new
-thread with a handoff; the old one stays in Threads) from its ⋯ menu or by
-telling it. See
-[restart and start fresh](docs/t3-native-migration.md#2026-10-14-restart-and-start-fresh-030-46).
-
-**2026-10-13: one look everywhere, version 0.3.0 (41).** Conversations read
-like plain chat in the app and the overlay alike: status lines are plain text,
-your messages keep glass bubbles, and model and approvals sit in a ⋯ menu. See
-[one look](docs/t3-native-migration.md#2026-10-13-one-look-everywhere-030-41).
-
-**2026-10-13: agent simulators, version 0.3.0 (40).** A simulator shows only
-while an agent uses it: agents run `squircle sim start`, Squircle records the
-simulator, and the phone shows it as a draggable PiP over the app's
-conversations (several at once, tap for large and touchable) and live in the
-turn, then the recording there. The divider and the live 3D device are gone;
-on the simulator the compositor's CPU with a live stream on screen fell from
-21% to 6–9%. Not yet on the phone. See
-[agent simulators](docs/t3-native-migration.md#2026-10-13-agent-simulators-030-40).
-
-**2026-10-12: one agent per app, version 0.3.0 (37).** Tapping an app opens
-its agent, which you tell what to do; it can run worker threads and is woken
-when they finish. Other threads open over it from its Threads list; Builds has its own button. The agent is a T3
-thread on a "Squircle agent" Claude instance with Squircle's plugin; the
-service wakes it when workers finish. Verified end to end on a scratch repo
-and in the simulator; not yet on the phone. See
-[one agent per app](docs/t3-native-migration.md#2026-10-12-one-agent-per-app-030-3637).
-
-**2026-10-06: in-app debug overlay, version 0.3.0 (24).** Device builds Squircle
-signs for other apps now carry a small injected overlay: a glass bubble showing
-that app's agent work that opens Squircle's own view of the app (threads, new
-thread, builds, live simulator). No project changes; never in App Store
-exports; `--no-overlay` opts out. Not yet validated on the phone. See
-[debug overlay](docs/t3-native-migration.md#2026-10-06-in-app-debug-overlay-030-24).
-
-**2026-10-06: diffs, version 0.3.0 (21).** Each finished turn that changed
-files shows a small pill ("8 files +81 −30") from T3's checkpoint; tapping it
-opens that turn's diff (`orchestration.getTurnDiff`) in a fast native viewer.
-Jump-to-latest sits at the right of the chip row and glides down. The back
-swipe keeps the travelling device clear of the conversation. The send drop
-carries no text, and message bubbles are solid again. See
-[diffs](docs/t3-native-migration.md#2026-10-06-diffs-and-a-clean-back-swipe-030-21).
-
-**2026-10-06: glass and flow, version 0.3.0 (20).** The conversation runs
-full height with the docked device floating as a PiP. The live state is a
-glass loupe: a handwritten Metal lens bends each finished task out through the
-glass edge as the next rises in. Your message pinches off the field as liquid
-glass into a glass bubble. Model and approval pickers sit above the field;
-builds the agent mentions appear inline with Install; an expanded turn's
-summary pins while you read inside it. Back is a left-edge swipe. See
-[glass and flow](docs/t3-native-migration.md#2026-10-06-glass-and-flow-030-20).
-
-**2026-10-05: thread redesign, version 0.3.0 (19).** No title bar: the
-conversation starts under a floating back button and the docked device. Agent
-work reads as sentences (a command's own description, "Edited Theme.swift
-+12 −3") on a shimmering rail, the running step is a live glass pill, and a
-finished turn folds into a "Worked for…" pill. Screenshots the agent takes and
-clips it records appear inline; diffs and output are one tap away. Handwritten
-Metal draws a flowing spectrum around the live pill and message field.
-Sending lifts your words into their bubble; a glass button jumps to the latest
-message; agent questions are an inline card. When the agent opens a simulator
-through T3 the device rises and goes live by itself. Signed build 19 is ready,
-not installed. See [thread redesign](docs/t3-native-migration.md#2026-10-05-thread-redesign-030-19).
-
-**2026-10-05: in-app install and New Thread layout, version 0.3.0 (18).**
-Install in Builds now opens the build's `itms-services` link directly, so iOS's
-own install prompt appears over Squircle; Safari and the Mac's install page are
-no longer in the path. iOS still requires that one system confirmation. New
-Thread opens with the device at half size showing the app, and the prompt and
-wrapping model chips sit directly above the composer. Ten native tests and the
-two draft UI tests passed; signed build 18 is ready, not installed on the phone.
-See [build 18 evidence](docs/t3-native-migration.md#2026-10-05-in-app-install-and-new-thread-layout-030-18).
-
-**2026-10-05: draft and model picker fixes, version 0.3.0 (17).** New Thread
-opens a local empty draft after visiting another conversation; T3 creation happens
-only on the first nonempty submission. Model shortcuts remember your preference,
-and existing threads offer only models from their established provider. Ten
-native tests and two UI regressions passed; the rendered draft capture is published
-in the Mac app catalog. Signed build 17 is ready, not installed on the phone.
-See [draft evidence](docs/t3-native-migration.md#2026-10-05-draft-and-model-picker-fixes-030-17).
-
-**2026-10-05: approval controls, version 0.3.0 (16).** New threads default to
-Auto. The agent menu exposes all four T3 approval modes; provider-supplied
-approval choices and warnings are displayed inline. Native tests, menu interaction,
-and real Codex/Claude Auto turns passed. Signed build 16 was installed and opened
-on the paired iPhone at the user's request. See [approval evidence](docs/t3-native-migration.md#2026-10-05-approval-controls-030-16).
-
-**2026-10-05: ground-up interface redesign, version 0.3.0 (15).** The T3
-transport, build service and credentials are unchanged from build 14.
-
-- **Home:** a carousel of large 3D devices showing each app's real screenshot,
-  lit by that screenshot's own color. The app's threads start beneath its name;
-  scrolling them up shrinks the device, tapping the device toggles it back.
-  New Thread and Builds stay at the bottom. Threads show live Working / Needs
-  you state from T3.
-- **Thread:** slides in while the same device travels to it. A divider moves
-  the device among docked (beside the title), half and full; it always fills
-  the space above the conversation. Swipe right anywhere to go back.
-- **Simulator:** the thread's live H.264 picture is drawn on the 3D device
-  itself and touches on its display go to the simulator. No separate panel.
-- **Conversation:** Markdown answers, the agent's thoughts, tool calls merged
-  into one line each and grouped, inline approvals, a growing glass composer,
-  agent/model menu under the title. A new thread is created by its first message.
-
-Verified in the simulator for this source: 22 deterministic tests, and real
-gesture UI tests for carousel, list pull, device tap, divider drags, cancelled
-and completed back swipes and rapid interruptions. Live simulator video on the
-3D device and its touch mapping were checked there too. **Not yet checked on
-the physical phone:** feel and frame rate, tilt parallax (needs a gyroscope),
-hardware BGRA decode, and touch on the live device. See
-[the redesign record](docs/t3-native-migration.md#2026-10-05-redesign-030-15).
-
-**Verified for build 13:** nine targeted native tests passed, including 180 decoded
-H.264 frames with 125 changing pictures, six forced input disconnects, startup
-cancellation, duplicate starts and a 31-second idle connection. Actual native
-rendering and touch were checked; signed build 13 was directly installed on the
-paired iPhone; its manual-launch acknowledgement arrived, and the user confirmed
-it works well. Earlier Codex execution and spatial-transition evidence remains
-recorded in [implementation evidence](docs/t3-native-migration.md).
-
-Build 12's MJPEG playback caused unacceptable phone latency, reported by the user.
-It is removed. There is no MJPEG priming request or fallback. AVCC decoding uses
-VideoToolbox, requires hardware decoding on the phone, and bounds decoded
-presentation to the newest picture. Video still uses T3's authenticated HTTPS
-feed, with WSS input over the existing user-managed Tailscale route. Measured
-physical-phone response latency remains outstanding.
-
-T3's host can retain a stale capture after a simulator reboot. Its supported
-shutdown/open API restored live capture; transport reconnection alone cannot
-identify a stale image on an otherwise valid idle connection. Do not auto-reboot
-an agent's simulator. Claude subscription login and a real T3 reply are verified in build 14’s source.
-Complete physical-phone/crash recovery checks remain outstanding.
-
-## For development
-
-Requires macOS, Xcode, XcodeGen and the existing T3 installation. No new agent
-backend, T3 fork, provider install or Tailscale configuration is needed.
+## Quick start
 
 ```sh
-./scripts/cargo-local build --release
-export SQUIRCLE_DATA_DIR="$PWD/.squircle"
-./target/release/squircle --help
-./target/release/squircle capabilities --json
-./target/release/squircle help workflow
+# 1. Build the CLI and service.
+cargo build --release            # or ./scripts/cargo-local build --release
+export PATH="$PWD/target/release:$PATH"
+export SQUIRCLE_DATA_DIR="$PWD/.squircle"   # private, ignored by Git
+
+# 2. Create local state and credentials, check Xcode, start the service.
+squircle init
+squircle doctor
+squircle serve --public-url https://YOUR-MAC-HTTPS-ORIGIN   # keep running
+
+# 3. In another terminal (same SQUIRCLE_DATA_DIR): give the service its own
+#    T3 session. Create a pairing token in T3 (pair a new client), then:
+pbpaste | squircle t3 connect --url http://127.0.0.1:3773
+#    restart `squircle serve`, then install the app-agent plugin into T3:
+squircle agent setup
+
+# 4. Generate the Xcode project and check it compiles.
 xcodegen generate --spec app/Squircle/project.yml
 ```
 
-The personal build uses ignored `.squircle/client-t3.json`: HTTPS T3 origin,
-normal paired session scoped to orchestration read/operate, and existing Squircle
-build/diagnostic credentials. It contains no Hermes credentials. Never commit
-this file or private runtime probes. The native client stores the paired session
-in the device Keychain; it does not copy T3's database. See the
-[app guide](app/Squircle/README.md) for setup and build commands.
+To put the app on your phone, write the phone's connection file
+(`.squircle/client-t3.json`, described in the [app guide](app/Squircle/README.md)),
+set your own signing team and identifiers, and start a signed build with
+`squircle build start`. Install it from the link the service gives you, then
+open it. `squircle help workflow` walks through builds, install links and
+diagnostics; `squircle capabilities --json` lists every command.
 
-The existing build service is running on its original loopback address and
-user-managed Tailscale HTTPS route. Startup supervision is not packaged yet.
-After UI changes, find the app ID with `squircle app list`, update its summary,
-and publish an actual simulator PNG with `squircle app preview ID --file PATH`.
-Actual native simulator captures are published through that catalog.
-See the evidence page for the scope of rendered transition checks.
+The personal build embeds that connection file, so **never share its IPA**.
 
-## Read only what you need
+## How it fits together
+
+```text
+iPhone app ──HTTPS/WebSocket──> T3 Code (agents, threads, simulators)
+     └──────HTTPS────────────> Squircle service on the Mac ──> Xcode, T3
+```
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| Service and CLI | `src/` (Rust) | One `squircle` binary: builds, install links, app catalog, tasks, simulator leases, notifications, agent wake-ups. `squircle serve` is the service; every other command is a client usable by any agent. See [CLI](docs/cli.md). |
+| iPhone app | `app/Squircle` (UIKit) | Talks to T3 directly for conversations and to the service for everything else. See the [app guide](app/Squircle/README.md). |
+| Overlay | `app/Squircle/Overlay` | Squircle's own conversation view as a framework injected into device builds of other apps. Never in App Store exports. |
+| Plugin | `plugin/squircle` | The app agent's instructions, its read-only history subagent and hooks, installed into T3 by `squircle agent setup`. |
+| Probe | `examples/SquircleProbe` | A sample app with crash and log reporting, used to test the build and diagnostics path. |
+
+The service never runs a model and never writes to T3's database; it reads
+T3's `state.sqlite` read-only for details T3 doesn't stream.
+
+## Read more
 
 | Question | Document |
 | --- | --- |
-| What is implemented and what remains unverified? | [Native T3 implementation](docs/t3-native-migration.md) |
-| How does T3 streaming/input work? | [T3 research and simulator trial](docs/direct-agents-plan.md) |
-| What owns each part? | [Architecture](docs/architecture.md) |
-| How do agents build and deliver apps? | [CLI design](docs/cli.md) |
-| How does cellular installation work? | [Remote iOS workflow](docs/remote-ios.md) |
-| How does the phone record the screen or performance for the agent? | [Performance capture](docs/perf-capture.md) |
-| What was verified before the T3 replacement? | [Historical validation](docs/archive/validation.md) |
-| What did the October 2026 review find, and what is fixed? | [Code review](docs/code-review-2026-10.md) |
-| What did the second review find, and what is fixed? | [Second code review](docs/code-review-2026-10-b.md) |
-| What is proposed for the jelly as the design language (not built)? | [Jelly design proposal](docs/design-jelly-language.md) |
-
-Start with [AGENTS.md](AGENTS.md). Historical Hermes validation describes earlier
-builds and is not evidence that this replacement passed those checks.
-
-**Build 14 provider correction:** local provider choices survive live events,
-reconnects and thread navigation until T3 acknowledges the choice. The targeted
-regression and live Claude tool/reply tests passed; signed build 14 was installed
-on the paired iPhone. Manual launch of build 14 remains pending.
+| Contributing, checks and rules | [CONTRIBUTING](CONTRIBUTING.md) |
+| Reporting a security issue, trust boundaries | [SECURITY](SECURITY.md) |
+| Decisions that must be kept | [AGENTS.md](AGENTS.md) |
+| What owns each part? | [Architecture](docs/architecture.md), [owners and state machines](docs/fsm-architecture.md) |
+| How do agents build and deliver apps? | [CLI](docs/cli.md), [workflow](docs/verification.md) |
+| How does cellular installation work? | [Remote iOS](docs/remote-ios.md) |
+| How do tasks work? | [Tasks](docs/task-tracking.md) |
+| How does the phone record performance? | [Performance capture](docs/perf-capture.md) |
+| Why each design, with evidence | [Migration record](docs/t3-native-migration.md), [history](docs/history.md) |
+| The jelly characters (direction B is built; the rest is a proposal) | [Jelly design](docs/design-jelly-language.md) |
+| Reviews and audits | [Open-source review](docs/oss-review.md), [code review](docs/code-review-2026-10.md), [second review](docs/code-review-2026-10-b.md), [reinvention audit](docs/reinvention-audit.md) |
+| Publishing this repository | [Publishing](docs/publishing.md) |
+| Superseded designs (Hermes, live 3D) | [Archive](docs/archive/) |
