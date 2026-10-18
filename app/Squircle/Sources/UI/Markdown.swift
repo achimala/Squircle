@@ -313,7 +313,7 @@ struct MarkdownTableLayout {
             return CGSize(width: ceil(rect.width), height: ceil(rect.height))
         }
         // Each column wants its longest cell on one line, and needs at least
-        // its longest word (a long path may still break).
+        // its longest word (a long path may still break) and a readable width.
         let columns = table.header.indices
         var natural = columns.map { _ in CGFloat(0) }, least = natural
         let longestWord = min(160, width * 0.45)
@@ -328,7 +328,10 @@ struct MarkdownTableLayout {
                 least[column] = max(least[column], min(widest, longestWord))
             }
         }
-        least = zip(least, natural).map { min($0, $1) }
+        // Below a few words' width a column wraps into a word per line;
+        // past that the table scrolls instead.
+        let narrowest = ceil(font.pointSize * 6)
+        least = zip(least, natural).map { min($1, max($0, narrowest)) }
         let room = width - Self.gap * CGFloat(max(0, columns.count - 1))
         let wanted = natural.reduce(0, +), needed = least.reduce(0, +)
         let widths: [CGFloat]
