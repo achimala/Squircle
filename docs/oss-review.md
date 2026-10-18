@@ -54,6 +54,13 @@ This is a **publish-after-targeted-cleanup** verdict, not a recommendation to re
   idempotency contracts. U1's server side already used `model::success` and
   `failure_with`; the shared HTTP boundary preserves that one envelope.
 
+- **Step 10, agent coordinator: done.** `agents/` separates the durable
+  records/shell, single state owner, runtime, lifecycle, workers, messages,
+  outbox driver, builds, upkeep, context and plugin installation. Public entry
+  paths and saved formats stay the same. A mechanical comparison found all
+  155 production functions/methods unchanged apart from local visibility,
+  formatting and relocated include paths; all 219 tests and clippy pass.
+
 ## Scope, method, and verification
 
 Read `AGENTS.md` and `README.md` first. Inventoried all 184 tracked files: 47 Rust files, 71 Swift files, the C overlay loader, project/build configuration, plugin templates, scripts, examples, and documentation. The Rust/Swift/C files total 53,731 lines, including tests. Reviewed subsystem boundaries and representative execution paths, searched the complete tracked tree for references/configuration/secrets, traced superseded implementations through Git, and ran the checks below. This is not a claim that every branch or runtime combination was exercised.
