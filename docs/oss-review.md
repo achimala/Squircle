@@ -8,6 +8,179 @@ Reviewed 2026-10-18 on `oss-review`, source commit `9c63bec7baf55f1e92a78fc3dcd3
 
 This is a **publish-after-targeted-cleanup** verdict, not a recommendation to rewrite the product. T3 ownership, the agent-neutral CLI, UIKit layout, the Clay design, still device portraits, shared conversations, simulator leases, team-shared overlay credentials, and single-owner Rust state are intentional decisions to preserve.
 
+## Rust cleanup progress (2026-10-18–19)
+
+- **Step 6, Rust formatting/lints and Q1 Rust coverage: done.** Rust 2024
+  rustfmt baseline is isolated in `2d5ab8a`. Clippy passes with `--all-targets
+  -- -D warnings`; only three documented inline-state size allowances remain.
+  The ownership scan parses test-module spans rather than discarding the file
+  suffix; a regression covers later and nested production code. Locked offline
+  tests pass with local fake-server sockets/process inspection permitted.
+  No live service, T3, provider, simulator or signing checks were run.
+
+- **Read-only T3 database adapter (reinvention item 21): done.** The user
+  approved bundled `rusqlite`; `t3db` owns static projection SQL and bound
+  parameters. The system sqlite3 process/JSON decoding and SQL interpolation
+  are deleted. Read-only/no-create flags, a blocking-pool job, cancellation
+  interrupts plus a progress deadline, and bounded output preserve the read
+  contract. Four offline tests cover hostile parameters, writes/missing files,
+  JSON projection queries, aggregate size and stopping long reads. All 218 Rust
+  tests pass; no live T3 database was opened.
+
+- **Q4/Q5 and U4 discovery/polling: done.** Help names T3. Capabilities walk
+  clap's public command tree (70 operations, including history, notes and
+  compact), removing the second inventory. One deadline loop serves distinct
+  build/preview completion policies; preview submission is still once only.
+  Invalid non-UTF-8 arguments now produce the normal JSON error. All 219 tests
+  pass, including the existing hung-request/deadline contracts; compiled help
+  and capability output were inspected without a service.
+
+- **Step 9, CLI extraction: done.** `main.rs` is a nine-line entry point;
+  `cli/` keeps each command group's declarations and handler together, with
+  separate transport, output, discovery and polling modules. Locked tests,
+  rustfmt and clippy pass after the mechanical move.
+
+- **Step 9, U3 process boundary: done.** The existing bounded process-group
+  runner and its cancellation/reaping tests moved from `xcode` to private
+  `process.rs`. Git, symbolication, perf, previews and overlay builds use it;
+  the already-consolidated hardened Git adapter is preserved. Full locked tests
+  and clippy pass. This was a move, not a change to process ownership.
+
+- **Step 10, HTTP/application services: done.** `server/` separates runtime
+  wiring, router, common authentication/error/compression handling, endpoint
+  families, build orchestration and catalog import/publication. Extractor and
+  response wrapping stay in routes; application services take ordinary values.
+  All 219 tests and clippy pass, including HTTP envelope/auth/upload/build
+  idempotency contracts. U1's server side already used `model::success` and
+  `failure_with`; the shared HTTP boundary preserves that one envelope.
+
+- **Step 10, agent coordinator: done.** `agents/` separates the durable
+  records/shell, single state owner, runtime, lifecycle, workers, messages,
+  outbox driver, builds, upkeep, context and plugin installation. Public entry
+  paths and saved formats stay the same. A mechanical comparison found all
+  155 production functions/methods unchanged apart from local visibility,
+  formatting and relocated include paths; all 219 tests and clippy pass.
+
+- **Step 10, simulator owner: done.** `sims/` separates records, recorder
+  supervision, host adapters, the single state owner, startup, sessions and
+  maintenance. All 74 production functions/methods compare unchanged apart
+  from local visibility and formatting; all 219 tests and clippy pass.
+
+- **Step 10, push owner: done.** `push/` separates APNs transport, payloads,
+  device registration, observed projections, the single state owner and
+  delivery. All 59 production functions/methods compare unchanged apart from
+  local visibility and formatting; all 219 tests and clippy pass. No APNs
+  requests were sent.
+
+- **D7: done.** Removed the unused 13-line `Dispatched::into_result`
+  implementation; durable callers keep distinct refused/not-sent/unknown
+  outcomes. Crate documentation makes the public-API policy explicit: CLI and
+  HTTP are product interfaces; Rust modules are internal shared implementation,
+  not a stable SDK. Existing public entry paths otherwise remain intact.
+
+- **CI (Rust + Swift concurrency gate): done.** The macOS workflow runs
+  `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`,
+  `cargo test --locked` and `scripts/check-swift-concurrency`, using locally
+  verified Rust 1.99.0. All four commands pass locally (219 tests); workflow
+  YAML parses. Hosted GitHub execution remains unverified. No signing or live
+  service dependencies were added; no service was restarted.
+
+### Rust module navigation after cleanup
+
+```text
+src/
+  main.rs       CLI entry point
+  cli/          command declarations/handlers, discovery, HTTP client and polling
+  server/       HTTP endpoints, shared boundary and application services
+  agents/       coordinator state owner and T3/build/worker adapters
+  sims/         session state owner, host adapter, recording and cleanup
+  push/         delivery state owner, APNs transport and device projections
+  t3db/         bundled read-only SQLite adapter and parameterised projections
+  process.rs    bounded process-group supervision and cancellation
+  fsm/          pure state machines (existing ownership boundaries preserved)
+```
+
+Within each extracted group:
+
+| Module | Responsibility |
+| --- | --- |
+| `cli/mod.rs` | Dispatch and common command context. |
+| `cli/args.rs` | Top-level clap declarations. |
+| `cli/agents.rs` | Agent, thread and T3 command declarations/handlers. |
+| `cli/apps.rs` | App catalog commands. |
+| `cli/builds.rs` | Build and preview commands. |
+| `cli/history.rs` | History and durable notes commands. |
+| `cli/local.rs` | Local service, pairing, diagnostics and doctor commands. |
+| `cli/media.rs` | Media and performance commands. |
+| `cli/push.rs` | Push setup/status commands. |
+| `cli/sims.rs` | Simulator commands. |
+| `cli/tasks.rs` | Task commands. |
+| `cli/client.rs` | Authenticated HTTP transport. |
+| `cli/output.rs` | Structured command output/errors. |
+| `cli/discovery.rs` | Capability inventory derived from clap. |
+| `cli/poll.rs` | Bounded build/preview completion polling. |
+| `server/mod.rs` | Shared application state and ranked lanes. |
+| `server/router.rs` | Route inventory. |
+| `server/runtime.rs` | Server startup and shutdown. |
+| `server/http.rs` | Authentication, errors, common JSON boundary and compression. |
+| `server/build_routes.rs` | Build/preview HTTP adapters. |
+| `server/build_service.rs` | Build/preview application orchestration. |
+| `server/catalog_routes.rs` | App catalog HTTP adapters. |
+| `server/catalog_service.rs` | Catalog import/publication. |
+| `server/agent_routes.rs` | Agent/thread/T3 endpoints. |
+| `server/diagnostic_routes.rs` | Diagnostic endpoints. |
+| `server/install_routes.rs` | Installation endpoints. |
+| `server/media_routes.rs` | Media endpoints. |
+| `server/push_routes.rs` | Push endpoints. |
+| `server/sim_routes.rs` | Simulator endpoints. |
+| `server/task_routes.rs` | Task endpoints. |
+| `agents/mod.rs` | Coordinator handle and shared constants. |
+| `agents/records.rs` | Durable records and public data models. |
+| `agents/state.rs` | Single owner and synchronous letters. |
+| `agents/shell.rs` | Observations consumed by the coordinator. |
+| `agents/peer.rs` | T3 and push adapters. |
+| `agents/selection.rs` | Provider/runtime selection. |
+| `agents/runtime.rs` | Owner startup, subscriptions and snapshots. |
+| `agents/outbox_driver.rs` | Durable outbox dispatch. |
+| `agents/lifecycle.rs` | App-agent lifecycle. |
+| `agents/workers.rs` | Worker lifecycle and observation. |
+| `agents/messages.rs` | Messages, answers and provider/status access. |
+| `agents/builds.rs` | Build observations and notifications. |
+| `agents/upkeep.rs` | Idle compaction and restart policy. |
+| `agents/context.rs` | Notes, handoff and turn context. |
+| `agents/worktrees.rs` | Git worktree inspection/removal. |
+| `agents/plugin.rs` | Plugin installation. |
+| `sims/mod.rs` | Simulator handle and shared constants. |
+| `sims/records.rs` | Ledger and durable receipts. |
+| `sims/state.rs` | Single owner and synchronous letters. |
+| `sims/host.rs` | Agent/device host adapter and inventory. |
+| `sims/recorder.rs` | Recorder process identity and supervision. |
+| `sims/runtime.rs` | Owner startup and snapshots. |
+| `sims/start.rs` | Session startup and cancellation. |
+| `sims/sessions.rs` | Session stop/query operations. |
+| `sims/maintenance.rs` | Reconciliation, cleanup and shutdown. |
+| `push/mod.rs` | Push handle, timing and retry policy. |
+| `push/apns.rs` | APNs setup, signing and HTTP transport. |
+| `push/payload.rs` | Alert and Live Activity payloads. |
+| `push/devices.rs` | Device registration and persisted activity links. |
+| `push/projection.rs` | App/thread observations and desired activity. |
+| `push/state.rs` | Single owner and delivery settlement. |
+| `push/delivery.rs` | Reconciliation and asynchronous sends. |
+| `t3db/mod.rs` | Read-only connections, deadlines, cancellation and output bounds. |
+| `t3db/sql.rs` | Static T3 projection queries. |
+
+`server/tests.rs`, `agents/tests.rs`, `sims/tests.rs` and `push/tests.rs`
+contain their existing offline tests; moving them did not add a new test layer.
+Unlisted modules retain their existing boundaries. The remaining native, setup,
+security and documentation work belongs to the other cleanup workers.
+
+Line accounting: relative to the isolated formatting baseline, Rust sources and
+Rust tests changed by +17,290/-16,267 physical lines (net +1,023). Most of those
+are moves, not deleted logic. The SQLite replacement accounts for 221 removed
+lines across its old consumers (and adds the bounded adapter and regression
+fixtures); D7 deletes 13 lines. Formatting itself added 10,481 Rust source/test
+lines, so raw before/after totals are not a code-reduction measure.
+
 ## Scope, method, and verification
 
 Read `AGENTS.md` and `README.md` first. Inventoried all 184 tracked files: 47 Rust files, 71 Swift files, the C overlay loader, project/build configuration, plugin templates, scripts, examples, and documentation. The Rust/Swift/C files total 53,731 lines, including tests. Reviewed subsystem boundaries and representative execution paths, searched the complete tracked tree for references/configuration/secrets, traced superseded implementations through Git, and ran the checks below. This is not a claim that every branch or runtime combination was exercised.

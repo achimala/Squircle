@@ -85,7 +85,8 @@ impl Fixture {
     /// A new service over the same data directory, which rereads its records.
     fn reopen(&mut self) {
         let root = self.state.files.root.clone();
-        self.state = AppState::new(Store::open(root).unwrap(), Some("https://mac.test".into())).unwrap();
+        self.state =
+            AppState::new(Store::open(root).unwrap(), Some("https://mac.test".into())).unwrap();
         self.app = router(self.state.clone());
     }
 
@@ -254,7 +255,11 @@ async fn preview_download_is_bound_to_its_job_and_control_token() {
         let mut job = store.load_job(&id).unwrap();
         let artifact = store.job_dir(&id).unwrap().join("preview.png");
         fs::write(&artifact, png).unwrap();
-        job.set_preview(PreviewState::Ready(PreviewArtifact { path: artifact, captured_at: 1, source: None }));
+        job.set_preview(PreviewState::Ready(PreviewArtifact {
+            path: artifact,
+            captured_at: 1,
+            source: None,
+        }));
         store.save_job(&job).unwrap();
     }
     fixture.reopen();
@@ -290,7 +295,11 @@ async fn preview_download_is_bound_to_its_job_and_control_token() {
         let store = fixture.state.files.clone();
         let mut job = store.load_job(&other).unwrap();
         let path = store.job_dir(&id).unwrap().join("preview.png");
-        job.set_preview(PreviewState::Ready(PreviewArtifact { path, captured_at: 1, source: None }));
+        job.set_preview(PreviewState::Ready(PreviewArtifact {
+            path,
+            captured_at: 1,
+            source: None,
+        }));
         store.save_job(&job).unwrap();
     }
     fixture.reopen();
@@ -376,13 +385,7 @@ async fn remote_project_routes_require_control_before_inspecting_paths_or_query_
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(value["ok"], false);
-    assert!(
-        fixture
-            .state
-            .files.list_jobs()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(fixture.state.files.list_jobs().unwrap().is_empty());
     assert!(
         squircle::apps::list(&fixture.state.files)
             .unwrap()
@@ -692,12 +695,25 @@ async fn imported_ipa_downloads_unchanged_with_correct_manifest_and_no_installat
     assert_eq!(ipa_url.as_str(), format!("{page}/app.ipa"));
 
     // Fetching the IPA is what records that installation was confirmed.
-    let token = page.path_segments().unwrap().next_back().unwrap().to_owned();
+    let token = page
+        .path_segments()
+        .unwrap()
+        .next_back()
+        .unwrap()
+        .to_owned();
     let status_path = format!("/v1/install-links/{token}");
-    let (code, before) = fixture.json("GET", &status_path, Some(&fixture.control), None).await;
+    let (code, before) = fixture
+        .json("GET", &status_path, Some(&fixture.control), None)
+        .await;
     assert_eq!(code, StatusCode::OK);
     assert!(before["data"]["downloaded_at"].is_null());
-    assert_eq!(fixture.request("GET", &status_path, None, None).await.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        fixture
+            .request("GET", &status_path, None, None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
 
     // Capability URLs work without either bearer token, as the iOS installer requires.
     let response = fixture.request("GET", ipa_url.path(), None, None).await;
@@ -720,7 +736,9 @@ async fn imported_ipa_downloads_unchanged_with_correct_manifest_and_no_installat
             .as_ref(),
         fixture.ipa_bytes
     );
-    let (_, after) = fixture.json("GET", &status_path, Some(&fixture.control), None).await;
+    let (_, after) = fixture
+        .json("GET", &status_path, Some(&fixture.control), None)
+        .await;
     assert!(after["data"]["downloaded_at"].as_u64().is_some());
     assert_eq!(fixture.status(&id).await["launch_observed"], false);
 }
@@ -736,10 +754,7 @@ async fn invalid_and_expired_tickets_cannot_fetch_any_installation_resource() {
         base_url: "https://mac.test".into(),
         transfer: TransferEvidence::NotStarted,
     };
-    fixture
-        .state
-        .files.save_ticket(&expired)
-        .unwrap();
+    fixture.state.files.save_ticket(&expired).unwrap();
     for suffix in ["", "/manifest.plist", "/app.ipa"] {
         for invalid in ["invalid".to_owned(), token()] {
             let (status, value) = fixture
@@ -887,7 +902,14 @@ async fn capture_uploads_authenticate_and_check_size_before_reading_the_body() {
     assert_eq!(fs::read(&path).unwrap(), video);
     let leftovers = fs::read_dir(path.parent().unwrap())
         .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().file_name().to_string_lossy().ends_with(".partial"))
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")
+        })
         .count();
     assert_eq!(leftovers, 0);
 }
@@ -899,8 +921,18 @@ async fn extractor_and_routing_rejections_use_the_json_error_envelope() {
     // Missing query field, bad path parameter, malformed JSON, wrong method.
     for (method, path, payload, status) in [
         ("POST", "/v1/captures", None, StatusCode::BAD_REQUEST),
-        ("GET", "/v1/t3/threads/t/steps/c/images/not-a-number", None, StatusCode::BAD_REQUEST),
-        ("POST", "/v1/agents", Some(json!({"message": "no project"})), StatusCode::UNPROCESSABLE_ENTITY),
+        (
+            "GET",
+            "/v1/t3/threads/t/steps/c/images/not-a-number",
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            "/v1/agents",
+            Some(json!({"message": "no project"})),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
         ("DELETE", "/v1/builds", None, StatusCode::METHOD_NOT_ALLOWED),
     ] {
         let (code, value) = fixture.json(method, path, control, payload).await;
@@ -919,18 +951,34 @@ async fn install_evidence_requires_a_complete_transfer() {
         let fixture = &fixture;
         async move {
             let (_, value) = fixture
-                .json("GET", &format!("/v1/install-links/{token}"), Some(&fixture.control), None)
+                .json(
+                    "GET",
+                    &format!("/v1/install-links/{token}"),
+                    Some(&fixture.control),
+                    None,
+                )
                 .await;
-            (value["data"]["download_started_at"].clone(), value["data"]["downloaded_at"].clone())
+            (
+                value["data"]["download_started_at"].clone(),
+                value["data"]["downloaded_at"].clone(),
+            )
         }
     };
     let token_of = |link: &Value| {
-        link["page_url"].as_str().unwrap().rsplit('/').next().unwrap().to_owned()
+        link["page_url"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_owned()
     };
 
     // Aborted after the first chunk: started, never finished.
     let aborted = token_of(&fixture.install_link(&id).await);
-    let response = fixture.request("GET", &format!("/install/{aborted}/app.ipa"), None, None).await;
+    let response = fixture
+        .request("GET", &format!("/install/{aborted}/app.ipa"), None, None)
+        .await;
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body();
     body.frame().await.unwrap().unwrap();
@@ -948,7 +996,10 @@ async fn install_evidence_requires_a_complete_transfer() {
     let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     socket
-        .write_all(format!("GET /install/{complete}/app.ipa HTTP/1.1\r\nHost: mac.test\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET /install/{complete}/app.ipa HTTP/1.1\r\nHost: mac.test\r\n\r\n")
+                .as_bytes(),
+        )
         .await
         .unwrap();
     let mut received = Vec::new();
@@ -957,17 +1008,20 @@ async fn install_evidence_requires_a_complete_transfer() {
         let read = socket.read(&mut buffer).await.unwrap();
         assert!(read > 0, "connection closed early");
         received.extend_from_slice(&buffer[..read]);
-        if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
-            if received.len() >= end + 4 + fixture.ipa_bytes.len() {
-                break end + 4;
-            }
+        if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n")
+            && received.len() >= end + 4 + fixture.ipa_bytes.len()
+        {
+            break end + 4;
         }
     };
     assert_eq!(&received[head_end..], fixture.ipa_bytes.as_slice());
     // The connection stays open (keep-alive); the finish is already on record.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     while evidence(complete.clone()).await.1.is_null() {
-        assert!(tokio::time::Instant::now() < deadline, "downloaded_at never recorded");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "downloaded_at never recorded"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     drop(socket);
@@ -975,9 +1029,14 @@ async fn install_evidence_requires_a_complete_transfer() {
 
     // A missing IPA records nothing at all.
     let missing = token_of(&fixture.install_link(&id).await);
-    let ipa = fixture.status(&id).await["job"]["output"]["ipa_path"].as_str().unwrap().to_owned();
+    let ipa = fixture.status(&id).await["job"]["output"]["ipa_path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     fs::remove_file(ipa).unwrap();
-    let response = fixture.request("GET", &format!("/install/{missing}/app.ipa"), None, None).await;
+    let response = fixture
+        .request("GET", &format!("/install/{missing}/app.ipa"), None, None)
+        .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let (started, finished) = evidence(missing).await;
     assert!(started.is_null() && finished.is_null());
@@ -989,14 +1048,19 @@ async fn a_stalled_capture_upload_does_not_hold_up_the_next() {
     // The phone's app suspended mid-send: headers came, the body never does.
     let stalled = Request::post("/v1/captures?kind=performance")
         .header(header::AUTHORIZATION, format!("Bearer {}", fixture.control))
-        .body(Body::from_stream(futures_util::stream::pending::<Result<Vec<u8>, std::io::Error>>()))
+        .body(Body::from_stream(futures_util::stream::pending::<
+            Result<Vec<u8>, std::io::Error>,
+        >()))
         .unwrap();
     let hung = tokio::spawn(fixture.app.clone().oneshot(stalled));
     tokio::task::yield_now().await;
 
     // A real recording is megabytes, over the service's 1 MB JSON limit.
     let frames: Vec<f64> = (0..200_000).map(|i| i as f64 / 120.0).collect();
-    let perf = serde_json::to_vec(&json!({"format":"squircle-perf","version":1,"duration":8.0,"frames":frames})).unwrap();
+    let perf = serde_json::to_vec(
+        &json!({"format":"squircle-perf","version":1,"duration":8.0,"frames":frames}),
+    )
+    .unwrap();
     assert!(perf.len() > 2 * 1024 * 1024);
     let next = Request::post("/v1/captures?kind=performance")
         .header(header::AUTHORIZATION, format!("Bearer {}", fixture.control))
@@ -1006,7 +1070,10 @@ async fn a_stalled_capture_upload_does_not_hold_up_the_next() {
     assert_eq!(response.status(), StatusCode::OK);
     let value: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    assert_eq!(fs::read(value["data"]["path"].as_str().unwrap()).unwrap(), perf);
+    assert_eq!(
+        fs::read(value["data"]["path"].as_str().unwrap()).unwrap(),
+        perf
+    );
     assert!(!hung.is_finished());
     hung.abort();
 }

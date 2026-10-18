@@ -81,7 +81,11 @@ pub enum Event {
     /// The agent of `thread` is eligible now and policy wants `reading`
     /// (`None`: nothing to do). `compact` is the exact command a new
     /// compaction would send.
-    Checked { thread: String, reading: Option<Reading>, compact: Command },
+    Checked {
+        thread: String,
+        reading: Option<Reading>,
+        compact: Command,
+    },
     /// `agent compact` for an agent eligible now.
     Manual { thread: String, compact: Command },
     /// What sending the record's command got.
@@ -104,44 +108,115 @@ pub fn reduce(state: Option<Record>, event: Event) -> Reduction<Option<Record>, 
     // A record of an agent thread that has since been replaced decides nothing.
     let current = |thread: &str, state: Option<Record>| state.filter(|r| r.thread == thread);
     match event {
-        Event::Checked { thread, reading, compact } => match (current(&thread, state.clone()), reading) {
+        Event::Checked {
+            thread,
+            reading,
+            compact,
+        } => match (current(&thread, state.clone()), reading) {
             // Settle the earlier compaction first: its own command, once it is wanted again.
-            (Some(Record { intent: Intent::Unknown { reading: pending, command, .. }, .. }), wanted) => {
-                let again = pending.origin == Origin::Manual || wanted.is_some_and(|w| w.decision == Decision::Compact);
-                if again { Reduction::applied(state, vec![Effect::Send(command)]) } else { Reduction::same(state, Unchanged) }
+            (
+                Some(Record {
+                    intent:
+                        Intent::Unknown {
+                            reading: pending,
+                            command,
+                            ..
+                        },
+                    ..
+                }),
+                wanted,
+            ) => {
+                let again = pending.origin == Origin::Manual
+                    || wanted.is_some_and(|w| w.decision == Decision::Compact);
+                if again {
+                    Reduction::applied(state, vec![Effect::Send(command)])
+                } else {
+                    Reduction::same(state, Unchanged)
+                }
             }
             (_, None) => Reduction::same(state, Unchanged),
-            (Some(Record { intent: Intent::Applied { reading: done } | Intent::Blocked { reading: done, .. }, .. }), Some(wanted)) if done.same(&wanted) =>
-                Reduction::same(state, Duplicate),
+            (
+                Some(Record {
+                    intent:
+                        Intent::Applied { reading: done } | Intent::Blocked { reading: done, .. },
+                    ..
+                }),
+                Some(wanted),
+            ) if done.same(&wanted) => Reduction::same(state, Duplicate),
             (_, Some(wanted)) => match wanted.decision {
                 Decision::Compact => compact_now(thread, wanted, compact),
                 Decision::Fresh { .. } => {
                     let effects = vec![Effect::StartFresh(wanted.clone())];
-                    Reduction::applied(Some(Record { thread, intent: Intent::Applied { reading: wanted } }), effects)
+                    Reduction::applied(
+                        Some(Record {
+                            thread,
+                            intent: Intent::Applied { reading: wanted },
+                        }),
+                        effects,
+                    )
                 }
             },
         },
         Event::Manual { thread, compact } => match current(&thread, state.clone()) {
-            Some(Record { intent: Intent::Unknown { command, .. }, .. }) => Reduction::applied(state, vec![Effect::Send(command)]),
-            _ => compact_now(thread, Reading { origin: Origin::Manual, decision: Decision::Compact, at: None, tokens: 0 }, compact),
+            Some(Record {
+                intent: Intent::Unknown { command, .. },
+                ..
+            }) => Reduction::applied(state, vec![Effect::Send(command)]),
+            _ => compact_now(
+                thread,
+                Reading {
+                    origin: Origin::Manual,
+                    decision: Decision::Compact,
+                    at: None,
+                    tokens: 0,
+                },
+                compact,
+            ),
         },
         Event::Sent(outcome) => {
-            let Some(Record { thread, intent: Intent::Unknown { reading, command, .. } }) = state else {
-                return Reduction::same(state, ProtocolFault("a compaction answered that was not sent".into()));
+            let Some(Record {
+                thread,
+                intent: Intent::Unknown {
+                    reading, command, ..
+                },
+            }) = state
+            else {
+                return Reduction::same(
+                    state,
+                    ProtocolFault("a compaction answered that was not sent".into()),
+                );
             };
             let intent = match outcome {
                 Dispatched::Accepted(_) => Intent::Applied { reading },
                 Dispatched::Refused(error) => Intent::Blocked { reading, error },
-                Dispatched::NotSent(error) | Dispatched::Unknown(error) => Intent::Unknown { reading, command, error: Some(error) },
+                Dispatched::NotSent(error) | Dispatched::Unknown(error) => Intent::Unknown {
+                    reading,
+                    command,
+                    error: Some(error),
+                },
             };
             Reduction::applied(Some(Record { thread, intent }), vec![Effect::Commit])
         }
     }
 }
 
-fn compact_now(thread: String, reading: Reading, command: Command) -> Reduction<Option<Record>, Effect> {
+fn compact_now(
+    thread: String,
+    reading: Reading,
+    command: Command,
+) -> Reduction<Option<Record>, Effect> {
     let effects = vec![Effect::Commit, Effect::Send(command.clone())];
-    Reduction::applied(Some(Record { thread, intent: Intent::Unknown { reading, command, error: None } }), effects)
+    Reduction::applied(
+        Some(Record {
+            thread,
+            intent: Intent::Unknown {
+                reading,
+                command,
+                error: None,
+            },
+        }),
+        effects,
+    )
 }
 
 #[cfg(test)]
@@ -152,15 +227,36 @@ mod tests {
     use serde_json::json;
 
     fn compact() -> Command {
-        Command::new(&Identity { id: CommandID::fresh(), created_at: "t".into() }, json!({"type": "thread.turn.start"}))
+        Command::new(
+            &Identity {
+                id: CommandID::fresh(),
+                created_at: "t".into(),
+            },
+            json!({"type": "thread.turn.start"}),
+        )
     }
 
     fn reading(at: &str, decision: Decision) -> Reading {
-        Reading { origin: Origin::Automatic, decision, at: Some(at.into()), tokens: 250_000 }
+        Reading {
+            origin: Origin::Automatic,
+            decision,
+            at: Some(at.into()),
+            tokens: 250_000,
+        }
     }
 
-    fn checked(state: Option<Record>, wanted: Option<Reading>) -> Reduction<Option<Record>, Effect> {
-        reduce(state, Event::Checked { thread: "a".into(), reading: wanted, compact: compact() })
+    fn checked(
+        state: Option<Record>,
+        wanted: Option<Reading>,
+    ) -> Reduction<Option<Record>, Effect> {
+        reduce(
+            state,
+            Event::Checked {
+                thread: "a".into(),
+                reading: wanted,
+                compact: compact(),
+            },
+        )
     }
 
     /// A compaction whose answer is lost (or that a restart interrupted) is
@@ -168,34 +264,98 @@ mod tests {
     #[test]
     fn an_unanswered_compaction_is_sent_again_never_replaced() {
         let first = checked(None, Some(reading("r1", Decision::Compact)));
-        let Some(Effect::Send(original)) = first.effects.get(1).cloned() else { panic!("{:?}", first.effects) };
+        let Some(Effect::Send(original)) = first.effects.get(1).cloned() else {
+            panic!("{:?}", first.effects)
+        };
         assert_eq!(first.effects[0], Effect::Commit);
-        let lost = reduce(first.state, Event::Sent(Dispatched::Unknown("closed".into())));
+        let lost = reduce(
+            first.state,
+            Event::Sent(Dispatched::Unknown("closed".into())),
+        );
         // Restored from disk, the next check settles it with that same command…
-        let restored: Option<Record> = serde_json::from_value(serde_json::to_value(&lost.state).unwrap()).unwrap();
+        let restored: Option<Record> =
+            serde_json::from_value(serde_json::to_value(&lost.state).unwrap()).unwrap();
         let again = checked(restored.clone(), Some(reading("r2", Decision::Compact)));
         assert_eq!(again.effects, vec![Effect::Send(original.clone())]);
         // …and not while compaction isn't wanted, nor for a fresh start.
         assert_eq!(checked(restored.clone(), None).effects, vec![]);
-        assert_eq!(checked(restored.clone(), Some(reading("r2", Decision::Fresh { nightly: false }))).effects, vec![]);
-        assert_eq!(reduce(restored.clone(), Event::Manual { thread: "a".into(), compact: compact() }).effects, vec![Effect::Send(original)]);
-        let applied = reduce(again.state, Event::Sent(Dispatched::Accepted(json!({"sequence": 3}))));
-        assert!(matches!(&applied.state, Some(Record { intent: Intent::Applied { reading }, .. }) if reading.at.as_deref() == Some("r1")));
+        assert_eq!(
+            checked(
+                restored.clone(),
+                Some(reading("r2", Decision::Fresh { nightly: false }))
+            )
+            .effects,
+            vec![]
+        );
+        assert_eq!(
+            reduce(
+                restored.clone(),
+                Event::Manual {
+                    thread: "a".into(),
+                    compact: compact()
+                }
+            )
+            .effects,
+            vec![Effect::Send(original)]
+        );
+        let applied = reduce(
+            again.state,
+            Event::Sent(Dispatched::Accepted(json!({"sequence": 3}))),
+        );
+        assert!(
+            matches!(&applied.state, Some(Record { intent: Intent::Applied { reading }, .. }) if reading.at.as_deref() == Some("r1"))
+        );
         // A replaced agent's record is not settled on its successor.
-        let successor = reduce(restored, Event::Checked { thread: "b".into(), reading: Some(reading("r3", Decision::Compact)), compact: compact() });
+        let successor = reduce(
+            restored,
+            Event::Checked {
+                thread: "b".into(),
+                reading: Some(reading("r3", Decision::Compact)),
+                compact: compact(),
+            },
+        );
         assert!(matches!(&successor.state, Some(Record { thread, .. }) if thread == "b"));
     }
 
     #[test]
     fn a_reading_is_acted_on_once_and_a_refused_one_not_again() {
-        let applied = Some(Record { thread: "a".into(), intent: Intent::Applied { reading: reading("r1", Decision::Compact) } });
-        assert_eq!(checked(applied.clone(), Some(reading("r1", Decision::Compact))).disposition, Disposition::Duplicate);
+        let applied = Some(Record {
+            thread: "a".into(),
+            intent: Intent::Applied {
+                reading: reading("r1", Decision::Compact),
+            },
+        });
+        assert_eq!(
+            checked(applied.clone(), Some(reading("r1", Decision::Compact))).disposition,
+            Disposition::Duplicate
+        );
         let sent = checked(None, Some(reading("r1", Decision::Compact)));
         let refused = reduce(sent.state, Event::Sent(Dispatched::Refused("no".into())));
-        assert_eq!(checked(refused.state.clone(), Some(reading("r1", Decision::Compact))).disposition, Disposition::Duplicate);
+        assert_eq!(
+            checked(
+                refused.state.clone(),
+                Some(reading("r1", Decision::Compact))
+            )
+            .disposition,
+            Disposition::Duplicate
+        );
         // A new reading is a new decision.
-        assert_eq!(checked(refused.state, Some(reading("r2", Decision::Compact))).effects.len(), 2);
-        let fresh = checked(applied, Some(reading("r1", Decision::Fresh { nightly: true })));
-        assert_eq!(fresh.effects, vec![Effect::StartFresh(reading("r1", Decision::Fresh { nightly: true }))]);
+        assert_eq!(
+            checked(refused.state, Some(reading("r2", Decision::Compact)))
+                .effects
+                .len(),
+            2
+        );
+        let fresh = checked(
+            applied,
+            Some(reading("r1", Decision::Fresh { nightly: true })),
+        );
+        assert_eq!(
+            fresh.effects,
+            vec![Effect::StartFresh(reading(
+                "r1",
+                Decision::Fresh { nightly: true }
+            ))]
+        );
     }
 }

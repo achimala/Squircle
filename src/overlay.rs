@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{process::Command, sync::watch, time::Instant};
 
-use crate::xcode::{Finished, RunError, Sink, cancelled, run_bounded, run_command};
+use crate::process::{Finished, RunError, Sink, cancelled, run_bounded};
+use crate::xcode::run_command;
 
 pub const FRAMEWORK: &str = "SquircleOverlay.framework";
 const LOAD_PATH: &str = "@executable_path/Frameworks/SquircleOverlay.framework/SquircleOverlay";
@@ -228,7 +229,9 @@ async fn lock(path: &Path, deadline: Instant, cancel: &watch::Receiver<bool>) ->
         match file.try_lock() {
             Ok(()) => return Ok(file),
             Err(fs::TryLockError::WouldBlock) => {}
-            Err(fs::TryLockError::Error(error)) => return Err(error).context("cannot lock the overlay cache"),
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(error).context("cannot lock the overlay cache");
+            }
         }
         tokio::select! {
             _ = cancelled(Some(cancel.clone())) => bail!("build cancelled while waiting for the overlay cache"),
@@ -320,12 +323,12 @@ pub async fn inject(
     // 60 Hz on ProMotion iPhones unless the app opts in.
     const FRAME_RATE_KEY: &str = "CADisableMinimumFrameDurationOnPhone";
     let mut info = info;
-    if let Some(dict) = info.as_dictionary_mut() {
-        if dict.get(FRAME_RATE_KEY).and_then(|v| v.as_boolean()) != Some(true) {
-            dict.insert(FRAME_RATE_KEY.into(), true.into());
-            info.to_file_binary(app.join("Info.plist"))?;
-            writeln!(log, "Allowed 120 Hz display links ({FRAME_RATE_KEY})")?;
-        }
+    if let Some(dict) = info.as_dictionary_mut()
+        && dict.get(FRAME_RATE_KEY).and_then(|v| v.as_boolean()) != Some(true)
+    {
+        dict.insert(FRAME_RATE_KEY.into(), true.into());
+        info.to_file_binary(app.join("Info.plist"))?;
+        writeln!(log, "Allowed 120 Hz display links ({FRAME_RATE_KEY})")?;
     }
 
     let destination = app.join("Frameworks").join(FRAMEWORK);

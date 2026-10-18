@@ -39,17 +39,33 @@ pub fn holder(root: &Path) -> Result<Option<u32>> {
         return Ok(None);
     }
     let pid = std::fs::read_to_string(&path)?;
-    Ok(Some(pid.trim().parse().with_context(|| format!("The service lock names no process ({pid:?}); it may be starting"))?))
+    Ok(Some(pid.trim().parse().with_context(|| {
+        format!("The service lock names no process ({pid:?}); it may be starting")
+    })?))
 }
 
 /// Restarts the running service; returns once the new one answers.
 pub async fn restart(root: &Path, server: &str) -> Result<Value> {
-    let old = holder(root)?.context("No Squircle service is running for this data directory; start one with squircle serve")?;
+    let old = holder(root)?.context(
+        "No Squircle service is running for this data directory; start one with squircle serve",
+    )?;
     let invocation = invocation(old)?;
-    ensure!(invocation.argv.iter().any(|a| a == "serve"), "Process {old} holds the lock but is not squircle serve");
-    let program = invocation.cwd.join(invocation.argv.first().context("The service has no command line")?);
+    ensure!(
+        invocation.argv.iter().any(|a| a == "serve"),
+        "Process {old} holds the lock but is not squircle serve"
+    );
+    let program = invocation.cwd.join(
+        invocation
+            .argv
+            .first()
+            .context("The service has no command line")?,
+    );
     let log_path = std::path::absolute(root.join("serve.log"))?;
-    let log = OpenOptions::new().create(true).append(true).open(&log_path).context("Cannot open the service log")?;
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .context("Cannot open the service log")?;
 
     signal(old, libc::SIGTERM)?;
     exited(old).await;
@@ -66,24 +82,34 @@ pub async fn restart(root: &Path, server: &str) -> Result<Value> {
         .spawn()
         .with_context(|| format!("Cannot start {}", program.display()))?;
     let new = child.id();
-    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let health = format!("{}/health", server.trim_end_matches('/'));
     loop {
         if let Some(status) = child.try_wait()? {
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             let tail: Vec<&str> = log.lines().rev().take(15).collect();
-            bail!("The new service exited ({status}); simulator sessions stay in the ledger for the next start. Log:\n{}",
-                tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+            bail!(
+                "The new service exited ({status}); simulator sessions stay in the ledger for the next start. Log:\n{}",
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
         }
         if holder(root).ok().flatten() == Some(new)
-            && client.get(&health).send().await.is_ok_and(|r| r.status().is_success())
+            && client
+                .get(&health)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
         {
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    Ok(json!({"previous_pid": old, "pid": new, "program": program, "log": log_path,
-              "next": "Simulator sessions were handed over; squircle sim status shows them."}))
+    Ok(
+        json!({"previous_pid": old, "pid": new, "program": program, "log": log_path,
+              "next": "Simulator sessions were handed over; squircle sim status shows them."}),
+    )
 }
 
 /// Stops the running service, ending its simulator sessions.
@@ -95,7 +121,11 @@ pub async fn stop(root: &Path) -> Result<Value> {
 }
 
 fn signal(pid: u32, signal: libc::c_int) -> Result<()> {
-    ensure!(unsafe { libc::kill(pid as i32, signal) } == 0, "Cannot signal process {pid}: {}", std::io::Error::last_os_error());
+    ensure!(
+        unsafe { libc::kill(pid as i32, signal) } == 0,
+        "Cannot signal process {pid}: {}",
+        std::io::Error::last_os_error()
+    );
     Ok(())
 }
 
@@ -110,37 +140,89 @@ async fn exited(pid: u32) {
 fn invocation(pid: u32) -> Result<Invocation> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size: libc::size_t = 0;
-    let sized = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) };
-    ensure!(sized == 0, "Cannot read process {pid}'s arguments: {}", std::io::Error::last_os_error());
+    let sized = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    ensure!(
+        sized == 0,
+        "Cannot read process {pid}'s arguments: {}",
+        std::io::Error::last_os_error()
+    );
     let mut raw = vec![0u8; size];
-    let read = unsafe { libc::sysctl(mib.as_mut_ptr(), 3, raw.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) };
-    ensure!(read == 0, "Cannot read process {pid}'s arguments: {}", std::io::Error::last_os_error());
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            raw.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    ensure!(
+        read == 0,
+        "Cannot read process {pid}'s arguments: {}",
+        std::io::Error::last_os_error()
+    );
     raw.truncate(size);
     let (argv, env) = parse_procargs(&raw)?;
 
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let length = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
-    let got = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDVNODEPATHINFO, 0, (&raw mut info).cast(), length) };
-    ensure!(got == length, "Cannot read process {pid}'s working directory: {}", std::io::Error::last_os_error());
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast(),
+            length,
+        )
+    };
+    ensure!(
+        got == length,
+        "Cannot read process {pid}'s working directory: {}",
+        std::io::Error::last_os_error()
+    );
     let cwd = unsafe { CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
-    Ok(Invocation { argv, env, cwd: PathBuf::from(OsString::from_vec(cwd.to_bytes().to_vec())) })
+    Ok(Invocation {
+        argv,
+        env,
+        cwd: PathBuf::from(OsString::from_vec(cwd.to_bytes().to_vec())),
+    })
 }
 
 /// `KERN_PROCARGS2`: argc, the executable path and NUL padding, then argc
 /// arguments and the environment, each NUL-terminated; an empty string ends
 /// the environment (the kernel's own strings follow).
-fn parse_procargs(raw: &[u8]) -> Result<(Vec<OsString>, Vec<(OsString, OsString)>)> {
+type ProcessArgs = (Vec<OsString>, Vec<(OsString, OsString)>);
+
+fn parse_procargs(raw: &[u8]) -> Result<ProcessArgs> {
     ensure!(raw.len() >= 4, "Truncated process arguments");
     let argc = i32::from_ne_bytes(raw[..4].try_into()?) as usize;
     let mut strings = raw[4..].split(|b| *b == 0);
     strings.next().context("No executable path")?;
     let mut strings = strings.skip_while(|s| s.is_empty());
-    let argv: Vec<OsString> = strings.by_ref().take(argc).map(|s| OsString::from_vec(s.to_vec())).collect();
+    let argv: Vec<OsString> = strings
+        .by_ref()
+        .take(argc)
+        .map(|s| OsString::from_vec(s.to_vec()))
+        .collect();
     ensure!(argv.len() == argc, "Truncated process arguments");
-    let env = strings.take_while(|s| !s.is_empty())
+    let env = strings
+        .take_while(|s| !s.is_empty())
         .filter_map(|s| {
             let at = s.iter().position(|b| *b == b'=')?;
-            Some((OsString::from_vec(s[..at].to_vec()), OsString::from_vec(s[at + 1..].to_vec())))
+            Some((
+                OsString::from_vec(s[..at].to_vec()),
+                OsString::from_vec(s[at + 1..].to_vec()),
+            ))
         })
         .collect();
     Ok((argv, env))
@@ -155,7 +237,9 @@ mod tests {
     #[test]
     fn procargs_split_arguments_from_environment() {
         let mut raw = 3i32.to_ne_bytes().to_vec();
-        raw.extend_from_slice(b"./squircle\0\0\0\0./squircle\0serve\0\0A=1=2\0B=\0\0executable_path=x\0\0");
+        raw.extend_from_slice(
+            b"./squircle\0\0\0\0./squircle\0serve\0\0A=1=2\0B=\0\0executable_path=x\0\0",
+        );
         let (argv, env) = parse_procargs(&raw).unwrap();
         assert_eq!(argv, ["./squircle", "serve", ""]);
         assert_eq!(env, [("A".into(), "1=2".into()), ("B".into(), "".into())]);

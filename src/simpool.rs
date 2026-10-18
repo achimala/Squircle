@@ -23,8 +23,10 @@
 
 use crate::actor::{Lane, Owner, Rank};
 use crate::fsm::core::commit::{Gate, JsonFile};
-pub use crate::fsm::sims::pool::{Action, BootReceipt, Device, Facts, Lease, Policy, Provenance, Row, ThreadInfo, plan};
 use crate::fsm::sims::pool::{self as policy, Acting};
+pub use crate::fsm::sims::pool::{
+    Action, BootReceipt, Device, Facts, Lease, Policy, Provenance, Row, ThreadInfo, plan,
+};
 use crate::fsm::sims::session::Released;
 use crate::sims::Pending;
 use anyhow::{Context, Result, anyhow, ensure};
@@ -42,7 +44,12 @@ use tokio::process::Command;
 
 impl Policy {
     pub fn from_env() -> Self {
-        let number = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| *v >= 0.0);
+        let number = |name: &str| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|v| *v >= 0.0)
+        };
         Self {
             max_leases: number("SQUIRCLE_MAX_SIMULATORS").map_or(3, |v| (v as usize).max(1)),
             idle: number("SQUIRCLE_SIM_IDLE_MINUTES").map_or(600.0, |m| m * 60.0),
@@ -80,7 +87,9 @@ fn uuids(text: &str) -> Vec<String> {
             _ => b.is_ascii_hexdigit(),
         });
         let bounded = (i == 0 || !bytes[i - 1].is_ascii_alphanumeric())
-            && bytes.get(i + UUID_LEN).is_none_or(|b| !b.is_ascii_alphanumeric());
+            && bytes
+                .get(i + UUID_LEN)
+                .is_none_or(|b| !b.is_ascii_alphanumeric());
         if shaped && bounded {
             found.push(String::from_utf8_lossy(candidate).to_ascii_uppercase());
             i += UUID_LEN;
@@ -95,11 +104,16 @@ fn uuids(text: &str) -> Vec<String> {
 fn argument(rest: &str) -> Option<String> {
     let mut rest = rest.trim_start();
     while rest.starts_with('-') {
-        rest = rest.split_once(char::is_whitespace).map_or("", |(_, r)| r).trim_start();
+        rest = rest
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, r)| r)
+            .trim_start();
     }
     let word = match rest.chars().next()? {
         quote @ ('"' | '\'') => rest[1..].split(quote).next()?,
-        _ => rest.split(|c: char| c.is_whitespace() || ";&|)".contains(c)).next()?,
+        _ => rest
+            .split(|c: char| c.is_whitespace() || ";&|)".contains(c))
+            .next()?,
     };
     (!word.is_empty() && !word.starts_with('$') && !word.contains('`')).then(|| word.to_string())
 }
@@ -113,18 +127,40 @@ pub fn parse_use(command: &str, output: &str) -> Use {
     let mut segments = command.split("simctl ");
     segments.next();
     for segment in segments {
-        let segment = segment.split(['\n', ';', '|']).next().unwrap_or("").split("&&").next().unwrap_or("");
-        let (verb, rest) = segment.trim_start().split_once(char::is_whitespace).unwrap_or((segment.trim(), ""));
+        let segment = segment
+            .split(['\n', ';', '|'])
+            .next()
+            .unwrap_or("")
+            .split("&&")
+            .next()
+            .unwrap_or("");
+        let (verb, rest) = segment
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .unwrap_or((segment.trim(), ""));
         match verb {
             "create" | "clone" => {
                 found.created.extend(uuids(output));
-                let name = if verb == "clone" { argument(rest.trim_start().split_once(char::is_whitespace).map_or("", |(_, r)| r)) }
-                           else { argument(rest) };
-                found.created_names.extend(name.filter(|n| uuids(n).is_empty()));
+                let name = if verb == "clone" {
+                    argument(
+                        rest.trim_start()
+                            .split_once(char::is_whitespace)
+                            .map_or("", |(_, r)| r),
+                    )
+                } else {
+                    argument(rest)
+                };
+                found
+                    .created_names
+                    .extend(name.filter(|n| uuids(n).is_empty()));
             }
             "boot" | "install" | "launch" | "bootstatus" | "openurl" | "spawn" => {
                 let ids = uuids(segment);
-                let name = if ids.is_empty() { argument(rest).filter(|n| n != "booted") } else { None };
+                let name = if ids.is_empty() {
+                    argument(rest).filter(|n| n != "booted")
+                } else {
+                    None
+                };
                 // A boot of an already booted device boots nothing.
                 if verb == "boot" && !output.contains("current state: Booted") {
                     found.booted.extend(ids.iter().take(1).cloned());
@@ -142,7 +178,9 @@ pub fn parse_use(command: &str, output: &str) -> Use {
             for part in spec.split(',') {
                 match part.split_once('=') {
                     Some(("id", id)) => found.touched.extend(uuids(id)),
-                    Some(("name", name)) if spec.contains("Simulator") => found.touched_names.push(name.to_string()),
+                    Some(("name", name)) if spec.contains("Simulator") => {
+                        found.touched_names.push(name.to_string())
+                    }
                     _ => {}
                 }
             }
@@ -166,16 +204,39 @@ fn merge_activity(saved: &mut Saved, rows: &[Activity], devices: &[Device]) {
     for row in rows {
         let used = parse_use(&row.command, &row.output);
         let at = crate::t3::iso_parse(&row.created_at).unwrap_or_else(now);
-        for udid in used.created.iter().cloned().chain(used.created_names.iter().filter_map(|n| by_name(n))) {
+        for udid in used
+            .created
+            .iter()
+            .cloned()
+            .chain(used.created_names.iter().filter_map(|n| by_name(n)))
+        {
             let entry = saved.known.entry(udid).or_default();
             entry.created_by.get_or_insert_with(|| row.thread.clone());
             entry.last_used = entry.last_used.max(at);
         }
-        for udid in used.booted.iter().cloned().chain(used.booted_names.iter().filter_map(|n| by_name(n))) {
-            saved.known.entry(udid).or_default().note_boot(BootReceipt { at, thread: Some(row.thread.clone()), session: None });
+        for udid in used
+            .booted
+            .iter()
+            .cloned()
+            .chain(used.booted_names.iter().filter_map(|n| by_name(n)))
+        {
+            saved.known.entry(udid).or_default().note_boot(BootReceipt {
+                at,
+                thread: Some(row.thread.clone()),
+                session: None,
+            });
         }
-        for udid in used.touched.iter().cloned().chain(used.touched_names.iter().filter_map(|n| by_name(n))) {
-            saved.known.entry(udid).or_default().note_touch(&row.thread, at);
+        for udid in used
+            .touched
+            .iter()
+            .cloned()
+            .chain(used.touched_names.iter().filter_map(|n| by_name(n)))
+        {
+            saved
+                .known
+                .entry(udid)
+                .or_default()
+                .note_touch(&row.thread, at);
         }
         if row.created_at > saved.activity_seen {
             saved.activity_seen = row.created_at.clone();
@@ -258,10 +319,14 @@ struct State {
 impl State {
     /// Changes what is known and saves it before anything reads or acts on it.
     fn change<T>(&mut self, change: impl FnOnce(&mut Saved) -> T) -> Result<T> {
-        self.gate.resolve().map_err(|e| anyhow!("Simulator pool state not saved: {e}"))?;
+        self.gate
+            .resolve()
+            .map_err(|e| anyhow!("Simulator pool state not saved: {e}"))?;
         let mut candidate = self.gate.committed().clone();
         let out = change(&mut candidate);
-        self.gate.commit(candidate, vec![]).map_err(|e| anyhow!("Simulator pool state not saved: {e}"))?;
+        self.gate
+            .commit(candidate, vec![])
+            .map_err(|e| anyhow!("Simulator pool state not saved: {e}"))?;
         Ok(out)
     }
 }
@@ -279,7 +344,10 @@ pub struct Pool {
 }
 
 fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// What one look at the world found.
@@ -292,16 +360,43 @@ struct Snapshot {
 
 impl Pool {
     pub fn open(root: &Path, agents: Arc<crate::agents::Agents>) -> Result<Arc<Self>> {
-        let reserved = std::env::var("SQUIRCLE_SIMULATOR_ID").ok().map(|s| s.trim().to_ascii_uppercase()).into_iter().collect();
-        Self::with(root, Arc::new(Xcrun), Arc::new(T3World(agents)), Policy::from_env(), reserved)
+        let reserved = std::env::var("SQUIRCLE_SIMULATOR_ID")
+            .ok()
+            .map(|s| s.trim().to_ascii_uppercase())
+            .into_iter()
+            .collect();
+        Self::with(
+            root,
+            Arc::new(Xcrun),
+            Arc::new(T3World(agents)),
+            Policy::from_env(),
+            reserved,
+        )
     }
 
-    pub fn with(root: &Path, simctl: Arc<dyn Simctl>, world: Arc<dyn World>, policy: Policy, reserved: Vec<String>) -> Result<Arc<Self>> {
+    pub fn with(
+        root: &Path,
+        simctl: Arc<dyn Simctl>,
+        world: Arc<dyn World>,
+        policy: Policy,
+        reserved: Vec<String>,
+    ) -> Result<Arc<Self>> {
         let file = JsonFile::new(root.join("simpool.json"));
         let (saved, revision) = file.read::<Saved>()?.unwrap_or_default();
-        let state = State { gate: Gate::restore(saved, revision, file), idle_since: HashMap::new(), reconciled: false };
-        Ok(Arc::new(Self { simctl, world, policy, reserved, owner: Owner::spawn("simulator pool", state),
-            holds: OnceLock::new(), applying: Lane::new(Rank::PoolApply) }))
+        let state = State {
+            gate: Gate::restore(saved, revision, file),
+            idle_since: HashMap::new(),
+            reconciled: false,
+        };
+        Ok(Arc::new(Self {
+            simctl,
+            world,
+            policy,
+            reserved,
+            owner: Owner::spawn("simulator pool", state),
+            holds: OnceLock::new(),
+            applying: Lane::new(Rank::PoolApply),
+        }))
     }
 
     /// The session owner: its reservations, boots and cleanup exclusions.
@@ -314,7 +409,10 @@ impl Pool {
     }
 
     /// Changes what is known and saves it before anything reads or acts on it.
-    async fn change<T: Send + 'static>(&self, change: impl FnOnce(&mut Saved) -> T + Send + 'static) -> Result<T> {
+    async fn change<T: Send + 'static>(
+        &self,
+        change: impl FnOnce(&mut Saved) -> T + Send + 'static,
+    ) -> Result<T> {
         self.owner.ask(move |s| s.change(change)).await
     }
 
@@ -322,11 +420,15 @@ impl Pool {
     /// was last: an observation, whatever this file has lost.
     pub async fn remember_leased(&self, used: impl IntoIterator<Item = (String, f64)>) {
         let used: Vec<(String, f64)> = used.into_iter().collect();
-        let saved = self.change(move |saved| for (udid, at) in &used {
-            let entry = saved.known.entry(udid.to_ascii_uppercase()).or_default();
-            entry.leased = true;
-            entry.last_used = entry.last_used.max(*at);
-        }).await;
+        let saved = self
+            .change(move |saved| {
+                for (udid, at) in &used {
+                    let entry = saved.known.entry(udid.to_ascii_uppercase()).or_default();
+                    entry.leased = true;
+                    entry.last_used = entry.last_used.max(*at);
+                }
+            })
+            .await;
         if let Err(error) = saved {
             eprintln!("{error:#}");
         }
@@ -336,18 +438,32 @@ impl Pool {
     /// could be shown to be the user's, so no plan.
     async fn look(&self, leases: Vec<Lease>) -> Result<Snapshot> {
         let devices = self.simctl.devices().await?;
-        let sessions = self.world.t3_sessions().await.context("T3 did not list its device sessions")?;
-        Ok(Snapshot { now: now(), devices, sessions, leases })
+        let sessions = self
+            .world
+            .t3_sessions()
+            .await
+            .context("T3 did not list its device sessions")?;
+        Ok(Snapshot {
+            now: now(),
+            devices,
+            sessions,
+            leases,
+        })
     }
 
     /// Commands agents ran since the last read, or None if T3's activity
     /// log couldn't be read (then an unseen use could protect any of ours).
     async fn read_activity(&self) -> Option<Vec<Activity>> {
-        let since = self.owner.ask(|s| s.gate.committed().activity_seen.clone()).await;
+        let since = self
+            .owner
+            .ask(|s| s.gate.committed().activity_seen.clone())
+            .await;
         match self.world.activity(&since).await {
             Ok(rows) => Some(rows),
             Err(error) => {
-                eprintln!("Simulator pool: T3's activity log not read, so nothing of ours is cleaned up: {error:#}");
+                eprintln!(
+                    "Simulator pool: T3's activity log not read, so nothing of ours is cleaned up: {error:#}"
+                );
                 None
             }
         }
@@ -361,43 +477,71 @@ impl Pool {
         let complete = activity.is_some();
         let boots = self.holds().map(|h| h.boots()).unwrap_or_default();
         let facts = snapshot.clone();
-        let (known, idle_since) = self.owner.ask(move |s| -> Result<_> {
-            let reconcile = !s.reconciled;
-            s.change(|saved| {
-                merge_activity(saved, activity.as_deref().unwrap_or_default(), &facts.devices);
-                for (udid, receipt) in boots {
-                    saved.known.entry(udid.to_ascii_uppercase()).or_default().note_boot(receipt);
-                }
-                for lease in &facts.leases {
-                    let entry = saved.known.entry(lease.device_id.to_ascii_uppercase()).or_default();
-                    entry.leased = true;
-                    entry.last_used = facts.now;
-                }
-                policy::observe(&mut saved.known, &facts.devices, facts.now);
-                if reconcile {
-                    policy::reconcile(&mut saved.known, &facts.devices);
-                }
-            })?;
-            s.reconciled = true;
-            Ok((s.gate.committed().known.clone(), s.idle_since.clone()))
-        }).await?;
+        let (known, idle_since) = self
+            .owner
+            .ask(move |s| -> Result<_> {
+                let reconcile = !s.reconciled;
+                s.change(|saved| {
+                    merge_activity(
+                        saved,
+                        activity.as_deref().unwrap_or_default(),
+                        &facts.devices,
+                    );
+                    for (udid, receipt) in boots {
+                        saved
+                            .known
+                            .entry(udid.to_ascii_uppercase())
+                            .or_default()
+                            .note_boot(receipt);
+                    }
+                    for lease in &facts.leases {
+                        let entry = saved
+                            .known
+                            .entry(lease.device_id.to_ascii_uppercase())
+                            .or_default();
+                        entry.leased = true;
+                        entry.last_used = facts.now;
+                    }
+                    policy::observe(&mut saved.known, &facts.devices, facts.now);
+                    if reconcile {
+                        policy::reconcile(&mut saved.known, &facts.devices);
+                    }
+                })?;
+                s.reconciled = true;
+                Ok((s.gate.committed().known.clone(), s.idle_since.clone()))
+            })
+            .await?;
         // The policy is pure; it runs here, on what was just saved, asking T3
         // (the agents' published shell) about threads as it goes.
         let world = self.world.clone();
         let thread = move |id: &str| world.thread(id);
         let rows = plan(&Facts {
-            now: snapshot.now, devices: &snapshot.devices, leases: &snapshot.leases, t3_sessions: &snapshot.sessions,
-            known: &known, thread: &thread, activity_complete: complete, idle_since: &idle_since,
-            reserved: &self.reserved, policy: self.policy, now_please,
+            now: snapshot.now,
+            devices: &snapshot.devices,
+            leases: &snapshot.leases,
+            t3_sessions: &snapshot.sessions,
+            known: &known,
+            thread: &thread,
+            activity_complete: complete,
+            idle_since: &idle_since,
+            reserved: &self.reserved,
+            policy: self.policy,
+            now_please,
         });
-        let free: Vec<String> = rows.iter().filter(|r| r.free).map(|r| r.udid.clone()).collect();
+        let free: Vec<String> = rows
+            .iter()
+            .filter(|r| r.free)
+            .map(|r| r.udid.clone())
+            .collect();
         let seen_at = snapshot.now;
-        self.owner.ask(move |s| {
-            s.idle_since.retain(|udid, _| free.contains(udid));
-            for udid in free {
-                s.idle_since.entry(udid).or_insert(seen_at);
-            }
-        }).await;
+        self.owner
+            .ask(move |s| {
+                s.idle_since.retain(|udid, _| free.contains(udid));
+                for udid in free {
+                    s.idle_since.entry(udid).or_insert(seen_at);
+                }
+            })
+            .await;
         Ok(rows)
     }
 
@@ -406,14 +550,27 @@ impl Pool {
     /// only if that still asks for it. Every outcome is saved.
     async fn act(&self, row: &Row, now_please: bool) -> Value {
         let report = |error: Option<String>| json!({"udid": row.udid, "name": row.name, "action": row.action, "why": row.why, "error": error});
-        let Some(action) = row.action else { return report(None) };
-        let Some(holds) = self.holds() else { return report(Some("no session owner to reserve it from".into())) };
-        let Some(_exclusion) = holds.exclude(&row.udid).await else { return report(Some("a session took it meanwhile; left alone".into())) };
-        let udid = row.udid.clone();
-        let acting = |udid: String, acting: Option<Acting>| move |saved: &mut Saved| if let Some(entry) = saved.known.get_mut(&udid) {
-            entry.acting = acting;
+        let Some(action) = row.action else {
+            return report(None);
         };
-        if let Err(error) = self.change(acting(udid.clone(), Some(Acting { action, at: now() }))).await {
+        let Some(holds) = self.holds() else {
+            return report(Some("no session owner to reserve it from".into()));
+        };
+        let Some(_exclusion) = holds.exclude(&row.udid).await else {
+            return report(Some("a session took it meanwhile; left alone".into()));
+        };
+        let udid = row.udid.clone();
+        let acting = |udid: String, acting: Option<Acting>| {
+            move |saved: &mut Saved| {
+                if let Some(entry) = saved.known.get_mut(&udid) {
+                    entry.acting = acting;
+                }
+            }
+        };
+        if let Err(error) = self
+            .change(acting(udid.clone(), Some(Acting { action, at: now() })))
+            .await
+        {
             return report(Some(format!("{error:#}")));
         }
         let fresh = match self.refresh(&holds.leases(), now_please).await {
@@ -431,14 +588,22 @@ impl Pool {
         let result = match action {
             Action::Shutdown => self.simctl.shutdown(&row.udid).await,
             Action::Delete => self.simctl.delete(&row.udid).await,
-        }.map_err(|e| format!("{e:#}"));
+        }
+        .map_err(|e| format!("{e:#}"));
         let error = result.clone().err();
         let settled = udid.clone();
-        if let Err(saved) = self.change(move |saved| policy::settle(&mut saved.known, &settled, action, result, now())).await {
+        if let Err(saved) = self
+            .change(move |saved| policy::settle(&mut saved.known, &settled, action, result, now()))
+            .await
+        {
             eprintln!("{saved:#}");
         }
         if error.is_none() {
-            self.owner.ask(move |s| { s.idle_since.remove(&udid); }).await;
+            self.owner
+                .ask(move |s| {
+                    s.idle_since.remove(&udid);
+                })
+                .await;
         }
         report(error)
     }
@@ -456,64 +621,102 @@ impl Pool {
     /// reservation keeps starts off it meanwhile; its thread's own commands
     /// on it don't keep it.
     pub async fn release(&self, udid: &str, thread: &str, others: &[Lease]) -> Result<Released> {
-        self.applying.run(async {
-            let rows = self.refresh(others, false).await?;
-            let Some(row) = rows.into_iter().find(|r| r.udid.eq_ignore_ascii_case(udid)) else {
-                return Ok(Released::NotBooted);
-            };
-            if !row.booted {
-                return Ok(Released::NotBooted);
-            }
-            let mine = row.free || (row.owner == "agent outside a lease" && row.thread.as_deref() == Some(thread));
-            if !mine {
-                return Ok(Released::Kept { why: row.why });
-            }
-            let udid = row.udid;
-            let intent = udid.clone();
-            self.change(move |saved| if let Some(entry) = saved.known.get_mut(&intent) {
-                entry.acting = Some(Acting { action: Action::Shutdown, at: now() });
-            }).await?;
-            let result = self.simctl.shutdown(&udid).await.map_err(|e| format!("{e:#}"));
-            let (settled, outcome) = (udid.clone(), result.clone());
-            self.change(move |saved| policy::settle(&mut saved.known, &settled, Action::Shutdown, outcome, now())).await?;
-            result.map_err(|e| anyhow!(e))?;
-            self.owner.ask(move |s| { s.idle_since.remove(&udid); }).await;
-            Ok(Released::ShutDown)
-        }).await
+        self.applying
+            .run(async {
+                let rows = self.refresh(others, false).await?;
+                let Some(row) = rows.into_iter().find(|r| r.udid.eq_ignore_ascii_case(udid)) else {
+                    return Ok(Released::NotBooted);
+                };
+                if !row.booted {
+                    return Ok(Released::NotBooted);
+                }
+                let mine = row.free
+                    || (row.owner == "agent outside a lease"
+                        && row.thread.as_deref() == Some(thread));
+                if !mine {
+                    return Ok(Released::Kept { why: row.why });
+                }
+                let udid = row.udid;
+                let intent = udid.clone();
+                self.change(move |saved| {
+                    if let Some(entry) = saved.known.get_mut(&intent) {
+                        entry.acting = Some(Acting {
+                            action: Action::Shutdown,
+                            at: now(),
+                        });
+                    }
+                })
+                .await?;
+                let result = self
+                    .simctl
+                    .shutdown(&udid)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                let (settled, outcome) = (udid.clone(), result.clone());
+                self.change(move |saved| {
+                    policy::settle(&mut saved.known, &settled, Action::Shutdown, outcome, now())
+                })
+                .await?;
+                result.map_err(|e| anyhow!(e))?;
+                self.owner
+                    .ask(move |s| {
+                        s.idle_since.remove(&udid);
+                    })
+                    .await;
+                Ok(Released::ShutDown)
+            })
+            .await
     }
 
     /// Shuts down and deletes what the policy says (idle waits included).
     pub async fn tick(&self, leases: &[Lease]) -> Result<Vec<Value>> {
-        self.applying.run(async {
-            let rows = self.refresh(leases, false).await?;
-            Ok(self.apply(&rows, false).await)
-        }).await
+        self.applying
+            .run(async {
+                let rows = self.refresh(leases, false).await?;
+                Ok(self.apply(&rows, false).await)
+            })
+            .await
     }
 
     /// `sim cleanup`: the policy without idle waits; `dry_run` only reports.
     pub async fn cleanup(&self, leases: &[Lease], dry_run: bool) -> Result<Value> {
-        self.applying.run(async {
-            let rows = self.refresh(leases, true).await?;
-            let planned: Vec<&Row> = rows.iter().filter(|r| r.action.is_some()).collect();
-            let kept: Vec<&Row> = rows.iter().filter(|r| r.booted && r.action.is_none()).collect();
-            let done = if dry_run { Value::Null } else { Value::Array(self.apply(&rows, true).await) };
-            Ok(json!({"dry_run": dry_run, "would": planned, "kept": kept, "done": done}))
-        }).await
+        self.applying
+            .run(async {
+                let rows = self.refresh(leases, true).await?;
+                let planned: Vec<&Row> = rows.iter().filter(|r| r.action.is_some()).collect();
+                let kept: Vec<&Row> = rows
+                    .iter()
+                    .filter(|r| r.booted && r.action.is_none())
+                    .collect();
+                let done = if dry_run {
+                    Value::Null
+                } else {
+                    Value::Array(self.apply(&rows, true).await)
+                };
+                Ok(json!({"dry_run": dry_run, "would": planned, "kept": kept, "done": done}))
+            })
+            .await
     }
 
     /// Every booted simulator with its owner, for `sim status`.
     pub async fn status(&self, leases: &[Lease]) -> Result<Value> {
         let rows = self.refresh(leases, false).await?;
         let cpu = self.simctl.cpu();
-        let booted: Vec<Value> = rows.iter().filter(|r| r.booted).map(|r| {
-            let mut value = serde_json::to_value(r).unwrap_or_default();
-            value["apps_cpu_percent"] = json!(cpu.get(&r.udid).map(|c| c.round()));
-            if let Some(title) = r.thread.as_deref().and_then(|t| self.world.title(t)) {
-                value["thread_title"] = json!(title);
-            }
-            value
-        }).collect();
-        Ok(json!({"booted": booted, "max_leases": self.policy.max_leases, "idle_minutes": self.policy.idle / 60.0}))
+        let booted: Vec<Value> = rows
+            .iter()
+            .filter(|r| r.booted)
+            .map(|r| {
+                let mut value = serde_json::to_value(r).unwrap_or_default();
+                value["apps_cpu_percent"] = json!(cpu.get(&r.udid).map(|c| c.round()));
+                if let Some(title) = r.thread.as_deref().and_then(|t| self.world.title(t)) {
+                    value["thread_title"] = json!(title);
+                }
+                value
+            })
+            .collect();
+        Ok(
+            json!({"booted": booted, "max_leases": self.policy.max_leases, "idle_minutes": self.policy.idle / 60.0}),
+        )
     }
 
     /// T3's open device sessions: (thread, device).
@@ -526,10 +729,20 @@ impl Pool {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             match self.tick(&sims.leases()).await {
-                Ok(done) => for item in done {
-                    eprintln!("Simulator pool: {} {} ({}){}", item["action"], item["name"], item["why"],
-                              item["error"].as_str().map(|e| format!(": {e}")).unwrap_or_default());
-                },
+                Ok(done) => {
+                    for item in done {
+                        eprintln!(
+                            "Simulator pool: {} {} ({}){}",
+                            item["action"],
+                            item["name"],
+                            item["why"],
+                            item["error"]
+                                .as_str()
+                                .map(|e| format!(": {e}"))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
                 Err(error) => eprintln!("Simulator pool not applied: {error:#}"),
             }
         }
@@ -540,27 +753,54 @@ impl Pool {
 pub struct Xcrun;
 
 async fn simctl(args: &[&str]) -> Result<Vec<u8>> {
-    let output = tokio::time::timeout(Duration::from_secs(120), Command::new("xcrun").arg("simctl").args(args)
-        .stdin(Stdio::null()).kill_on_drop(true).output()).await
-        .context("simctl timed out")?.context("Cannot run xcrun simctl")?;
-    ensure!(output.status.success(), "simctl {} failed: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
+    let output = tokio::time::timeout(
+        Duration::from_secs(120),
+        Command::new("xcrun")
+            .arg("simctl")
+            .args(args)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("simctl timed out")?
+    .context("Cannot run xcrun simctl")?;
+    ensure!(
+        output.status.success(),
+        "simctl {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     Ok(output.stdout)
 }
 
 impl Simctl for Xcrun {
     fn devices(&self) -> Pending<'_, Result<Vec<Device>>> {
         Box::pin(async {
-            let list: Value = serde_json::from_slice(&simctl(&["list", "devices", "-j"]).await?).context("simctl list output")?;
+            let list: Value = serde_json::from_slice(&simctl(&["list", "devices", "-j"]).await?)
+                .context("simctl list output")?;
             let mut devices = Vec::new();
             for (runtime, entries) in list["devices"].as_object().into_iter().flatten() {
-                if !runtime.contains("SimRuntime.iOS") { continue }
+                if !runtime.contains("SimRuntime.iOS") {
+                    continue;
+                }
                 for d in entries.as_array().into_iter().flatten() {
-                    let Some(udid) = d["udid"].as_str() else { continue };
-                    let plist = d["dataPath"].as_str().map(|p| Path::new(p).with_file_name("device.plist"));
-                    let changed_at = plist.and_then(|p| p.metadata().ok()?.modified().ok())
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0.0, |d| d.as_secs_f64());
-                    devices.push(Device { udid: udid.to_ascii_uppercase(), name: d["name"].as_str().unwrap_or("").into(),
-                                          state: d["state"].as_str().unwrap_or("").into(), changed_at });
+                    let Some(udid) = d["udid"].as_str() else {
+                        continue;
+                    };
+                    let plist = d["dataPath"]
+                        .as_str()
+                        .map(|p| Path::new(p).with_file_name("device.plist"));
+                    let changed_at = plist
+                        .and_then(|p| p.metadata().ok()?.modified().ok())
+                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                        .map_or(0.0, |d| d.as_secs_f64());
+                    devices.push(Device {
+                        udid: udid.to_ascii_uppercase(),
+                        name: d["name"].as_str().unwrap_or("").into(),
+                        state: d["state"].as_str().unwrap_or("").into(),
+                        changed_at,
+                    });
                 }
             }
             Ok(devices)
@@ -583,13 +823,26 @@ impl Simctl for Xcrun {
 
     fn cpu(&self) -> HashMap<String, f64> {
         let mut cpu = HashMap::new();
-        let Ok(output) = std::process::Command::new("/bin/ps").args(["-axww", "-o", "pcpu=,command="])
-            .stdin(Stdio::null()).stderr(Stdio::null()).output() else { return cpu };
+        let Ok(output) = std::process::Command::new("/bin/ps")
+            .args(["-axww", "-o", "pcpu=,command="])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return cpu;
+        };
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let line = line.trim_start();
-            let Some((percent, command)) = line.split_once(' ') else { continue };
-            let Some(after) = command.split("/CoreSimulator/Devices/").nth(1) else { continue };
-            if let (Some(udid), Ok(percent)) = (uuids(&after[..after.len().min(UUID_LEN)]).pop(), percent.parse::<f64>()) {
+            let Some((percent, command)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some(after) = command.split("/CoreSimulator/Devices/").nth(1) else {
+                continue;
+            };
+            if let (Some(udid), Ok(percent)) = (
+                uuids(&after[..after.len().min(UUID_LEN)]).pop(),
+                percent.parse::<f64>(),
+            ) {
                 *cpu.entry(udid).or_default() += percent;
             }
         }
@@ -604,19 +857,37 @@ impl World for T3World {
         Box::pin(async {
             // T3's cached state: sessions are its own, and unlike
             // `device.list` this doesn't make it re-list every host.
-            let list = self.0.connection().await?.snapshot("subscribeDeviceState", json!({})).await?;
-            Ok(list["sessions"].as_array().into_iter().flatten().filter_map(|s| {
-                Some((s["threadId"].as_str()?.to_string(), s["deviceId"].as_str()?.to_ascii_uppercase()))
-            }).collect())
+            let list = self
+                .0
+                .connection()
+                .await?
+                .snapshot("subscribeDeviceState", json!({}))
+                .await?;
+            Ok(list["sessions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| {
+                    Some((
+                        s["threadId"].as_str()?.to_string(),
+                        s["deviceId"].as_str()?.to_ascii_uppercase(),
+                    ))
+                })
+                .collect())
         })
     }
 
     fn thread(&self, id: &str) -> ThreadInfo {
-        ThreadInfo { seen: crate::sims::seen(&self.0, id), squircle: self.0.is_squircle_thread(id) }
+        ThreadInfo {
+            seen: crate::sims::seen(&self.0, id),
+            squircle: self.0.is_squircle_thread(id),
+        }
     }
 
     fn title(&self, id: &str) -> Option<String> {
-        self.0.worker_title(id).or_else(|| self.0.thread_row(id)?["title"].as_str().map(str::to_string))
+        self.0
+            .worker_title(id)
+            .or_else(|| self.0.thread_row(id)?["title"].as_str().map(str::to_string))
     }
 
     fn activity<'a>(&'a self, since: &'a str) -> Pending<'a, Result<Vec<Activity>>> {
@@ -632,30 +903,61 @@ mod tests {
     use crate::fsm::sims::Seen;
     use std::sync::Mutex;
 
-    const POLICY: Policy = Policy { max_leases: 3, idle: 600.0, delete_after: 24.0 * 3600.0 };
+    const POLICY: Policy = Policy {
+        max_leases: 3,
+        idle: 600.0,
+        delete_after: 24.0 * 3600.0,
+    };
 
     fn device(udid: &str, state: &str) -> Device {
-        Device { udid: udid.into(), name: format!("sim {udid}"), state: state.into(), changed_at: 0.0 }
+        Device {
+            udid: udid.into(),
+            name: format!("sim {udid}"),
+            state: state.into(),
+            changed_at: 0.0,
+        }
     }
 
     #[test]
     fn agent_simulator_commands() {
-        let created = "S=$(xcrun simctl create \"simsmooth-scratch\" $T $R) && xcrun simctl boot $S; echo $S";
-        assert_eq!(parse_use(created, "5c5214a2-39cf-4937-b0cf-94764a34ea09\n"), Use {
-            created: vec!["5C5214A2-39CF-4937-B0CF-94764A34EA09".into()],
-            created_names: vec!["simsmooth-scratch".into()], ..Use::default() });
+        let created =
+            "S=$(xcrun simctl create \"simsmooth-scratch\" $T $R) && xcrun simctl boot $S; echo $S";
+        assert_eq!(
+            parse_use(created, "5c5214a2-39cf-4937-b0cf-94764a34ea09\n"),
+            Use {
+                created: vec!["5C5214A2-39CF-4937-B0CF-94764A34EA09".into()],
+                created_names: vec!["simsmooth-scratch".into()],
+                ..Use::default()
+            }
+        );
         let used = "xcrun simctl boot 'iPhone 18 Pro Max'; xcrun simctl install 389DF2C3-2656-40AD-830A-A8A90667D730 /tmp/A.app \
                     && xcodebuild test -scheme S -destination 'platform=iOS Simulator,id=DFDF12FB-5C70-4B39-B85C-D5D82D6AB5F7'";
-        assert_eq!(parse_use(used, "1F0C7E5A-0000-4000-8000-000000000000"), Use {
-            touched: vec!["389DF2C3-2656-40AD-830A-A8A90667D730".into(), "DFDF12FB-5C70-4B39-B85C-D5D82D6AB5F7".into()],
-            booted_names: vec!["iPhone 18 Pro Max".into()],
-            touched_names: vec!["iPhone 18 Pro Max".into()], ..Use::default() });
+        assert_eq!(
+            parse_use(used, "1F0C7E5A-0000-4000-8000-000000000000"),
+            Use {
+                touched: vec![
+                    "389DF2C3-2656-40AD-830A-A8A90667D730".into(),
+                    "DFDF12FB-5C70-4B39-B85C-D5D82D6AB5F7".into()
+                ],
+                booted_names: vec!["iPhone 18 Pro Max".into()],
+                touched_names: vec!["iPhone 18 Pro Max".into()],
+                ..Use::default()
+            }
+        );
         // Booting a booted device boots nothing.
-        let again = parse_use("xcrun simctl boot 389DF2C3-2656-40AD-830A-A8A90667D730",
-            "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):\nUnable to boot device in current state: Booted");
+        let again = parse_use(
+            "xcrun simctl boot 389DF2C3-2656-40AD-830A-A8A90667D730",
+            "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):\nUnable to boot device in current state: Booted",
+        );
         assert!(again.booted.is_empty() && again.touched.len() == 1);
         // Listing, reading or recording is not a use; nor is the literal "booted".
-        assert_eq!(parse_use("xcrun simctl list devices; xcrun simctl io booted screenshot /tmp/a.png; simctl boot booted", "x"), Use::default());
+        assert_eq!(
+            parse_use(
+                "xcrun simctl list devices; xcrun simctl io booted screenshot /tmp/a.png; simctl boot booted",
+                "x"
+            ),
+            Use::default()
+        );
     }
 
     #[derive(Default)]
@@ -674,14 +976,24 @@ mod tests {
         }
         fn shutdown<'a>(&'a self, udid: &'a str) -> Pending<'a, Result<()>> {
             self.calls.lock().unwrap().push(format!("shutdown {udid}"));
-            for d in self.devices.lock().unwrap().iter_mut().filter(|d| d.udid == udid) { d.state = "Shutdown".into() }
+            for d in self
+                .devices
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .filter(|d| d.udid == udid)
+            {
+                d.state = "Shutdown".into()
+            }
             Box::pin(async { Ok(()) })
         }
         fn delete<'a>(&'a self, udid: &'a str) -> Pending<'a, Result<()>> {
             self.calls.lock().unwrap().push(format!("delete {udid}"));
             Box::pin(async { Ok(()) })
         }
-        fn cpu(&self) -> HashMap<String, f64> { HashMap::new() }
+        fn cpu(&self) -> HashMap<String, f64> {
+            HashMap::new()
+        }
     }
 
     struct Quiet(Arc<Fake>);
@@ -694,14 +1006,29 @@ mod tests {
             Box::pin(async move { Ok(sessions) })
         }
         fn thread(&self, id: &str) -> ThreadInfo {
-            ThreadInfo { seen: if id == "user" { Seen::Idle { turn: None } } else { Seen::Gone }, squircle: id != "user" }
+            ThreadInfo {
+                seen: if id == "user" {
+                    Seen::Idle { turn: None }
+                } else {
+                    Seen::Gone
+                },
+                squircle: id != "user",
+            }
         }
-        fn title(&self, _: &str) -> Option<String> { None }
+        fn title(&self, _: &str) -> Option<String> {
+            None
+        }
         fn activity<'a>(&'a self, since: &'a str) -> Pending<'a, Result<Vec<Activity>>> {
             let rows = if since.is_empty() {
-                vec![Activity { thread: "w".into(), created_at: "2026-10-14T20:00:00.000Z".into(),
-                                command: "xcrun simctl boot AAAAAAAA-0000-4000-8000-000000000000".into(), output: String::new() }]
-            } else { vec![] };
+                vec![Activity {
+                    thread: "w".into(),
+                    created_at: "2026-10-14T20:00:00.000Z".into(),
+                    command: "xcrun simctl boot AAAAAAAA-0000-4000-8000-000000000000".into(),
+                    output: String::new(),
+                }]
+            } else {
+                vec![]
+            };
             Box::pin(async move { Ok(rows) })
         }
     }
@@ -715,10 +1042,20 @@ mod tests {
     }
 
     impl Holds for Sessions {
-        fn leases(&self) -> Vec<Lease> { self.leases.lock().unwrap().clone() }
-        fn boots(&self) -> Vec<(String, BootReceipt)> { self.boots.lock().unwrap().clone() }
+        fn leases(&self) -> Vec<Lease> {
+            self.leases.lock().unwrap().clone()
+        }
+        fn boots(&self) -> Vec<(String, BootReceipt)> {
+            self.boots.lock().unwrap().clone()
+        }
         fn exclude<'a>(&'a self, udid: &'a str) -> Pending<'a, Option<Exclusion>> {
-            let excluded = (!self.leases.lock().unwrap().iter().any(|l| l.device_id == udid)).then(|| {
+            let excluded = (!self
+                .leases
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|l| l.device_id == udid))
+            .then(|| {
                 self.excluded.lock().unwrap().push(udid.into());
                 let excluded = self.excluded.clone();
                 let udid = udid.to_string();
@@ -733,7 +1070,14 @@ mod tests {
     const USER: &str = "CCCCCCCC-0000-4000-8000-000000000000";
 
     fn pool(dir: &Path, fake: &Arc<Fake>, owner: &Arc<Sessions>) -> Arc<Pool> {
-        let pool = Pool::with(dir, fake.clone(), Arc::new(Quiet(fake.clone())), POLICY, vec![]).unwrap();
+        let pool = Pool::with(
+            dir,
+            fake.clone(),
+            Arc::new(Quiet(fake.clone())),
+            POLICY,
+            vec![],
+        )
+        .unwrap();
         let holds: Arc<dyn Holds> = owner.clone();
         pool.attach(Arc::downgrade(&holds));
         pool
@@ -746,9 +1090,16 @@ mod tests {
     async fn cleanup_and_release_apply_the_plan() {
         let dir = tempfile::tempdir().unwrap();
         let fake = Arc::new(Fake::default());
-        *fake.devices.lock().unwrap() = vec![device(ADHOC, "Booted"), device(LEASED, "Booted"), device(USER, "Booted")];
+        *fake.devices.lock().unwrap() = vec![
+            device(ADHOC, "Booted"),
+            device(LEASED, "Booted"),
+            device(USER, "Booted"),
+        ];
         let owner = Arc::new(Sessions::default());
-        *owner.leases.lock().unwrap() = vec![Lease { device_id: LEASED.into(), thread_id: "w2".into() }];
+        *owner.leases.lock().unwrap() = vec![Lease {
+            device_id: LEASED.into(),
+            thread_id: "w2".into(),
+        }];
         let pool = pool(dir.path(), &fake, &owner);
 
         let report = pool.cleanup(&owner.leases(), true).await.unwrap();
@@ -757,17 +1108,36 @@ mod tests {
 
         // Leased but not booted by the session: the user's, kept.
         owner.leases.lock().unwrap().clear();
-        assert!(matches!(pool.release(USER, "w2", &[]).await.unwrap(), Released::Kept { .. }));
-        *owner.boots.lock().unwrap() = vec![(LEASED.into(), BootReceipt { at: now(), thread: None, session: Some("s".into()) })];
-        assert_eq!(pool.release(LEASED, "w2", &[]).await.unwrap(), Released::ShutDown);
+        assert!(matches!(
+            pool.release(USER, "w2", &[]).await.unwrap(),
+            Released::Kept { .. }
+        ));
+        *owner.boots.lock().unwrap() = vec![(
+            LEASED.into(),
+            BootReceipt {
+                at: now(),
+                thread: None,
+                session: Some("s".into()),
+            },
+        )];
+        assert_eq!(
+            pool.release(LEASED, "w2", &[]).await.unwrap(),
+            Released::ShutDown
+        );
         assert_eq!(*fake.calls.lock().unwrap(), [format!("shutdown {LEASED}")]);
         // Within the idle time the ad-hoc one stays; cleanup takes it now.
         pool.tick(&[]).await.unwrap();
         assert_eq!(fake.calls.lock().unwrap().len(), 1);
         let reopened = super::tests::pool(dir.path(), &fake, &owner);
         reopened.cleanup(&[], false).await.unwrap();
-        assert_eq!(*fake.calls.lock().unwrap(), [format!("shutdown {LEASED}"), format!("shutdown {ADHOC}")]);
-        assert!(owner.excluded.lock().unwrap().is_empty(), "an exclusion outlived its cleanup");
+        assert_eq!(
+            *fake.calls.lock().unwrap(),
+            [format!("shutdown {LEASED}"), format!("shutdown {ADHOC}")]
+        );
+        assert!(
+            owner.excluded.lock().unwrap().is_empty(),
+            "an exclusion outlived its cleanup"
+        );
     }
 
     /// A cleanup is saved before it runs and revalidated right before:
@@ -785,22 +1155,47 @@ mod tests {
         *fake.late_session.lock().unwrap() = Some(("user".into(), ADHOC.into()));
         let report = pool.cleanup(&[], false).await.unwrap();
         assert!(fake.calls.lock().unwrap().is_empty(), "{report}");
-        assert!(report["done"][0]["error"].as_str().unwrap().contains("no longer due"));
+        assert!(
+            report["done"][0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("no longer due")
+        );
         fake.sessions.lock().unwrap().clear();
         // A session reserves it: no exclusion, no action.
-        *owner.leases.lock().unwrap() = vec![Lease { device_id: ADHOC.into(), thread_id: "w".into() }];
+        *owner.leases.lock().unwrap() = vec![Lease {
+            device_id: ADHOC.into(),
+            thread_id: "w".into(),
+        }];
         let rows = pool.refresh(&[], true).await.unwrap();
-        assert!(pool.apply(&rows, true).await[0]["error"].as_str().unwrap().contains("took it"));
+        assert!(
+            pool.apply(&rows, true).await[0]["error"]
+                .as_str()
+                .unwrap()
+                .contains("took it")
+        );
         assert!(fake.calls.lock().unwrap().is_empty());
 
         // A crash after the intent was saved: the next run reads the
         // inventory before deciding anything, and nothing is assumed done.
         owner.leases.lock().unwrap().clear();
-        pool.change(|saved| saved.known.get_mut(ADHOC).unwrap().acting = Some(Acting { action: Action::Shutdown, at: 1.0 })).await.unwrap();
+        pool.change(|saved| {
+            saved.known.get_mut(ADHOC).unwrap().acting = Some(Acting {
+                action: Action::Shutdown,
+                at: 1.0,
+            })
+        })
+        .await
+        .unwrap();
         drop(pool);
         let reopened = super::tests::pool(dir.path(), &fake, &owner);
         let rows = reopened.refresh(&[], true).await.unwrap();
-        assert!(reopened.owner.ask(|s| s.gate.committed().known[ADHOC].acting.is_none()).await);
+        assert!(
+            reopened
+                .owner
+                .ask(|s| s.gate.committed().known[ADHOC].acting.is_none())
+                .await
+        );
         assert_eq!(rows[0].action, Some(Action::Shutdown));
     }
 }

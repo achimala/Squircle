@@ -37,6 +37,18 @@ fn json_result(output: &Output) -> Value {
 }
 
 #[test]
+fn non_utf8_arguments_report_an_error_instead_of_panicking() {
+    use std::os::unix::ffi::OsStringExt;
+    let output = command()
+        .arg("--json")
+        .arg(std::ffi::OsString::from_vec(vec![0xff]))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_result(&output)["error"]["code"], "invalid_arguments");
+}
+
+#[test]
 fn argument_errors_are_one_machine_readable_result() {
     let output = command()
         .args(["--json", "not-a-command"])

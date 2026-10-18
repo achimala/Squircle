@@ -3,7 +3,6 @@ use crate::{
     apps::{self, AppRecord, AppRegistration},
     model::{BuildMode, BuildRequest},
     store::{Store, private_dir},
-    xcode,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -479,19 +478,21 @@ async fn xcode_json(args: &[OsString], deadline: Instant) -> Result<Vec<u8>> {
 }
 
 async fn bounded_output(command: Command, deadline: Instant) -> Result<Vec<u8>> {
-    let finished = xcode::run_bounded(
+    let finished = crate::process::run_bounded(
         command,
-        xcode::Sink::Capture(8 * 1024 * 1024),
-        xcode::Sink::Capture(1024 * 1024),
+        crate::process::Sink::Capture(8 * 1024 * 1024),
+        crate::process::Sink::Capture(1024 * 1024),
         deadline,
         None,
     )
     .await
     .map_err(|error| match error {
-        xcode::RunError::TimedOut | xcode::RunError::Cancelled => anyhow::anyhow!(
-            "Xcode inspection exceeded 45 seconds; resolve packages/setup in Xcode, then retry"
-        ),
-        xcode::RunError::Failed(error) => {
+        crate::process::RunError::TimedOut | crate::process::RunError::Cancelled => {
+            anyhow::anyhow!(
+                "Xcode inspection exceeded 45 seconds; resolve packages/setup in Xcode, then retry"
+            )
+        }
+        crate::process::RunError::Failed(error) => {
             error.context("Cannot run xcodebuild; select an installed Xcode on the Mac")
         }
     })?;

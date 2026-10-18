@@ -55,14 +55,23 @@ fn directory(root: &Path, thread: &str) -> Result<PathBuf> {
 /// directories (0700, no symlinks), whatever the umask.
 fn private_directory(root: &Path, thread: &str) -> Result<PathBuf> {
     let dir = directory(root, thread)?;
-    for path in [root.to_path_buf(), root.join("threads"), root.join("threads").join(thread), dir.clone()] {
+    for path in [
+        root.to_path_buf(),
+        root.join("threads"),
+        root.join("threads").join(thread),
+        dir.clone(),
+    ] {
         crate::store::private_dir(&path)?;
     }
     Ok(dir)
 }
 
 fn kind(path: &Path) -> Result<(&'static str, &'static str)> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     Ok(match ext.as_str() {
         "mp4" => ("video", "video/mp4"),
         "mov" => ("video", "video/quicktime"),
@@ -89,8 +98,22 @@ pub fn recording_path(root: &Path, thread: &str, session: &str) -> Result<PathBu
     Ok(private_directory(root, thread)?.join(format!(".{session}.recording.mp4")))
 }
 
-fn store(root: &Path, thread: &str, file: &Path, caption: Option<&str>, simulator: Option<SimulatorClip>, take: bool) -> Result<Media> {
-    store_in(&private_directory(root, thread)?, thread, file, caption, simulator, take)
+fn store(
+    root: &Path,
+    thread: &str,
+    file: &Path,
+    caption: Option<&str>,
+    simulator: Option<SimulatorClip>,
+    take: bool,
+) -> Result<Media> {
+    store_in(
+        &private_directory(root, thread)?,
+        thread,
+        file,
+        caption,
+        simulator,
+        take,
+    )
 }
 
 /// Copies `file` into another owner's media folder (a task's, say); its
@@ -99,22 +122,37 @@ pub fn add_in(dir: &Path, owner: &str, file: &Path, caption: Option<&str>) -> Re
     store_in(dir, owner, file, caption, None, false)
 }
 
-fn store_in(dir: &Path, thread: &str, file: &Path, caption: Option<&str>, simulator: Option<SimulatorClip>, take: bool) -> Result<Media> {
+fn store_in(
+    dir: &Path,
+    thread: &str,
+    file: &Path,
+    caption: Option<&str>,
+    simulator: Option<SimulatorClip>,
+    take: bool,
+) -> Result<Media> {
     let dir = dir.to_path_buf();
     let (kind, content_type) = kind(file)?;
-    let size = fs::metadata(file).with_context(|| format!("Reading {}", file.display()))?.len();
+    let size = fs::metadata(file)
+        .with_context(|| format!("Reading {}", file.display()))?
+        .len();
     if size == 0 || size > MAX_BYTES {
         bail!("Media must be between 1 byte and 512 MB");
     }
     crate::store::private_dir(&dir)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_ascii_lowercase();
+    let ext = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
     let stored = dir.join(format!("{id}.{ext}"));
     if take {
         crate::store::publish_private(file, &stored).context("Moving the recording into media")?;
     } else {
-        crate::store::write_private(&stored, true, |out| Ok(std::io::copy(&mut File::open(file)?, out).map(|_| ())?))
-            .context("Copying media")?;
+        crate::store::write_private(&stored, true, |out| {
+            Ok(std::io::copy(&mut File::open(file)?, out).map(|_| ())?)
+        })
+        .context("Copying media")?;
     }
     // A recording belongs where its session began.
     let created_at = match &simulator {
@@ -143,12 +181,18 @@ pub fn list(root: &Path, thread: &str) -> Result<Vec<Media>> {
 }
 
 pub fn list_in(dir: &Path) -> Result<Vec<Media>> {
-    let Ok(entries) = fs::read_dir(&dir) else { return Ok(Vec::new()) };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(Vec::new());
+    };
     let mut items: Vec<Media> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .filter_map(|p| fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Media>(&b).ok()))
+        .filter_map(|p| {
+            fs::read(&p)
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Media>(&b).ok())
+        })
         // Only ever serve the file beside its record, whatever path the
         // record names (the data directory may have been given relatively).
         .filter_map(|mut m| {
@@ -166,7 +210,10 @@ pub fn list_in(dir: &Path) -> Result<Vec<Media>> {
 /// without downloading the movie (a long session is well over 100 MB).
 pub fn poster(media: &Media) -> Result<PathBuf> {
     let poster = media.file.with_extension("poster.jpg");
-    ensure!(poster.metadata().is_ok_and(|m| m.is_file() && m.len() > 0), "This recording has no poster");
+    ensure!(
+        poster.metadata().is_ok_and(|m| m.is_file() && m.len() > 0),
+        "This recording has no poster"
+    );
     Ok(poster)
 }
 
@@ -192,7 +239,13 @@ mod tests {
         let clip = root.path().join("demo.mp4");
         fs::write(&clip, b"not really a movie").unwrap();
         let thread = "c3e60882-f28f-4656-879d-99b3e2dcddbb";
-        let media = add(root.path(), thread, &clip, Some("Tapping through onboarding")).unwrap();
+        let media = add(
+            root.path(),
+            thread,
+            &clip,
+            Some("Tapping through onboarding"),
+        )
+        .unwrap();
         assert_eq!(media.kind, "video");
         let listed = list(root.path(), thread).unwrap();
         assert_eq!(listed.len(), 1);
@@ -202,7 +255,11 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode(&root.path().join("threads")), 0o700, "Private whatever the umask.");
+            assert_eq!(
+                mode(&root.path().join("threads")),
+                0o700,
+                "Private whatever the umask."
+            );
             assert_eq!(mode(&root.path().join("threads").join(thread)), 0o700);
             assert_eq!(mode(&media.file), 0o600);
             assert_eq!(mode(&media.file.with_extension("json")), 0o600);

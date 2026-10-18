@@ -54,7 +54,8 @@ impl ThreadObservation {
     pub fn decode(row: &Value) -> Self {
         let session = &row["session"];
         let waiting = row["hasPendingApprovals"] == true || row["hasPendingUserInput"] == true;
-        let turn_running = row["latestTurn"]["state"] == "running" || session["activeTurnId"].is_string();
+        let turn_running =
+            row["latestTurn"]["state"] == "running" || session["activeTurnId"].is_string();
         let execution = match session["status"].as_str() {
             Some("stopped") => Execution::Stopped,
             _ if turn_running => Execution::Running,

@@ -8,7 +8,15 @@ use std::path::{Path, PathBuf};
 
 /// Locks, and the calls that block a thread until something else happens.
 const BANNED: [&str; 9] = [
-    "Mutex", "RwLock", "Condvar", "parking_lot", "blocking_recv", "blocking_send", "blocking_lock", "block_on", "get_or_init",
+    "Mutex",
+    "RwLock",
+    "Condvar",
+    "parking_lot",
+    "blocking_recv",
+    "blocking_send",
+    "blocking_lock",
+    "block_on",
+    "get_or_init",
 ];
 
 /// The one lock: a lane's turn, entered only in rank order (`actor::Lane`).
@@ -25,16 +33,49 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// The file without its test module (`#[cfg(test)]` then `mod tests`).
-fn without_tests(text: &str) -> &str {
-    let lines: Vec<&str> = text.lines().collect();
-    let start = lines.iter().enumerate().find(|(i, line)| {
-        line.trim() == "#[cfg(test)]" && lines[i + 1..].iter().take(4).any(|l| l.trim_start().starts_with("mod tests"))
-    });
-    match start {
-        Some((i, _)) => &text[..lines[..i].iter().map(|l| l.len() + 1).sum::<usize>()],
-        None => text,
+/// Skip only the parsed test modules, including nested ones. A suffix after a
+/// test module is still production code. Parsing avoids braces inside strings,
+/// comments and macro bodies accidentally hiding that suffix.
+fn test_lines(text: &str) -> Vec<std::ops::RangeInclusive<usize>> {
+    use syn::{spanned::Spanned, visit::Visit};
+    fn test_only(attrs: &[syn::Attribute]) -> bool {
+        attrs.iter().any(|attr| {
+            attr.path().is_ident("cfg")
+                && attr
+                    .parse_args::<syn::Path>()
+                    .is_ok_and(|p| p.is_ident("test"))
+        })
     }
+    #[derive(Default)]
+    struct Tests(Vec<std::ops::RangeInclusive<usize>>);
+    impl<'ast> Visit<'ast> for Tests {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if test_only(&item.attrs) {
+                self.0
+                    .push(item.span().start().line..=item.span().end().line);
+            } else {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+    }
+    let mut tests = Tests::default();
+    let file = syn::parse_file(text).expect("valid Rust source");
+    if test_only(&file.attrs) {
+        return std::iter::once(1..=text.lines().count()).collect();
+    }
+    tests.visit_file(&file);
+    tests.0
+}
+
+#[test]
+fn test_exclusion_keeps_later_production_code() {
+    let source = "#[cfg(test)]\nmod tests { const S: &str = r#\"}\"#; }\nfn later() {}\nmod nested {\n#[cfg(test)] mod tests {}\nfn also_later() {}\n}";
+    assert_eq!(test_lines("#![cfg(test)]\nfn fake() {}"), vec![1..=2]);
+    let skipped = test_lines(source);
+    assert!(skipped.iter().any(|r| r.contains(&2)));
+    assert!(!skipped.iter().any(|r| r.contains(&3)));
+    assert!(skipped.iter().any(|r| r.contains(&5)));
+    assert!(!skipped.iter().any(|r| r.contains(&6)));
 }
 
 #[test]
@@ -44,19 +85,37 @@ fn the_service_shares_state_only_through_owners() {
     sources(&root.join("src"), &mut files);
     let mut found = vec![];
     for file in files {
-        let name = file.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let name = file
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let text = std::fs::read_to_string(&file).unwrap();
-        for (number, line) in without_tests(&text).lines().enumerate() {
+        let skipped = test_lines(&text);
+        for (number, line) in text.lines().enumerate() {
+            if skipped.iter().any(|range| range.contains(&(number + 1))) {
+                continue;
+            }
             let code = line.split("//").next().unwrap_or("");
             for word in BANNED.iter().filter(|word| code.contains(*word)) {
-                if !ALLOWED.iter().any(|(allowed, exact)| *allowed == name && line.trim() == *exact) {
+                if !ALLOWED
+                    .iter()
+                    .any(|(allowed, exact)| *allowed == name && line.trim() == *exact)
+                {
                     found.push(format!("{name}:{}: {word}: {}", number + 1, line.trim()));
                 }
             }
         }
     }
-    assert!(found.is_empty(), "Share state through a crate::actor::Owner (readers use a Snapshot; \
-        non-overlapping async work a ranked Lane) instead of:\n{}", found.join("\n"));
+    assert!(
+        found.is_empty(),
+        "Share state through a crate::actor::Owner (readers use a Snapshot; \
+        non-overlapping async work a ranked Lane) instead of:\n{}",
+        found.join("\n")
+    );
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    assert!(!manifest.contains("parking_lot"), "parking_lot is a lock crate");
+    assert!(
+        !manifest.contains("parking_lot"),
+        "parking_lot is a lock crate"
+    );
 }

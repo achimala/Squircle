@@ -31,7 +31,9 @@ fn path(root: &Path, project: &str) -> Result<PathBuf> {
 
 pub fn load(root: &Path, project: &str) -> Result<Notes> {
     let path = path(root, project)?;
-    if !path.try_exists()? { return Ok(Notes::default()); }
+    if !path.try_exists()? {
+        return Ok(Notes::default());
+    }
     read_json(&path)
 }
 
@@ -48,7 +50,10 @@ pub fn change(root: &Path, project: &str, change: Change) -> Result<Notes> {
     let clean = |text: &str| -> Result<String> {
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
         ensure!(!text.is_empty(), "A note needs text");
-        ensure!(text.chars().count() <= NOTE_CHARS, "Keep a note under {NOTE_CHARS} characters: one preference, decision or gotcha");
+        ensure!(
+            text.chars().count() <= NOTE_CHARS,
+            "Keep a note under {NOTE_CHARS} characters: one preference, decision or gotcha"
+        );
         Ok(text)
     };
     let index = |n: usize, len: usize| -> Result<usize> {
@@ -57,12 +62,27 @@ pub fn change(root: &Path, project: &str, change: Change) -> Result<Notes> {
     };
     let now = crate::model::now();
     match change {
-        Change::Add(text) => notes.notes.push(Note { text: clean(text)?, updated_at: now }),
-        Change::Edit(n, text) => { let i = index(n, notes.notes.len())?; notes.notes[i] = Note { text: clean(text)?, updated_at: now }; }
-        Change::Remove(n) => { let i = index(n, notes.notes.len())?; notes.notes.remove(i); }
+        Change::Add(text) => notes.notes.push(Note {
+            text: clean(text)?,
+            updated_at: now,
+        }),
+        Change::Edit(n, text) => {
+            let i = index(n, notes.notes.len())?;
+            notes.notes[i] = Note {
+                text: clean(text)?,
+                updated_at: now,
+            };
+        }
+        Change::Remove(n) => {
+            let i = index(n, notes.notes.len())?;
+            notes.notes.remove(i);
+        }
     }
     let total: usize = notes.notes.iter().map(|n| n.text.chars().count()).sum();
-    ensure!(total <= TOTAL_CHARS, "Notes are full ({total} of {TOTAL_CHARS} characters): merge, shorten or remove some first");
+    ensure!(
+        total <= TOTAL_CHARS,
+        "Notes are full ({total} of {TOTAL_CHARS} characters): merge, shorten or remove some first"
+    );
     let path = path(root, project)?;
     private_dir(path.parent().context("notes path")?)?;
     atomic_json(&path, &notes)?;
@@ -71,5 +91,10 @@ pub fn change(root: &Path, project: &str, change: Change) -> Result<Notes> {
 
 /// Numbered, one per line.
 pub fn listing(notes: &Notes) -> String {
-    notes.notes.iter().enumerate().map(|(i, n)| format!("{}. {}\n", i + 1, n.text)).collect()
+    notes
+        .notes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("{}. {}\n", i + 1, n.text))
+        .collect()
 }

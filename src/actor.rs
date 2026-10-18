@@ -39,7 +39,10 @@ pub struct Owner<S> {
 
 impl<S> Clone for Owner<S> {
     fn clone(&self) -> Self {
-        Self { name: self.name, mail: self.mail.clone() }
+        Self {
+            name: self.name,
+            mail: self.mail.clone(),
+        }
     }
 }
 
@@ -59,7 +62,10 @@ impl<S: Send + 'static> Owner<S> {
     /// Runs `letter` on the state, after every letter sent before it, and
     /// returns its answer. A letter that panics stops the owner, as a
     /// poisoned lock did: later asks panic too.
-    pub async fn ask<R: Send + 'static>(&self, letter: impl FnOnce(&mut S) -> R + Send + 'static) -> R {
+    pub async fn ask<R: Send + 'static>(
+        &self,
+        letter: impl FnOnce(&mut S) -> R + Send + 'static,
+    ) -> R {
         let (reply, answer) = oneshot::channel();
         self.tell(move |state| {
             let _ = reply.send(letter(state));
@@ -114,7 +120,11 @@ impl<T> Snapshot<T> {
     /// `ready` holds; `None` once the owner has stopped without one.
     pub async fn wait_for(&self, mut ready: impl FnMut(&T) -> bool) -> Option<Arc<T>> {
         let mut receiver = self.0.clone();
-        receiver.wait_for(|value| ready(value)).await.ok().map(|value| value.clone())
+        receiver
+            .wait_for(|value| ready(value))
+            .await
+            .ok()
+            .map(|value| value.clone())
     }
 }
 
@@ -130,7 +140,14 @@ impl<R: Clone, A, S: Storage<R>> Saved<R, A, S> {
     pub fn new(gate: Gate<R, A, S>) -> (Self, Snapshot<R>) {
         let (published, snapshot) = Published::new(gate.committed().clone());
         let revision = gate.revision();
-        (Self { gate, published, revision }, snapshot)
+        (
+            Self {
+                gate,
+                published,
+                revision,
+            },
+            snapshot,
+        )
     }
 
     pub fn committed(&self) -> &R {
@@ -191,7 +208,10 @@ tokio::task_local! {
 fn entering(rank: Rank) -> Vec<Rank> {
     let mut held = HELD.try_with(Vec::clone).unwrap_or_default();
     if let Some(top) = held.last() {
-        assert!(*top < rank, "lane order broken: entering {rank:?} while in {held:?} (see crate::actor::Rank)");
+        assert!(
+            *top < rank,
+            "lane order broken: entering {rank:?} while in {held:?} (see crate::actor::Rank)"
+        );
     }
     held.push(rank);
     held
@@ -211,7 +231,10 @@ pub struct Lane {
 
 impl Lane {
     pub fn new(rank: Rank) -> Self {
-        Self { rank, turn: Turn::new(()) }
+        Self {
+            rank,
+            turn: Turn::new(()),
+        }
     }
 
     /// Waits for the lane, then runs `work` in it.
@@ -237,13 +260,19 @@ pub struct Lanes<K> {
 
 impl<K: Eq + Hash + Send + 'static> Lanes<K> {
     pub fn new(name: &'static str, rank: Rank) -> Self {
-        Self { rank, turns: Owner::spawn(name, HashMap::new()) }
+        Self {
+            rank,
+            turns: Owner::spawn(name, HashMap::new()),
+        }
     }
 
     /// Waits for `key`'s lane, then runs `work` in it.
     pub async fn run<F: Future>(&self, key: K, work: F) -> F::Output {
         let held = entering(self.rank);
-        let turn = self.turns.ask(move |turns| turns.entry(key).or_default().clone()).await;
+        let turn = self
+            .turns
+            .ask(move |turns| turns.entry(key).or_default().clone())
+            .await;
         let _turn = turn.lock().await;
         HELD.scope(held, work).await
     }
@@ -258,18 +287,34 @@ mod tests {
     /// each other, so each is refused on entry instead.
     #[tokio::test]
     async fn lanes_are_entered_only_in_rank_order() {
-        let (spawn, ops, pool) = (Lane::new(Rank::AgentSpawn), Lanes::new("ops", Rank::AgentOp), Lane::new(Rank::PoolApply));
+        let (spawn, ops, pool) = (
+            Lane::new(Rank::AgentSpawn),
+            Lanes::new("ops", Rank::AgentOp),
+            Lane::new(Rank::PoolApply),
+        );
         assert_eq!(spawn.run(ops.run("a", pool.run(async { 1 }))).await, 1);
         let refused = |work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>| async move {
             tokio::spawn(work).await.unwrap_err().is_panic()
         };
         let (ops, pool) = (Arc::new(ops), Arc::new(pool));
         let (o, p) = (ops.clone(), pool.clone());
-        assert!(refused(Box::pin(async move { p.run(o.run("a", async {})).await })).await, "entered a lower rank");
+        assert!(
+            refused(Box::pin(async move { p.run(o.run("a", async {})).await })).await,
+            "entered a lower rank"
+        );
         let o = ops.clone();
-        assert!(refused(Box::pin(async move { o.run("a", o.run("b", async {})).await })).await, "entered two keys of one rank");
+        assert!(
+            refused(Box::pin(
+                async move { o.run("a", o.run("b", async {})).await }
+            ))
+            .await,
+            "entered two keys of one rank"
+        );
         let p = pool.clone();
-        assert!(refused(Box::pin(async move { p.run(p.run(async {})).await })).await, "entered a lane twice");
+        assert!(
+            refused(Box::pin(async move { p.run(p.run(async {})).await })).await,
+            "entered a lane twice"
+        );
         // A refused entry held nothing: the lanes are free.
         assert_eq!(pool.try_run(async { 2 }).await, Some(2));
         assert_eq!(ops.run("b", async { 3 }).await, 3);

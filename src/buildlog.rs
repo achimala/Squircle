@@ -66,13 +66,25 @@ pub fn failure(log: &str, root: Option<&str>) -> Failure {
         } else if let Some(mut issue) = issue(line, root) {
             let mut detail = Vec::new();
             while detail.len() < MAX_CONTEXT_LINES {
-                let Some(next) = lines.next_if(|next| is_detail(next)) else { break };
+                let Some(next) = lines.next_if(|next| is_detail(next)) else {
+                    break;
+                };
                 detail.push(clip(next.trim_end()));
             }
             if !detail.is_empty() {
-                let indent = detail.iter().filter(|l| !l.trim().is_empty())
-                    .map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
-                issue.detail = Some(detail.iter().map(|l| l.get(indent..).unwrap_or("")).collect::<Vec<_>>().join("\n"));
+                let indent = detail
+                    .iter()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| l.len() - l.trim_start().len())
+                    .min()
+                    .unwrap_or(0);
+                issue.detail = Some(
+                    detail
+                        .iter()
+                        .map(|l| l.get(indent..).unwrap_or(""))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
             }
             let duplicate = failure.errors.iter().any(|seen| {
                 seen.message == issue.message && seen.file == issue.file && seen.line == issue.line
@@ -118,7 +130,12 @@ fn issue(line: &str, root: Option<&str>) -> Option<Issue> {
     let message = message.trim();
     let message = clip(message.strip_prefix("exportArchive ").unwrap_or(message));
     if location.is_empty() {
-        return Some(Issue { message, file: None, line: None, detail: None });
+        return Some(Issue {
+            message,
+            file: None,
+            line: None,
+            detail: None,
+        });
     }
     let location = location.strip_suffix(": ")?;
     if location.starts_with('/') {
@@ -129,10 +146,20 @@ fn issue(line: &str, root: Option<&str>) -> Option<Issue> {
             .and_then(|root| path.strip_prefix(root))
             .map(|rest| rest.trim_start_matches('/'))
             .unwrap_or(path);
-        return Some(Issue { message, file: Some(file.to_string()), line: number, detail: None });
+        return Some(Issue {
+            message,
+            file: Some(file.to_string()),
+            line: number,
+            detail: None,
+        });
     }
     // A tool prefix such as `clang` or `xcodebuild`; anything with spaces is prose.
-    (!location.contains(' ')).then(|| Issue { message, file: None, line: None, detail: None })
+    (!location.contains(' ')).then_some(Issue {
+        message,
+        file: None,
+        line: None,
+        detail: None,
+    })
 }
 
 /// Swift's `12 | source` excerpt, or Xcode's indented hint under an error.
@@ -141,7 +168,9 @@ fn is_detail(line: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    let numbered = trimmed.split_once('|').is_some_and(|(n, _)| n.trim().chars().all(|c| c.is_ascii_digit()));
+    let numbered = trimmed
+        .split_once('|')
+        .is_some_and(|(n, _)| n.trim().chars().all(|c| c.is_ascii_digit()));
     numbered || (line.starts_with("  ") && !line.starts_with('\t') && !trimmed.contains("error: "))
 }
 
@@ -170,7 +199,10 @@ mod tests {
         assert_eq!(failure.exit_status, Some(70));
         assert_eq!(failure.errors.len(), 2);
         assert_eq!(failure.errors[0].message, "No Accounts");
-        assert_eq!(failure.errors[0].detail.as_deref(), Some("Add a new account in Accounts settings."));
+        assert_eq!(
+            failure.errors[0].detail.as_deref(),
+            Some("Add a new account in Accounts settings.")
+        );
     }
 
     #[test]
@@ -191,12 +223,24 @@ mod tests {
         assert_eq!(issue.line, Some(772));
         assert!(issue.detail.as_deref().unwrap().starts_with("770 |"));
         assert!(issue.detail.as_deref().unwrap().contains("`- error"));
-        assert_eq!(failure.failed_commands, ["SwiftCompile normal arm64 (in target 'App')", "Archiving project App"]);
+        assert_eq!(
+            failure.failed_commands,
+            [
+                "SwiftCompile normal arm64 (in target 'App')",
+                "Archiving project App"
+            ]
+        );
     }
 
     #[test]
     fn failure_after_a_successful_command_names_no_step() {
         let log = "$ /usr/bin/xcodebuild [\"archive\"]\nerror: noise\n** ARCHIVE SUCCEEDED **\nxcodebuild exited: exit status: 0\n";
-        assert_eq!(failure(log, None), Failure { exit_status: Some(0), ..Failure::default() });
+        assert_eq!(
+            failure(log, None),
+            Failure {
+                exit_status: Some(0),
+                ..Failure::default()
+            }
+        );
     }
 }

@@ -75,7 +75,11 @@ pub struct ProjectID(String);
 
 impl ProjectID {
     pub fn parse(value: &str) -> Result<Self, &'static str> {
-        if value.trim().is_empty() { Err("A project ID can't be empty") } else { Ok(Self(value.to_owned())) }
+        if value.trim().is_empty() {
+            Err("A project ID can't be empty")
+        } else {
+            Ok(Self(value.to_owned()))
+        }
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -83,7 +87,9 @@ impl ProjectID {
 }
 
 /// A committed version of one aggregate; rises by one per commit.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct Revision(pub u64);
 
@@ -95,7 +101,9 @@ impl Revision {
 
 /// One connection or process lifetime of a source; facts from an older
 /// epoch never count as current.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct Epoch(pub u64);
 
@@ -105,8 +113,16 @@ pub struct Epoch(pub u64);
 #[derive(Clone, Debug, PartialEq)]
 pub enum Observed<T> {
     Unavailable(String),
-    Stale { epoch: Epoch, revision: Revision, last: Option<T> },
-    Current { epoch: Epoch, revision: Revision, value: T },
+    Stale {
+        epoch: Epoch,
+        revision: Revision,
+        last: Option<T>,
+    },
+    Current {
+        epoch: Epoch,
+        revision: Revision,
+        value: T,
+    },
 }
 
 impl<T> Observed<T> {
@@ -143,7 +159,10 @@ pub struct Failure {
 
 impl Failure {
     pub fn new(kind: FailureKind, detail: impl fmt::Display) -> Self {
-        Self { kind, detail: detail.to_string() }
+        Self {
+            kind,
+            detail: detail.to_string(),
+        }
     }
 }
 
@@ -188,11 +207,19 @@ pub struct Reduction<S, E> {
 
 impl<S, E> Reduction<S, E> {
     pub fn applied(state: S, effects: Vec<E>) -> Self {
-        Self { state, effects, disposition: Disposition::Applied }
+        Self {
+            state,
+            effects,
+            disposition: Disposition::Applied,
+        }
     }
     /// No transition and no effects.
     pub fn same(state: S, disposition: Disposition) -> Self {
-        Self { state, effects: vec![], disposition }
+        Self {
+            state,
+            effects: vec![],
+            disposition,
+        }
     }
 }
 
