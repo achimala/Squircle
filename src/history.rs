@@ -378,8 +378,17 @@ async fn gather(root: &Path, scope: &Scope, terms: &[String], kinds: &[Kind], af
     Ok((items, unavailable))
 }
 
+/// Reads with git, running nothing else. The project's config and attributes
+/// can name an fsmonitor and external diff and text-conversion programs
+/// (callers pass `--no-ext-diff --no-textconv` where git would diff), and
+/// `GIT_*` variables can reconfigure or redirect git; none are honoured.
 async fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let output = tokio::process::Command::new("git").arg("-C").arg(root).args(args)
+    let mut command = tokio::process::Command::new("git");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") { command.env_remove(name); }
+    }
+    let output = command.env("GIT_TERMINAL_PROMPT", "0")
+        .args(["-c", "core.fsmonitor=false", "--no-pager", "-C"]).arg(root).args(args)
         .stdin(std::process::Stdio::null()).kill_on_drop(true).output().await.context("running git")?;
     ensure!(output.status.success(), "git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim());
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -561,9 +570,9 @@ pub async fn show(root: &Path, scope: Option<&Scope>, reference: &str, max_chars
         Kind::Commit => {
             let scope = scope.context("Pass --thread or --project, or run in the app's folder, to show a commit")?;
             ensure!(!id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_hexdigit()), "A commit reference is a hex SHA");
-            let mut text = git(&scope.root, &["show", "--stat", "--format=commit %H%nDate: %ad%n%n%B", "--date=iso", id]).await?;
+            let mut text = git(&scope.root, &["show", "--no-ext-diff", "--no-textconv", "--stat", "--format=commit %H%nDate: %ad%n%n%B", "--date=iso", id]).await?;
             if max_chars > text.len() {
-                let patch = git(&scope.root, &["show", "--format=", "--patch", id]).await.unwrap_or_default();
+                let patch = git(&scope.root, &["show", "--no-ext-diff", "--no-textconv", "--format=", "--patch", id]).await.unwrap_or_default();
                 text += &format!("\n{}", cap(&patch, max_chars - text.len()));
             }
             let text = cap(&text, max_chars);
