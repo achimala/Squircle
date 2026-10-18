@@ -67,7 +67,10 @@ impl BuildState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BuildOrigin {
     /// A validated project recipe and what was observed at submission.
-    Project { request: BuildRequest, provenance: Provenance },
+    Project {
+        request: BuildRequest,
+        provenance: Provenance,
+    },
     /// An IPA imported as is; its signature is not verified.
     Imported,
 }
@@ -87,12 +90,21 @@ pub struct Provenance {
 pub enum JobPhase {
     Queued,
     Running,
-    Succeeded { output: BuildOutput, preview: PreviewState },
-    Failed { message: String },
+    Succeeded {
+        output: BuildOutput,
+        preview: PreviewState,
+    },
+    Failed {
+        message: String,
+    },
     /// Cancelled before it started has no message.
-    Cancelled { message: Option<String> },
+    Cancelled {
+        message: Option<String>,
+    },
     /// The service stopped while it was queued or running.
-    Interrupted { message: String },
+    Interrupted {
+        message: String,
+    },
 }
 
 impl JobPhase {
@@ -125,7 +137,9 @@ impl PreviewSource {
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
-        [Self::BuiltSimulatorProduct, Self::CurrentWorkingTree].into_iter().find(|s| s.as_str() == value)
+        [Self::BuiltSimulatorProduct, Self::CurrentWorkingTree]
+            .into_iter()
+            .find(|s| s.as_str() == value)
     }
 }
 
@@ -143,10 +157,17 @@ pub struct PreviewArtifact {
 pub enum PreviewState {
     #[default]
     Absent,
-    Queued { prior: Option<PreviewArtifact> },
-    Capturing { prior: Option<PreviewArtifact> },
+    Queued {
+        prior: Option<PreviewArtifact>,
+    },
+    Capturing {
+        prior: Option<PreviewArtifact>,
+    },
     Ready(PreviewArtifact),
-    Failed { reason: String, prior: Option<PreviewArtifact> },
+    Failed {
+        reason: String,
+        prior: Option<PreviewArtifact>,
+    },
 }
 
 impl PreviewState {
@@ -155,20 +176,29 @@ impl PreviewState {
         match self {
             Self::Absent => None,
             Self::Ready(artifact) => Some(artifact),
-            Self::Queued { prior } | Self::Capturing { prior } | Self::Failed { prior, .. } => prior.as_ref(),
+            Self::Queued { prior } | Self::Capturing { prior } | Self::Failed { prior, .. } => {
+                prior.as_ref()
+            }
         }
     }
     pub fn in_progress(&self) -> bool {
         matches!(self, Self::Queued { .. } | Self::Capturing { .. })
     }
     pub fn queued(&self) -> Self {
-        Self::Queued { prior: self.artifact().cloned() }
+        Self::Queued {
+            prior: self.artifact().cloned(),
+        }
     }
     pub fn capturing(&self) -> Self {
-        Self::Capturing { prior: self.artifact().cloned() }
+        Self::Capturing {
+            prior: self.artifact().cloned(),
+        }
     }
     pub fn failed(&self, reason: impl Into<String>) -> Self {
-        Self::Failed { reason: reason.into(), prior: self.artifact().cloned() }
+        Self::Failed {
+            reason: reason.into(),
+            prior: self.artifact().cloned(),
+        }
     }
     /// A capture's result; a failure keeps the previous image.
     pub fn finish(&self, result: anyhow::Result<PreviewArtifact>) -> Self {
@@ -289,11 +319,17 @@ impl TryFrom<JobRecord> for Job {
         let origin = match (r.source.as_str(), r.request) {
             (PROJECT_SOURCE, Some(request)) => BuildOrigin::Project {
                 request,
-                provenance: Provenance { revision: r.source_revision, dirty: r.source_dirty },
+                provenance: Provenance {
+                    revision: r.source_revision,
+                    dirty: r.source_dirty,
+                },
             },
             (IMPORTED_SOURCE, None) => BuildOrigin::Imported,
             (source, request) => {
-                return Err(format!("job source {source:?} does not match its recipe (present: {})", request.is_some()));
+                return Err(format!(
+                    "job source {source:?} does not match its recipe (present: {})",
+                    request.is_some()
+                ));
             }
         };
         let no_output = |phase: JobPhase, output: &Option<OutputRecord>| match output {
@@ -306,7 +342,11 @@ impl TryFrom<JobRecord> for Job {
                 let preview = preview_from_record(&record)?;
                 let output = record.output;
                 let artifact = match &origin {
-                    BuildOrigin::Project { request, .. } if request.mode == BuildMode::Simulator => output.app_path.is_some(),
+                    BuildOrigin::Project { request, .. }
+                        if request.mode == BuildMode::Simulator =>
+                    {
+                        output.app_path.is_some()
+                    }
                     _ => output.ipa_path.is_some(),
                 };
                 if !artifact {
@@ -315,25 +355,51 @@ impl TryFrom<JobRecord> for Job {
                 JobPhase::Succeeded { output, preview }
             }
             (BuildState::Succeeded, Some(_)) => return Err("succeeded job has an error".into()),
-            (_, _) if origin == BuildOrigin::Imported => return Err("imported job did not succeed".into()),
+            (_, _) if origin == BuildOrigin::Imported => {
+                return Err("imported job did not succeed".into());
+            }
             (BuildState::Queued, None) => no_output(JobPhase::Queued, &r.output)?,
             (BuildState::Running, None) => no_output(JobPhase::Running, &r.output)?,
-            (BuildState::Failed, Some(message)) => no_output(JobPhase::Failed { message }, &r.output)?,
-            (BuildState::Interrupted, Some(message)) => no_output(JobPhase::Interrupted { message }, &r.output)?,
-            (BuildState::Cancelled, message) => no_output(JobPhase::Cancelled { message }, &r.output)?,
-            (state, error) => return Err(format!("{state:?} job with error present: {}", error.is_some())),
+            (BuildState::Failed, Some(message)) => {
+                no_output(JobPhase::Failed { message }, &r.output)?
+            }
+            (BuildState::Interrupted, Some(message)) => {
+                no_output(JobPhase::Interrupted { message }, &r.output)?
+            }
+            (BuildState::Cancelled, message) => {
+                no_output(JobPhase::Cancelled { message }, &r.output)?
+            }
+            (state, error) => {
+                return Err(format!(
+                    "{state:?} job with error present: {}",
+                    error.is_some()
+                ));
+            }
         };
-        Ok(Job { id: r.id, created_at: r.created_at, updated_at: r.updated_at, origin, phase })
+        Ok(Job {
+            id: r.id,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            origin,
+            phase,
+        })
     }
 }
 
 fn preview_from_record(record: &OutputRecord) -> Result<PreviewState, String> {
     let source = match record.preview_source.as_deref() {
         None => None,
-        Some(value) => Some(PreviewSource::parse(value).ok_or_else(|| format!("unknown preview source {value:?}"))?),
+        Some(value) => Some(
+            PreviewSource::parse(value)
+                .ok_or_else(|| format!("unknown preview source {value:?}"))?,
+        ),
     };
     let artifact = match (&record.preview_path, record.preview_captured_at) {
-        (Some(path), Some(captured_at)) => Some(PreviewArtifact { path: path.clone(), captured_at, source }),
+        (Some(path), Some(captured_at)) => Some(PreviewArtifact {
+            path: path.clone(),
+            captured_at,
+            source,
+        }),
         (None, None) => None,
         _ => return Err("preview path and capture time must come together".into()),
     };
@@ -360,7 +426,10 @@ impl From<Job> for JobRecord {
         let state = job.state();
         let error = job.error().map(str::to_owned);
         let (source, request, provenance) = match job.origin {
-            BuildOrigin::Project { request, provenance } => (PROJECT_SOURCE, Some(request), provenance),
+            BuildOrigin::Project {
+                request,
+                provenance,
+            } => (PROJECT_SOURCE, Some(request), provenance),
             BuildOrigin::Imported => (IMPORTED_SOURCE, None, Provenance::default()),
         };
         let output = match job.phase {
@@ -378,7 +447,9 @@ impl From<Job> for JobRecord {
                     preview_state: preview_state.map(str::to_owned),
                     preview_error,
                     preview_captured_at: artifact.as_ref().map(|a| a.captured_at),
-                    preview_source: artifact.and_then(|a| a.source).map(|s| s.as_str().to_owned()),
+                    preview_source: artifact
+                        .and_then(|a| a.source)
+                        .map(|s| s.as_str().to_owned()),
                     output,
                 })
             }
@@ -439,8 +510,14 @@ impl TransferEvidence {
     }
     pub fn completed(self, at: u64) -> Self {
         match self {
-            Self::NotStarted => Self::Completed { started_at: at, completed_at: at },
-            Self::Opened { started_at } => Self::Completed { started_at, completed_at: at },
+            Self::NotStarted => Self::Completed {
+                started_at: at,
+                completed_at: at,
+            },
+            Self::Opened { started_at } => Self::Completed {
+                started_at,
+                completed_at: at,
+            },
             done => done,
         }
     }
@@ -462,7 +539,10 @@ impl TryFrom<TransferRecord> for TransferEvidence {
         match (r.download_started_at, r.downloaded_at) {
             (None, None) => Ok(Self::NotStarted),
             (Some(started_at), None) => Ok(Self::Opened { started_at }),
-            (Some(started_at), Some(completed_at)) => Ok(Self::Completed { started_at, completed_at }),
+            (Some(started_at), Some(completed_at)) => Ok(Self::Completed {
+                started_at,
+                completed_at,
+            }),
             (None, Some(_)) => Err("ticket finished a download it never started"),
         }
     }
@@ -473,9 +553,15 @@ impl From<TransferEvidence> for TransferRecord {
         let (download_started_at, downloaded_at) = match evidence {
             TransferEvidence::NotStarted => (None, None),
             TransferEvidence::Opened { started_at } => (Some(started_at), None),
-            TransferEvidence::Completed { started_at, completed_at } => (Some(started_at), Some(completed_at)),
+            TransferEvidence::Completed {
+                started_at,
+                completed_at,
+            } => (Some(started_at), Some(completed_at)),
         };
-        Self { download_started_at, downloaded_at }
+        Self {
+            download_started_at,
+            downloaded_at,
+        }
     }
 }
 
@@ -540,7 +626,11 @@ pub fn failure_with(
 mod tests {
     use super::*;
 
-    fn record(state: &str, output: serde_json::Value, error: serde_json::Value) -> serde_json::Value {
+    fn record(
+        state: &str,
+        output: serde_json::Value,
+        error: serde_json::Value,
+    ) -> serde_json::Value {
         serde_json::json!({
             "id": "ed8c7cf6-45ac-4a0f-90ef-67e4901e9386", "created_at": 1, "updated_at": 1,
             "state": state, "output": output, "error": error, "source": "xcodebuild",
@@ -552,7 +642,10 @@ mod tests {
     fn ipa(extra: serde_json::Value) -> serde_json::Value {
         let mut output = serde_json::json!({"archive_path": "/A.xcarchive", "ipa_path": "/A.ipa", "app_path": null,
             "dsym_paths": [], "bundle_id": "b", "version": "1", "build_number": "1", "title": "A"});
-        output.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        output
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         output
     }
 
@@ -561,9 +654,16 @@ mod tests {
         use serde_json::{Value, json};
         let load = |value: Value| serde_json::from_value::<Job>(value);
         // Legacy records: no provenance, a preview without its state.
-        let legacy = load(record("succeeded", ipa(json!({"preview_path": "/p.png", "preview_captured_at": 3})), Value::Null)).unwrap();
+        let legacy = load(record(
+            "succeeded",
+            ipa(json!({"preview_path": "/p.png", "preview_captured_at": 3})),
+            Value::Null,
+        ))
+        .unwrap();
         assert_eq!(legacy.provenance(), Some(&Provenance::default()));
-        assert!(matches!(legacy.preview(), Some(PreviewState::Ready(a)) if a.captured_at == 3 && a.source.is_none()));
+        assert!(
+            matches!(legacy.preview(), Some(PreviewState::Ready(a)) if a.captured_at == 3 && a.source.is_none())
+        );
         // A failed recapture keeps the prior image, and survives a round trip.
         let failed = legacy.preview().unwrap().failed("crashed");
         let mut job = legacy.clone();
@@ -578,12 +678,38 @@ mod tests {
             record("failed", ipa(json!({})), json!("boom")),
             record("failed", Value::Null, Value::Null),
             record("running", Value::Null, json!("boom")),
-            record("succeeded", ipa(json!({"preview_state": "succeeded"})), Value::Null),
-            record("succeeded", ipa(json!({"preview_path": "/p.png"})), Value::Null),
-            record("succeeded", ipa(json!({"preview_state": "failed"})), Value::Null),
-            record("succeeded", ipa(json!({"preview_path": "/p.png", "preview_captured_at": 1, "preview_source": "drawn"})), Value::Null),
-            { let mut r = record("running", Value::Null, Value::Null); r["source"] = "imported_ipa_signature_not_verified".into(); r },
-            { let mut r = record("succeeded", ipa(json!({})), Value::Null); r["request"] = Value::Null; r },
+            record(
+                "succeeded",
+                ipa(json!({"preview_state": "succeeded"})),
+                Value::Null,
+            ),
+            record(
+                "succeeded",
+                ipa(json!({"preview_path": "/p.png"})),
+                Value::Null,
+            ),
+            record(
+                "succeeded",
+                ipa(json!({"preview_state": "failed"})),
+                Value::Null,
+            ),
+            record(
+                "succeeded",
+                ipa(
+                    json!({"preview_path": "/p.png", "preview_captured_at": 1, "preview_source": "drawn"}),
+                ),
+                Value::Null,
+            ),
+            {
+                let mut r = record("running", Value::Null, Value::Null);
+                r["source"] = "imported_ipa_signature_not_verified".into();
+                r
+            },
+            {
+                let mut r = record("succeeded", ipa(json!({})), Value::Null);
+                r["request"] = Value::Null;
+                r
+            },
         ] {
             assert!(load(bad.clone()).is_err(), "accepted {bad}");
         }
@@ -594,11 +720,22 @@ mod tests {
         let opened = TransferEvidence::NotStarted.opened(5);
         assert_eq!(opened.opened(9), opened);
         let done = opened.completed(7);
-        assert_eq!(done, TransferEvidence::Completed { started_at: 5, completed_at: 7 });
+        assert_eq!(
+            done,
+            TransferEvidence::Completed {
+                started_at: 5,
+                completed_at: 7
+            }
+        );
         assert_eq!(done.opened(9).completed(11), done);
-        let ticket = |value| serde_json::from_value::<Ticket>(serde_json::json!({
-            "token": "t", "build_id": "b", "expires_at": 1, "base_url": "u", "downloaded_at": value}));
+        let ticket = |value| {
+            serde_json::from_value::<Ticket>(serde_json::json!({
+            "token": "t", "build_id": "b", "expires_at": 1, "base_url": "u", "downloaded_at": value}))
+        };
         assert!(ticket(serde_json::json!(3)).is_err());
-        assert_eq!(ticket(serde_json::Value::Null).unwrap().transfer, TransferEvidence::NotStarted);
+        assert_eq!(
+            ticket(serde_json::Value::Null).unwrap().transfer,
+            TransferEvidence::NotStarted
+        );
     }
 }

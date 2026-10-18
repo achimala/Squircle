@@ -228,7 +228,9 @@ async fn lock(path: &Path, deadline: Instant, cancel: &watch::Receiver<bool>) ->
         match file.try_lock() {
             Ok(()) => return Ok(file),
             Err(fs::TryLockError::WouldBlock) => {}
-            Err(fs::TryLockError::Error(error)) => return Err(error).context("cannot lock the overlay cache"),
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(error).context("cannot lock the overlay cache");
+            }
         }
         tokio::select! {
             _ = cancelled(Some(cancel.clone())) => bail!("build cancelled while waiting for the overlay cache"),

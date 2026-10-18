@@ -53,13 +53,15 @@ pub async fn serve<S, F>(
             accepted = axum::serve::Listener::accept(&mut listener) => accepted,
             reason = &mut signal => break reason,
         };
-        let (app, closing, cut, handlers) = (app.clone(), closing.clone(), cut.clone(), handlers.clone());
+        let (app, closing, cut, handlers) =
+            (app.clone(), closing.clone(), cut.clone(), handlers.clone());
         connections.spawn(async move {
             let bodies = closing.clone();
-            let service = hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
-                let request = request.map(|body| Body::new(Closing::new(body, bodies.clone())));
-                handlers.track_future(app.clone().oneshot(request))
-            });
+            let service =
+                hyper::service::service_fn(move |request: Request<hyper::body::Incoming>| {
+                    let request = request.map(|body| Body::new(Closing::new(body, bodies.clone())));
+                    handlers.track_future(app.clone().oneshot(request))
+                });
             let builder = auto::Builder::new(TokioExecutor::new());
             let mut connection = pin!(builder.serve_connection(TokioIo::new(stream), service));
             tokio::select! {
@@ -91,7 +93,10 @@ struct Closing {
 
 impl Closing {
     fn new(body: hyper::body::Incoming, closing: CancellationToken) -> Self {
-        Self { body, closed: Box::pin(closing.cancelled_owned()) }
+        Self {
+            body,
+            closed: Box::pin(closing.cancelled_owned()),
+        }
     }
 }
 
@@ -99,14 +104,19 @@ impl http_body::Body for Closing {
     type Data = Bytes;
     type Error = axum::Error;
 
-    fn poll_frame(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
         if self.body.is_end_stream() {
             return Poll::Ready(None);
         }
         if self.closed.as_mut().poll(cx).is_ready() {
             return Poll::Ready(Some(Err(axum::Error::new("the service is shutting down"))));
         }
-        Pin::new(&mut self.body).poll_frame(cx).map_err(axum::Error::new)
+        Pin::new(&mut self.body)
+            .poll_frame(cx)
+            .map_err(axum::Error::new)
     }
 
     fn is_end_stream(&self) -> bool {
@@ -132,33 +142,63 @@ mod tests {
     async fn shutdown_ends_with_stalled_clients() {
         let movie = Bytes::from(vec![7u8; 64 * 1024 * 1024]);
         let app = Router::new()
-            .route("/movie", get(move || async move { Body::from_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(movie)])) }))
-            .route("/upload", post(|body: Bytes| async move { body.len().to_string() }))
-            .route("/slow", get(|| async {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                "done"
-            }));
+            .route(
+                "/movie",
+                get(move || async move {
+                    Body::from_stream(futures_util::stream::iter([Ok::<_, std::io::Error>(movie)]))
+                }),
+            )
+            .route(
+                "/upload",
+                post(|body: Bytes| async move { body.len().to_string() }),
+            )
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    "done"
+                }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let stop = CancellationToken::new();
-        let server = tokio::spawn(serve(listener, app, stop.clone().cancelled_owned(), |()| async {}));
+        let server = tokio::spawn(serve(
+            listener,
+            app,
+            stop.clone().cancelled_owned(),
+            |()| async {},
+        ));
 
         let mut download = tokio::net::TcpStream::connect(address).await.unwrap();
-        download.write_all(b"GET /movie HTTP/1.1\r\nhost: x\r\n\r\n").await.unwrap();
+        download
+            .write_all(b"GET /movie HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .unwrap();
         let mut head = [0u8; 12];
         download.read_exact(&mut head).await.unwrap();
         assert_eq!(&head, b"HTTP/1.1 200");
         let mut upload = tokio::net::TcpStream::connect(address).await.unwrap();
-        upload.write_all(b"POST /upload HTTP/1.1\r\nhost: x\r\ncontent-length: 1000\r\n\r\npartial").await.unwrap();
+        upload
+            .write_all(b"POST /upload HTTP/1.1\r\nhost: x\r\ncontent-length: 1000\r\n\r\npartial")
+            .await
+            .unwrap();
         let mut slow = tokio::net::TcpStream::connect(address).await.unwrap();
-        slow.write_all(b"GET /slow HTTP/1.1\r\nhost: x\r\n\r\n").await.unwrap();
+        slow.write_all(b"GET /slow HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .unwrap();
         let _idle = tokio::net::TcpStream::connect(address).await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         stop.cancel();
-        tokio::time::timeout(Duration::from_secs(5), server).await.expect("shutdown waited on a client").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("shutdown waited on a client")
+            .unwrap();
         let mut answer = String::new();
         slow.read_to_string(&mut answer).await.unwrap();
-        assert!(answer.starts_with("HTTP/1.1 200") && answer.ends_with("done"), "{answer}");
+        assert!(
+            answer.starts_with("HTTP/1.1 200") && answer.ends_with("done"),
+            "{answer}"
+        );
     }
 }

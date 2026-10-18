@@ -39,13 +39,19 @@ impl Seen {
     pub fn turn(&self) -> Option<&str> {
         match self {
             Seen::Gone => None,
-            Seen::Busy { turn } | Seen::Waiting { turn } | Seen::Idle { turn } | Seen::Unknown { turn } => turn.as_deref(),
+            Seen::Busy { turn }
+            | Seen::Waiting { turn }
+            | Seen::Idle { turn }
+            | Seen::Unknown { turn } => turn.as_deref(),
         }
     }
 
     /// The thread may be doing something: busy, waiting on the user, or not known.
     pub fn protects(&self) -> bool {
-        matches!(self, Seen::Busy { .. } | Seen::Waiting { .. } | Seen::Unknown { .. })
+        matches!(
+            self,
+            Seen::Busy { .. } | Seen::Waiting { .. } | Seen::Unknown { .. }
+        )
     }
 }
 
@@ -65,7 +71,11 @@ impl RetryState {
     pub fn failed(&self, error: String, now: f64) -> Self {
         let tries = self.tries.saturating_add(1);
         let wait = (3.0 * 2f64.powi(tries.min(10) as i32 - 1)).min(300.0);
-        Self { tries, retry_at: now + wait, error: Some(error) }
+        Self {
+            tries,
+            retry_at: now + wait,
+            error: Some(error),
+        }
     }
 
     pub fn due(&self, now: f64) -> bool {

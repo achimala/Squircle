@@ -17,7 +17,10 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::Notify;
@@ -56,11 +59,20 @@ impl KeyConfig {
 }
 
 fn valid_apple_id(id: &str) -> bool {
-    id.len() == 10 && id.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    id.len() == 10
+        && id
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 /// Validates and stores the key; `squircle push setup`.
-pub fn setup(root: &Path, key_file: Option<&Path>, key_id: Option<&str>, team_id: Option<&str>, remove: bool) -> Result<Value> {
+pub fn setup(
+    root: &Path,
+    key_file: Option<&Path>,
+    key_id: Option<&str>,
+    team_id: Option<&str>,
+    remove: bool,
+) -> Result<Value> {
     let path = key_path(root);
     if remove {
         if path.try_exists()? {
@@ -71,20 +83,40 @@ pub fn setup(root: &Path, key_file: Option<&Path>, key_id: Option<&str>, team_id
     let (Some(key_file), Some(key_id), Some(team_id)) = (key_file, key_id, team_id) else {
         bail!("Pass --key-file, --key-id and --team-id (or --remove)");
     };
-    ensure!(valid_apple_id(key_id), "The key ID is the 10-character ID shown with the key (e.g. AB12CD34EF)");
-    ensure!(valid_apple_id(team_id), "The team ID is the 10-character ID under Membership (e.g. 2F26US4NAU)");
-    let pem = std::fs::read_to_string(key_file).with_context(|| format!("Cannot read {}", key_file.display()))?;
-    let config = KeyConfig { key_id: key_id.into(), team_id: team_id.into(), key_pem: pem.trim().to_string() };
+    ensure!(
+        valid_apple_id(key_id),
+        "The key ID is the 10-character ID shown with the key (e.g. AB12CD34EF)"
+    );
+    ensure!(
+        valid_apple_id(team_id),
+        "The team ID is the 10-character ID under Membership (e.g. 2F26US4NAU)"
+    );
+    let pem = std::fs::read_to_string(key_file)
+        .with_context(|| format!("Cannot read {}", key_file.display()))?;
+    let config = KeyConfig {
+        key_id: key_id.into(),
+        team_id: team_id.into(),
+        key_pem: pem.trim().to_string(),
+    };
     Signer::new(&config).context("Not an APNs auth key (.p8)")?;
     private_dir(&root.join("push"))?;
     atomic_json(&path, &config)?;
-    Ok(json!({"configured": true, "key_id": key_id, "team_id": team_id,
-        "next": "The running service picks the key up on its next push. Send one: squircle push test"}))
+    Ok(
+        json!({"configured": true, "key_id": key_id, "team_id": team_id,
+        "next": "The running service picks the key up on its next push. Send one: squircle push test"}),
+    )
 }
 
 fn pem_der(pem: &str) -> Result<Vec<u8>> {
-    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).map(str::trim).collect();
-    ensure!(pem.contains("BEGIN PRIVATE KEY"), "expected a PKCS#8 PEM private key");
+    let body: String = pem
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .map(str::trim)
+        .collect();
+    ensure!(
+        pem.contains("BEGIN PRIVATE KEY"),
+        "expected a PKCS#8 PEM private key"
+    );
     Ok(base64::engine::general_purpose::STANDARD.decode(body)?)
 }
 
@@ -102,16 +134,34 @@ pub struct Signer {
 impl Signer {
     pub fn new(config: &KeyConfig) -> Result<Self> {
         let der = pem_der(&config.key_pem)?;
-        let key = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der, &ring::rand::SystemRandom::new())
-            .map_err(|e| anyhow::anyhow!("invalid P-256 key: {e}"))?;
-        Ok(Self { key, key_id: config.key_id.clone(), team_id: config.team_id.clone() })
+        let key = EcdsaKeyPair::from_pkcs8(
+            &ECDSA_P256_SHA256_FIXED_SIGNING,
+            &der,
+            &ring::rand::SystemRandom::new(),
+        )
+        .map_err(|e| anyhow::anyhow!("invalid P-256 key: {e}"))?;
+        Ok(Self {
+            key,
+            key_id: config.key_id.clone(),
+            team_id: config.team_id.clone(),
+        })
     }
 
     pub fn jwt(&self, issued_at: u64) -> Result<String> {
-        let header = b64url(json!({"alg": "ES256", "kid": self.key_id}).to_string().as_bytes());
-        let claims = b64url(json!({"iss": self.team_id, "iat": issued_at}).to_string().as_bytes());
+        let header = b64url(
+            json!({"alg": "ES256", "kid": self.key_id})
+                .to_string()
+                .as_bytes(),
+        );
+        let claims = b64url(
+            json!({"iss": self.team_id, "iat": issued_at})
+                .to_string()
+                .as_bytes(),
+        );
         let input = format!("{header}.{claims}");
-        let signature = self.key.sign(&ring::rand::SystemRandom::new(), input.as_bytes())
+        let signature = self
+            .key
+            .sign(&ring::rand::SystemRandom::new(), input.as_bytes())
             .map_err(|_| anyhow::anyhow!("signing failed"))?;
         Ok(format!("{input}.{}", b64url(signature.as_ref())))
     }
@@ -184,7 +234,8 @@ impl Tokens {
     fn token(&mut self, refresh: bool) -> Result<String> {
         let now = crate::model::now();
         if let Some((at, token)) = self.cached.as_ref()
-            && !refresh && now < at + 40 * 60
+            && !refresh
+            && now < at + 40 * 60
         {
             return Ok(token.clone());
         }
@@ -215,18 +266,37 @@ impl Apns {
         if sandbox.starts_with("http://") {
             builder = builder.http2_prior_knowledge();
         }
-        let tokens = Owner::spawn("APNs tokens", Tokens { signer: Signer::new(config)?, cached: None });
-        Ok(Self { tokens, client: builder.build()?, sandbox: sandbox.into(), production: production.into() })
+        let tokens = Owner::spawn(
+            "APNs tokens",
+            Tokens {
+                signer: Signer::new(config)?,
+                cached: None,
+            },
+        );
+        Ok(Self {
+            tokens,
+            client: builder.build()?,
+            sandbox: sandbox.into(),
+            production: production.into(),
+        })
     }
 
     async fn post(&self, delivery: &Delivery, refresh: bool) -> Result<(u16, String)> {
-        let host = match delivery.environment { Environment::Development => &self.sandbox, Environment::Production => &self.production };
+        let host = match delivery.environment {
+            Environment::Development => &self.sandbox,
+            Environment::Production => &self.production,
+        };
         let (kind, topic) = match delivery.push_type {
             PushType::Alert => ("alert", delivery.bundle_id.clone()),
-            PushType::LiveActivity => ("liveactivity", format!("{}.push-type.liveactivity", delivery.bundle_id)),
+            PushType::LiveActivity => (
+                "liveactivity",
+                format!("{}.push-type.liveactivity", delivery.bundle_id),
+            ),
         };
         let token = self.tokens.ask(move |tokens| tokens.token(refresh)).await?;
-        let mut request = self.client.post(format!("{host}/3/device/{}", delivery.token))
+        let mut request = self
+            .client
+            .post(format!("{host}/3/device/{}", delivery.token))
             .bearer_auth(token)
             .header("apns-topic", topic)
             .header("apns-push-type", kind)
@@ -251,10 +321,15 @@ impl Transport for Apns {
             }
             Ok(match (status, reason.as_str()) {
                 (200, _) => Outcome::Sent,
-                (410, _) | (400, "BadDeviceToken" | "DeviceTokenNotForTopic") => Outcome::Unregistered,
-                (429 | 500..=599, reason) | (403, reason @ "ExpiredProviderToken") =>
-                    Outcome::Retry(format!("HTTP {status} {reason}").trim().to_string()),
-                (_, reason) => Outcome::Rejected(format!("HTTP {status} {reason}").trim().to_string()),
+                (410, _) | (400, "BadDeviceToken" | "DeviceTokenNotForTopic") => {
+                    Outcome::Unregistered
+                }
+                (429 | 500..=599, reason) | (403, reason @ "ExpiredProviderToken") => {
+                    Outcome::Retry(format!("HTTP {status} {reason}").trim().to_string())
+                }
+                (_, reason) => {
+                    Outcome::Rejected(format!("HTTP {status} {reason}").trim().to_string())
+                }
             })
         })
     }
@@ -296,11 +371,20 @@ pub fn alert_payload(notes: &[&Note]) -> Value {
     } else {
         lines.join("\n")
     };
-    let same = |f: fn(&Target) -> &Option<String>| notes.iter().all(|n| f(&n.target) == f(&first.target));
+    let same =
+        |f: fn(&Target) -> &Option<String>| notes.iter().all(|n| f(&n.target) == f(&first.target));
     let target = Target {
         project: first.target.project.clone(),
-        thread: if same(|t| &t.thread) { first.target.thread.clone() } else { None },
-        build: if same(|t| &t.build) { first.target.build.clone() } else { None },
+        thread: if same(|t| &t.thread) {
+            first.target.thread.clone()
+        } else {
+            None
+        },
+        build: if same(|t| &t.build) {
+            first.target.build.clone()
+        } else {
+            None
+        },
         app: first.target.app.clone(),
         bundle: first.target.bundle.clone(),
     };
@@ -328,7 +412,13 @@ pub enum LiveEvent {
     End,
 }
 
-pub fn activity_payload(event: LiveEvent, state: &LiveState, app: &str, project: &str, now: u64) -> Value {
+pub fn activity_payload(
+    event: LiveEvent,
+    state: &LiveState,
+    app: &str,
+    project: &str,
+    now: u64,
+) -> Value {
     let mut aps = json!({
         "timestamp": now,
         "event": match event { LiveEvent::Start => "start", LiveEvent::Update => "update", LiveEvent::End => "end" },
@@ -343,7 +433,9 @@ pub fn activity_payload(event: LiveEvent, state: &LiveState, app: &str, project:
             aps["alert"] = json!({"title": app, "body": state.status});
         }
         LiveEvent::End => aps["dismissal-date"] = json!(now + 2 * 60),
-        LiveEvent::Update if state.needs_you => aps["alert"] = json!({"title": app, "body": state.status}),
+        LiveEvent::Update if state.needs_you => {
+            aps["alert"] = json!({"title": app, "body": state.status})
+        }
         LiveEvent::Update => {}
     }
     json!({"aps": aps})
@@ -367,7 +459,10 @@ enum Stage {
     Starting { at: Instant },
     /// A running activity. `acked` is the content APNs last accepted for it;
     /// its token is kept until an End is accepted or Apple says it is gone.
-    Running { activity: Activity, acked: Option<(LiveState, Instant)> },
+    Running {
+        activity: Activity,
+        acked: Option<(LiveState, Instant)>,
+    },
 }
 
 /// The send for a link: none, one in flight (by generation), or a failure
@@ -387,7 +482,10 @@ struct Link {
 
 impl Link {
     fn new(stage: Stage) -> Self {
-        Self { stage, flight: Flight::Idle }
+        Self {
+            stage,
+            flight: Flight::Idle,
+        }
     }
 }
 
@@ -398,17 +496,34 @@ mod persisted_links {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::collections::BTreeMap;
 
-    pub fn serialize<S: Serializer>(links: &BTreeMap<String, Link>, s: S) -> Result<S::Ok, S::Error> {
-        let running: BTreeMap<&String, &Activity> = links.iter().filter_map(|(project, link)| match &link.stage {
-            Stage::Running { activity, .. } => Some((project, activity)),
-            _ => None,
-        }).collect();
+    pub fn serialize<S: Serializer>(
+        links: &BTreeMap<String, Link>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let running: BTreeMap<&String, &Activity> = links
+            .iter()
+            .filter_map(|(project, link)| match &link.stage {
+                Stage::Running { activity, .. } => Some((project, activity)),
+                _ => None,
+            })
+            .collect();
         running.serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Link>, D::Error> {
-        Ok(BTreeMap::<String, Activity>::deserialize(d)?.into_iter()
-            .map(|(project, activity)| (project, Link::new(Stage::Running { activity, acked: None })))
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<BTreeMap<String, Link>, D::Error> {
+        Ok(BTreeMap::<String, Activity>::deserialize(d)?
+            .into_iter()
+            .map(|(project, activity)| {
+                (
+                    project,
+                    Link::new(Stage::Running {
+                        activity,
+                        acked: None,
+                    }),
+                )
+            })
             .collect())
     }
 }
@@ -432,7 +547,10 @@ pub struct Device {
 
 impl Device {
     fn running(&self) -> usize {
-        self.links.values().filter(|l| matches!(l.stage, Stage::Running { .. })).count()
+        self.links
+            .values()
+            .filter(|l| matches!(l.stage, Stage::Running { .. }))
+            .count()
     }
 }
 
@@ -451,12 +569,18 @@ struct Presence {
 
 impl Presence {
     fn shown(&self) -> Shown {
-        if Instant::now() < self.until { self.shown.clone() } else { Shown::Background }
+        if Instant::now() < self.until {
+            self.shown.clone()
+        } else {
+            Shown::Background
+        }
     }
 }
 
 fn shown(presence: &HashMap<String, Presence>, device: &str) -> Shown {
-    presence.get(device).map_or(Shown::Background, Presence::shown)
+    presence
+        .get(device)
+        .map_or(Shown::Background, Presence::shown)
 }
 
 fn valid_token(token: &str) -> bool {
@@ -464,7 +588,10 @@ fn valid_token(token: &str) -> bool {
 }
 
 fn valid_id(id: &str) -> bool {
-    (1..=128).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    (1..=128).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
 }
 
 #[derive(Deserialize)]
@@ -535,7 +662,11 @@ enum Change {
     Failed,
 }
 
-fn change(before: Option<&(Option<String>, Phase)>, turn: Option<String>, now: Phase) -> Option<Change> {
+fn change(
+    before: Option<&(Option<String>, Phase)>,
+    turn: Option<String>,
+    now: Phase,
+) -> Option<Change> {
     let (was_turn, was) = before?;
     if *was == now && *was_turn == turn || now == Phase::Working {
         return None;
@@ -552,8 +683,15 @@ fn change(before: Option<&(Option<String>, Phase)>, turn: Option<String>, now: P
 
 /// A plain first line of an agent's reply for a notification body.
 pub fn summary_line(text: &str) -> String {
-    let line = text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("```")).unwrap_or("");
-    let line = line.trim_start_matches(['#', '>', '-', '*', ' ']).replace("**", "").replace('`', "");
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("```"))
+        .unwrap_or("");
+    let line = line
+        .trim_start_matches(['#', '>', '-', '*', ' '])
+        .replace("**", "")
+        .replace('`', "");
     let mut out: String = line.chars().take(160).collect();
     if line.chars().count() > 160 {
         out.push('…');
@@ -602,7 +740,8 @@ impl AppLive {
     fn stepped(&self, state: &LiveState) -> LiveState {
         let mut state = state.clone();
         if let (Some(key), Some(step)) = (&self.stepping, &self.step)
-            && step.key == *key && let Some(text) = &step.text
+            && step.key == *key
+            && let Some(text) = &step.text
         {
             state.status = text.clone();
         }
@@ -617,12 +756,32 @@ fn observe(app: &AppView) -> (LiveState, Option<StepKey>) {
     let busy = workers.iter().filter(|p| **p == Phase::Working).count();
     let needs_you = agent == Some(Phase::NeedsYou) || workers.contains(&Phase::NeedsYou);
     let working = agent == Some(Phase::Working) || busy > 0;
-    let status = if needs_you { "Needs you" } else if agent == Some(Phase::Working) { "Working" }
-        else if busy > 0 { "Waiting on workers" } else { "Done" };
-    let stepping = app.agent.as_ref().filter(|_| agent == Some(Phase::Working) && !needs_you).map(|(id, row)| StepKey {
-        thread: id.clone(), turn: row["latestTurn"]["turnId"].as_str().map(str::to_string),
-    });
-    (LiveState { status: status.into(), workers: busy, needs_you, working }, stepping)
+    let status = if needs_you {
+        "Needs you"
+    } else if agent == Some(Phase::Working) {
+        "Working"
+    } else if busy > 0 {
+        "Waiting on workers"
+    } else {
+        "Done"
+    };
+    let stepping = app
+        .agent
+        .as_ref()
+        .filter(|_| agent == Some(Phase::Working) && !needs_you)
+        .map(|(id, row)| StepKey {
+            thread: id.clone(),
+            turn: row["latestTurn"]["turnId"].as_str().map(str::to_string),
+        });
+    (
+        LiveState {
+            status: status.into(),
+            workers: busy,
+            needs_you,
+            working,
+        },
+        stepping,
+    )
 }
 
 /// What one send to one phone's activity carries.
@@ -659,8 +818,12 @@ pub struct Timing {
 
 impl Default for Timing {
     fn default() -> Self {
-        Self { coalesce: COALESCE, retry: Duration::from_secs(2), pause: Duration::from_secs(20),
-               throttle: Duration::from_secs(10) }
+        Self {
+            coalesce: COALESCE,
+            retry: Duration::from_secs(2),
+            pause: Duration::from_secs(20),
+            throttle: Duration::from_secs(10),
+        }
     }
 }
 
@@ -677,7 +840,8 @@ const RETRY_CAP: Duration = Duration::from_secs(300);
 const ALERT_ATTEMPTS: u32 = 4;
 
 fn backoff(base: Duration, failures: u32) -> Duration {
-    base.saturating_mul(4u32.saturating_pow(failures.saturating_sub(1))).min(RETRY_CAP)
+    base.saturating_mul(4u32.saturating_pow(failures.saturating_sub(1)))
+        .min(RETRY_CAP)
 }
 
 /// Whether a send's outcome is worth trying again later.
@@ -715,24 +879,35 @@ impl State {
     /// A phone that could show this app's activity: one running or starting,
     /// or a start token while Squircle isn't open on it.
     fn has_recipient(&self, project: &str) -> bool {
-        self.devices.values().any(|d| match d.links.get(project).map(|l| &l.stage) {
-            Some(Stage::Running { .. } | Stage::Starting { .. }) => true,
-            _ => d.start_token.is_some() && shown(&self.presence, &d.id) == Shown::Background,
-        })
+        self.devices
+            .values()
+            .any(|d| match d.links.get(project).map(|l| &l.stage) {
+                Some(Stage::Running { .. } | Stage::Starting { .. }) => true,
+                _ => d.start_token.is_some() && shown(&self.presence, &d.id) == Shown::Background,
+            })
     }
 
     fn save(&self) {
-        if let Err(error) = atomic_json(&self.root.join("push").join("devices.json"), &self.devices) {
+        if let Err(error) = atomic_json(&self.root.join("push").join("devices.json"), &self.devices)
+        {
             eprintln!("Push: cannot save devices: {error:#}");
         }
     }
 
     /// Forgets a token Apple says is gone, wherever this device used it.
     fn forget(&mut self, device: &str, token: &str) {
-        let Some(d) = self.devices.get_mut(device) else { return };
-        if d.token.as_deref() == Some(token) { d.token = None; }
-        if d.start_token.as_deref() == Some(token) { d.start_token = None; }
-        d.links.retain(|_, l| !matches!(&l.stage, Stage::Running { activity, .. } if activity.token == token));
+        let Some(d) = self.devices.get_mut(device) else {
+            return;
+        };
+        if d.token.as_deref() == Some(token) {
+            d.token = None;
+        }
+        if d.start_token.as_deref() == Some(token) {
+            d.start_token = None;
+        }
+        d.links.retain(
+            |_, l| !matches!(&l.stage, Stage::Running { activity, .. } if activity.token == token),
+        );
         self.save();
     }
 
@@ -744,7 +919,12 @@ impl State {
             let here = shown(&self.presence, &device.id);
             let mut by_app: BTreeMap<&str, Vec<&Note>> = BTreeMap::new();
             for note in notes {
-                if let (Some(t), Shown::Foreground { thread: Some(viewed) }) = (&note.target.thread, &here)
+                if let (
+                    Some(t),
+                    Shown::Foreground {
+                        thread: Some(viewed),
+                    },
+                ) = (&note.target.thread, &here)
                     && t == viewed
                 {
                     continue;
@@ -752,28 +932,48 @@ impl State {
                 by_app.entry(note.app.as_str()).or_default().push(note);
             }
             for group in by_app.values() {
-                out.push((device.id.clone(), Delivery {
-                    token: token.clone(), environment: device.environment, bundle_id: device.bundle_id.clone(),
-                    push_type: PushType::Alert, priority: 10, collapse_id: None, payload: alert_payload(group),
-                }));
+                out.push((
+                    device.id.clone(),
+                    Delivery {
+                        token: token.clone(),
+                        environment: device.environment,
+                        bundle_id: device.bundle_id.clone(),
+                        push_type: PushType::Alert,
+                        priority: 10,
+                        collapse_id: None,
+                        payload: alert_payload(group),
+                    },
+                ));
             }
         }
         out
     }
 
     /// Notes for finished turns and questions since the last shell.
-    fn changes(&mut self, apps: &[AppView]) -> Vec<(String, String, String, Option<String>, Change)> {
+    fn changes(
+        &mut self,
+        apps: &[AppView],
+    ) -> Vec<(String, String, String, Option<String>, Change)> {
         let mut changes = vec![];
         let first = self.seen.is_none();
         let seen = self.seen.get_or_insert_with(HashMap::new);
         for app in apps {
             let agent = app.agent.iter().map(|(id, row)| (id, None, row));
-            let workers = app.workers.iter().map(|(id, title, row)| (id, Some(title), row));
+            let workers = app
+                .workers
+                .iter()
+                .map(|(id, title, row)| (id, Some(title), row));
             for (id, title, row) in agent.chain(workers) {
                 let turn = row["latestTurn"]["turnId"].as_str().map(str::to_string);
                 let now = phase(row);
                 if !first && let Some(change) = change(seen.get(id), turn.clone(), now) {
-                    changes.push((app.app.clone(), app.project_id.clone(), id.clone(), title.cloned(), change));
+                    changes.push((
+                        app.app.clone(),
+                        app.project_id.clone(),
+                        id.clone(),
+                        title.cloned(),
+                        change,
+                    ));
                 }
                 seen.insert(id.clone(), (turn, now));
             }
@@ -787,18 +987,35 @@ impl State {
         for app in apps {
             let (observed, stepping) = observe(app);
             let active = observed.working || observed.needs_you;
-            let entry = self.apps.entry(app.project_id.clone()).or_insert_with(|| AppLive {
-                name: app.app.clone(), want: Want::Hide(observed.clone()), stepping: None, step: None,
-            });
+            let entry = self
+                .apps
+                .entry(app.project_id.clone())
+                .or_insert_with(|| AppLive {
+                    name: app.app.clone(),
+                    want: Want::Hide(observed.clone()),
+                    stepping: None,
+                    step: None,
+                });
             entry.name = app.app.clone();
             entry.want = match (&entry.want, active) {
                 (_, true) => Want::Show(observed),
-                (Want::Show(_), false) => Want::Pausing { since: now, last: observed },
-                (Want::Pausing { since, .. }, false) => Want::Pausing { since: *since, last: observed },
+                (Want::Show(_), false) => Want::Pausing {
+                    since: now,
+                    last: observed,
+                },
+                (Want::Pausing { since, .. }, false) => Want::Pausing {
+                    since: *since,
+                    last: observed,
+                },
                 (Want::Hide(_), false) => Want::Hide(observed),
             };
             if entry.step.as_ref().map(|s| &s.key) != stepping.as_ref() {
-                entry.step = stepping.clone().map(|key| Step { key, text: None, checked: None, looking: false });
+                entry.step = stepping.clone().map(|key| Step {
+                    key,
+                    text: None,
+                    checked: None,
+                    looking: false,
+                });
             }
             entry.stepping = stepping;
         }
@@ -806,15 +1023,33 @@ impl State {
 
     /// One pass of the reconciler: the sends and step lookups due now, and
     /// when the next pass is due.
-    fn reconcile(&mut self, timing: Timing) -> (Vec<(u32, Outgoing)>, Vec<(String, StepKey)>, Option<Instant>) {
+    fn reconcile(
+        &mut self,
+        timing: Timing,
+    ) -> (
+        Vec<(u32, Outgoing)>,
+        Vec<(String, StepKey)>,
+        Option<Instant>,
+    ) {
         let now = Instant::now();
         let mut next: Option<Instant> = None;
         let mut due = |at: Instant| next = Some(next.map_or(at, |n: Instant| n.min(at)));
         let mut sends = vec![];
         let mut lookups = vec![];
         // The step is read only while it can reach someone.
-        let recipients: Vec<String> = self.apps.keys().filter(|p| self.has_recipient(p)).cloned().collect();
-        let State { devices, presence, apps, generation, .. } = self;
+        let recipients: Vec<String> = self
+            .apps
+            .keys()
+            .filter(|p| self.has_recipient(p))
+            .cloned()
+            .collect();
+        let State {
+            devices,
+            presence,
+            apps,
+            generation,
+            ..
+        } = self;
         for app in apps.values_mut() {
             if let Want::Pausing { since, last } = &app.want {
                 if now.duration_since(*since) >= timing.pause {
@@ -831,7 +1066,10 @@ impl State {
                 if let Some(Link { flight, .. }) = &link {
                     match flight {
                         Flight::Sending(_) => continue,
-                        Flight::Waiting { until, .. } if *until > now => { due(*until); continue }
+                        Flight::Waiting { until, .. } if *until > now => {
+                            due(*until);
+                            continue;
+                        }
                         _ => {}
                     }
                 }
@@ -841,25 +1079,43 @@ impl State {
                     (Want::Show(shown), Some(Stage::Running { activity, acked })) => {
                         let content = app.stepped(shown);
                         let important = acked.as_ref().is_none_or(|(s, _)| {
-                            s.working != content.working || s.needs_you != content.needs_you || s.workers != content.workers
+                            s.working != content.working
+                                || s.needs_you != content.needs_you
+                                || s.workers != content.workers
                         });
                         match acked {
                             Some((s, _)) if *s == content => continue,
-                            Some((_, at)) if !important && now.duration_since(*at) < timing.throttle => {
+                            Some((_, at))
+                                if !important && now.duration_since(*at) < timing.throttle =>
+                            {
                                 due(*at + timing.throttle);
                                 continue;
                             }
                             _ => {}
                         }
-                        (Message::Update(content), activity.token.clone(), if important { 10 } else { 5 })
+                        (
+                            Message::Update(content),
+                            activity.token.clone(),
+                            if important { 10 } else { 5 },
+                        )
                     }
-                    (Want::Show(_), Some(Stage::Starting { at })) if now.duration_since(*at) < START_WAIT => continue,
+                    (Want::Show(_), Some(Stage::Starting { at }))
+                        if now.duration_since(*at) < START_WAIT =>
+                    {
+                        continue;
+                    }
                     (Want::Show(shown), _) => {
-                        let Some(token) = &device.start_token else { continue };
-                        if here != Shown::Background { continue }
+                        let Some(token) = &device.start_token else {
+                            continue;
+                        };
+                        if here != Shown::Background {
+                            continue;
+                        }
                         (Message::Start(app.stepped(shown)), token.clone(), 10)
                     }
-                    (Want::Hide(last), Some(Stage::Running { activity, .. })) => (Message::End(last.clone()), activity.token.clone(), 10),
+                    (Want::Hide(last), Some(Stage::Running { activity, .. })) => {
+                        (Message::End(last.clone()), activity.token.clone(), 10)
+                    }
                     (Want::Hide(_), Some(Stage::Starting { .. } | Stage::Absent)) => {
                         // Nothing to end; the phone reports a late start's token, which then ends.
                         device.links.remove(project);
@@ -873,23 +1129,49 @@ impl State {
                     Message::Update(s) => (LiveEvent::Update, s.clone()),
                     Message::End(s) => (LiveEvent::End, s.clone()),
                 };
-                let failures = match link.as_ref().map(|l| l.flight) { Some(Flight::Waiting { failures, .. }) => failures, _ => 0 };
-                let entry = device.links.entry(project.clone()).or_insert_with(|| Link::new(Stage::Absent));
+                let failures = match link.as_ref().map(|l| l.flight) {
+                    Some(Flight::Waiting { failures, .. }) => failures,
+                    _ => 0,
+                };
+                let entry = device
+                    .links
+                    .entry(project.clone())
+                    .or_insert_with(|| Link::new(Stage::Absent));
                 entry.flight = Flight::Sending(*generation);
-                sends.push((failures, Outgoing {
-                    device: device.id.clone(), project: project.clone(), generation: *generation, message,
-                    delivery: Delivery {
-                        token, environment: device.environment, bundle_id: device.bundle_id.clone(),
-                        push_type: PushType::LiveActivity, priority, collapse_id: None,
-                        payload: activity_payload(event, &body, &app.name, project, crate::model::now()),
+                sends.push((
+                    failures,
+                    Outgoing {
+                        device: device.id.clone(),
+                        project: project.clone(),
+                        generation: *generation,
+                        message,
+                        delivery: Delivery {
+                            token,
+                            environment: device.environment,
+                            bundle_id: device.bundle_id.clone(),
+                            push_type: PushType::LiveActivity,
+                            priority,
+                            collapse_id: None,
+                            payload: activity_payload(
+                                event,
+                                &body,
+                                &app.name,
+                                project,
+                                crate::model::now(),
+                            ),
+                        },
                     },
-                }));
+                ));
             }
         }
         // One lookup per turn at a time.
         for (project, app) in apps.iter_mut() {
-            let (Want::Show(_), Some(step)) = (&app.want, app.step.as_mut()) else { continue };
-            if step.looking || !recipients.contains(project) { continue }
+            let (Want::Show(_), Some(step)) = (&app.want, app.step.as_mut()) else {
+                continue;
+            };
+            if step.looking || !recipients.contains(project) {
+                continue;
+            }
             match step.checked {
                 Some(at) if now.duration_since(at) < STEP_EVERY => due(at + STEP_EVERY),
                 _ => {
@@ -904,18 +1186,26 @@ impl State {
     /// Applies a send's result, if the link still waits for that send.
     fn settle(&mut self, send: Outgoing, failures: u32, outcome: Result<Outcome>, retry: Duration) {
         let now = Instant::now();
-        let Some(device) = self.devices.get_mut(&send.device) else { return };
-        let Some(link) = device.links.get_mut(&send.project) else { return };
+        let Some(device) = self.devices.get_mut(&send.device) else {
+            return;
+        };
+        let Some(link) = device.links.get_mut(&send.project) else {
+            return;
+        };
         if link.flight != Flight::Sending(send.generation) {
             return; // superseded: a new activity token, or the link went away
         }
         link.flight = Flight::Idle;
         let mut save = false;
         match (&outcome, &send.message) {
-            (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::Start(_)) => link.stage = Stage::Starting { at: now },
+            (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::Start(_)) => {
+                link.stage = Stage::Starting { at: now }
+            }
             (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::Update(content)) => {
                 // A rejected update is not retried: the next change sends anew.
-                if let Stage::Running { acked, .. } = &mut link.stage { *acked = Some((content.clone(), now)); }
+                if let Stage::Running { acked, .. } = &mut link.stage {
+                    *acked = Some((content.clone(), now));
+                }
             }
             (Ok(Outcome::Sent | Outcome::Rejected(_)), Message::End(_)) => {
                 device.links.remove(&send.project);
@@ -923,13 +1213,18 @@ impl State {
             }
             (Ok(Outcome::Unregistered), message) => {
                 device.links.remove(&send.project);
-                if matches!(message, Message::Start(_)) && device.start_token.as_deref() == Some(&send.delivery.token) {
+                if matches!(message, Message::Start(_))
+                    && device.start_token.as_deref() == Some(&send.delivery.token)
+                {
                     device.start_token = None;
                 }
                 save = true;
             }
             (Ok(Outcome::Retry(_)) | Err(_), _) => {
-                link.flight = Flight::Waiting { until: now + backoff(retry, failures + 1), failures: failures + 1 };
+                link.flight = Flight::Waiting {
+                    until: now + backoff(retry, failures + 1),
+                    failures: failures + 1,
+                };
             }
         }
         if save {
@@ -964,16 +1259,38 @@ impl Push {
     }
 
     /// With a given transport and timing, for tests.
-    pub fn with_transport(root: &Path, transport: Arc<dyn Transport>, timing: Timing) -> Result<Arc<Self>> {
+    pub fn with_transport(
+        root: &Path,
+        transport: Arc<dyn Transport>,
+        timing: Timing,
+    ) -> Result<Arc<Self>> {
         Self::build(root, Some(transport), timing)
     }
 
     fn build(root: &Path, fixed: Option<Arc<dyn Transport>>, timing: Timing) -> Result<Arc<Self>> {
         private_dir(&root.join("push"))?;
         let path = root.join("push").join("devices.json");
-        let devices = if path.try_exists()? { read_json(&path)? } else { BTreeMap::new() };
-        let owner = Owner::spawn("push", State { root: root.to_path_buf(), devices, ..State::default() });
-        Ok(Arc::new(Self { root: root.to_path_buf(), owner, fixed, timing, alerts_sent: AtomicU64::new(0), wake: Notify::new() }))
+        let devices = if path.try_exists()? {
+            read_json(&path)?
+        } else {
+            BTreeMap::new()
+        };
+        let owner = Owner::spawn(
+            "push",
+            State {
+                root: root.to_path_buf(),
+                devices,
+                ..State::default()
+            },
+        );
+        Ok(Arc::new(Self {
+            root: root.to_path_buf(),
+            owner,
+            fixed,
+            timing,
+            alerts_sent: AtomicU64::new(0),
+            wake: Notify::new(),
+        }))
     }
 
     pub fn set_threads(&self, threads: Arc<dyn Threads>) {
@@ -990,14 +1307,24 @@ impl Push {
             self.owner.ask(|s| s.loaded = None).await;
             return Ok(None);
         };
-        let loaded = self.owner.ask(move |s| s.loaded.as_ref().filter(|(at, _)| *at == modified).map(|(_, t)| t.clone())).await;
+        let loaded = self
+            .owner
+            .ask(move |s| {
+                s.loaded
+                    .as_ref()
+                    .filter(|(at, _)| *at == modified)
+                    .map(|(_, t)| t.clone())
+            })
+            .await;
         if let Some(transport) = loaded {
             return Ok(Some(transport));
         }
         let config = KeyConfig::load(&self.root)?.context("APNs key disappeared")?;
         let transport: Arc<dyn Transport> = Arc::new(Apns::new(&config)?);
         let made = transport.clone();
-        self.owner.ask(move |s| s.loaded = Some((modified, made))).await;
+        self.owner
+            .ask(move |s| s.loaded = Some((modified, made)))
+            .await;
         Ok(Some(transport))
     }
 
@@ -1005,34 +1332,54 @@ impl Push {
 
     pub async fn register(&self, r: Registration) -> Result<()> {
         ensure!(valid_id(&r.device_id), "invalid device ID");
-        ensure!(valid_id(&r.bundle_id) && r.bundle_id.contains('.'), "invalid bundle ID");
+        ensure!(
+            valid_id(&r.bundle_id) && r.bundle_id.contains('.'),
+            "invalid bundle ID"
+        );
         for token in [&r.token, &r.start_token].into_iter().flatten() {
             ensure!(valid_token(token), "a push token is hex");
         }
-        self.owner.ask(move |s| {
-            let device = s.devices.entry(r.device_id.clone()).or_insert_with(|| Device {
-                id: r.device_id.clone(), token: None, environment: r.environment, bundle_id: r.bundle_id.clone(),
-                start_token: None, links: BTreeMap::new(), updated_at: 0,
-            });
-            if device.environment != r.environment || device.bundle_id != r.bundle_id {
-                // A different build: its activities belong to the old one.
-                device.links.clear();
-                device.token = None;
-                device.start_token = None;
-            }
-            device.environment = r.environment;
-            device.bundle_id = r.bundle_id;
-            if r.token.is_some() { device.token = r.token; }
-            if r.start_token.is_some() { device.start_token = r.start_token; }
-            device.updated_at = crate::model::now();
-            s.save();
-        }).await;
+        self.owner
+            .ask(move |s| {
+                let device = s
+                    .devices
+                    .entry(r.device_id.clone())
+                    .or_insert_with(|| Device {
+                        id: r.device_id.clone(),
+                        token: None,
+                        environment: r.environment,
+                        bundle_id: r.bundle_id.clone(),
+                        start_token: None,
+                        links: BTreeMap::new(),
+                        updated_at: 0,
+                    });
+                if device.environment != r.environment || device.bundle_id != r.bundle_id {
+                    // A different build: its activities belong to the old one.
+                    device.links.clear();
+                    device.token = None;
+                    device.start_token = None;
+                }
+                device.environment = r.environment;
+                device.bundle_id = r.bundle_id;
+                if r.token.is_some() {
+                    device.token = r.token;
+                }
+                if r.start_token.is_some() {
+                    device.start_token = r.start_token;
+                }
+                device.updated_at = crate::model::now();
+                s.save();
+            })
+            .await;
         self.wake.notify_one();
         Ok(())
     }
 
     pub async fn register_activity(&self, r: ActivityRegistration) -> Result<()> {
-        ensure!(valid_id(&r.project_id) && valid_id(&r.activity_id), "invalid ID");
+        ensure!(
+            valid_id(&r.project_id) && valid_id(&r.activity_id),
+            "invalid ID"
+        );
         if let Some(token) = &r.token {
             ensure!(valid_token(token), "a push token is hex");
         }
@@ -1067,19 +1414,40 @@ impl Push {
 
     pub async fn report_presence(&self, r: PresenceReport) -> Result<()> {
         ensure!(valid_id(&r.device_id), "invalid device ID");
-        let shown = if r.foreground { Shown::Foreground { thread: r.thread_id } } else { Shown::Background };
-        self.owner.ask(move |s| { s.presence.insert(r.device_id, Presence { shown, until: Instant::now() + PRESENCE }); }).await;
+        let shown = if r.foreground {
+            Shown::Foreground {
+                thread: r.thread_id,
+            }
+        } else {
+            Shown::Background
+        };
+        self.owner
+            .ask(move |s| {
+                s.presence.insert(
+                    r.device_id,
+                    Presence {
+                        shown,
+                        until: Instant::now() + PRESENCE,
+                    },
+                );
+            })
+            .await;
         self.wake.notify_one();
         Ok(())
     }
 
     pub async fn status(&self) -> Value {
         let key = KeyConfig::load(&self.root).ok().flatten();
-        let devices: Vec<Value> = self.owner.ask(|s| s.devices.values().map(|d| json!({
+        let devices: Vec<Value> = self
+            .owner
+            .ask(|s| {
+                s.devices.values().map(|d| json!({
             "id": d.id, "environment": d.environment, "bundle_id": d.bundle_id,
             "notifications": d.token.is_some(), "live_activity_start": d.start_token.is_some(),
             "live_activities": d.running(), "updated_at": d.updated_at,
-        })).collect()).await;
+        })).collect()
+            })
+            .await;
         json!({
             "configured": key.is_some() || self.fixed.is_some(),
             "key_id": key.as_ref().map(|k| k.key_id.clone()), "team_id": key.as_ref().map(|k| k.team_id.clone()),
@@ -1114,10 +1482,13 @@ impl Push {
     /// Sends the batch; each alert retries transient failures on its own,
     /// under one collapse ID so a retry of a delivered alert replaces it.
     async fn flush(self: &Arc<Self>) {
-        let deliveries = self.owner.ask(|s| {
-            let notes = std::mem::take(&mut s.pending);
-            s.alerts(&notes)
-        }).await;
+        let deliveries = self
+            .owner
+            .ask(|s| {
+                let notes = std::mem::take(&mut s.pending);
+                s.alerts(&notes)
+            })
+            .await;
         for (device, mut delivery) in deliveries {
             let n = self.alerts_sent.fetch_add(1, Ordering::Relaxed);
             delivery.collapse_id = Some(format!("squircle-{}-{n}", crate::model::now()));
@@ -1131,14 +1502,20 @@ impl Push {
             let transport = match self.transport().await {
                 Ok(Some(t)) => t,
                 Ok(None) => return,
-                Err(error) => { eprintln!("Push: {error:#}"); return }
+                Err(error) => {
+                    eprintln!("Push: {error:#}");
+                    return;
+                }
             };
             let outcome = transport.send(&delivery).await;
             if matches!(outcome, Ok(Outcome::Unregistered)) {
                 self.forget(&device, &delivery.token).await;
             }
             if !matches!(outcome, Ok(Outcome::Sent)) {
-                eprintln!("Push to device {device} (try {attempt}): {}", describe(&outcome));
+                eprintln!(
+                    "Push to device {device} (try {attempt}): {}",
+                    describe(&outcome)
+                );
             }
             if !transient(&outcome) {
                 return;
@@ -1152,28 +1529,57 @@ impl Push {
     /// `squircle push test`: a notification, and optionally a Live Activity,
     /// now, once each, reporting what Apple said.
     pub async fn test(&self, live: bool) -> Value {
-        let note = Note { app: "Squircle".into(), line: "Notifications from your Mac work.".into(), target: Target::default() };
-        let deliveries = self.owner.ask(move |s| {
-            let mut deliveries = s.alerts(&[note]);
-            if live {
-                let content = LiveState { status: "Testing the Live Activity".into(), workers: 1, needs_you: false, working: true };
-                for device in s.devices.values() {
-                    let Some(token) = &device.start_token else { continue };
-                    deliveries.push((device.id.clone(), Delivery {
-                        token: token.clone(), environment: device.environment, bundle_id: device.bundle_id.clone(),
-                        push_type: PushType::LiveActivity, priority: 10, collapse_id: None,
-                        payload: activity_payload(LiveEvent::Start, &content, "Squircle", "test", crate::model::now()),
-                    }));
+        let note = Note {
+            app: "Squircle".into(),
+            line: "Notifications from your Mac work.".into(),
+            target: Target::default(),
+        };
+        let deliveries = self
+            .owner
+            .ask(move |s| {
+                let mut deliveries = s.alerts(&[note]);
+                if live {
+                    let content = LiveState {
+                        status: "Testing the Live Activity".into(),
+                        workers: 1,
+                        needs_you: false,
+                        working: true,
+                    };
+                    for device in s.devices.values() {
+                        let Some(token) = &device.start_token else {
+                            continue;
+                        };
+                        deliveries.push((
+                            device.id.clone(),
+                            Delivery {
+                                token: token.clone(),
+                                environment: device.environment,
+                                bundle_id: device.bundle_id.clone(),
+                                push_type: PushType::LiveActivity,
+                                priority: 10,
+                                collapse_id: None,
+                                payload: activity_payload(
+                                    LiveEvent::Start,
+                                    &content,
+                                    "Squircle",
+                                    "test",
+                                    crate::model::now(),
+                                ),
+                            },
+                        ));
+                    }
                 }
-            }
-            deliveries
-        }).await;
+                deliveries
+            })
+            .await;
         if deliveries.is_empty() {
             return json!({"sent": [], "note": "No phone has registered yet. Open Squircle on the phone and allow notifications."});
         }
         let transport = match self.transport().await {
             Ok(Some(t)) => t,
-            Ok(None) => return json!({"sent": [{"error": "No APNs key. Run: squircle push setup --key-file PATH --key-id ID --team-id ID"}]}),
+            Ok(None) => {
+                return json!({"sent": [{"error": "No APNs key. Run: squircle push setup --key-file PATH --key-id ID --team-id ID"}]});
+            }
             Err(error) => return json!({"sent": [{"error": format!("{error:#}")}]}),
         };
         let mut results = vec![];
@@ -1191,7 +1597,11 @@ impl Push {
 
     /// A finished device build. `app` is its catalog app, when the caller
     /// knows it, so even a failed build without output opens its app.
-    pub fn build_finished(self: &Arc<Self>, job: &crate::model::Job, app: Option<&crate::apps::AppRecord>) {
+    pub fn build_finished(
+        self: &Arc<Self>,
+        job: &crate::model::Job,
+        app: Option<&crate::apps::AppRecord>,
+    ) {
         use crate::model::{BuildMode, BuildState};
         let Some(request) = job.request() else { return };
         if request.mode != BuildMode::Archive {
@@ -1199,8 +1609,11 @@ impl Push {
         }
         let output = job.output();
         let record = app;
-        let app = output.map(|o| o.title.clone()).filter(|t| !t.is_empty())
-            .or_else(|| record.map(|r| r.name.clone())).unwrap_or_else(|| request.scheme.clone());
+        let app = output
+            .map(|o| o.title.clone())
+            .filter(|t| !t.is_empty())
+            .or_else(|| record.map(|r| r.name.clone()))
+            .unwrap_or_else(|| request.scheme.clone());
         let line = match job.state() {
             BuildState::Succeeded => match output {
                 Some(o) => format!("Build {} is ready to install", o.build_number),
@@ -1213,8 +1626,11 @@ impl Push {
             _ => return,
         };
         let target = Target {
-            app: record.map(|r| r.id.clone()), build: Some(job.id.clone()),
-            bundle: output.map(|o| o.bundle_id.clone()).or_else(|| record.and_then(|r| r.bundle_id.clone())),
+            app: record.map(|r| r.id.clone()),
+            build: Some(job.id.clone()),
+            bundle: output
+                .map(|o| o.bundle_id.clone())
+                .or_else(|| record.and_then(|r| r.bundle_id.clone())),
             ..Target::default()
         };
         self.notify(Note { app, line, target });
@@ -1225,16 +1641,23 @@ impl Push {
     /// Called with each change to T3's shell: notes for finished turns and
     /// questions, and what each app's Live Activity should show.
     pub async fn apps_changed(self: &Arc<Self>, apps: Vec<AppView>) {
-        let (changes, threads) = self.owner.ask(move |s| {
-            let changes = s.changes(&apps);
-            s.observe(&apps);
-            (changes, s.threads.clone())
-        }).await;
+        let (changes, threads) = self
+            .owner
+            .ask(move |s| {
+                let changes = s.changes(&apps);
+                s.observe(&apps);
+                (changes, s.threads.clone())
+            })
+            .await;
         self.wake.notify_one();
         for (app, project, thread, worker, change) in changes {
             let (this, threads) = (self.clone(), threads.clone());
             tokio::spawn(async move {
-                if worker.is_none() && change == Change::Replied && let Some(t) = &threads && t.quiet(&thread).await {
+                if worker.is_none()
+                    && change == Change::Replied
+                    && let Some(t) = &threads
+                    && t.quiet(&thread).await
+                {
                     return;
                 }
                 let line = match (&worker, change) {
@@ -1242,17 +1665,33 @@ impl Push {
                     (Some(title), Change::Asks) => format!("“{title}” needs you"),
                     (Some(title), Change::Failed) => format!("“{title}” stopped with an error"),
                     (None, Change::Replied) => match &threads {
-                        Some(t) => t.last_reply(&thread).await.map(|r| summary_line(&r)).filter(|l| !l.is_empty())
+                        Some(t) => t
+                            .last_reply(&thread)
+                            .await
+                            .map(|r| summary_line(&r))
+                            .filter(|l| !l.is_empty())
                             .unwrap_or_else(|| "Replied".into()),
                         None => "Replied".into(),
                     },
                     (None, Change::Asks) => match &threads {
-                        Some(t) => t.question(&thread).await.map(|q| summary_line(&q)).unwrap_or_else(|| "Needs your approval".into()),
+                        Some(t) => t
+                            .question(&thread)
+                            .await
+                            .map(|q| summary_line(&q))
+                            .unwrap_or_else(|| "Needs your approval".into()),
                         None => "Needs you".into(),
                     },
                     (None, Change::Failed) => "Stopped with an error".into(),
                 };
-                this.notify(Note { app, line, target: Target { project: Some(project), thread: Some(thread), ..Target::default() } });
+                this.notify(Note {
+                    app,
+                    line,
+                    target: Target {
+                        project: Some(project),
+                        thread: Some(thread),
+                        ..Target::default()
+                    },
+                });
             });
         }
     }
@@ -1262,7 +1701,9 @@ impl Push {
     pub async fn run(self: Arc<Self>) {
         loop {
             let next = self.reconcile().await;
-            let wait = next.map_or(TICK, |at| at.saturating_duration_since(Instant::now())).min(TICK);
+            let wait = next
+                .map_or(TICK, |at| at.saturating_duration_since(Instant::now()))
+                .min(TICK);
             tokio::select! {
                 _ = self.wake.notified() => {}
                 _ = tokio::time::sleep(wait) => {}
@@ -1276,7 +1717,10 @@ impl Push {
         let transport = match self.transport().await {
             Ok(Some(t)) => t,
             Ok(None) => return None, // nobody to tell: no sends, no lookups
-            Err(error) => { eprintln!("Push: {error:#}"); return None }
+            Err(error) => {
+                eprintln!("Push: {error:#}");
+                return None;
+            }
         };
         let timing = self.timing;
         let (sends, lookups, next) = self.owner.ask(move |s| s.reconcile(timing)).await;
@@ -1297,10 +1741,17 @@ impl Push {
     /// Applies a send's result, if the link still waits for that send.
     async fn settle(&self, send: Outgoing, failures: u32, outcome: Result<Outcome>) {
         if !matches!(outcome, Ok(Outcome::Sent)) {
-            eprintln!("Live Activity push to device {} ({}): {}", send.device, send.project, describe(&outcome));
+            eprintln!(
+                "Live Activity push to device {} ({}): {}",
+                send.device,
+                send.project,
+                describe(&outcome)
+            );
         }
         let retry = self.timing.retry;
-        self.owner.ask(move |s| s.settle(send, failures, outcome, retry)).await;
+        self.owner
+            .ask(move |s| s.settle(send, failures, outcome, retry))
+            .await;
         self.wake.notify_one();
     }
 
@@ -1309,17 +1760,29 @@ impl Push {
     async fn look_up(&self, project: String, key: StepKey) {
         let threads = self.owner.ask(|s| s.threads.clone()).await;
         let text = match threads {
-            Some(t) => tokio::time::timeout(STEP_DEADLINE, t.current_step(&key.thread)).await.ok().flatten(),
+            Some(t) => tokio::time::timeout(STEP_DEADLINE, t.current_step(&key.thread))
+                .await
+                .ok()
+                .flatten(),
             None => None,
         };
-        self.owner.ask(move |s| {
-            let Some(step) = s.apps.get_mut(&project).and_then(|a| a.step.as_mut()).filter(|s| s.key == key) else { return };
-            step.looking = false;
-            step.checked = Some(Instant::now());
-            if text.is_some() {
-                step.text = text;
-            }
-        }).await;
+        self.owner
+            .ask(move |s| {
+                let Some(step) = s
+                    .apps
+                    .get_mut(&project)
+                    .and_then(|a| a.step.as_mut())
+                    .filter(|s| s.key == key)
+                else {
+                    return;
+                };
+                step.looking = false;
+                step.checked = Some(Instant::now());
+                if text.is_some() {
+                    step.text = text;
+                }
+            })
+            .await;
         self.wake.notify_one();
     }
 }
@@ -1329,27 +1792,47 @@ impl Push {
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use axum::{Router, extract::State, http::HeaderMap, routing::post};
+    use std::sync::Mutex;
 
     // A throwaway P-256 key in Apple's .p8 format (PKCS#8 with public key).
     fn key() -> KeyConfig {
         let rng = ring::rand::SystemRandom::new();
         let der = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
         let body = base64::engine::general_purpose::STANDARD.encode(der.as_ref());
-        let lines: Vec<&str> = body.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).unwrap()).collect();
-        KeyConfig { key_id: "AB12CD34EF".into(), team_id: "2F26US4NAU".into(),
-                    key_pem: format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----", lines.join("\n")) }
+        let lines: Vec<&str> = body
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        KeyConfig {
+            key_id: "AB12CD34EF".into(),
+            team_id: "2F26US4NAU".into(),
+            key_pem: format!(
+                "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----",
+                lines.join("\n")
+            ),
+        }
     }
 
     fn verify(jwt: &str, public: &[u8]) -> (Value, Value) {
         let parts: Vec<&str> = jwt.split('.').collect();
         assert_eq!(parts.len(), 3);
-        let decode = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s).unwrap();
+        let decode = |s: &str| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(s)
+                .unwrap()
+        };
         ring::signature::UnparsedPublicKey::new(&ring::signature::ECDSA_P256_SHA256_FIXED, public)
-            .verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &decode(parts[2]))
+            .verify(
+                format!("{}.{}", parts[0], parts[1]).as_bytes(),
+                &decode(parts[2]),
+            )
             .expect("signature verifies");
-        (serde_json::from_slice(&decode(parts[0])).unwrap(), serde_json::from_slice(&decode(parts[1])).unwrap())
+        (
+            serde_json::from_slice(&decode(parts[0])).unwrap(),
+            serde_json::from_slice(&decode(parts[1])).unwrap(),
+        )
     }
 
     #[test]
@@ -1357,35 +1840,77 @@ mod tests {
         let signer = Signer::new(&key()).unwrap();
         let (header, claims) = verify(&signer.jwt(1_700_000_000).unwrap(), signer.public_key());
         assert_eq!(header, json!({"alg": "ES256", "kid": "AB12CD34EF"}));
-        assert_eq!(claims, json!({"iss": "2F26US4NAU", "iat": 1_700_000_000u64}));
-        assert!(Signer::new(&KeyConfig { key_pem: "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----".into(), ..key() }).is_err());
+        assert_eq!(
+            claims,
+            json!({"iss": "2F26US4NAU", "iat": 1_700_000_000u64})
+        );
+        assert!(
+            Signer::new(&KeyConfig {
+                key_pem: "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----".into(),
+                ..key()
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn a_burst_becomes_one_alert_that_opens_the_common_target() {
-        let note = |line: &str, thread: &str| Note { app: "Notes".into(), line: line.into(),
-            target: Target { project: Some("p".into()), thread: Some(thread.into()), ..Target::default() } };
-        let (a, b) = (note("“Login” finished", "w1"), note("“Search” finished", "w2"));
+        let note = |line: &str, thread: &str| Note {
+            app: "Notes".into(),
+            line: line.into(),
+            target: Target {
+                project: Some("p".into()),
+                thread: Some(thread.into()),
+                ..Target::default()
+            },
+        };
+        let (a, b) = (
+            note("“Login” finished", "w1"),
+            note("“Search” finished", "w2"),
+        );
         let payload = alert_payload(&[&a, &b]);
-        assert_eq!(payload["aps"]["alert"], json!({"title": "Notes", "body": "“Login” finished\n“Search” finished"}));
+        assert_eq!(
+            payload["aps"]["alert"],
+            json!({"title": "Notes", "body": "“Login” finished\n“Search” finished"})
+        );
         assert_eq!(payload["aps"]["thread-id"], "p");
         assert_eq!(payload["squircle"], json!({"project": "p"}));
         let lines: Vec<Note> = (0..6).map(|i| note(&format!("line {i}"), "w1")).collect();
         let payload = alert_payload(&lines.iter().collect::<Vec<_>>());
-        assert_eq!(payload["aps"]["alert"]["body"], "line 0\nline 1\nline 2\n+3 more");
+        assert_eq!(
+            payload["aps"]["alert"]["body"],
+            "line 0\nline 1\nline 2\n+3 more"
+        );
         assert_eq!(payload["squircle"], json!({"project": "p", "thread": "w1"}));
     }
 
     #[test]
     fn activity_payloads_match_activitykit() {
-        let state = LiveState { status: "Edited Theme.swift".into(), workers: 2, needs_you: false, working: true };
+        let state = LiveState {
+            status: "Edited Theme.swift".into(),
+            workers: 2,
+            needs_you: false,
+            working: true,
+        };
         let start = activity_payload(LiveEvent::Start, &state, "Notes", "p1", 100);
         assert_eq!(start["aps"]["event"], "start");
         assert_eq!(start["aps"]["attributes-type"], ACTIVITY_TYPE);
-        assert_eq!(start["aps"]["attributes"], json!({"appName": "Notes", "projectID": "p1"}));
-        assert_eq!(start["aps"]["content-state"], json!({"status": "Edited Theme.swift", "workers": 2, "needsYou": false, "working": true}));
+        assert_eq!(
+            start["aps"]["attributes"],
+            json!({"appName": "Notes", "projectID": "p1"})
+        );
+        assert_eq!(
+            start["aps"]["content-state"],
+            json!({"status": "Edited Theme.swift", "workers": 2, "needsYou": false, "working": true})
+        );
         let end = activity_payload(LiveEvent::End, &state, "Notes", "p1", 100);
-        assert_eq!((end["aps"]["event"].as_str(), end["aps"]["dismissal-date"].as_u64()), (Some("end"), Some(220)));
+        assert_eq!(
+            (
+                end["aps"]["event"].as_str(),
+                end["aps"]["dismissal-date"].as_u64()
+            ),
+            (Some("end"), Some(220))
+        );
         assert!(end["aps"]["attributes"].is_null());
     }
 
@@ -1393,15 +1918,36 @@ mod tests {
     fn turns_report_once_when_they_stop_or_ask() {
         let t = |s: &str| Some(s.to_string());
         let was = |turn: &str, p| (t(turn), p);
-        assert_eq!(change(Some(&was("a", Phase::Working)), t("a"), Phase::Done), Some(Change::Replied));
-        assert_eq!(change(Some(&was("a", Phase::Done)), t("a"), Phase::Done), None);
-        assert_eq!(change(Some(&was("a", Phase::Done)), t("b"), Phase::Done), Some(Change::Replied));
-        assert_eq!(change(Some(&was("a", Phase::Working)), t("a"), Phase::NeedsYou), Some(Change::Asks));
-        assert_eq!(change(Some(&was("a", Phase::NeedsYou)), t("a"), Phase::Done), None);
-        assert_eq!(change(Some(&was("a", Phase::Working)), t("a"), Phase::Error), Some(Change::Failed));
+        assert_eq!(
+            change(Some(&was("a", Phase::Working)), t("a"), Phase::Done),
+            Some(Change::Replied)
+        );
+        assert_eq!(
+            change(Some(&was("a", Phase::Done)), t("a"), Phase::Done),
+            None
+        );
+        assert_eq!(
+            change(Some(&was("a", Phase::Done)), t("b"), Phase::Done),
+            Some(Change::Replied)
+        );
+        assert_eq!(
+            change(Some(&was("a", Phase::Working)), t("a"), Phase::NeedsYou),
+            Some(Change::Asks)
+        );
+        assert_eq!(
+            change(Some(&was("a", Phase::NeedsYou)), t("a"), Phase::Done),
+            None
+        );
+        assert_eq!(
+            change(Some(&was("a", Phase::Working)), t("a"), Phase::Error),
+            Some(Change::Failed)
+        );
         assert_eq!(change(None, t("a"), Phase::Done), None);
         assert_eq!(change(Some(&(None, Phase::Done)), None, Phase::Done), None);
-        assert_eq!(summary_line("\n## **Done.** Fixed `login` and pushed.\nMore"), "Done. Fixed login and pushed.");
+        assert_eq!(
+            summary_line("\n## **Done.** Fixed `login` and pushed.\nMore"),
+            "Done. Fixed login and pushed."
+        );
     }
 
     type Seen = Arc<Mutex<Vec<(HeaderMap, String, Value)>>>;
@@ -1409,16 +1955,28 @@ mod tests {
     /// A fake APNs over HTTP/2: records requests, answers like Apple.
     async fn fake_apns() -> (String, Seen) {
         let seen: Seen = Arc::default();
-        let app = Router::new().route("/3/device/{token}", post(
-            |State(seen): State<Seen>, axum::extract::Path(token): axum::extract::Path<String>, headers: HeaderMap, body: axum::Json<Value>| async move {
-                let gone = token.starts_with("dead");
-                seen.lock().unwrap().push((headers, token, body.0));
-                if gone {
-                    (axum::http::StatusCode::GONE, axum::Json(json!({"reason": "Unregistered"})))
-                } else {
-                    (axum::http::StatusCode::OK, axum::Json(json!({})))
-                }
-            })).with_state(seen.clone());
+        let app = Router::new()
+            .route(
+                "/3/device/{token}",
+                post(
+                    |State(seen): State<Seen>,
+                     axum::extract::Path(token): axum::extract::Path<String>,
+                     headers: HeaderMap,
+                     body: axum::Json<Value>| async move {
+                        let gone = token.starts_with("dead");
+                        seen.lock().unwrap().push((headers, token, body.0));
+                        if gone {
+                            (
+                                axum::http::StatusCode::GONE,
+                                axum::Json(json!({"reason": "Unregistered"})),
+                            )
+                        } else {
+                            (axum::http::StatusCode::OK, axum::Json(json!({})))
+                        }
+                    },
+                ),
+            )
+            .with_state(seen.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1431,17 +1989,61 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = key();
         let public = Signer::new(&config).unwrap().public_key().to_vec();
-        let timing = Timing { coalesce: Duration::from_millis(50), ..Timing::default() };
-        let push = Push::with_transport(dir.path(), Arc::new(Apns::with_hosts(&config, &url, &url).unwrap()), timing).unwrap();
-        push.register(Registration { device_id: "phone".into(), bundle_id: "ai.dreamslate.Squircle".into(),
-            environment: Environment::Development, token: Some("ab".repeat(32)), start_token: None }).await.unwrap();
-        push.register(Registration { device_id: "old".into(), bundle_id: "ai.dreamslate.Squircle".into(),
-            environment: Environment::Production, token: Some(format!("dead{}", "0".repeat(28))), start_token: None }).await.unwrap();
-        assert!(push.register(Registration { device_id: "x".into(), bundle_id: "ai.dreamslate.Squircle".into(),
-            environment: Environment::Development, token: Some("../../x".into()), start_token: None }).await.is_err());
-        push.report_presence(PresenceReport { device_id: "phone".into(), foreground: true, thread_id: Some("t1".into()) }).await.unwrap();
-        let note = |line: &str, thread: &str| Note { app: "Notes".into(), line: line.into(),
-            target: Target { project: Some("p".into()), thread: Some(thread.into()), ..Target::default() } };
+        let timing = Timing {
+            coalesce: Duration::from_millis(50),
+            ..Timing::default()
+        };
+        let push = Push::with_transport(
+            dir.path(),
+            Arc::new(Apns::with_hosts(&config, &url, &url).unwrap()),
+            timing,
+        )
+        .unwrap();
+        push.register(Registration {
+            device_id: "phone".into(),
+            bundle_id: "ai.dreamslate.Squircle".into(),
+            environment: Environment::Development,
+            token: Some("ab".repeat(32)),
+            start_token: None,
+        })
+        .await
+        .unwrap();
+        push.register(Registration {
+            device_id: "old".into(),
+            bundle_id: "ai.dreamslate.Squircle".into(),
+            environment: Environment::Production,
+            token: Some(format!("dead{}", "0".repeat(28))),
+            start_token: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            push.register(Registration {
+                device_id: "x".into(),
+                bundle_id: "ai.dreamslate.Squircle".into(),
+                environment: Environment::Development,
+                token: Some("../../x".into()),
+                start_token: None
+            })
+            .await
+            .is_err()
+        );
+        push.report_presence(PresenceReport {
+            device_id: "phone".into(),
+            foreground: true,
+            thread_id: Some("t1".into()),
+        })
+        .await
+        .unwrap();
+        let note = |line: &str, thread: &str| Note {
+            app: "Notes".into(),
+            line: line.into(),
+            target: Target {
+                project: Some("p".into()),
+                thread: Some(thread.into()),
+                ..Target::default()
+            },
+        };
         push.notify(note("Looked at it", "t1"));
         push.notify(note("“Login” finished", "w1"));
         tokio::time::sleep(Duration::from_millis(400)).await;
@@ -1450,16 +2052,37 @@ mod tests {
             let requests = seen.lock().unwrap();
             assert_eq!(requests.len(), 2, "one alert per device");
             let (headers, _, body) = requests.iter().find(|r| r.1.starts_with("abab")).unwrap();
-            assert_eq!(body["aps"]["alert"]["body"], "“Login” finished", "the viewed thread is left out on that phone");
+            assert_eq!(
+                body["aps"]["alert"]["body"], "“Login” finished",
+                "the viewed thread is left out on that phone"
+            );
             assert_eq!(headers["apns-topic"], "ai.dreamslate.Squircle");
             assert_eq!(headers["apns-push-type"], "alert");
-            let jwt = headers["authorization"].to_str().unwrap().strip_prefix("bearer ").or_else(|| headers["authorization"].to_str().unwrap().strip_prefix("Bearer ")).unwrap();
+            let jwt = headers["authorization"]
+                .to_str()
+                .unwrap()
+                .strip_prefix("bearer ")
+                .or_else(|| {
+                    headers["authorization"]
+                        .to_str()
+                        .unwrap()
+                        .strip_prefix("Bearer ")
+                })
+                .unwrap();
             verify(jwt, &public);
             let (_, _, other) = requests.iter().find(|r| r.1.starts_with("dead")).unwrap();
-            assert_eq!(other["aps"]["alert"]["body"], "Looked at it\n“Login” finished");
+            assert_eq!(
+                other["aps"]["alert"]["body"],
+                "Looked at it\n“Login” finished"
+            );
         }
         let status = push.status().await;
-        let old = status["devices"].as_array().unwrap().iter().find(|d| d["id"] == "old").unwrap();
+        let old = status["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["id"] == "old")
+            .unwrap();
         assert_eq!(old["notifications"], false, "a 410 forgets the token");
     }
 
@@ -1474,19 +2097,30 @@ mod tests {
         fn send<'a>(&'a self, delivery: &'a Delivery) -> BoxFuture<'a, Result<Outcome>> {
             self.sent.lock().unwrap().push(delivery.clone());
             let mut answers = self.answers.lock().unwrap();
-            let next = answers.iter().position(|(kind, _)| *kind == delivery.push_type);
+            let next = answers
+                .iter()
+                .position(|(kind, _)| *kind == delivery.push_type);
             let outcome = next.map_or(Outcome::Sent, |i| answers.remove(i).1);
             Box::pin(async move { Ok(outcome) })
         }
     }
 
     fn fast() -> Timing {
-        Timing { coalesce: Duration::from_millis(10), retry: Duration::from_millis(30), pause: Duration::from_millis(40),
-                 throttle: Duration::from_millis(20) }
+        Timing {
+            coalesce: Duration::from_millis(10),
+            retry: Duration::from_millis(30),
+            pause: Duration::from_millis(40),
+            throttle: Duration::from_millis(20),
+        }
     }
 
     fn app(agent: Value) -> Vec<AppView> {
-        vec![AppView { project_id: "p".into(), app: "Notes".into(), agent: Some(("agent".into(), agent)), workers: vec![] }]
+        vec![AppView {
+            project_id: "p".into(),
+            app: "Notes".into(),
+            agent: Some(("agent".into(), agent)),
+            workers: vec![],
+        }]
     }
 
     fn working(turn: &str) -> Value {
@@ -1494,15 +2128,34 @@ mod tests {
     }
 
     async fn phone(push: &Push) {
-        push.register(Registration { device_id: "phone".into(), bundle_id: "ai.dreamslate.Squircle".into(),
-            environment: Environment::Development, token: Some("ab".repeat(32)), start_token: None }).await.unwrap();
-        push.register_activity(ActivityRegistration { device_id: "phone".into(), project_id: "p".into(),
-            activity_id: "a1".into(), token: Some("cd".repeat(32)) }).await.unwrap();
+        push.register(Registration {
+            device_id: "phone".into(),
+            bundle_id: "ai.dreamslate.Squircle".into(),
+            environment: Environment::Development,
+            token: Some("ab".repeat(32)),
+            start_token: None,
+        })
+        .await
+        .unwrap();
+        push.register_activity(ActivityRegistration {
+            device_id: "phone".into(),
+            project_id: "p".into(),
+            activity_id: "a1".into(),
+            token: Some("cd".repeat(32)),
+        })
+        .await
+        .unwrap();
     }
 
     fn events(transport: &Scripted) -> Vec<String> {
-        transport.sent.lock().unwrap().iter().filter(|d| d.push_type == PushType::LiveActivity)
-            .map(|d| d.payload["aps"]["event"].as_str().unwrap().to_string()).collect()
+        transport
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| d.push_type == PushType::LiveActivity)
+            .map(|d| d.payload["aps"]["event"].as_str().unwrap().to_string())
+            .collect()
     }
 
     #[tokio::test]
@@ -1514,10 +2167,25 @@ mod tests {
         phone(&push).await;
 
         // An alert that APNs drops once arrives on the retry, under one collapse ID.
-        transport.answers.lock().unwrap().push((PushType::Alert, Outcome::Retry("HTTP 503".into())));
-        push.notify(Note { app: "Notes".into(), line: "Build failed".into(), target: Target::default() });
+        transport
+            .answers
+            .lock()
+            .unwrap()
+            .push((PushType::Alert, Outcome::Retry("HTTP 503".into())));
+        push.notify(Note {
+            app: "Notes".into(),
+            line: "Build failed".into(),
+            target: Target::default(),
+        });
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let alerts: Vec<Delivery> = transport.sent.lock().unwrap().iter().filter(|d| d.push_type == PushType::Alert).cloned().collect();
+        let alerts: Vec<Delivery> = transport
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|d| d.push_type == PushType::Alert)
+            .cloned()
+            .collect();
         assert_eq!(alerts.len(), 2);
         transport.sent.lock().unwrap().clear();
         assert!(alerts[0].collapse_id.is_some() && alerts[0].collapse_id == alerts[1].collapse_id);
@@ -1527,16 +2195,35 @@ mod tests {
         assert_eq!(events(&transport), ["update"]);
 
         // Idle past the pause: the End fails once, and the token survives it.
-        transport.answers.lock().unwrap().push((PushType::LiveActivity, Outcome::Retry("HTTP 500".into())));
-        push.apps_changed(app(json!({"latestTurn": {"turnId": "t1", "state": "completed"}}))).await;
+        transport
+            .answers
+            .lock()
+            .unwrap()
+            .push((PushType::LiveActivity, Outcome::Retry("HTTP 500".into())));
+        push.apps_changed(app(
+            json!({"latestTurn": {"turnId": "t1", "state": "completed"}}),
+        ))
+        .await;
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(events(&transport), ["update", "end"]);
-        assert_eq!(push.status().await["devices"][0]["live_activities"], 1, "token kept for the retry");
+        assert_eq!(
+            push.status().await["devices"][0]["live_activities"],
+            1,
+            "token kept for the retry"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(events(&transport), ["update", "end", "end"]);
-        assert_eq!(push.status().await["devices"][0]["live_activities"], 0, "forgotten once ended");
+        assert_eq!(
+            push.status().await["devices"][0]["live_activities"],
+            0,
+            "forgotten once ended"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(events(&transport).len(), 3, "nothing more once acknowledged");
+        assert_eq!(
+            events(&transport).len(),
+            3,
+            "nothing more once acknowledged"
+        );
     }
 
     /// The first lookup waits to be released; later ones answer at once.
@@ -1546,11 +2233,21 @@ mod tests {
     }
 
     impl Threads for SlowSteps {
-        fn last_reply<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> { Box::pin(async { None }) }
-        fn quiet<'a>(&'a self, _: &'a str) -> BoxFuture<'a, bool> { Box::pin(async { false }) }
-        fn question<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> { Box::pin(async { None }) }
+        fn last_reply<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async { None })
+        }
+        fn quiet<'a>(&'a self, _: &'a str) -> BoxFuture<'a, bool> {
+            Box::pin(async { false })
+        }
+        fn question<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async { None })
+        }
         fn current_step<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Option<String>> {
-            let first = { let mut calls = self.calls.lock().unwrap(); calls.push("step".into()); calls.len() == 1 };
+            let first = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push("step".into());
+                calls.len() == 1
+            };
             Box::pin(async move {
                 if first {
                     self.release.notified().await;
@@ -1567,13 +2264,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let transport = Arc::new(Scripted::default());
         let push = Push::with_transport(dir.path(), transport.clone(), fast()).unwrap();
-        let steps = Arc::new(SlowSteps { calls: Mutex::default(), release: tokio::sync::Notify::new() });
+        let steps = Arc::new(SlowSteps {
+            calls: Mutex::default(),
+            release: tokio::sync::Notify::new(),
+        });
         push.set_threads(steps.clone());
         tokio::spawn(push.clone().run());
 
         push.apps_changed(app(working("t1"))).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(steps.calls.lock().unwrap().is_empty(), "no phone, no lookup");
+        assert!(
+            steps.calls.lock().unwrap().is_empty(),
+            "no phone, no lookup"
+        );
 
         phone(&push).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1583,9 +2286,25 @@ mod tests {
         steps.release.notify_one();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let statuses: Vec<String> = transport.sent.lock().unwrap().iter()
-            .map(|d| d.payload["aps"]["content-state"]["status"].as_str().unwrap_or_default().to_string()).collect();
-        assert!(statuses.contains(&"New turn's step".to_string()), "{statuses:?}");
-        assert!(!statuses.contains(&"Old turn's step".to_string()), "{statuses:?}");
+        let statuses: Vec<String> = transport
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                d.payload["aps"]["content-state"]["status"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            statuses.contains(&"New turn's step".to_string()),
+            "{statuses:?}"
+        );
+        assert!(
+            !statuses.contains(&"Old turn's step".to_string()),
+            "{statuses:?}"
+        );
     }
 }

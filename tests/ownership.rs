@@ -8,7 +8,15 @@ use std::path::{Path, PathBuf};
 
 /// Locks, and the calls that block a thread until something else happens.
 const BANNED: [&str; 9] = [
-    "Mutex", "RwLock", "Condvar", "parking_lot", "blocking_recv", "blocking_send", "blocking_lock", "block_on", "get_or_init",
+    "Mutex",
+    "RwLock",
+    "Condvar",
+    "parking_lot",
+    "blocking_recv",
+    "blocking_send",
+    "blocking_lock",
+    "block_on",
+    "get_or_init",
 ];
 
 /// The one lock: a lane's turn, entered only in rank order (`actor::Lane`).
@@ -29,7 +37,11 @@ fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
 fn without_tests(text: &str) -> &str {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.iter().enumerate().find(|(i, line)| {
-        line.trim() == "#[cfg(test)]" && lines[i + 1..].iter().take(4).any(|l| l.trim_start().starts_with("mod tests"))
+        line.trim() == "#[cfg(test)]"
+            && lines[i + 1..]
+                .iter()
+                .take(4)
+                .any(|l| l.trim_start().starts_with("mod tests"))
     });
     match start {
         Some((i, _)) => &text[..lines[..i].iter().map(|l| l.len() + 1).sum::<usize>()],
@@ -44,19 +56,33 @@ fn the_service_shares_state_only_through_owners() {
     sources(&root.join("src"), &mut files);
     let mut found = vec![];
     for file in files {
-        let name = file.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let name = file
+            .strip_prefix(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let text = std::fs::read_to_string(&file).unwrap();
         for (number, line) in without_tests(&text).lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
             for word in BANNED.iter().filter(|word| code.contains(*word)) {
-                if !ALLOWED.iter().any(|(allowed, exact)| *allowed == name && line.trim() == *exact) {
+                if !ALLOWED
+                    .iter()
+                    .any(|(allowed, exact)| *allowed == name && line.trim() == *exact)
+                {
                     found.push(format!("{name}:{}: {word}: {}", number + 1, line.trim()));
                 }
             }
         }
     }
-    assert!(found.is_empty(), "Share state through a crate::actor::Owner (readers use a Snapshot; \
-        non-overlapping async work a ranked Lane) instead of:\n{}", found.join("\n"));
+    assert!(
+        found.is_empty(),
+        "Share state through a crate::actor::Owner (readers use a Snapshot; \
+        non-overlapping async work a ranked Lane) instead of:\n{}",
+        found.join("\n")
+    );
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    assert!(!manifest.contains("parking_lot"), "parking_lot is a lock crate");
+    assert!(
+        !manifest.contains("parking_lot"),
+        "parking_lot is a lock crate"
+    );
 }

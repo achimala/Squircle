@@ -9,12 +9,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -32,7 +27,9 @@ impl T3Config {
     pub fn load(root: &Path) -> Result<Self> {
         let path = root.join("t3.json");
         if !path.try_exists()? {
-            bail!("Squircle is not paired with T3. Run: squircle t3 connect --url http://127.0.0.1:3773 (reads a T3 pairing token on stdin)");
+            bail!(
+                "Squircle is not paired with T3. Run: squircle t3 connect --url http://127.0.0.1:3773 (reads a T3 pairing token on stdin)"
+            );
         }
         let config: Self = read_json(&path)?;
         crate::origin::credential_origin(&config.url, "T3 URL in t3.json")?;
@@ -54,10 +51,19 @@ pub async fn pair(root: &Path, url: &str, pairing_token: &str) -> Result<T3Confi
     let response = http_client()?
         .post(format!("{url}/oauth/token"))
         .form(&[
-            ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
             ("subject_token", pairing_token.trim()),
-            ("subject_token_type", "urn:t3:params:oauth:token-type:environment-bootstrap"),
-            ("requested_token_type", "urn:ietf:params:oauth:token-type:access_token"),
+            (
+                "subject_token_type",
+                "urn:t3:params:oauth:token-type:environment-bootstrap",
+            ),
+            (
+                "requested_token_type",
+                "urn:ietf:params:oauth:token-type:access_token",
+            ),
             ("scope", "orchestration:read orchestration:operate"),
             ("client_label", "Squircle service"),
             ("client_device_type", "desktop"),
@@ -68,7 +74,13 @@ pub async fn pair(root: &Path, url: &str, pairing_token: &str) -> Result<T3Confi
     let status = response.status();
     let body: Value = response.json().await.context("T3 did not return JSON")?;
     let Some(token) = body["access_token"].as_str() else {
-        bail!("T3 refused the pairing token (HTTP {status}): {}", body["error_description"].as_str().or(body["error"].as_str()).unwrap_or("no detail"));
+        bail!(
+            "T3 refused the pairing token (HTTP {status}): {}",
+            body["error_description"]
+                .as_str()
+                .or(body["error"].as_str())
+                .unwrap_or("no detail")
+        );
     };
     let config = T3Config {
         url,
@@ -82,21 +94,27 @@ pub async fn pair(root: &Path, url: &str, pairing_token: &str) -> Result<T3Confi
 /// ISO 8601 UTC with milliseconds, as T3 commands expect.
 pub fn iso_now() -> String {
     time::OffsetDateTime::now_utc()
-        .format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"))
+        .format(time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+        ))
         .unwrap_or_default()
 }
 
 /// `YYYY-MM-DDTHH:MM:SS` (UTC) for Unix seconds.
 pub fn iso_utc(secs: i64) -> String {
-    time::OffsetDateTime::from_unix_timestamp(secs).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
-        .format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]"))
+    time::OffsetDateTime::from_unix_timestamp(secs)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        .format(time::macros::format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second]"
+        ))
         .unwrap_or_default()
 }
 
 /// An RFC 3339 time as T3 writes it (`2026-10-14T22:23:14.016Z`) as Unix
 /// seconds; `None` for anything that isn't a real date and time.
 pub fn iso_parse(text: &str) -> Option<f64> {
-    let at = time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()?;
+    let at =
+        time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()?;
     Some(at.unix_timestamp_nanos() as f64 / 1e9)
 }
 
@@ -150,8 +168,16 @@ const ERROR_DETAIL: usize = 700;
 /// travels with its request, so its answer can't arrive before it.
 enum Outbound {
     Frame(Message),
-    Call { id: String, waiter: Waiter, frame: Message },
-    Subscribe { id: String, chunks: mpsc::UnboundedSender<Value>, frame: Message },
+    Call {
+        id: String,
+        waiter: Waiter,
+        frame: Message,
+    },
+    Subscribe {
+        id: String,
+        chunks: mpsc::UnboundedSender<Value>,
+        frame: Message,
+    },
     /// A call that ended without its answer (out of budget, or dropped).
     Forget(String),
     Unsubscribe(String),
@@ -206,7 +232,10 @@ struct PendingGuard<'a> {
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
         // A full queue stops the connection anyway, and with it every waiter.
-        let _ = self.link.out.try_send(Outbound::Forget(self.id.to_string()));
+        let _ = self
+            .link
+            .out
+            .try_send(Outbound::Forget(self.id.to_string()));
     }
 }
 
@@ -224,15 +253,19 @@ impl T3 {
             .context("T3 rejected Squircle's session; pair again with squircle t3 connect")?
             .json()
             .await?;
-        let ticket = ticket["ticket"].as_str().context("T3 returned no WebSocket ticket")?;
+        let ticket = ticket["ticket"]
+            .as_str()
+            .context("T3 returned no WebSocket ticket")?;
         let mut ws = url::Url::parse(&config.url)?;
-        ws.set_scheme(if ws.scheme() == "https" { "wss" } else { "ws" }).ok();
+        ws.set_scheme(if ws.scheme() == "https" { "wss" } else { "ws" })
+            .ok();
         ws.set_path("/ws");
         ws.query_pairs_mut().append_pair("wsTicket", ticket);
-        let (socket, _) = tokio::time::timeout(OPEN_TIMEOUT, tokio_tungstenite::connect_async(ws.as_str()))
-            .await
-            .context("T3's WebSocket did not open within 15 seconds")?
-            .context("Cannot open T3's WebSocket")?;
+        let (socket, _) =
+            tokio::time::timeout(OPEN_TIMEOUT, tokio_tungstenite::connect_async(ws.as_str()))
+                .await
+                .context("T3's WebSocket did not open within 15 seconds")?
+                .context("Cannot open T3's WebSocket")?;
         let (sink, stream) = socket.split();
         Ok(Self::start(config, sink, stream, TIMING))
     }
@@ -245,35 +278,57 @@ impl T3 {
         E: Send + 'static,
     {
         let (out, outgoing) = mpsc::channel(OUTBOX);
-        let link = Arc::new(Link { out, stop: CancellationToken::new() });
+        let link = Arc::new(Link {
+            out,
+            stop: CancellationToken::new(),
+        });
         let (closed_tx, closed) = watch::channel(false);
         tokio::spawn(run(link.clone(), sink, stream, outgoing, closed_tx, timing));
-        Arc::new(Self { config, link, closed })
+        Arc::new(Self {
+            config,
+            link,
+            closed,
+        })
     }
 
     fn request(id: &str, tag: &str, payload: Value) -> Message {
-        Message::text(json!({"_tag":"Request","id":id,"tag":tag,"payload":payload,"headers":[]}).to_string())
+        Message::text(
+            json!({"_tag":"Request","id":id,"tag":tag,"payload":payload,"headers":[]}).to_string(),
+        )
     }
 
     async fn exchange(&self, tag: &str, payload: Value) -> Reply {
         let id = uuid::Uuid::new_v4().to_string();
         let (waiter, rx) = oneshot::channel();
-        let _guard = PendingGuard { link: &self.link, id: &id };
-        if let Err(error) = self.link.send(Outbound::Call { id: id.clone(), waiter, frame: Self::request(&id, tag, payload) }) {
+        let _guard = PendingGuard {
+            link: &self.link,
+            id: &id,
+        };
+        if let Err(error) = self.link.send(Outbound::Call {
+            id: id.clone(),
+            waiter,
+            frame: Self::request(&id, tag, payload),
+        }) {
             return Reply::NotSent(error);
         }
         match tokio::time::timeout(CALL_BUDGET, rx).await {
             Ok(Ok(Ok(value))) => Reply::Answered(Ok(value)),
             Ok(Ok(Err(Ended::Failed(cause)))) => Reply::Answered(Err(cause)),
             Ok(Ok(Err(Ended::Closed)) | Err(_)) => Reply::Lost("T3 connection closed".into()),
-            Err(_) => Reply::Lost(format!("T3 did not answer {tag} within {} seconds", CALL_BUDGET.as_secs())),
+            Err(_) => Reply::Lost(format!(
+                "T3 did not answer {tag} within {} seconds",
+                CALL_BUDGET.as_secs()
+            )),
         }
     }
 
     pub async fn call(&self, tag: &str, payload: Value) -> Result<Value> {
         match self.exchange(tag, payload).await {
             Reply::Answered(Ok(value)) => Ok(value),
-            Reply::Answered(Err(cause)) => bail!("T3 rejected the request: {}", clip(&cause.to_string(), ERROR_DETAIL)),
+            Reply::Answered(Err(cause)) => bail!(
+                "T3 rejected the request: {}",
+                clip(&cause.to_string(), ERROR_DETAIL)
+            ),
             Reply::NotSent(error) => Err(error),
             Reply::Lost(detail) => bail!(detail),
         }
@@ -281,10 +336,18 @@ impl T3 {
 
     /// Chunks of a streaming RPC, in order, until the socket closes. Dropping
     /// the receiver interrupts the stream at its next chunk.
-    pub fn subscribe(&self, tag: &str, payload: Value) -> Result<(String, mpsc::UnboundedReceiver<Value>)> {
+    pub fn subscribe(
+        &self,
+        tag: &str,
+        payload: Value,
+    ) -> Result<(String, mpsc::UnboundedReceiver<Value>)> {
         let id = uuid::Uuid::new_v4().to_string();
         let (chunks, rx) = mpsc::unbounded_channel();
-        self.link.send(Outbound::Subscribe { id: id.clone(), chunks, frame: Self::request(&id, tag, payload) })?;
+        self.link.send(Outbound::Subscribe {
+            id: id.clone(),
+            chunks,
+            frame: Self::request(&id, tag, payload),
+        })?;
         Ok((id, rx))
     }
 
@@ -311,12 +374,24 @@ impl T3 {
         if command.id().is_none() || !command.body()["createdAt"].is_string() {
             return Dispatched::NotSent("A T3 command needs its commandId and createdAt".into());
         }
-        match self.exchange("orchestration.dispatchCommand", command.body().clone()).await {
-            Reply::Answered(Ok(result)) if result["status"] == "rejected" => Dispatched::Refused(format!("T3 rejected the command: {result}")),
+        match self
+            .exchange("orchestration.dispatchCommand", command.body().clone())
+            .await
+        {
+            Reply::Answered(Ok(result)) if result["status"] == "rejected" => {
+                Dispatched::Refused(format!("T3 rejected the command: {result}"))
+            }
             Reply::Answered(Ok(result)) => Dispatched::Accepted(result),
             Reply::Answered(Err(cause)) => {
-                let detail = format!("T3 rejected the command: {}", clip(&cause.to_string(), ERROR_DETAIL));
-                if refused(&cause) { Dispatched::Refused(detail) } else { Dispatched::Unknown(detail) }
+                let detail = format!(
+                    "T3 rejected the command: {}",
+                    clip(&cause.to_string(), ERROR_DETAIL)
+                );
+                if refused(&cause) {
+                    Dispatched::Refused(detail)
+                } else {
+                    Dispatched::Unknown(detail)
+                }
             }
             Reply::NotSent(error) => Dispatched::NotSent(format!("{error:#}")),
             Reply::Lost(detail) => Dispatched::Unknown(detail),
@@ -343,8 +418,12 @@ fn refused(cause: &Value) -> bool {
         Value::Array(reasons) => reasons.as_slice(),
         reason => std::slice::from_ref(reason),
     };
-    reasons.iter().any(|reason| reason["_tag"] == "Fail"
-        && reason["error"]["_tag"].as_str().is_some_and(|tag| tag != "InternalError"))
+    reasons.iter().any(|reason| {
+        reason["_tag"] == "Fail"
+            && reason["error"]["_tag"]
+                .as_str()
+                .is_some_and(|tag| tag != "InternalError")
+    })
 }
 
 fn interrupt(id: &str) -> Message {
@@ -459,18 +538,26 @@ impl Open {
             Value::Number(n) => n.to_string(),
             _ => String::new(),
         };
-        let reply = |message: Message| { let _ = link.send(Outbound::Frame(message)); };
+        let reply = |message: Message| {
+            let _ = link.send(Outbound::Frame(message));
+        };
         match frame["_tag"].as_str() {
             Some("Chunk") => {
                 if let Some(sender) = self.subscriptions.get(&id) {
-                    let gone = frame["values"].as_array().into_iter().flatten().any(|value| sender.send(value.clone()).is_err());
+                    let gone = frame["values"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|value| sender.send(value.clone()).is_err());
                     if gone {
                         self.subscriptions.remove(&id);
                         reply(interrupt(&id));
                         return;
                     }
                 }
-                reply(Message::text(json!({"_tag":"Ack","requestId":id}).to_string()));
+                reply(Message::text(
+                    json!({"_tag":"Ack","requestId":id}).to_string(),
+                ));
             }
             Some("Exit") => {
                 self.subscriptions.remove(&id);
@@ -512,15 +599,25 @@ mod tests {
 
     #[test]
     fn iso_times_round_trip_and_reject_impossible_dates() {
-        assert_eq!(iso_parse("2026-10-14T22:23:14.016Z").map(|s| s.round()), Some(1_792_016_594.0));
-        assert_eq!(iso_parse("2026-10-15T00:23:14+02:00").map(|s| s as i64), Some(1_792_016_594));
+        assert_eq!(
+            iso_parse("2026-10-14T22:23:14.016Z").map(|s| s.round()),
+            Some(1_792_016_594.0)
+        );
+        assert_eq!(
+            iso_parse("2026-10-15T00:23:14+02:00").map(|s| s as i64),
+            Some(1_792_016_594)
+        );
         assert_eq!(iso_utc(1_792_016_594), "2026-10-14T22:23:14");
         assert_eq!(iso_parse("2026-02-30T00:00:00Z"), None);
         assert_eq!(iso_parse("2026-13-01T00:00:00Z"), None);
     }
 
     fn config() -> T3Config {
-        T3Config { url: "http://t3.test".into(), token: String::new(), expires_at: None }
+        T3Config {
+            url: "http://t3.test".into(),
+            token: String::new(),
+            expires_at: None,
+        }
     }
 
     /// A client wired to an in-memory WebSocket peer the test controls.
@@ -536,7 +633,9 @@ mod tests {
 
     async fn next_request(server: &mut WebSocketStream<DuplexStream>) -> Value {
         loop {
-            let Message::Text(text) = server.next().await.unwrap().unwrap() else { continue };
+            let Message::Text(text) = server.next().await.unwrap().unwrap() else {
+                continue;
+            };
             let frame: Value = serde_json::from_str(&text).unwrap();
             if frame["_tag"] == "Request" {
                 return frame;
@@ -553,7 +652,8 @@ mod tests {
             let exit = json!({"_tag":"Exit","requestId":first["id"],"exit":{"_tag":"Failure","cause":cause}});
             server.send(Message::text(exit.to_string())).await.unwrap();
             let second = next_request(&mut server).await;
-            let exit = json!({"_tag":"Exit","requestId":second["id"],"exit":{"_tag":"Success","value":7}});
+            let exit =
+                json!({"_tag":"Exit","requestId":second["id"],"exit":{"_tag":"Success","value":7}});
             server.send(Message::text(exit.to_string())).await.unwrap();
             server
         });
@@ -568,34 +668,58 @@ mod tests {
         use crate::fsm::coordinator::Identity;
         use crate::fsm::core::CommandID;
         let (client, mut server) = peer(TIMING).await;
-        let identity = Identity { id: CommandID::fresh(), created_at: "2026-10-16T00:00:00.000Z".into() };
+        let identity = Identity {
+            id: CommandID::fresh(),
+            created_at: "2026-10-16T00:00:00.000Z".into(),
+        };
         let command = Command::new(&identity, json!({"type": "thread.turn.start"}));
         let answers = tokio::spawn(async move {
             let fail = |error: Value| json!([{"_tag": "Fail", "error": error}]);
-            for cause in [fail(json!({"_tag": "OrchestrationDispatchCommandError", "message": "no"})), fail(json!({"_tag": "InternalError"}))] {
+            for cause in [
+                fail(json!({"_tag": "OrchestrationDispatchCommandError", "message": "no"})),
+                fail(json!({"_tag": "InternalError"})),
+            ] {
                 let request = next_request(&mut server).await;
-                assert_eq!((request["payload"]["commandId"].as_str(), request["payload"]["createdAt"].as_str()),
-                           (Some(identity.id.as_str()), Some("2026-10-16T00:00:00.000Z")));
+                assert_eq!(
+                    (
+                        request["payload"]["commandId"].as_str(),
+                        request["payload"]["createdAt"].as_str()
+                    ),
+                    (Some(identity.id.as_str()), Some("2026-10-16T00:00:00.000Z"))
+                );
                 let exit = json!({"_tag":"Exit","requestId":request["id"],"exit":{"_tag":"Failure","cause":cause}});
                 server.send(Message::text(exit.to_string())).await.unwrap();
             }
             // Sent, then the connection drops before an answer.
             next_request(&mut server).await;
         });
-        assert!(matches!(client.dispatch(&command).await, Dispatched::Refused(_)));
-        assert!(matches!(client.dispatch(&command).await, Dispatched::Unknown(_)));
+        assert!(matches!(
+            client.dispatch(&command).await,
+            Dispatched::Refused(_)
+        ));
+        assert!(matches!(
+            client.dispatch(&command).await,
+            Dispatched::Unknown(_)
+        ));
         let dropped = client.dispatch(&command);
         let (outcome, _) = tokio::join!(dropped, answers);
         assert!(matches!(outcome, Dispatched::Unknown(_)), "{outcome:?}");
-        assert!(matches!(client.dispatch(&command).await, Dispatched::NotSent(_)));
+        assert!(matches!(
+            client.dispatch(&command).await,
+            Dispatched::NotSent(_)
+        ));
     }
 
     #[tokio::test]
     async fn silent_peer_closes_the_connection_and_fails_calls() {
         let (client, server) = peer(FAST).await;
-        let error = tokio::time::timeout(Duration::from_secs(2), client.call("a", json!({}))).await.unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), client.call("a", json!({})))
+            .await
+            .unwrap();
         assert_eq!(error.unwrap_err().to_string(), "T3 connection closed");
-        tokio::time::timeout(Duration::from_secs(1), client.closed()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), client.closed())
+            .await
+            .unwrap();
         drop(server);
     }
 
@@ -606,9 +730,13 @@ mod tests {
         }));
         let stream = futures_util::stream::pending::<Result<Message, std::io::Error>>();
         let client = T3::start(config(), sink, stream, TIMING);
-        let result = tokio::time::timeout(Duration::from_secs(1), client.call("a", json!({}))).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), client.call("a", json!({})))
+            .await
+            .unwrap();
         assert!(result.is_err());
-        tokio::time::timeout(Duration::from_secs(1), client.closed()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), client.closed())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -628,7 +756,11 @@ mod tests {
     #[tokio::test]
     async fn abandoned_call_forgets_its_waiter() {
         let (client, server) = peer(TIMING).await;
-        assert!(tokio::time::timeout(Duration::from_millis(20), client.call("a", json!({}))).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), client.call("a", json!({})))
+                .await
+                .is_err()
+        );
         let (reply, count) = oneshot::channel();
         client.link.send(Outbound::Count(reply)).unwrap();
         assert_eq!(count.await.unwrap(), (0, 0));

@@ -5,7 +5,9 @@
 //! reported unavailable and a new publication repairs it.
 use crate::{
     model::{BuildRequest, Job, PreviewArtifact, PreviewSource, PreviewState, now},
-    store::{Store, atomic_json, check_dir, open_private_read, private_dir, read_json, write_private},
+    store::{
+        Store, atomic_json, check_dir, open_private_read, private_dir, read_json, write_private,
+    },
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -106,10 +108,13 @@ pub fn list(store: &Store) -> Result<Vec<AppRecord>> {
 /// imported IPA its bundle.
 pub fn owner_of<'a>(apps: &'a [AppRecord], job: &Job) -> Option<&'a AppRecord> {
     match job.request() {
-        Some(request) => apps.iter().find(|app| app.project == request.project && app.scheme == request.scheme),
+        Some(request) => apps
+            .iter()
+            .find(|app| app.project == request.project && app.scheme == request.scheme),
         None => {
             let bundle = &job.output()?.bundle_id;
-            apps.iter().find(|app| app.bundle_id.as_ref() == Some(bundle))
+            apps.iter()
+                .find(|app| app.bundle_id.as_ref() == Some(bundle))
         }
     }
 }
@@ -136,7 +141,10 @@ pub fn get(store: &Store, id: &str) -> Result<AppRecord> {
 /// Opens an app's current preview artifact. Fails when its bytes are missing
 /// or invalid; the record itself stays usable (see `get`).
 pub fn open_preview(app: &AppRecord) -> Result<File> {
-    let preview = app.preview.as_ref().context("App has no published preview")?;
+    let preview = app
+        .preview
+        .as_ref()
+        .context("App has no published preview")?;
     let directory = preview.path.parent().context("preview has no directory")?;
     check_dir(directory)?;
     // Reuse the store's no-follow open rather than trusting persisted paths.
@@ -255,7 +263,12 @@ pub fn sync_build_preview(store: &Store, job: &Job) -> Result<AppRecord> {
             summary: String::new(),
         },
     )?;
-    let Some(PreviewArtifact { path: file, captured_at, source }) = job.preview().and_then(PreviewState::artifact) else {
+    let Some(PreviewArtifact {
+        path: file,
+        captured_at,
+        source,
+    }) = job.preview().and_then(PreviewState::artifact)
+    else {
         return Ok(app);
     };
     let captured_at = *captured_at;
@@ -329,8 +342,14 @@ pub fn stage_preview(root: &Path, id: &str, file: &Path) -> Result<StagedPreview
     private_dir(&previews)?;
     let preview_id = Uuid::new_v4().to_string();
     let path = preview_path(&directory, &preview_id);
-    ensure!(write_private(&path, false, |output| Ok(output.write_all(&bytes)?))?, "preview already exists");
-    Ok(StagedPreview { id: preview_id, path: Some(path) })
+    ensure!(
+        write_private(&path, false, |output| Ok(output.write_all(&bytes)?))?,
+        "preview already exists"
+    );
+    Ok(StagedPreview {
+        id: preview_id,
+        path: Some(path),
+    })
 }
 
 /// Points the app at a staged preview. Works when the previous preview's bytes
@@ -364,9 +383,7 @@ fn commit_preview(
     if let Some(build_id) = &publication.build_id {
         validate_id(build_id)?;
         let job = store.load_job(build_id)?;
-        let output = job
-            .output()
-            .context("associated build has no app output")?;
+        let output = job.output().context("associated build has no app output")?;
         if let Some(bundle) = &app.bundle_id {
             ensure!(
                 &output.bundle_id == bundle,
@@ -387,7 +404,10 @@ fn commit_preview(
     }
     let directory = app_dir(store, id)?;
     let path = preview_path(&directory, &staged.id);
-    ensure!(staged.path.as_ref() == Some(&path), "staged preview belongs to another app");
+    ensure!(
+        staged.path.as_ref() == Some(&path),
+        "staged preview belongs to another app"
+    );
     app.preview = Some(AppPreview {
         id: staged.id.clone(),
         path,
@@ -580,29 +600,36 @@ mod tests {
             created_at: 1,
             updated_at: 2,
             origin: BuildOrigin::Project {
-                provenance: Provenance { revision: Some("submitted-revision".into()), dirty: Some(false) },
+                provenance: Provenance {
+                    revision: Some("submitted-revision".into()),
+                    dirty: Some(false),
+                },
                 request: BuildRequest {
-                project: registration.project.clone(),
-                scheme: registration.scheme.clone(),
-                configuration: "Release".into(),
-                mode: BuildMode::Simulator,
-                export_options: None,
-                allow_provisioning_updates: false,
-                capture_preview: true,
-                request_id: None,
-                no_overlay: false,
-                thread: None,
-            }},
-            phase: JobPhase::Succeeded { preview: PreviewState::Absent, output: BuildOutput {
-                archive_path: None,
-                ipa_path: None,
-                app_path: Some("/Example.app".into()),
-                dsym_paths: vec![],
-                bundle_id: "dev.example.app".into(),
-                version: "1".into(),
-                build_number: "1".into(),
-                title: "Build title".into(),
-            }},
+                    project: registration.project.clone(),
+                    scheme: registration.scheme.clone(),
+                    configuration: "Release".into(),
+                    mode: BuildMode::Simulator,
+                    export_options: None,
+                    allow_provisioning_updates: false,
+                    capture_preview: true,
+                    request_id: None,
+                    no_overlay: false,
+                    thread: None,
+                },
+            },
+            phase: JobPhase::Succeeded {
+                preview: PreviewState::Absent,
+                output: BuildOutput {
+                    archive_path: None,
+                    ipa_path: None,
+                    app_path: Some("/Example.app".into()),
+                    dsym_paths: vec![],
+                    bundle_id: "dev.example.app".into(),
+                    version: "1".into(),
+                    build_number: "1".into(),
+                    title: "Build title".into(),
+                },
+            },
         }
     }
 
@@ -708,7 +735,13 @@ mod tests {
         let source = temp.path().join("capture.png");
         fs::write(&source, PNG)?;
         let mut job = build(&registration);
-        let shot = |captured_at, source| PreviewState::Ready(PreviewArtifact { path: temp.path().join("capture.png"), captured_at, source: Some(source) });
+        let shot = |captured_at, source| {
+            PreviewState::Ready(PreviewArtifact {
+                path: temp.path().join("capture.png"),
+                captured_at,
+                source: Some(source),
+            })
+        };
         job.set_preview(shot(100, PreviewSource::BuiltSimulatorProduct));
         store.save_job(&job)?;
         let captured = sync_build_preview(&store, &job)?;
@@ -747,11 +780,7 @@ mod tests {
                 .caption
                 .contains("current working tree")
         );
-        let agent_preview = publish_preview(
-            &store,
-            &app.id,
-            publication(source),
-        )?;
+        let agent_preview = publish_preview(&store, &app.id, publication(source))?;
         assert_eq!(agent_preview.preview.as_ref().unwrap().source, "agent");
         assert_eq!(sync_build_preview(&store, &job)?, agent_preview);
         Ok(())
@@ -798,12 +827,19 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_preview_leaves_the_catalog_listable_and_is_repaired_by_republishing() -> Result<()> {
+    fn a_missing_preview_leaves_the_catalog_listable_and_is_repaired_by_republishing() -> Result<()>
+    {
         let (temp, store, registration) = setup()?;
         let damaged = register(&store, registration.clone())?;
         let other_project = temp.path().join("Other.xcodeproj");
         fs::create_dir(&other_project)?;
-        let other = register(&store, AppRegistration { project: other_project, ..registration })?;
+        let other = register(
+            &store,
+            AppRegistration {
+                project: other_project,
+                ..registration
+            },
+        )?;
         let source = temp.path().join("capture.png");
         fs::write(&source, PNG)?;
         let published = publish_preview(&store, &damaged.id, publication(source.clone()))?;
@@ -817,7 +853,10 @@ mod tests {
         assert!(open_preview(listed.iter().find(|app| app.id == other.id).unwrap()).is_ok());
 
         let repaired = publish_preview(&store, &damaged.id, publication(source))?;
-        assert_ne!(repaired.preview.as_ref().unwrap().id, published.preview.unwrap().id);
+        assert_ne!(
+            repaired.preview.as_ref().unwrap().id,
+            published.preview.unwrap().id
+        );
         assert!(open_preview(&get(&store, &damaged.id)?).is_ok());
         Ok(())
     }

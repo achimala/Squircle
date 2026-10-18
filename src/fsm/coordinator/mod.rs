@@ -72,7 +72,9 @@ impl Dispatched {
     pub fn into_result(self) -> anyhow::Result<Value> {
         match self {
             Self::Accepted(value) => Ok(value),
-            Self::Refused(detail) | Self::NotSent(detail) | Self::Unknown(detail) => Err(anyhow::anyhow!(detail)),
+            Self::Refused(detail) | Self::NotSent(detail) | Self::Unknown(detail) => {
+                Err(anyhow::anyhow!(detail))
+            }
         }
     }
 }

@@ -25,7 +25,10 @@ pub enum Stage {
     /// Recorded before T3 is asked to create the thread. Until T3 shows the
     /// thread, the same bootstrap (same thread and message IDs) is sent
     /// again only when asked, never a second worker.
-    Bootstrapping { message_id: String, command: Value },
+    Bootstrapping {
+        message_id: String,
+        command: Value,
+    },
     #[default]
     Active,
     /// Being archived; see `ArchiveStep`.
@@ -67,7 +70,10 @@ pub enum BootEvent {
     Sent(Dispatched),
     /// After an unconfirmed send (`detail`): whether T3 shows the thread or
     /// its first message, or why that couldn't be read.
-    Confirmed { found: Result<bool, String>, detail: String },
+    Confirmed {
+        found: Result<bool, String>,
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -85,20 +91,53 @@ pub enum BootEffect {
 pub fn bootstrap(stage: Stage, event: BootEvent) -> Reduction<Stage, BootEffect> {
     use Disposition::*;
     if !matches!(stage, Stage::Bootstrapping { .. }) {
-        return Reduction { state: stage, effects: vec![BootEffect::Done], disposition: Unchanged };
+        return Reduction {
+            state: stage,
+            effects: vec![BootEffect::Done],
+            disposition: Unchanged,
+        };
     }
-    let report = |stage, effect| Reduction { state: stage, effects: vec![effect], disposition: Unchanged };
+    let report = |stage, effect| Reduction {
+        state: stage,
+        effects: vec![effect],
+        disposition: Unchanged,
+    };
     match event {
-        BootEvent::Look { thread: Observed::Current { value: true, .. } } | BootEvent::Sent(Dispatched::Accepted(_))
-        | BootEvent::Confirmed { found: Ok(true), .. } => Reduction::applied(Stage::Active, vec![BootEffect::Commit, BootEffect::Done]),
-        BootEvent::Look { thread: Observed::Current { value: false, .. } } => report(stage, BootEffect::Send),
-        BootEvent::Look { .. } => report(stage, BootEffect::Failed("T3's thread list is not current; try again".into())),
-        BootEvent::Sent(Dispatched::Refused(detail) | Dispatched::NotSent(detail) | Dispatched::Unknown(detail)) =>
-            report(stage, BootEffect::Confirm(detail)),
-        BootEvent::Confirmed { found: Ok(false), detail } => report(stage, BootEffect::Failed(format!(
-            "{detail}: T3 did not confirm the new worker. Run the same `thread spawn` again to finish this one; it will not start a second"))),
-        BootEvent::Confirmed { found: Err(error), detail } => report(stage, BootEffect::Failed(format!(
-            "{detail}, and its thread couldn't be read to check ({error}). Run the same `thread spawn` again to finish this one; it will not start a second"))),
+        BootEvent::Look {
+            thread: Observed::Current { value: true, .. },
+        }
+        | BootEvent::Sent(Dispatched::Accepted(_))
+        | BootEvent::Confirmed {
+            found: Ok(true), ..
+        } => Reduction::applied(Stage::Active, vec![BootEffect::Commit, BootEffect::Done]),
+        BootEvent::Look {
+            thread: Observed::Current { value: false, .. },
+        } => report(stage, BootEffect::Send),
+        BootEvent::Look { .. } => report(
+            stage,
+            BootEffect::Failed("T3's thread list is not current; try again".into()),
+        ),
+        BootEvent::Sent(
+            Dispatched::Refused(detail) | Dispatched::NotSent(detail) | Dispatched::Unknown(detail),
+        ) => report(stage, BootEffect::Confirm(detail)),
+        BootEvent::Confirmed {
+            found: Ok(false),
+            detail,
+        } => report(
+            stage,
+            BootEffect::Failed(format!(
+                "{detail}: T3 did not confirm the new worker. Run the same `thread spawn` again to finish this one; it will not start a second"
+            )),
+        ),
+        BootEvent::Confirmed {
+            found: Err(error),
+            detail,
+        } => report(
+            stage,
+            BootEffect::Failed(format!(
+                "{detail}, and its thread couldn't be read to check ({error}). Run the same `thread spawn` again to finish this one; it will not start a second"
+            )),
+        ),
     }
 }
 
@@ -108,13 +147,20 @@ pub fn bootstrap(stage: Stage, event: BootEvent) -> Reduction<Stage, BootEffect>
 pub enum ArchiveEvent {
     /// What T3 shows now (`Current(None)`: no such thread) and what the
     /// request allows; `next` is a new identity, used only if a step needs one.
-    Look { thread: Observed<Option<ThreadObservation>>, discard: bool, next: Identity },
+    Look {
+        thread: Observed<Option<ThreadObservation>>,
+        discard: bool,
+        next: Identity,
+    },
     /// What sending the current step's command got.
     Sent { outcome: Dispatched, next: Identity },
     /// Whether T3 showed the session stopped after the stop was accepted.
     Stopped(bool),
     /// What would stop removal without `discard` (none: merged and clean).
-    Inspected { blocker: Result<Option<String>, String>, discard: bool },
+    Inspected {
+        blocker: Result<Option<String>, String>,
+        discard: bool,
+    },
     /// The worktree and branch were removed, or why not all of them.
     Removed(Result<(), String>),
 }
@@ -150,7 +196,11 @@ pub enum ArchiveEffect {
 }
 
 fn report(stage: Stage, effect: ArchiveEffect) -> Reduction<Stage, ArchiveEffect> {
-    Reduction { state: stage, effects: vec![effect], disposition: Disposition::Unchanged }
+    Reduction {
+        state: stage,
+        effects: vec![effect],
+        disposition: Disposition::Unchanged,
+    }
 }
 
 fn to(stage: Stage, effects: Vec<ArchiveEffect>) -> Reduction<Stage, ArchiveEffect> {
@@ -161,13 +211,35 @@ const NOT_CURRENT: &str = "T3's thread list is not current; try again";
 
 /// The live session must stop before anything is removed; one whose turn
 /// may still be running only when its work may be discarded.
-fn stop_first(stage: Stage, observation: &ThreadObservation, discard: bool, command: Identity, saved: bool) -> Reduction<Stage, ArchiveEffect> {
+fn stop_first(
+    stage: Stage,
+    observation: &ThreadObservation,
+    discard: bool,
+    command: Identity,
+    saved: bool,
+) -> Reduction<Stage, ArchiveEffect> {
     if observation.busy() && !discard {
-        let what = if observation.waiting { "waiting on a question or approval" } else { "still working" };
-        return report(stage, ArchiveEffect::Refused(format!("That worker is {what}; wait for it, or pass --discard to stop it and drop its work")));
+        let what = if observation.waiting {
+            "waiting on a question or approval"
+        } else {
+            "still working"
+        };
+        return report(
+            stage,
+            ArchiveEffect::Refused(format!(
+                "That worker is {what}; wait for it, or pass --discard to stop it and drop its work"
+            )),
+        );
     }
     let send = ArchiveEffect::Send(ArchiveOrder::Stop, command.clone());
-    if saved { report(stage, send) } else { to(Stage::Archiving(ArchiveStep::Stopping { command }), vec![ArchiveEffect::Commit, send]) }
+    if saved {
+        report(stage, send)
+    } else {
+        to(
+            Stage::Archiving(ArchiveStep::Stopping { command }),
+            vec![ArchiveEffect::Commit, send],
+        )
+    }
 }
 
 /// One step of archiving. The stage is the worker's (an unregistered T3
@@ -176,39 +248,87 @@ pub fn archive(stage: Stage, event: ArchiveEvent) -> Reduction<Stage, ArchiveEff
     use ArchiveEffect as E;
     use ArchiveStep as S;
     match (stage, event) {
-        (stage, ArchiveEvent::Look { thread: Observed::Stale { .. } | Observed::Unavailable(_), .. }) => report(stage, E::Failed(NOT_CURRENT.into())),
-        (Stage::Bootstrapping { .. }, ArchiveEvent::Look { thread: Observed::Current { value: None, .. }, .. }) =>
-            to(Stage::Archived, vec![E::Commit, E::NeverStarted]),
+        (
+            stage,
+            ArchiveEvent::Look {
+                thread: Observed::Stale { .. } | Observed::Unavailable(_),
+                ..
+            },
+        ) => report(stage, E::Failed(NOT_CURRENT.into())),
+        (
+            Stage::Bootstrapping { .. },
+            ArchiveEvent::Look {
+                thread: Observed::Current { value: None, .. },
+                ..
+            },
+        ) => to(Stage::Archived, vec![E::Commit, E::NeverStarted]),
 
         // Before anything is removed: stop, then inspect.
-        (stage @ (Stage::Bootstrapping { .. } | Stage::Active | Stage::Archived | Stage::Archiving(S::Removing)),
-         ArchiveEvent::Look { thread: Observed::Current { value, .. }, discard, next }) => match value {
+        (
+            stage @ (Stage::Bootstrapping { .. }
+            | Stage::Active
+            | Stage::Archived
+            | Stage::Archiving(S::Removing)),
+            ArchiveEvent::Look {
+                thread: Observed::Current { value, .. },
+                discard,
+                next,
+            },
+        ) => match value {
             Some(o) if !o.stopped() => stop_first(stage, &o, discard, next, false),
             _ => report(stage, E::Inspect),
         },
-        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Look { thread: Observed::Current { value, .. }, discard, .. }) => {
-            let Stage::Archiving(S::Stopping { command }) = &stage else { unreachable!() };
+        (
+            stage @ Stage::Archiving(S::Stopping { .. }),
+            ArchiveEvent::Look {
+                thread: Observed::Current { value, .. },
+                discard,
+                ..
+            },
+        ) => {
+            let Stage::Archiving(S::Stopping { command }) = &stage else {
+                unreachable!()
+            };
             let command = command.clone();
             match value {
                 Some(o) if !o.stopped() => stop_first(stage, &o, discard, command, true),
                 _ => report(stage, E::Inspect),
             }
         }
-        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Sent { outcome, .. }) => match outcome {
-            Dispatched::Accepted(_) => report(stage, E::AwaitStopped),
-            Dispatched::Refused(detail) => to(Stage::Active, vec![E::Commit, E::Failed(detail)]),
-            Dispatched::NotSent(detail) | Dispatched::Unknown(detail) =>
-                report(stage, E::Failed(format!("T3 has not confirmed the stop ({detail}); nothing was removed. Run archive again"))),
-        },
-        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Stopped(true)) => report(stage, E::Inspect),
-        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Stopped(false)) =>
-            report(stage, E::Failed("The worker did not stop within 30 seconds; nothing was removed".into())),
+        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Sent { outcome, .. }) => {
+            match outcome {
+                Dispatched::Accepted(_) => report(stage, E::AwaitStopped),
+                Dispatched::Refused(detail) => {
+                    to(Stage::Active, vec![E::Commit, E::Failed(detail)])
+                }
+                Dispatched::NotSent(detail) | Dispatched::Unknown(detail) => report(
+                    stage,
+                    E::Failed(format!(
+                        "T3 has not confirmed the stop ({detail}); nothing was removed. Run archive again"
+                    )),
+                ),
+            }
+        }
+        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Stopped(true)) => {
+            report(stage, E::Inspect)
+        }
+        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Stopped(false)) => report(
+            stage,
+            E::Failed("The worker did not stop within 30 seconds; nothing was removed".into()),
+        ),
 
-        (stage @ (Stage::Bootstrapping { .. } | Stage::Active | Stage::Archived | Stage::Archiving(S::Stopping { .. } | S::Removing)),
-         ArchiveEvent::Inspected { blocker, discard }) => match blocker {
+        (
+            stage @ (Stage::Bootstrapping { .. }
+            | Stage::Active
+            | Stage::Archived
+            | Stage::Archiving(S::Stopping { .. } | S::Removing)),
+            ArchiveEvent::Inspected { blocker, discard },
+        ) => match blocker {
             Err(detail) => report(stage, E::Failed(detail)),
             Ok(Some(reason)) if !discard => {
-                let refused = E::Refused(format!("Not archived: {reason}. Merge it first, or pass --discard to drop that work"));
+                let refused = E::Refused(format!(
+                    "Not archived: {reason}. Merge it first, or pass --discard to drop that work"
+                ));
                 // A stopped worker is still a worker; an archived one stays archived.
                 match stage {
                     Stage::Archived | Stage::Active => report(stage, refused),
@@ -220,31 +340,57 @@ pub fn archive(stage: Stage, event: ArchiveEvent) -> Reduction<Stage, ArchiveEff
         },
         (stage @ Stage::Archiving(S::Removing), ArchiveEvent::Removed(result)) => match result {
             Ok(()) => to(Stage::FilesRemoved, vec![E::Commit, E::Look]),
-            Err(detail) => report(stage, E::Failed(format!("{detail}; its files were not all removed. Run archive again"))),
+            Err(detail) => report(
+                stage,
+                E::Failed(format!(
+                    "{detail}; its files were not all removed. Run archive again"
+                )),
+            ),
         },
 
         // Files gone: archive the thread in T3.
-        (stage @ (Stage::FilesRemoved | Stage::Archiving(S::Thread { .. })), ArchiveEvent::Look { thread: Observed::Current { value, .. }, next, .. }) => {
-            match (value, &stage) {
-                (Some(o), Stage::Archiving(S::Thread { command })) if !o.archived => {
-                    let send = E::Send(ArchiveOrder::Archive, command.clone());
-                    report(stage, send)
-                }
-                (Some(o), _) if !o.archived =>
-                    to(Stage::Archiving(S::Thread { command: next.clone() }), vec![E::Commit, E::Send(ArchiveOrder::Archive, next)]),
-                _ => to(Stage::Archived, vec![E::Commit, E::Done]),
+        (
+            stage @ (Stage::FilesRemoved | Stage::Archiving(S::Thread { .. })),
+            ArchiveEvent::Look {
+                thread: Observed::Current { value, .. },
+                next,
+                ..
+            },
+        ) => match (value, &stage) {
+            (Some(o), Stage::Archiving(S::Thread { command })) if !o.archived => {
+                let send = E::Send(ArchiveOrder::Archive, command.clone());
+                report(stage, send)
             }
-        }
+            (Some(o), _) if !o.archived => to(
+                Stage::Archiving(S::Thread {
+                    command: next.clone(),
+                }),
+                vec![E::Commit, E::Send(ArchiveOrder::Archive, next)],
+            ),
+            _ => to(Stage::Archived, vec![E::Commit, E::Done]),
+        },
         (stage @ Stage::Archiving(S::Thread { .. }), ArchiveEvent::Sent { outcome, next }) => {
-            let not = |detail: &str| format!("Its files were removed, but T3 did not archive the thread ({detail}); run archive again");
+            let not = |detail: &str| {
+                format!(
+                    "Its files were removed, but T3 did not archive the thread ({detail}); run archive again"
+                )
+            };
             match outcome {
                 Dispatched::Accepted(_) => to(Stage::Archived, vec![E::Commit, E::Done]),
-                Dispatched::Refused(detail) => to(Stage::Archiving(S::Thread { command: next }), vec![E::Commit, E::Failed(not(&detail))]),
-                Dispatched::NotSent(detail) | Dispatched::Unknown(detail) => report(stage, E::Failed(not(&detail))),
+                Dispatched::Refused(detail) => to(
+                    Stage::Archiving(S::Thread { command: next }),
+                    vec![E::Commit, E::Failed(not(&detail))],
+                ),
+                Dispatched::NotSent(detail) | Dispatched::Unknown(detail) => {
+                    report(stage, E::Failed(not(&detail)))
+                }
             }
         }
 
-        (stage, event) => Reduction::same(stage, Disposition::ProtocolFault(format!("archive event {event:?} at this stage"))),
+        (stage, event) => Reduction::same(
+            stage,
+            Disposition::ProtocolFault(format!("archive event {event:?} at this stage")),
+        ),
     }
 }
 
@@ -256,16 +402,44 @@ mod tests {
     use serde_json::json;
 
     fn id(n: u8) -> Identity {
-        Identity { id: CommandID::parse(&format!("00000000-0000-4000-8000-0000000000{n:02}")).unwrap(), created_at: format!("t{n}") }
+        Identity {
+            id: CommandID::parse(&format!("00000000-0000-4000-8000-0000000000{n:02}")).unwrap(),
+            created_at: format!("t{n}"),
+        }
     }
 
-    fn seen(execution: Execution, waiting: bool, archived: bool) -> Observed<Option<ThreadObservation>> {
-        Observed::Current { epoch: Epoch(1), revision: Revision(0),
-                            value: Some(ThreadObservation { turn: Some("t".into()), execution, waiting, failed: false, archived }) }
+    fn seen(
+        execution: Execution,
+        waiting: bool,
+        archived: bool,
+    ) -> Observed<Option<ThreadObservation>> {
+        Observed::Current {
+            epoch: Epoch(1),
+            revision: Revision(0),
+            value: Some(ThreadObservation {
+                turn: Some("t".into()),
+                execution,
+                waiting,
+                failed: false,
+                archived,
+            }),
+        }
     }
 
-    fn look(stage: Stage, thread: Observed<Option<ThreadObservation>>, discard: bool, n: u8) -> Reduction<Stage, ArchiveEffect> {
-        archive(stage, ArchiveEvent::Look { thread, discard, next: id(n) })
+    fn look(
+        stage: Stage,
+        thread: Observed<Option<ThreadObservation>>,
+        discard: bool,
+        n: u8,
+    ) -> Reduction<Stage, ArchiveEffect> {
+        archive(
+            stage,
+            ArchiveEvent::Look {
+                thread,
+                discard,
+                next: id(n),
+            },
+        )
     }
 
     /// An archive cut at each step resumes from its saved step: the stop and
@@ -275,61 +449,212 @@ mod tests {
     fn an_archive_resumes_from_each_saved_step() {
         use ArchiveEffect as E;
         let stop = look(Stage::Active, seen(Execution::Idle, false, false), false, 1);
-        assert_eq!(stop.effects, vec![E::Commit, E::Send(ArchiveOrder::Stop, id(1))]);
+        assert_eq!(
+            stop.effects,
+            vec![E::Commit, E::Send(ArchiveOrder::Stop, id(1))]
+        );
         // Crash after the save: the same stop goes again, even with --discard now.
-        let again = look(stop.state.clone(), seen(Execution::Running, false, false), true, 2);
+        let again = look(
+            stop.state.clone(),
+            seen(Execution::Running, false, false),
+            true,
+            2,
+        );
         assert_eq!(again.effects, vec![E::Send(ArchiveOrder::Stop, id(1))]);
-        let lost = archive(stop.state, ArchiveEvent::Sent { outcome: Dispatched::Unknown("closed".into()), next: id(3) });
+        let lost = archive(
+            stop.state,
+            ArchiveEvent::Sent {
+                outcome: Dispatched::Unknown("closed".into()),
+                next: id(3),
+            },
+        );
         assert!(matches!(lost.effects[..], [E::Failed(_)]));
         // Shown stopped: inspect, then save the removal before removing.
         let inspect = look(lost.state, seen(Execution::Stopped, false, false), false, 4);
         assert_eq!(inspect.effects, vec![E::Inspect]);
-        let remove = archive(inspect.state, ArchiveEvent::Inspected { blocker: Ok(None), discard: false });
-        assert_eq!((remove.state.clone(), remove.effects), (Stage::Archiving(ArchiveStep::Removing), vec![E::Commit, E::Remove]));
+        let remove = archive(
+            inspect.state,
+            ArchiveEvent::Inspected {
+                blocker: Ok(None),
+                discard: false,
+            },
+        );
+        assert_eq!(
+            (remove.state.clone(), remove.effects),
+            (
+                Stage::Archiving(ArchiveStep::Removing),
+                vec![E::Commit, E::Remove]
+            )
+        );
         // Crash mid-removal: the worker is looked at and inspected again first.
-        assert_eq!(look(remove.state.clone(), seen(Execution::Stopped, false, false), false, 5).effects, vec![E::Inspect]);
+        assert_eq!(
+            look(
+                remove.state.clone(),
+                seen(Execution::Stopped, false, false),
+                false,
+                5
+            )
+            .effects,
+            vec![E::Inspect]
+        );
         let gone = archive(remove.state, ArchiveEvent::Removed(Ok(())));
-        assert_eq!((gone.state.clone(), gone.effects), (Stage::FilesRemoved, vec![E::Commit, E::Look]));
+        assert_eq!(
+            (gone.state.clone(), gone.effects),
+            (Stage::FilesRemoved, vec![E::Commit, E::Look])
+        );
         let thread = look(gone.state, seen(Execution::Stopped, false, false), false, 6);
-        assert_eq!(thread.effects, vec![E::Commit, E::Send(ArchiveOrder::Archive, id(6))]);
-        let lost = archive(thread.state, ArchiveEvent::Sent { outcome: Dispatched::Unknown("closed".into()), next: id(7) });
-        assert_eq!(look(lost.state.clone(), seen(Execution::Stopped, false, false), false, 8).effects, vec![E::Send(ArchiveOrder::Archive, id(6))]);
+        assert_eq!(
+            thread.effects,
+            vec![E::Commit, E::Send(ArchiveOrder::Archive, id(6))]
+        );
+        let lost = archive(
+            thread.state,
+            ArchiveEvent::Sent {
+                outcome: Dispatched::Unknown("closed".into()),
+                next: id(7),
+            },
+        );
+        assert_eq!(
+            look(
+                lost.state.clone(),
+                seen(Execution::Stopped, false, false),
+                false,
+                8
+            )
+            .effects,
+            vec![E::Send(ArchiveOrder::Archive, id(6))]
+        );
         // T3 had it: the thread shows archived.
         let done = look(lost.state, seen(Execution::Stopped, false, true), false, 9);
-        assert_eq!((done.state, done.effects), (Stage::Archived, vec![E::Commit, E::Done]));
+        assert_eq!(
+            (done.state, done.effects),
+            (Stage::Archived, vec![E::Commit, E::Done])
+        );
     }
 
     #[test]
     fn nothing_is_removed_from_a_live_or_unmerged_worker_without_discard() {
         use ArchiveEffect as E;
-        let asking = look(Stage::Active, seen(Execution::Running, true, false), false, 1);
-        assert!(matches!(&asking.effects[..], [E::Refused(why)] if why.contains("waiting on a question")));
+        let asking = look(
+            Stage::Active,
+            seen(Execution::Running, true, false),
+            false,
+            1,
+        );
+        assert!(
+            matches!(&asking.effects[..], [E::Refused(why)] if why.contains("waiting on a question"))
+        );
         assert_eq!(asking.state, Stage::Active);
-        let stale = look(Stage::Archiving(ArchiveStep::Removing), Observed::Unavailable("offline".into()), true, 1);
+        let stale = look(
+            Stage::Archiving(ArchiveStep::Removing),
+            Observed::Unavailable("offline".into()),
+            true,
+            1,
+        );
         assert_eq!(stale.effects, vec![E::Failed(NOT_CURRENT.into())]);
         // Live again after a removal began: it is stopped again first.
-        let live = look(Stage::Archiving(ArchiveStep::Removing), seen(Execution::Idle, false, false), false, 2);
-        assert_eq!(live.effects, vec![E::Commit, E::Send(ArchiveOrder::Stop, id(2))]);
-        let blocked = archive(Stage::Archiving(ArchiveStep::Stopping { command: id(2) }),
-                              ArchiveEvent::Inspected { blocker: Ok(Some("1 commit not merged".into())), discard: false });
+        let live = look(
+            Stage::Archiving(ArchiveStep::Removing),
+            seen(Execution::Idle, false, false),
+            false,
+            2,
+        );
+        assert_eq!(
+            live.effects,
+            vec![E::Commit, E::Send(ArchiveOrder::Stop, id(2))]
+        );
+        let blocked = archive(
+            Stage::Archiving(ArchiveStep::Stopping { command: id(2) }),
+            ArchiveEvent::Inspected {
+                blocker: Ok(Some("1 commit not merged".into())),
+                discard: false,
+            },
+        );
         assert_eq!(blocked.state, Stage::Active);
-        let discarded = archive(Stage::Active, ArchiveEvent::Inspected { blocker: Ok(Some("1 commit not merged".into())), discard: true });
+        let discarded = archive(
+            Stage::Active,
+            ArchiveEvent::Inspected {
+                blocker: Ok(Some("1 commit not merged".into())),
+                discard: true,
+            },
+        );
         assert_eq!(discarded.effects, vec![E::Commit, E::Remove]);
         // A reservation T3 never created touches no Git state.
-        let never = look(Stage::Bootstrapping { message_id: "m".into(), command: json!({}) },
-                         Observed::Current { epoch: Epoch(1), revision: Revision(0), value: None }, false, 3);
-        assert_eq!((never.state, never.effects), (Stage::Archived, vec![E::Commit, E::NeverStarted]));
+        let never = look(
+            Stage::Bootstrapping {
+                message_id: "m".into(),
+                command: json!({}),
+            },
+            Observed::Current {
+                epoch: Epoch(1),
+                revision: Revision(0),
+                value: None,
+            },
+            false,
+            3,
+        );
+        assert_eq!(
+            (never.state, never.effects),
+            (Stage::Archived, vec![E::Commit, E::NeverStarted])
+        );
     }
 
     #[test]
     fn an_unconfirmed_bootstrap_is_settled_by_looking_not_by_sending_again() {
-        let reserved = Stage::Bootstrapping { message_id: "m".into(), command: json!({}) };
-        let lost = bootstrap(reserved.clone(), BootEvent::Sent(Dispatched::Unknown("closed".into())));
+        let reserved = Stage::Bootstrapping {
+            message_id: "m".into(),
+            command: json!({}),
+        };
+        let lost = bootstrap(
+            reserved.clone(),
+            BootEvent::Sent(Dispatched::Unknown("closed".into())),
+        );
         assert_eq!(lost.effects, vec![BootEffect::Confirm("closed".into())]);
-        assert_eq!(bootstrap(reserved.clone(), BootEvent::Confirmed { found: Ok(true), detail: "closed".into() }).state, Stage::Active);
-        let current = |value| Observed::Current { epoch: Epoch(1), revision: Revision(0), value };
-        assert_eq!(bootstrap(reserved.clone(), BootEvent::Look { thread: current(true) }).effects, vec![BootEffect::Commit, BootEffect::Done]);
-        assert_eq!(bootstrap(reserved.clone(), BootEvent::Look { thread: current(false) }).effects, vec![BootEffect::Send]);
-        assert!(matches!(&bootstrap(reserved, BootEvent::Look { thread: Observed::Unavailable("x".into()) }).effects[..], [BootEffect::Failed(_)]));
+        assert_eq!(
+            bootstrap(
+                reserved.clone(),
+                BootEvent::Confirmed {
+                    found: Ok(true),
+                    detail: "closed".into()
+                }
+            )
+            .state,
+            Stage::Active
+        );
+        let current = |value| Observed::Current {
+            epoch: Epoch(1),
+            revision: Revision(0),
+            value,
+        };
+        assert_eq!(
+            bootstrap(
+                reserved.clone(),
+                BootEvent::Look {
+                    thread: current(true)
+                }
+            )
+            .effects,
+            vec![BootEffect::Commit, BootEffect::Done]
+        );
+        assert_eq!(
+            bootstrap(
+                reserved.clone(),
+                BootEvent::Look {
+                    thread: current(false)
+                }
+            )
+            .effects,
+            vec![BootEffect::Send]
+        );
+        assert!(matches!(
+            &bootstrap(
+                reserved,
+                BootEvent::Look {
+                    thread: Observed::Unavailable("x".into())
+                }
+            )
+            .effects[..],
+            [BootEffect::Failed(_)]
+        ));
     }
 }

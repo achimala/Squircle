@@ -104,7 +104,10 @@ impl Service {
 }
 
 fn fixture_job(root: &Path, state: BuildState) -> Job {
-    let terminal_error = matches!(state, BuildState::Failed | BuildState::Cancelled | BuildState::Interrupted);
+    let terminal_error = matches!(
+        state,
+        BuildState::Failed | BuildState::Cancelled | BuildState::Interrupted
+    );
     let output = (state == BuildState::Succeeded).then(|| serde_json::json!({
         "archive_path": null, "ipa_path": null, "app_path": "/retained/App.app", "dsym_paths": [],
         "bundle_id": "test.app", "version": "1", "build_number": "1", "title": "App"
@@ -250,7 +253,8 @@ async fn only_one_service_owns_a_store_and_shutdown_releases_ownership() {
 async fn restart_fails_unfinished_preview_without_invalidating_signed_build() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().to_owned()).unwrap();
-    let mut record = serde_json::to_value(fixture_job(directory.path(), BuildState::Succeeded)).unwrap();
+    let mut record =
+        serde_json::to_value(fixture_job(directory.path(), BuildState::Succeeded)).unwrap();
     record["request"]["mode"] = "archive".into();
     record["output"] = serde_json::json!({
         "archive_path":null,"ipa_path":"/retained/app.ipa","app_path":null,"dsym_paths":[],

@@ -214,7 +214,11 @@ pub async fn build(
                     .to_string_lossy()
             ));
             Ok(BuildArtifacts::Simulator {
-                dsyms: if dsym.is_dir() { vec![dsym] } else { Vec::new() },
+                dsyms: if dsym.is_dir() {
+                    vec![dsym]
+                } else {
+                    Vec::new()
+                },
                 app,
                 metadata,
             })
@@ -567,19 +571,29 @@ pub(crate) async fn run_bounded_with_input(
     let failed = |error: std::io::Error| RunError::Failed(error.into());
     let (out, out_limit) = stdout.stdio().map_err(failed)?;
     let (err, err_limit) = stderr.stdio().map_err(failed)?;
-    let stdin = if input.is_some() { Stdio::piped() } else { Stdio::null() };
+    let stdin = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     command.stdin(stdin).stdout(out).stderr(err);
     // Registered before the spawn so the leader's exit cannot be missed.
-    let mut sigchld =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
+    let mut sigchld = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
     let mut group = OwnedGroup::spawn(&mut command).map_err(|error| {
         RunError::Failed(
             anyhow::Error::new(error)
                 .context(format!("cannot start {}", Path::new(&program).display())),
         )
     })?;
-    let leader = group.leader.as_mut().expect("a spawned group holds its leader");
-    let (out, err, pipe) = (leader.stdout.take(), leader.stderr.take(), leader.stdin.take());
+    let leader = group
+        .leader
+        .as_mut()
+        .expect("a spawned group holds its leader");
+    let (out, err, pipe) = (
+        leader.stdout.take(),
+        leader.stderr.take(),
+        leader.stdin.take(),
+    );
     let work = async {
         let write = async {
             use tokio::io::AsyncWriteExt;
@@ -1001,12 +1015,24 @@ mod tests {
     #[tokio::test]
     async fn input_reaches_stdin_and_an_unread_one_does_not_hang() {
         let run = |program: &str, input: Vec<u8>| {
-            run_bounded_with_input(Command::new(program), Some(input), Sink::Capture(1024), Sink::Discard,
-                                   Instant::now() + Duration::from_secs(5), None)
+            run_bounded_with_input(
+                Command::new(program),
+                Some(input),
+                Sink::Capture(1024),
+                Sink::Discard,
+                Instant::now() + Duration::from_secs(5),
+                None,
+            )
         };
         assert_eq!(run("/bin/cat", b"in".to_vec()).await.unwrap().stdout, b"in");
         // More than a pipe holds, to a helper that exits without reading.
-        assert!(run("/usr/bin/true", vec![0; 1 << 20]).await.unwrap().status.success());
+        assert!(
+            run("/usr/bin/true", vec![0; 1 << 20])
+                .await
+                .unwrap()
+                .status
+                .success()
+        );
     }
 
     fn gone(pid: libc::pid_t) -> bool {
@@ -1048,7 +1074,10 @@ mod tests {
         let marker = tempfile::NamedTempFile::new().unwrap();
         let mut command = Command::new("/bin/sh");
         command
-            .args(["-c", "sleep 30 >/dev/null 2>&1 & echo $! > \"$0\"; sleep 30"])
+            .args([
+                "-c",
+                "sleep 30 >/dev/null 2>&1 & echo $! > \"$0\"; sleep 30",
+            ])
             .arg(marker.path());
         let result = run_bounded(
             command,

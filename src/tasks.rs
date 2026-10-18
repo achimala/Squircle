@@ -20,12 +20,16 @@ use std::{
 };
 
 pub use crate::fsm::tasks::{
-    BuildPhase, BuildSignal, By, Change, Signals, Source, Status, Task, Update, WorkerPhase, WorkerSignal,
+    BuildPhase, BuildSignal, By, Change, Signals, Source, Status, Task, Update, WorkerPhase,
+    WorkerSignal,
 };
 
 /// The book as saved, for reading without the service (`squircle history`).
 pub fn read(root: &Path) -> Result<Book> {
-    Ok(JsonFile::new(root.join("tasks.json")).read()?.map(|(book, _)| book).unwrap_or_default())
+    Ok(JsonFile::new(root.join("tasks.json"))
+        .read()?
+        .map(|(book, _)| book)
+        .unwrap_or_default())
 }
 
 /// The task owner's state: the book behind its commit gate, published once
@@ -82,10 +86,16 @@ pub struct Tasks {
 impl Tasks {
     pub fn open(root: &Path) -> Result<Self> {
         let file = JsonFile::new(root.join("tasks.json"));
-        let (book, revision) = file.read()?.unwrap_or((Book::default(), Revision::default()));
+        let (book, revision) = file
+            .read()?
+            .unwrap_or((Book::default(), Revision::default()));
         let (book, snapshot) = Saved::new(Gate::restore(book, revision, file));
         let owner = Owner::spawn("tasks", State { book });
-        Ok(Self { root: root.to_path_buf(), owner, book: snapshot })
+        Ok(Self {
+            root: root.to_path_buf(),
+            owner,
+            book: snapshot,
+        })
     }
 
     pub fn media_dir(&self, id: &str) -> Result<PathBuf> {
@@ -107,30 +117,95 @@ impl Tasks {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn add(&self, project: &str, ask: &str, status: Option<Status>, note: Option<&str>, by: By,
-                     source: Option<Source>, threads: Vec<String>) -> Result<Task> {
+    pub async fn add(
+        &self,
+        project: &str,
+        ask: &str,
+        status: Option<Status>,
+        note: Option<&str>,
+        by: By,
+        source: Option<Source>,
+        threads: Vec<String>,
+    ) -> Result<Task> {
         let id = TaskID::fresh();
         let event = Event::Add {
-            id: id.clone(), project: project.into(), ask: ask.into(), status, note: note.map(str::to_string), by, source, threads,
+            id: id.clone(),
+            project: project.into(),
+            ask: ask.into(),
+            status,
+            note: note.map(str::to_string),
+            by,
+            source,
+            threads,
             now: crate::model::now(),
         };
-        self.owner.ask(move |s| s.apply_get(vec![event], id.as_str())).await
+        self.owner
+            .ask(move |s| s.apply_get(vec![event], id.as_str()))
+            .await
     }
 
     /// An explicit change from the agent or the user. A status set this way
     /// holds until a linked worker or build changes after `observed`, what
     /// they were doing when it was chosen.
-    pub async fn update(&self, id: &str, update: Update, by: By, observed: Option<Signals>) -> Result<Task> {
+    pub async fn update(
+        &self,
+        id: &str,
+        update: Update,
+        by: By,
+        observed: Option<Signals>,
+    ) -> Result<Task> {
         let (id, now) = (id.to_string(), crate::model::now());
-        self.owner.ask(move |s| s.apply_get(vec![Event::Edit { id: id.clone(), update, by, observed, now }], &id)).await
+        self.owner
+            .ask(move |s| {
+                s.apply_get(
+                    vec![Event::Edit {
+                        id: id.clone(),
+                        update,
+                        by,
+                        observed,
+                        now,
+                    }],
+                    &id,
+                )
+            })
+            .await
     }
 
-    pub async fn link(&self, id: &str, thread: Option<&str>, build: Option<&str>, remove: bool) -> Result<Task> {
-        ensure!(thread.is_some() || build.is_some(), "Pass a thread or a build to link");
-        let thread = thread.map(ThreadID::parse).transpose().context("Thread and build IDs are UUIDs")?;
-        let build = build.map(BuildID::parse).transpose().context("Thread and build IDs are UUIDs")?;
+    pub async fn link(
+        &self,
+        id: &str,
+        thread: Option<&str>,
+        build: Option<&str>,
+        remove: bool,
+    ) -> Result<Task> {
+        ensure!(
+            thread.is_some() || build.is_some(),
+            "Pass a thread or a build to link"
+        );
+        let thread = thread
+            .map(ThreadID::parse)
+            .transpose()
+            .context("Thread and build IDs are UUIDs")?;
+        let build = build
+            .map(BuildID::parse)
+            .transpose()
+            .context("Thread and build IDs are UUIDs")?;
         let (id, now) = (id.to_string(), crate::model::now());
-        let event = if remove { Event::Unlink { id: id.clone(), thread, build, now } } else { Event::Link { id: id.clone(), thread, build, now } };
+        let event = if remove {
+            Event::Unlink {
+                id: id.clone(),
+                thread,
+                build,
+                now,
+            }
+        } else {
+            Event::Link {
+                id: id.clone(),
+                thread,
+                build,
+                now,
+            }
+        };
         self.owner.ask(move |s| s.apply_get(vec![event], &id)).await
     }
 
@@ -140,13 +215,19 @@ impl Tasks {
         }
         self.get(id)?;
         let media = media::add_in(&self.media_dir(id)?, id, file, caption)?;
-        let event = Event::Attached { id: id.into(), now: crate::model::now() };
+        let event = Event::Attached {
+            id: id.into(),
+            now: crate::model::now(),
+        };
         self.owner.ask(move |s| s.apply(vec![event])).await?;
         Ok(media)
     }
 
     pub fn media(&self, id: &str) -> Vec<Media> {
-        self.media_dir(id).ok().and_then(|dir| media::list_in(&dir).ok()).unwrap_or_default()
+        self.media_dir(id)
+            .ok()
+            .and_then(|dir| media::list_in(&dir).ok())
+            .unwrap_or_default()
     }
 
     /// Applies what linked workers and builds say, History tasks included,
@@ -158,7 +239,17 @@ impl Tasks {
     /// What linked work says of each watched task, read from the published
     /// book without the owner.
     pub fn read(&self, signals: impl Fn(&Task) -> Signals) -> Reads {
-        Reads(self.book.get().watched().into_iter().map(|task| { let s = signals(&task); (task.id, task.revision, s) }).collect())
+        Reads(
+            self.book
+                .get()
+                .watched()
+                .into_iter()
+                .map(|task| {
+                    let s = signals(&task);
+                    (task.id, task.revision, s)
+                })
+                .collect(),
+        )
     }
 
     /// Applies `reads` only to tasks still at the revision each was read at,
@@ -166,7 +257,17 @@ impl Tasks {
     /// next tick reads again), and ages tasks into History.
     pub async fn observe(&self, reads: Reads) -> Result<()> {
         let now = crate::model::now();
-        self.owner.ask(move |s| s.apply(vec![Event::Observe { reads: reads.0, now }, Event::AgeDue { now }])).await
+        self.owner
+            .ask(move |s| {
+                s.apply(vec![
+                    Event::Observe {
+                        reads: reads.0,
+                        now,
+                    },
+                    Event::AgeDue { now },
+                ])
+            })
+            .await
     }
 }
 
@@ -175,7 +276,15 @@ mod tests {
     use super::*;
 
     fn worker(turn: &str, phase: WorkerPhase) -> Signals {
-        Signals { revision: None, workers: vec![WorkerSignal { thread: "w".into(), turn: Some(turn.into()), phase }], builds: vec![] }
+        Signals {
+            revision: None,
+            workers: vec![WorkerSignal {
+                thread: "w".into(),
+                turn: Some(turn.into()),
+                phase,
+            }],
+            builds: vec![],
+        }
     }
 
     #[tokio::test]
@@ -189,22 +298,57 @@ mod tests {
         // Unchanged work leaves it where it is.
         tasks.tick(|_| Signals::legacy("w:done")).await.unwrap();
         assert_eq!(tasks.get("t").unwrap().archived_at, Some(5));
-        tasks.tick(|_| worker("2", WorkerPhase::Working)).await.unwrap();
+        tasks
+            .tick(|_| worker("2", WorkerPhase::Working))
+            .await
+            .unwrap();
         let task = tasks.get("t").unwrap();
         assert_eq!((task.status, task.archived_at), (Status::InProgress, None));
-        assert_eq!(Tasks::open(dir.path()).unwrap().get("t").unwrap().status, Status::InProgress);
+        assert_eq!(
+            Tasks::open(dir.path()).unwrap().get("t").unwrap().status,
+            Status::InProgress
+        );
     }
 
     #[tokio::test]
     async fn an_explicit_status_still_holds_after_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();
-        let id = tasks.add("p", "Stack the sims", None, None, By::Agent, None, vec!["w".into()]).await.unwrap().id;
-        tasks.tick(|_| worker("1", WorkerPhase::Working)).await.unwrap();
-        let needs_you = Update { status: Some(Status::NeedsYou), ..Default::default() };
-        tasks.update(&id, needs_you, By::Agent, Some(worker("1", WorkerPhase::Working))).await.unwrap();
+        let id = tasks
+            .add(
+                "p",
+                "Stack the sims",
+                None,
+                None,
+                By::Agent,
+                None,
+                vec!["w".into()],
+            )
+            .await
+            .unwrap()
+            .id;
+        tasks
+            .tick(|_| worker("1", WorkerPhase::Working))
+            .await
+            .unwrap();
+        let needs_you = Update {
+            status: Some(Status::NeedsYou),
+            ..Default::default()
+        };
+        tasks
+            .update(
+                &id,
+                needs_you,
+                By::Agent,
+                Some(worker("1", WorkerPhase::Working)),
+            )
+            .await
+            .unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();
-        tasks.tick(|_| worker("1", WorkerPhase::Working)).await.unwrap();
+        tasks
+            .tick(|_| worker("1", WorkerPhase::Working))
+            .await
+            .unwrap();
         assert_eq!(tasks.get(&id).unwrap().status, Status::NeedsYou);
     }
 
@@ -212,17 +356,49 @@ mod tests {
     async fn a_tick_read_before_an_explicit_change_does_not_overwrite_it() {
         let dir = tempfile::tempdir().unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();
-        let id = tasks.add("p", "Stack the sims", None, None, By::Agent, None, vec!["w".into()]).await.unwrap().id;
-        tasks.tick(|_| worker("1", WorkerPhase::Working)).await.unwrap();
+        let id = tasks
+            .add(
+                "p",
+                "Stack the sims",
+                None,
+                None,
+                By::Agent,
+                None,
+                vec!["w".into()],
+            )
+            .await
+            .unwrap()
+            .id;
+        tasks
+            .tick(|_| worker("1", WorkerPhase::Working))
+            .await
+            .unwrap();
         // While the tick reads the worker, the agent says the task needs the user,
         // having seen the worker finish.
         let reads = tasks.read(|_| worker("1", WorkerPhase::Working));
-        let finished = Signals { revision: Some(tasks.get(&id).unwrap().revision), ..worker("1", WorkerPhase::Done) };
-        tasks.update(&id, Update { status: Some(Status::NeedsYou), ..Default::default() }, By::Agent, Some(finished)).await.unwrap();
+        let finished = Signals {
+            revision: Some(tasks.get(&id).unwrap().revision),
+            ..worker("1", WorkerPhase::Done)
+        };
+        tasks
+            .update(
+                &id,
+                Update {
+                    status: Some(Status::NeedsYou),
+                    ..Default::default()
+                },
+                By::Agent,
+                Some(finished),
+            )
+            .await
+            .unwrap();
         tasks.observe(reads).await.unwrap();
         assert_eq!(tasks.get(&id).unwrap().status, Status::NeedsYou);
         // The finish it saw is no news afterwards either.
-        tasks.tick(|_| worker("1", WorkerPhase::Done)).await.unwrap();
+        tasks
+            .tick(|_| worker("1", WorkerPhase::Done))
+            .await
+            .unwrap();
         assert_eq!(tasks.get(&id).unwrap().status, Status::NeedsYou);
     }
 
@@ -230,19 +406,38 @@ mod tests {
     async fn a_change_that_cannot_be_saved_is_not_seen() {
         let dir = tempfile::tempdir().unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();
-        let id = tasks.add("p", "Stack the sims", None, None, By::Agent, None, vec![]).await.unwrap().id;
+        let id = tasks
+            .add("p", "Stack the sims", None, None, By::Agent, None, vec![])
+            .await
+            .unwrap()
+            .id;
         std::fs::remove_file(dir.path().join("tasks.json")).unwrap();
         std::fs::create_dir(dir.path().join("tasks.json")).unwrap();
-        let done = || Update { status: Some(Status::Done), ..Default::default() };
+        let done = || Update {
+            status: Some(Status::Done),
+            ..Default::default()
+        };
         assert!(tasks.update(&id, done(), By::User, None).await.is_err());
         let task = tasks.get(&id).unwrap();
-        assert_eq!((task.status, task.revision, task.history.len()), (Status::Queued, 1, 1));
+        assert_eq!(
+            (task.status, task.revision, task.history.len()),
+            (Status::Queued, 1, 1)
+        );
         // Once storage works again, the next change saves the change it couldn't
         // confirm first, then its own; nothing was published in between.
         std::fs::remove_dir(dir.path().join("tasks.json")).unwrap();
-        let note = Update { note: Some("Waiting on Xcode".into()), ..Default::default() };
+        let note = Update {
+            note: Some("Waiting on Xcode".into()),
+            ..Default::default()
+        };
         let task = tasks.update(&id, note, By::User, None).await.unwrap();
-        assert_eq!((task.status, task.note.as_str(), task.history.len()), (Status::Done, "Waiting on Xcode", 3));
-        assert_eq!(Tasks::open(dir.path()).unwrap().get(&id).unwrap().note, "Waiting on Xcode");
+        assert_eq!(
+            (task.status, task.note.as_str(), task.history.len()),
+            (Status::Done, "Waiting on Xcode", 3)
+        );
+        assert_eq!(
+            Tasks::open(dir.path()).unwrap().get(&id).unwrap().note,
+            "Waiting on Xcode"
+        );
     }
 }

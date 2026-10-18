@@ -153,26 +153,43 @@ pub fn observe(known: &mut HashMap<String, Provenance>, devices: &[Device], now:
 /// and never answered (a crash, an unknown outcome) is settled by what the
 /// inventory shows, never assumed done.
 pub fn reconcile(known: &mut HashMap<String, Provenance>, devices: &[Device]) {
-    known.retain(|udid, p| !(p.acting.as_ref().is_some_and(|a| a.action == Action::Delete) && !devices.iter().any(|d| &d.udid == udid)));
+    known.retain(|udid, p| {
+        !(p.acting
+            .as_ref()
+            .is_some_and(|a| a.action == Action::Delete)
+            && !devices.iter().any(|d| &d.udid == udid))
+    });
     for entry in known.values_mut() {
         entry.acting = None;
     }
 }
 
 /// A cleanup's answer.
-pub fn settle(known: &mut HashMap<String, Provenance>, udid: &str, action: Action, result: Result<(), String>, now: f64) {
+pub fn settle(
+    known: &mut HashMap<String, Provenance>,
+    udid: &str,
+    action: Action,
+    result: Result<(), String>,
+    now: f64,
+) {
     match (action, result) {
-        (Action::Delete, Ok(())) => { known.remove(udid); }
-        (Action::Shutdown, Ok(())) => if let Some(entry) = known.get_mut(udid) {
-            entry.shut_down_at = entry.shut_down_at.max(now);
-            entry.last_used = now;
-            entry.acting = None;
-            entry.error = None;
-        },
+        (Action::Delete, Ok(())) => {
+            known.remove(udid);
+        }
+        (Action::Shutdown, Ok(())) => {
+            if let Some(entry) = known.get_mut(udid) {
+                entry.shut_down_at = entry.shut_down_at.max(now);
+                entry.last_used = now;
+                entry.acting = None;
+                entry.error = None;
+            }
+        }
         // Unknown: the next inventory says what happened.
-        (_, Err(error)) => if let Some(entry) = known.get_mut(udid) {
-            entry.error = Some(error);
-        },
+        (_, Err(error)) => {
+            if let Some(entry) = known.get_mut(udid) {
+                entry.error = Some(error);
+            }
+        }
     }
 }
 
@@ -229,53 +246,147 @@ pub fn plan(facts: &Facts) -> Vec<Row> {
         let known = facts.known.get(&device.udid).cloned().unwrap_or_default();
         let ours = known.owned();
         let row = |owner, thread: Option<&str>, free, action, why: String| Row {
-            udid: device.udid.clone(), name: device.name.clone(), booted: device.state == "Booted",
-            owner, thread: thread.map(str::to_string), ours, free, action, why,
+            udid: device.udid.clone(),
+            name: device.name.clone(),
+            booted: device.state == "Booted",
+            owner,
+            thread: thread.map(str::to_string),
+            ours,
+            free,
+            action,
+            why,
         };
-        let lease = facts.leases.iter().find(|l| l.device_id.eq_ignore_ascii_case(&device.udid));
+        let lease = facts
+            .leases
+            .iter()
+            .find(|l| l.device_id.eq_ignore_ascii_case(&device.udid));
         // A T3 device session protects while its thread may be working, and
         // always while the thread is the user's own (not one Squircle started).
-        let session = facts.t3_sessions.iter().filter(|(_, d)| d.eq_ignore_ascii_case(&device.udid)).find(|(thread, _)| {
-            let info = (facts.thread)(thread);
-            info.seen.protects() || (info.seen != Seen::Gone && !info.squircle)
-        });
-        let recent_touch = known.touched_by.as_deref().filter(|_| facts.now - known.touched_at < TOUCH_WINDOW);
-        let toucher = [recent_touch, known.boot().and_then(|b| b.thread.as_deref()), known.created_by.as_deref()]
-            .into_iter().flatten()
-            .find(|t| (facts.thread)(t).seen.protects());
+        let session = facts
+            .t3_sessions
+            .iter()
+            .filter(|(_, d)| d.eq_ignore_ascii_case(&device.udid))
+            .find(|(thread, _)| {
+                let info = (facts.thread)(thread);
+                info.seen.protects() || (info.seen != Seen::Gone && !info.squircle)
+            });
+        let recent_touch = known
+            .touched_by
+            .as_deref()
+            .filter(|_| facts.now - known.touched_at < TOUCH_WINDOW);
+        let toucher = [
+            recent_touch,
+            known.boot().and_then(|b| b.thread.as_deref()),
+            known.created_by.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|t| (facts.thread)(t).seen.protects());
 
         if device.state != "Booted" {
             let unused = facts.now - known.last_used.max(device.changed_at);
-            let deletable = device.state == "Shutdown" && known.created_by.is_some() && lease.is_none() && facts.activity_complete
-                && !facts.reserved.contains(&device.udid) && !facts.t3_sessions.iter().any(|(_, d)| d.eq_ignore_ascii_case(&device.udid))
-                && toucher.is_none() && unused >= facts.policy.delete_after;
+            let deletable = device.state == "Shutdown"
+                && known.created_by.is_some()
+                && lease.is_none()
+                && facts.activity_complete
+                && !facts.reserved.contains(&device.udid)
+                && !facts
+                    .t3_sessions
+                    .iter()
+                    .any(|(_, d)| d.eq_ignore_ascii_case(&device.udid))
+                && toucher.is_none()
+                && unused >= facts.policy.delete_after;
             if deletable {
-                rows.push(row("agent (idle)", known.created_by.as_deref(), false, Some(Action::Delete),
-                    format!("an agent created it; unused for {}", span(unused))));
+                rows.push(row(
+                    "agent (idle)",
+                    known.created_by.as_deref(),
+                    false,
+                    Some(Action::Delete),
+                    format!("an agent created it; unused for {}", span(unused)),
+                ));
             }
             continue;
         }
         let r = if let Some(lease) = lease {
-            row("lease", Some(&lease.thread_id), false, None, "leased through squircle sim start".into())
+            row(
+                "lease",
+                Some(&lease.thread_id),
+                false,
+                None,
+                "leased through squircle sim start".into(),
+            )
         } else if facts.reserved.contains(&device.udid) {
-            row("reserved", None, false, None, "the preview capture's simulator".into())
+            row(
+                "reserved",
+                None,
+                false,
+                None,
+                "the preview capture's simulator".into(),
+            )
         } else if let Some((thread, _)) = session {
-            row("t3 session", Some(thread), false, None, "open in T3's device tools".into())
+            row(
+                "t3 session",
+                Some(thread),
+                false,
+                None,
+                "open in T3's device tools".into(),
+            )
         } else if !ours {
-            row("unowned", None, false, None, "not created or booted by Squircle or its agents; left alone".into())
+            row(
+                "unowned",
+                None,
+                false,
+                None,
+                "not created or booted by Squircle or its agents; left alone".into(),
+            )
         } else if let Some(thread) = toucher {
-            row("agent outside a lease", Some(thread), false, None, "used by an agent that may still be working".into())
+            row(
+                "agent outside a lease",
+                Some(thread),
+                false,
+                None,
+                "used by an agent that may still be working".into(),
+            )
         } else if !facts.activity_complete {
-            row("agent (idle)", None, false, None, "T3's activity log couldn't be read; kept until it can".into())
+            row(
+                "agent (idle)",
+                None,
+                false,
+                None,
+                "T3's activity log couldn't be read; kept until it can".into(),
+            )
         } else {
-            let since = facts.idle_since.get(&device.udid).copied().unwrap_or(facts.now);
+            let since = facts
+                .idle_since
+                .get(&device.udid)
+                .copied()
+                .unwrap_or(facts.now);
             let idle = facts.now - since;
             let due = facts.now_please || idle >= facts.policy.idle;
-            let thread = known.touched_by.as_deref().or(known.boot().and_then(|b| b.thread.as_deref())).or(known.created_by.as_deref());
-            let failed = known.error.as_deref().map(|e| format!("; the last shutdown failed: {e}")).unwrap_or_default();
-            row("agent (idle)", thread, true, due.then_some(Action::Shutdown),
-                if due { format!("Squircle's or an agent's, held by nothing (idle {}){failed}", span(idle)) }
-                else { format!("free; shut down after {} idle", span(facts.policy.idle)) })
+            let thread = known
+                .touched_by
+                .as_deref()
+                .or(known.boot().and_then(|b| b.thread.as_deref()))
+                .or(known.created_by.as_deref());
+            let failed = known
+                .error
+                .as_deref()
+                .map(|e| format!("; the last shutdown failed: {e}"))
+                .unwrap_or_default();
+            row(
+                "agent (idle)",
+                thread,
+                true,
+                due.then_some(Action::Shutdown),
+                if due {
+                    format!(
+                        "Squircle's or an agent's, held by nothing (idle {}){failed}",
+                        span(idle)
+                    )
+                } else {
+                    format!("free; shut down after {} idle", span(facts.policy.idle))
+                },
+            )
         };
         rows.push(r);
     }
@@ -303,14 +414,31 @@ mod tests {
     use super::*;
 
     const HOUR: f64 = 3600.0;
-    const POLICY: Policy = Policy { max_leases: 3, idle: 600.0, delete_after: 24.0 * HOUR };
+    const POLICY: Policy = Policy {
+        max_leases: 3,
+        idle: 600.0,
+        delete_after: 24.0 * HOUR,
+    };
 
     fn device(udid: &str, state: &str) -> Device {
-        Device { udid: udid.into(), name: format!("sim {udid}"), state: state.into(), changed_at: 0.0 }
+        Device {
+            udid: udid.into(),
+            name: format!("sim {udid}"),
+            state: state.into(),
+            changed_at: 0.0,
+        }
     }
 
     fn booted_by_session(at: f64) -> Provenance {
-        Provenance { leased: true, booted: Some(BootReceipt { at, thread: None, session: Some("s".into()) }), ..Provenance::default() }
+        Provenance {
+            leased: true,
+            booted: Some(BootReceipt {
+                at,
+                thread: None,
+                session: Some("s".into()),
+            }),
+            ..Provenance::default()
+        }
     }
 
     fn info(seen: Seen, squircle: bool) -> ThreadInfo {
@@ -324,50 +452,138 @@ mod tests {
     fn policy_acts_only_on_proven_free_simulators() {
         let now = 100.0 * HOUR;
         let devices = [
-            device("LEASED", "Booted"), device("USER", "Booted"), device("PANEL", "Booted"), device("ASKING", "Booted"),
-            device("ADHOC", "Booted"), device("IDLE", "Booted"), device("FRESH", "Booted"), device("PREVIEW", "Booted"),
-            device("USEDONLY", "Booted"), device("REBOOTED", "Booted"), device("STALE", "Shutdown"), device("RECENT", "Shutdown"),
+            device("LEASED", "Booted"),
+            device("USER", "Booted"),
+            device("PANEL", "Booted"),
+            device("ASKING", "Booted"),
+            device("ADHOC", "Booted"),
+            device("IDLE", "Booted"),
+            device("FRESH", "Booted"),
+            device("PREVIEW", "Booted"),
+            device("USEDONLY", "Booted"),
+            device("REBOOTED", "Booted"),
+            device("STALE", "Shutdown"),
+            device("RECENT", "Shutdown"),
         ];
         let known: HashMap<String, Provenance> = [
-            ("LEASED", booted_by_session(1.0)), ("PANEL", booted_by_session(1.0)), ("IDLE", booted_by_session(1.0)),
-            ("FRESH", booted_by_session(1.0)), ("PREVIEW", booted_by_session(1.0)), ("ASKING", booted_by_session(1.0)),
-            ("ADHOC", Provenance { booted: Some(BootReceipt { at: now - 60.0, thread: Some("worker".into()), session: None }), ..Provenance::default() }),
+            ("LEASED", booted_by_session(1.0)),
+            ("PANEL", booted_by_session(1.0)),
+            ("IDLE", booted_by_session(1.0)),
+            ("FRESH", booted_by_session(1.0)),
+            ("PREVIEW", booted_by_session(1.0)),
+            ("ASKING", booted_by_session(1.0)),
+            (
+                "ADHOC",
+                Provenance {
+                    booted: Some(BootReceipt {
+                        at: now - 60.0,
+                        thread: Some("worker".into()),
+                        session: None,
+                    }),
+                    ..Provenance::default()
+                },
+            ),
             // Used by sessions and agents, never booted or created by them: not ours.
-            ("USEDONLY", Provenance { leased: true, touched_by: Some("gone".into()), touched_at: now - 60.0, ..Provenance::default() }),
+            (
+                "USEDONLY",
+                Provenance {
+                    leased: true,
+                    touched_by: Some("gone".into()),
+                    touched_at: now - 60.0,
+                    ..Provenance::default()
+                },
+            ),
             // Ours once, but seen shut down since: this boot is someone else's.
-            ("REBOOTED", Provenance { shut_down_at: 2.0, ..booted_by_session(1.0) }),
-            ("STALE", Provenance { last_used: now - 30.0 * HOUR, created_by: Some("old-worker".into()), ..Provenance::default() }),
-            ("RECENT", Provenance { last_used: now - HOUR, created_by: Some("old-worker".into()), ..Provenance::default() }),
-        ].into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+            (
+                "REBOOTED",
+                Provenance {
+                    shut_down_at: 2.0,
+                    ..booted_by_session(1.0)
+                },
+            ),
+            (
+                "STALE",
+                Provenance {
+                    last_used: now - 30.0 * HOUR,
+                    created_by: Some("old-worker".into()),
+                    ..Provenance::default()
+                },
+            ),
+            (
+                "RECENT",
+                Provenance {
+                    last_used: now - HOUR,
+                    created_by: Some("old-worker".into()),
+                    ..Provenance::default()
+                },
+            ),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
         let thread = |id: &str| match id {
             "worker" => info(Seen::Busy { turn: None }, true),
             "user" => info(Seen::Idle { turn: None }, false),
             "asking" => info(Seen::Waiting { turn: None }, true),
             _ => info(Seen::Gone, true),
         };
-        let idle_since: HashMap<String, f64> = [("IDLE".to_string(), now - 700.0), ("FRESH".to_string(), now - 60.0)].into();
-        let leases = [Lease { device_id: "LEASED".into(), thread_id: "worker".into() }];
-        let sessions = [("user".to_string(), "PANEL".to_string()), ("asking".to_string(), "ASKING".to_string()), ("gone".to_string(), "IDLE".to_string())];
+        let idle_since: HashMap<String, f64> = [
+            ("IDLE".to_string(), now - 700.0),
+            ("FRESH".to_string(), now - 60.0),
+        ]
+        .into();
+        let leases = [Lease {
+            device_id: "LEASED".into(),
+            thread_id: "worker".into(),
+        }];
+        let sessions = [
+            ("user".to_string(), "PANEL".to_string()),
+            ("asking".to_string(), "ASKING".to_string()),
+            ("gone".to_string(), "IDLE".to_string()),
+        ];
         let reserved = ["PREVIEW".to_string()];
-        let facts = |now_please, activity_complete| Facts { now, devices: &devices, leases: &leases, t3_sessions: &sessions, known: &known,
-            thread: &thread, activity_complete, idle_since: &idle_since, reserved: &reserved, policy: POLICY, now_please };
-        let summary = |rows: Vec<Row>| rows.into_iter().map(|r| (r.udid, r.owner, r.action)).collect::<Vec<_>>();
+        let facts = |now_please, activity_complete| Facts {
+            now,
+            devices: &devices,
+            leases: &leases,
+            t3_sessions: &sessions,
+            known: &known,
+            thread: &thread,
+            activity_complete,
+            idle_since: &idle_since,
+            reserved: &reserved,
+            policy: POLICY,
+            now_please,
+        };
+        let summary = |rows: Vec<Row>| {
+            rows.into_iter()
+                .map(|r| (r.udid, r.owner, r.action))
+                .collect::<Vec<_>>()
+        };
 
-        assert_eq!(summary(plan(&facts(false, true))), vec![
-            ("LEASED".into(), "lease", None),
-            ("USER".into(), "unowned", None),
-            ("PANEL".into(), "t3 session", None),
-            ("ASKING".into(), "t3 session", None),
-            ("ADHOC".into(), "agent outside a lease", None),
-            ("IDLE".into(), "agent (idle)", Some(Action::Shutdown)),
-            ("FRESH".into(), "agent (idle)", None),
-            ("PREVIEW".into(), "reserved", None),
-            ("USEDONLY".into(), "unowned", None),
-            ("REBOOTED".into(), "unowned", None),
-            ("STALE".into(), "agent (idle)", Some(Action::Delete)),
-        ]);
+        assert_eq!(
+            summary(plan(&facts(false, true))),
+            vec![
+                ("LEASED".into(), "lease", None),
+                ("USER".into(), "unowned", None),
+                ("PANEL".into(), "t3 session", None),
+                ("ASKING".into(), "t3 session", None),
+                ("ADHOC".into(), "agent outside a lease", None),
+                ("IDLE".into(), "agent (idle)", Some(Action::Shutdown)),
+                ("FRESH".into(), "agent (idle)", None),
+                ("PREVIEW".into(), "reserved", None),
+                ("USEDONLY".into(), "unowned", None),
+                ("REBOOTED".into(), "unowned", None),
+                ("STALE".into(), "agent (idle)", Some(Action::Delete)),
+            ]
+        );
         // On demand the idle wait goes, nothing else.
-        let acted = |rows: Vec<Row>| rows.into_iter().filter(|r| r.action.is_some()).map(|r| r.udid).collect::<Vec<_>>();
+        let acted = |rows: Vec<Row>| {
+            rows.into_iter()
+                .filter(|r| r.action.is_some())
+                .map(|r| r.udid)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(acted(plan(&facts(true, true))), ["IDLE", "FRESH", "STALE"]);
         // Without the activity log an unseen use could protect any of ours: nothing is acted on.
         assert!(acted(plan(&facts(true, false))).is_empty());
@@ -379,28 +595,81 @@ mod tests {
     #[test]
     fn unproven_devices_are_never_destroyed() {
         let now = 1000.0;
-        let seens = [Seen::Gone, Seen::Idle { turn: None }, Seen::Busy { turn: None }, Seen::Waiting { turn: None }, Seen::Unknown { turn: None }];
+        let seens = [
+            Seen::Gone,
+            Seen::Idle { turn: None },
+            Seen::Busy { turn: None },
+            Seen::Waiting { turn: None },
+            Seen::Unknown { turn: None },
+        ];
         for state in ["Booted", "Shutdown"] {
             for seen in &seens {
                 for squircle in [false, true] {
                     for (provenance, owned) in [
-                        (Provenance { leased: true, touched_by: Some("t".into()), touched_at: 1.0, last_used: 1.0, ..Provenance::default() }, false),
-                        (Provenance { booted: Some(BootReceipt { at: 1.0, thread: None, session: None }), shut_down_at: 5.0, ..Provenance::default() }, false),
+                        (
+                            Provenance {
+                                leased: true,
+                                touched_by: Some("t".into()),
+                                touched_at: 1.0,
+                                last_used: 1.0,
+                                ..Provenance::default()
+                            },
+                            false,
+                        ),
+                        (
+                            Provenance {
+                                booted: Some(BootReceipt {
+                                    at: 1.0,
+                                    thread: None,
+                                    session: None,
+                                }),
+                                shut_down_at: 5.0,
+                                ..Provenance::default()
+                            },
+                            false,
+                        ),
                         (booted_by_session(1.0), true),
                     ] {
                         for session in [false, true] {
-                            let devices = [Device { udid: "D".into(), name: "d".into(), state: state.into(), changed_at: 0.0 }];
-                            let known: HashMap<String, Provenance> = [("D".to_string(), provenance.clone())].into();
-                            let sessions: Vec<(String, String)> = if session { vec![("t".into(), "D".into())] } else { vec![] };
+                            let devices = [Device {
+                                udid: "D".into(),
+                                name: "d".into(),
+                                state: state.into(),
+                                changed_at: 0.0,
+                            }];
+                            let known: HashMap<String, Provenance> =
+                                [("D".to_string(), provenance.clone())].into();
+                            let sessions: Vec<(String, String)> = if session {
+                                vec![("t".into(), "D".into())]
+                            } else {
+                                vec![]
+                            };
                             let thread = |_: &str| info(seen.clone(), squircle);
-                            let rows = plan(&Facts { now, devices: &devices, leases: &[], t3_sessions: &sessions, known: &known, thread: &thread,
-                                activity_complete: true, idle_since: &HashMap::new(), reserved: &[], policy: POLICY, now_please: true });
+                            let rows = plan(&Facts {
+                                now,
+                                devices: &devices,
+                                leases: &[],
+                                t3_sessions: &sessions,
+                                known: &known,
+                                thread: &thread,
+                                activity_complete: true,
+                                idle_since: &HashMap::new(),
+                                reserved: &[],
+                                policy: POLICY,
+                                now_please: true,
+                            });
                             let acted = rows.iter().any(|r| r.action.is_some());
                             if !owned {
-                                assert!(!acted, "acted on an unproven device: {provenance:?} {seen:?}");
+                                assert!(
+                                    !acted,
+                                    "acted on an unproven device: {provenance:?} {seen:?}"
+                                );
                             }
                             if session && (seen.protects() || (!squircle && *seen != Seen::Gone)) {
-                                assert!(!acted, "acted under a protecting T3 session: {seen:?} squircle={squircle}");
+                                assert!(
+                                    !acted,
+                                    "acted under a protecting T3 session: {seen:?} squircle={squircle}"
+                                );
                             }
                         }
                     }
@@ -415,22 +684,76 @@ mod tests {
     #[test]
     fn inventory_settles_unanswered_cleanups_and_ends_boots() {
         let mut known: HashMap<String, Provenance> = [
-            ("A".to_string(), Provenance { acting: Some(Acting { action: Action::Shutdown, at: 5.0 }), ..booted_by_session(1.0) }),
-            ("B".to_string(), Provenance { acting: Some(Acting { action: Action::Delete, at: 5.0 }), created_by: Some("w".into()), ..Provenance::default() }),
-            ("C".to_string(), Provenance { acting: Some(Acting { action: Action::Shutdown, at: 5.0 }), ..booted_by_session(1.0) }),
-        ].into();
-        let devices = [Device { udid: "A".into(), name: "a".into(), state: "Shutdown".into(), changed_at: 6.0 }, device("C", "Booted")];
+            (
+                "A".to_string(),
+                Provenance {
+                    acting: Some(Acting {
+                        action: Action::Shutdown,
+                        at: 5.0,
+                    }),
+                    ..booted_by_session(1.0)
+                },
+            ),
+            (
+                "B".to_string(),
+                Provenance {
+                    acting: Some(Acting {
+                        action: Action::Delete,
+                        at: 5.0,
+                    }),
+                    created_by: Some("w".into()),
+                    ..Provenance::default()
+                },
+            ),
+            (
+                "C".to_string(),
+                Provenance {
+                    acting: Some(Acting {
+                        action: Action::Shutdown,
+                        at: 5.0,
+                    }),
+                    ..booted_by_session(1.0)
+                },
+            ),
+        ]
+        .into();
+        let devices = [
+            Device {
+                udid: "A".into(),
+                name: "a".into(),
+                state: "Shutdown".into(),
+                changed_at: 6.0,
+            },
+            device("C", "Booted"),
+        ];
         observe(&mut known, &devices, 10.0);
         reconcile(&mut known, &devices);
-        assert!(!known["A"].owned() && known["A"].acting.is_none(), "a shut-down device stays ours");
+        assert!(
+            !known["A"].owned() && known["A"].acting.is_none(),
+            "a shut-down device stays ours"
+        );
         assert!(!known.contains_key("B"), "a deleted device is still known");
         // Still booted: nothing assumed; it is ours and planned again.
         assert!(known["C"].owned() && known["C"].acting.is_none());
         // A later boot of ours is current again.
-        known.get_mut("A").unwrap().note_boot(BootReceipt { at: 20.0, thread: Some("w".into()), session: None });
+        known.get_mut("A").unwrap().note_boot(BootReceipt {
+            at: 20.0,
+            thread: Some("w".into()),
+            session: None,
+        });
         assert!(known["A"].owned());
         assert!(!revalidate(Action::Shutdown, None));
-        let kept = Row { udid: "C".into(), name: "c".into(), booted: true, owner: "t3 session", thread: None, ours: true, free: false, action: None, why: String::new() };
+        let kept = Row {
+            udid: "C".into(),
+            name: "c".into(),
+            booted: true,
+            owner: "t3 session",
+            thread: None,
+            ours: true,
+            free: false,
+            action: None,
+            why: String::new(),
+        };
         assert!(!revalidate(Action::Shutdown, Some(&kept)));
     }
 
@@ -442,6 +765,9 @@ mod tests {
             "L": {"leased": true, "created_by": null, "touched_by": null, "touched_at": 0.0, "last_used": 5.0},
             "T": {"leased": false, "created_by": null, "touched_by": "w", "touched_at": 5.0, "last_used": 5.0},
             "C": {"leased": true, "created_by": "w", "touched_by": null, "touched_at": 0.0, "last_used": 5.0}})).unwrap();
-        assert_eq!((old["L"].owned(), old["T"].owned(), old["C"].owned()), (false, false, true));
+        assert_eq!(
+            (old["L"].owned(), old["T"].owned(), old["C"].owned()),
+            (false, false, true)
+        );
     }
 }

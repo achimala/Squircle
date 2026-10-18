@@ -33,9 +33,11 @@ use crate::actor::{Lane, Owner, Rank, Saved, Snapshot};
 use crate::agents::{Agents, Observed};
 use crate::fsm::core::Disposition;
 use crate::fsm::core::commit::{Gate, JsonFile};
-use crate::fsm::sims::admission::{self, Answer, Capacity, Reservation, Waiter};
-use crate::fsm::sims::session::{self, Boot, Closed, Event, IdleClock, Phase, RecorderID, Released, Served, Session};
 use crate::fsm::sims::Seen;
+use crate::fsm::sims::admission::{self, Answer, Capacity, Reservation, Waiter};
+use crate::fsm::sims::session::{
+    self, Boot, Closed, Event, IdleClock, Phase, RecorderID, Released, Served, Session,
+};
 use crate::media::{self, SimulatorClip};
 use crate::simpool::{BootReceipt, Exclusion, Holds, Lease, Pool};
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -49,7 +51,10 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     process::Stdio,
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::process::{Child, Command};
@@ -82,7 +87,9 @@ pub fn seen(agents: &Agents, thread: &str) -> Seen {
                 Seen::Idle { turn }
             }
         }
-        Observed::Stale { value, .. } => Seen::Unknown { turn: value.and_then(|t| t.turn) },
+        Observed::Stale { value, .. } => Seen::Unknown {
+            turn: value.and_then(|t| t.turn),
+        },
         Observed::Unavailable => Seen::Unknown { turn: None },
     }
 }
@@ -109,8 +116,14 @@ struct Ledger {
 
 impl Ledger {
     fn reservations(&self) -> Vec<Reservation> {
-        self.sessions.iter().filter(|s| s.reserves())
-            .map(|s| Reservation { thread: s.thread_id.clone(), device: s.device_id.to_ascii_uppercase() }).collect()
+        self.sessions
+            .iter()
+            .filter(|s| s.reserves())
+            .map(|s| Reservation {
+                thread: s.thread_id.clone(),
+                device: s.device_id.to_ascii_uppercase(),
+            })
+            .collect()
     }
 
     fn session(&self, id: &str) -> Option<&Session> {
@@ -178,7 +191,12 @@ pub trait Host: Send + Sync {
     fn free<'a>(&'a self, leases: &'a [Lease]) -> Pending<'a, Vec<String>>;
     /// `thread`'s session on `device` no longer uses it: the pool shuts it
     /// down unless its policy keeps it. `others`: what other sessions reserve.
-    fn release<'a>(&'a self, device: &'a str, thread: &'a str, others: &'a [Lease]) -> Pending<'a, Result<Released>>;
+    fn release<'a>(
+        &'a self,
+        device: &'a str,
+        thread: &'a str,
+        others: &'a [Lease],
+    ) -> Pending<'a, Result<Released>>;
     /// How many simulators may be reserved at once.
     fn max_leases(&self) -> usize;
     fn title(&self, thread: &str) -> Option<String>;
@@ -216,25 +234,42 @@ impl Host for AgentsHost {
 
     fn boot<'a>(&'a self, device: &'a str) -> Pending<'a, Result<()>> {
         Box::pin(async move {
-            let status = Command::new("xcrun").args(["simctl", "bootstatus", device, "-b"])
-                .stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).status();
+            let status = Command::new("xcrun")
+                .args(["simctl", "bootstatus", device, "-b"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status();
             let booted = tokio::time::timeout(Duration::from_secs(180), status).await;
-            ensure!(matches!(booted, Ok(Ok(status)) if status.success()), "did not finish booting");
+            ensure!(
+                matches!(booted, Ok(Ok(status)) if status.success()),
+                "did not finish booting"
+            );
             Ok(())
         })
     }
 
     fn record(&self, device: &str, path: &Path, log: std::fs::File) -> Result<Child> {
         Command::new("xcrun")
-            .args(["simctl", "io", device, "recordVideo", "--codec=h264", "--force"])
+            .args([
+                "simctl",
+                "io",
+                device,
+                "recordVideo",
+                "--codec=h264",
+                "--force",
+            ])
             .arg(path)
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(log)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(log)
             // Outlives a restart or crash so the next run can adopt it or end
             // it cleanly (SIGINT), and a signal to the service's process group
             // (a closed terminal) doesn't end it.
             .kill_on_drop(false)
             .process_group(0)
-            .spawn().context("Cannot start simctl recordVideo")
+            .spawn()
+            .context("Cannot start simctl recordVideo")
     }
 
     fn compact<'a>(&'a self, raw: &'a Path) -> Pending<'a, Option<PathBuf>> {
@@ -243,12 +278,25 @@ impl Host for AgentsHost {
 
     fn free<'a>(&'a self, leases: &'a [Lease]) -> Pending<'a, Vec<String>> {
         Box::pin(async move {
-            self.1.refresh(leases, false).await.map(|rows| rows.into_iter().filter(|r| r.free).map(|r| r.udid).collect())
+            self.1
+                .refresh(leases, false)
+                .await
+                .map(|rows| {
+                    rows.into_iter()
+                        .filter(|r| r.free)
+                        .map(|r| r.udid)
+                        .collect()
+                })
                 .unwrap_or_default()
         })
     }
 
-    fn release<'a>(&'a self, device: &'a str, thread: &'a str, others: &'a [Lease]) -> Pending<'a, Result<Released>> {
+    fn release<'a>(
+        &'a self,
+        device: &'a str,
+        thread: &'a str,
+        others: &'a [Lease],
+    ) -> Pending<'a, Result<Released>> {
         Box::pin(self.1.release(device, thread, others))
     }
 
@@ -261,7 +309,13 @@ impl Host for AgentsHost {
     }
 
     fn wake<'a>(&'a self, thread: &'a str, id: &'a str, text: String) -> Pending<'a, Result<()>> {
-        Box::pin(self.0.notify(thread, id, text, crate::agents::Note::SimReady, json!({"thread": thread})))
+        Box::pin(self.0.notify(
+            thread,
+            id,
+            text,
+            crate::agents::Note::SimReady,
+            json!({"thread": thread}),
+        ))
     }
 
     fn waiting(&self, threads: Vec<String>) {
@@ -271,14 +325,44 @@ impl Host for AgentsHost {
     fn poster<'a>(&'a self, device: &'a str, path: &'a Path) -> Pending<'a, ()> {
         Box::pin(async move {
             let run = |program: &str, args: &[&std::ffi::OsStr]| {
-                let status = Command::new(program).args(args).stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).status();
+                let status = Command::new(program)
+                    .args(args)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .status();
                 tokio::time::timeout(Duration::from_secs(15), status)
             };
             let shot = path.with_extension("png");
-            let taken = run("xcrun", &["simctl".as_ref(), "io".as_ref(), device.as_ref(), "screenshot".as_ref(), shot.as_os_str()]).await;
+            let taken = run(
+                "xcrun",
+                &[
+                    "simctl".as_ref(),
+                    "io".as_ref(),
+                    device.as_ref(),
+                    "screenshot".as_ref(),
+                    shot.as_os_str(),
+                ],
+            )
+            .await;
             if matches!(taken, Ok(Ok(s)) if s.success()) {
-                let _ = run("/usr/bin/sips", &["-Z".as_ref(), "900".as_ref(), "-s".as_ref(), "format".as_ref(), "jpeg".as_ref(),
-                    "-s".as_ref(), "formatOptions".as_ref(), "70".as_ref(), shot.as_os_str(), "--out".as_ref(), path.as_os_str()]).await;
+                let _ = run(
+                    "/usr/bin/sips",
+                    &[
+                        "-Z".as_ref(),
+                        "900".as_ref(),
+                        "-s".as_ref(),
+                        "format".as_ref(),
+                        "jpeg".as_ref(),
+                        "-s".as_ref(),
+                        "formatOptions".as_ref(),
+                        "70".as_ref(),
+                        shot.as_os_str(),
+                        "--out".as_ref(),
+                        path.as_os_str(),
+                    ],
+                )
+                .await;
             }
             let _ = std::fs::remove_file(&shot);
         })
@@ -301,22 +385,42 @@ pub struct Sims {
 }
 
 fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 /// T3's 24-hex-digit key (sha256 prefix) for agent-device files.
 fn key(value: &str) -> String {
-    Sha256::digest(value.as_bytes()).iter().take(12).map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The agent-device invocation T3's `device_open` tool gives agents for this
 /// thread and simulator (same config file and session name as T3 0.0.45).
 pub fn agent_device(thread: &str, host: &str, device: &str) -> Value {
-    let base = dirs::home_dir().unwrap_or_default().join(".t3/userdata/device");
+    let base = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".t3/userdata/device");
     let config = base.join("hosts").join(format!("{}.json", key(host)));
-    let session = format!("t3-{}", key(&serde_json::to_string(&[thread, host, device]).unwrap_or_default()));
-    let args = vec!["--platform".to_string(), "ios".into(), "--udid".into(), device.into(),
-                    "--config".into(), config.display().to_string(), "--session".into(), session];
+    let session = format!(
+        "t3-{}",
+        key(&serde_json::to_string(&[thread, host, device]).unwrap_or_default())
+    );
+    let args = vec![
+        "--platform".to_string(),
+        "ios".into(),
+        "--udid".into(),
+        device.into(),
+        "--config".into(),
+        config.display().to_string(),
+        "--session".into(),
+        session,
+    ];
     json!({
         "command": base.join("bin/agent-device"),
         "target_args": args,
@@ -329,10 +433,22 @@ pub fn agent_device(thread: &str, host: &str, device: &str) -> Value {
 /// still screens). Returns the smaller file, having removed the original.
 async fn compact(raw: &Path) -> Option<PathBuf> {
     let small = compacted(raw);
-    let converted = tokio::time::timeout(Duration::from_secs(180), Command::new("/usr/bin/avconvert")
-        .args(["--preset", "Preset1280x720", "--replace", "--source"]).arg(raw).arg("--output").arg(&small)
-        .stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).status()).await;
-    if matches!(converted, Ok(Ok(status)) if status.success()) && small.metadata().is_ok_and(|m| m.len() > 0) {
+    let converted = tokio::time::timeout(
+        Duration::from_secs(180),
+        Command::new("/usr/bin/avconvert")
+            .args(["--preset", "Preset1280x720", "--replace", "--source"])
+            .arg(raw)
+            .arg("--output")
+            .arg(&small)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await;
+    if matches!(converted, Ok(Ok(status)) if status.success())
+        && small.metadata().is_ok_and(|m| m.len() > 0)
+    {
         let _ = std::fs::remove_file(raw);
         Some(small)
     } else {
@@ -353,14 +469,26 @@ fn alive(pid: u32) -> bool {
 fn process_start(pid: u32) -> Option<(u64, u64)> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-    let read = unsafe { libc::proc_pidinfo(pid as libc::c_int, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
     (read == size).then_some((info.pbi_start_tvsec, info.pbi_start_tvusec))
 }
 
 /// The process's command line, if it is running.
 fn command_line(pid: u32) -> Option<String> {
-    let output = std::process::Command::new("/bin/ps").args(["-ww", "-o", "command=", "-p", &pid.to_string()])
-        .stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (output.status.success() && !line.is_empty()).then_some(line)
 }
@@ -369,14 +497,20 @@ fn command_line(pid: u32) -> Option<String> {
 /// session's own recording file, and (once recorded) it started when the
 /// recorder did, which no reused PID can.
 fn is_recorder(recorder: RecorderID, session: &str) -> bool {
-    let named = command_line(recorder.pid).is_some_and(|line| line.contains(&format!(".{session}.recording.mp4")));
-    named && recorder.start.is_none_or(|start| process_start(recorder.pid) == Some(start))
+    let named = command_line(recorder.pid)
+        .is_some_and(|line| line.contains(&format!(".{session}.recording.mp4")));
+    named
+        && recorder
+            .start
+            .is_none_or(|start| process_start(recorder.pid) == Some(start))
 }
 
 /// Saves `candidate` through the gate before the owner starts: nothing is
 /// published unless saved.
 fn save(gate: &mut Gate<Ledger, Infallible, JsonFile>, candidate: Ledger) -> Result<()> {
-    gate.commit(candidate, vec![]).map(|_| ()).map_err(|e| anyhow!("Cannot save the simulator session ledger: {e}"))
+    gate.commit(candidate, vec![])
+        .map(|_| ())
+        .map_err(|e| anyhow!("Cannot save the simulator session ledger: {e}"))
 }
 
 /// A token telling one holder of a claim or exclusion from the next.
@@ -411,7 +545,9 @@ impl State {
     }
 
     fn resolve(&mut self) -> Result<()> {
-        self.ledger.resolve().map_err(|e| anyhow!("Cannot save the simulator session ledger: {e}"))
+        self.ledger
+            .resolve()
+            .map_err(|e| anyhow!("Cannot save the simulator session ledger: {e}"))
     }
 
     /// Changes a copy of the saved ledger and saves it; the change is seen,
@@ -421,7 +557,9 @@ impl State {
         self.resolve()?;
         let mut candidate = self.ledger().clone();
         let out = change(&mut candidate)?;
-        self.ledger.commit(candidate, vec![]).map_err(|e| anyhow!("Cannot save the simulator session ledger: {e}"))?;
+        self.ledger
+            .commit(candidate, vec![])
+            .map_err(|e| anyhow!("Cannot save the simulator session ledger: {e}"))?;
         self.saved.notify_waiters();
         Ok(out)
     }
@@ -429,18 +567,30 @@ impl State {
     /// Reduces one event for one session and saves the result. Returns the
     /// decision and the effects to run now that it is saved.
     fn step(&mut self, id: &str, event: Event) -> Result<(Disposition, Vec<session::Effect>)> {
-        let current = self.ledger().session(id).cloned().context("No such simulator session")?;
+        let current = self
+            .ledger()
+            .session(id)
+            .cloned()
+            .context("No such simulator session")?;
         let reduction = session::reduce(current, event);
         if let Disposition::ProtocolFault(why) = &reduction.disposition {
             bail!("Simulator session {id}: {why}");
         }
-        debug_assert!(session::violations(&reduction.state).is_empty(), "{:?}", session::violations(&reduction.state));
+        debug_assert!(
+            session::violations(&reduction.state).is_empty(),
+            "{:?}",
+            session::violations(&reduction.state)
+        );
         let mut effects = reduction.effects;
         if effects.first() == Some(&session::Effect::Commit) {
             effects.remove(0);
             let next = reduction.state;
             self.change(|ledger| {
-                let slot = ledger.sessions.iter_mut().find(|s| s.id == id).context("No such simulator session")?;
+                let slot = ledger
+                    .sessions
+                    .iter_mut()
+                    .find(|s| s.id == id)
+                    .context("No such simulator session")?;
                 *slot = next;
                 Ok(())
             })?;
@@ -456,7 +606,9 @@ impl State {
         if !self.starts.remove(id) {
             return;
         }
-        let Some(thread) = self.ledger().session(id).map(|s| s.thread_id.clone()) else { return };
+        let Some(thread) = self.ledger().session(id).map(|s| s.thread_id.clone()) else {
+            return;
+        };
         if let Ok(path) = media::recording_path(root, &thread, id) {
             let _ = std::fs::remove_file(path.with_extension("log"));
             let _ = std::fs::remove_file(path);
@@ -479,26 +631,53 @@ impl Sims {
     pub fn with_host(root: &Path, host: Arc<dyn Host>) -> Result<Arc<Self>> {
         let path = root.join("sims.json");
         let file = JsonFile::new(path.clone());
-        let (ledger, revision) = file.read::<Ledger>()?.unwrap_or((Ledger { schema: SCHEMA, ..Ledger::default() }, Default::default()));
+        let (ledger, revision) = file.read::<Ledger>()?.unwrap_or((
+            Ledger {
+                schema: SCHEMA,
+                ..Ledger::default()
+            },
+            Default::default(),
+        ));
         let legacy = ledger.schema < SCHEMA;
         let mut gate = Gate::restore(ledger, revision, file);
         // An earlier ledger: keep the original beside it, then save it once
         // in this format before anything is admitted.
         if legacy {
-            let backup = root.join(format!("sims.schema{}.json", gate.committed().schema.max(1)));
+            let backup = root.join(format!(
+                "sims.schema{}.json",
+                gate.committed().schema.max(1)
+            ));
             if !backup.try_exists()? {
-                std::fs::copy(&path, &backup).with_context(|| format!("Cannot keep the earlier simulator ledger as {}", backup.display()))?;
+                std::fs::copy(&path, &backup).with_context(|| {
+                    format!(
+                        "Cannot keep the earlier simulator ledger as {}",
+                        backup.display()
+                    )
+                })?;
             }
-            let candidate = Ledger { schema: SCHEMA, ..gate.committed().clone() };
+            let candidate = Ledger {
+                schema: SCHEMA,
+                ..gate.committed().clone()
+            };
             save(&mut gate, candidate)?;
         }
         // A recorder a previous run left is taken over only if it is provably
         // this session's; one from before start times were saved gets its own now.
         let mut recorders = HashMap::new();
         let mut adopted = vec![];
-        for s in gate.committed().sessions.iter().filter(|s| s.holds_device()) {
-            let Some(recorder) = s.recorder().filter(|r| is_recorder(*r, &s.id)) else { continue };
-            let recorder = RecorderID { start: recorder.start.or_else(|| process_start(recorder.pid)), ..recorder };
+        for s in gate
+            .committed()
+            .sessions
+            .iter()
+            .filter(|s| s.holds_device())
+        {
+            let Some(recorder) = s.recorder().filter(|r| is_recorder(*r, &s.id)) else {
+                continue;
+            };
+            let recorder = RecorderID {
+                start: recorder.start.or_else(|| process_start(recorder.pid)),
+                ..recorder
+            };
             if s.active() && s.recorder() != Some(recorder) {
                 adopted.push((s.id.clone(), recorder));
             }
@@ -515,13 +694,25 @@ impl Sims {
         }
         // A recording handed over with its recorder still running carries on,
         // watched like any other; the rest a previous run left are finished.
-        let orphans = gate.committed().sessions.iter().filter(|s| !s.ended() && !(s.active() && recorders.contains_key(&s.id)))
-            .map(|s| s.id.clone()).collect();
+        let orphans = gate
+            .committed()
+            .sessions
+            .iter()
+            .filter(|s| !s.ended() && !(s.active() && recorders.contains_key(&s.id)))
+            .map(|s| s.id.clone())
+            .collect();
         let (ledger, snapshot) = Saved::new(gate);
         let saved = Arc::new(Notify::new());
         let state = State {
-            ledger, saved: saved.clone(), recorders, clocks: HashMap::new(), running: HashMap::new(), starts: HashSet::new(),
-            orphans, excluded: HashMap::new(), draining: false,
+            ledger,
+            saved: saved.clone(),
+            recorders,
+            clocks: HashMap::new(),
+            running: HashMap::new(),
+            starts: HashSet::new(),
+            orphans,
+            excluded: HashMap::new(),
+            draining: false,
         };
         let sims = Arc::new(Self {
             root: root.to_path_buf(),
@@ -548,31 +739,66 @@ impl Sims {
     }
 
     async fn claim(&self, id: &str, work: Work) -> Option<Claim> {
-        let claim = Claim { owner: self.owner.clone(), key: (id.to_string(), work), token: token() };
+        let claim = Claim {
+            owner: self.owner.clone(),
+            key: (id.to_string(), work),
+            token: token(),
+        };
         let (key, token) = (claim.key.clone(), claim.token);
-        let claimed = self.owner.ask(move |s| match s.running.entry(key) {
-            Entry::Vacant(free) => { free.insert(token); true }
-            Entry::Occupied(_) => false,
-        }).await;
+        let claimed = self
+            .owner
+            .ask(move |s| match s.running.entry(key) {
+                Entry::Vacant(free) => {
+                    free.insert(token);
+                    true
+                }
+                Entry::Occupied(_) => false,
+            })
+            .await;
         claimed.then_some(claim)
     }
 
     /// Every simulator a session has used, with when it was last used.
     pub fn used(&self) -> Vec<(String, f64)> {
-        self.ledger().sessions.iter().map(|s| (s.device_id.clone(), s.ended_at().unwrap_or(s.started_at))).collect()
+        self.ledger()
+            .sessions
+            .iter()
+            .map(|s| (s.device_id.clone(), s.ended_at().unwrap_or(s.started_at)))
+            .collect()
     }
 
     /// The simulators sessions reserve now: in use, or their cleanup unsettled.
     pub fn leases(&self) -> Vec<Lease> {
-        self.ledger().reservations().into_iter().map(|r| Lease { device_id: r.device, thread_id: r.thread }).collect()
+        self.ledger()
+            .reservations()
+            .into_iter()
+            .map(|r| Lease {
+                device_id: r.device,
+                thread_id: r.thread,
+            })
+            .collect()
     }
 
     /// Sessions still recording, and recent ones (newest first), optionally for one thread.
     pub fn list(&self, thread: Option<&str>) -> Value {
         let ledger = self.ledger();
         let mine = |s: &&Session| thread.is_none_or(|t| s.thread_id == t);
-        let active: Vec<Served> = ledger.sessions.iter().filter(mine).filter(|s| s.active()).map(Served::from).collect();
-        let recent: Vec<Served> = ledger.sessions.iter().rev().filter(mine).filter(|s| !s.active()).take(50).map(Served::from).collect();
+        let active: Vec<Served> = ledger
+            .sessions
+            .iter()
+            .filter(mine)
+            .filter(|s| s.active())
+            .map(Served::from)
+            .collect();
+        let recent: Vec<Served> = ledger
+            .sessions
+            .iter()
+            .rev()
+            .filter(mine)
+            .filter(|s| !s.active())
+            .take(50)
+            .map(Served::from)
+            .collect();
         let queue: Vec<Value> = ledger.queue.iter().enumerate().map(|(i, w)| json!({
             "position": i + 1, "thread_id": w.thread_id, "title": self.host.title(&w.thread_id), "queued_at": w.queued_at,
             "state": if w.grant.is_some() { "held for it" } else { "waiting" },
@@ -583,7 +809,10 @@ impl Sims {
     // MARK: Start
 
     pub async fn start(self: &Arc<Self>, thread: &str, device: Option<&str>) -> Result<Value> {
-        ensure!(media::valid_thread(thread) && uuid::Uuid::parse_str(thread).is_ok(), "Thread ID must be a T3 thread UUID");
+        ensure!(
+            media::valid_thread(thread) && uuid::Uuid::parse_str(thread).is_ok(),
+            "Thread ID must be a T3 thread UUID"
+        );
         loop {
             // Listening before looking, so a save in between isn't missed.
             let saved = self.saved.notified();
@@ -599,9 +828,15 @@ impl Sims {
     }
 
     async fn try_start(self: &Arc<Self>, thread: &str, device: Option<&str>) -> Result<Started> {
-        ensure!(!*self.draining.borrow(), "Squircle is restarting or stopping; start the simulator again once it is back");
+        ensure!(
+            !*self.draining.borrow(),
+            "Squircle is restarting or stopping; start the simulator again once it is back"
+        );
         let inventory = inventory(&*self.host).await?;
-        ensure!(self.host.seen(thread) != Seen::Gone, "T3 has no thread {thread}");
+        ensure!(
+            self.host.seen(thread) != Seen::Gone,
+            "T3 has no thread {thread}"
+        );
         let simulators = local_simulators(&inventory);
         ensure!(!simulators.is_empty(), "{}", no_simulators(&inventory));
 
@@ -613,23 +848,57 @@ impl Sims {
 
         let ledger = self.ledger();
         let reserved: Vec<&Session> = ledger.sessions.iter().filter(|s| s.reserves()).collect();
-        let excluded: HashSet<String> = self.owner.ask(|s| s.excluded.keys().cloned().collect()).await;
+        let excluded: HashSet<String> = self
+            .owner
+            .ask(|s| s.excluded.keys().cloned().collect())
+            .await;
         let id = |d: &Value| d["id"].as_str().unwrap_or("").to_ascii_uppercase();
-        let mine = |d: &Value| reserved.iter().any(|s| s.device_id.eq_ignore_ascii_case(&id(d)) && s.thread_id == thread && s.active());
+        let mine = |d: &Value| {
+            reserved.iter().any(|s| {
+                s.device_id.eq_ignore_ascii_case(&id(d)) && s.thread_id == thread && s.active()
+            })
+        };
         let chosen = match device {
-            Some(wanted) => simulators.iter().find(|d| d["id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(wanted))
-                    || d["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(wanted)))
-                .with_context(|| format!("No iOS simulator {wanted} on this Mac; run squircle sim devices"))?,
+            Some(wanted) => simulators
+                .iter()
+                .find(|d| {
+                    d["id"]
+                        .as_str()
+                        .is_some_and(|id| id.eq_ignore_ascii_case(wanted))
+                        || d["name"]
+                            .as_str()
+                            .is_some_and(|n| n.eq_ignore_ascii_case(wanted))
+                })
+                .with_context(|| {
+                    format!("No iOS simulator {wanted} on this Mac; run squircle sim devices")
+                })?,
             None => {
-                let last = ledger.sessions.iter().rev().find(|s| s.thread_id == thread).map(|s| s.device_id.to_ascii_uppercase());
-                let used: HashSet<String> = ledger.sessions.iter().map(|s| s.device_id.to_ascii_uppercase()).collect();
+                let last = ledger
+                    .sessions
+                    .iter()
+                    .rev()
+                    .find(|s| s.thread_id == thread)
+                    .map(|s| s.device_id.to_ascii_uppercase());
+                let used: HashSet<String> = ledger
+                    .sessions
+                    .iter()
+                    .map(|s| s.device_id.to_ascii_uppercase())
+                    .collect();
                 let free = self.host.free(&self.leases()).await;
                 // Reserved by a session (another thread's, or this thread's
                 // still being cleaned up) or being cleaned up by the pool.
-                let taken = |d: &Value| (reserved.iter().any(|s| s.device_id.eq_ignore_ascii_case(&id(d))) && !mine(d)) || excluded.contains(&id(d));
+                let taken = |d: &Value| {
+                    (reserved
+                        .iter()
+                        .any(|s| s.device_id.eq_ignore_ascii_case(&id(d)))
+                        && !mine(d))
+                        || excluded.contains(&id(d))
+                };
                 // A booted simulator is taken only when it is Squircle's and
                 // free: never the user's own, nor another agent's.
-                let takeable = |d: &Value| !taken(d) && (d["booted"] != true || free.contains(&id(d)) || mine(d));
+                let takeable = |d: &Value| {
+                    !taken(d) && (d["booted"] != true || free.contains(&id(d)) || mine(d))
+                };
                 simulators.iter().copied().find(|d| last.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(&id(d))) && takeable(d))
                     .or_else(|| simulators.iter().copied().find(|d| d["booted"] == true && takeable(d)))
                     .or_else(|| simulators.iter().copied().find(|d| used.contains(&id(d)) && takeable(d)))
@@ -637,14 +906,23 @@ impl Sims {
                     .context("No free simulator: the booted ones are the user's or other agents'; pass --device (squircle sim devices)")?
             }
         };
-        let device_id = chosen["id"].as_str().context("Simulator without an ID")?.to_string();
+        let device_id = chosen["id"]
+            .as_str()
+            .context("Simulator without an ID")?
+            .to_string();
         let device_name = chosen["name"].as_str().unwrap_or("Simulator").to_string();
         let booted = chosen["booted"] == true;
 
         // Already running here: the same session. On another simulator: end that one first.
-        if let Some(existing) = reserved.iter().find(|s| s.thread_id == thread && s.active()) {
+        if let Some(existing) = reserved
+            .iter()
+            .find(|s| s.thread_id == thread && s.active())
+        {
             if existing.device_id.eq_ignore_ascii_case(&device_id) {
-                return Ok(Started::Done(self.started(existing, "This thread's simulator session is already running.")));
+                return Ok(Started::Done(self.started(
+                    existing,
+                    "This thread's simulator session is already running.",
+                )));
             }
             let sims = self.clone();
             let old = existing.id.clone();
@@ -654,26 +932,53 @@ impl Sims {
                 }
             });
         }
-        if let Some(other) = reserved.iter().find(|s| s.device_id.eq_ignore_ascii_case(&device_id) && !s.active()) {
+        if let Some(other) = reserved
+            .iter()
+            .find(|s| s.device_id.eq_ignore_ascii_case(&device_id) && !s.active())
+        {
             if other.thread_id != thread {
-                bail!("{device_name} is in use by thread {}; pick another with --device (squircle sim devices)", other.thread_id);
+                bail!(
+                    "{device_name} is in use by thread {}; pick another with --device (squircle sim devices)",
+                    other.thread_id
+                );
             }
             if let Some(error) = cleanup_error(other) {
-                bail!("{device_name} is still held by this thread's previous session, whose cleanup is failing ({error}); \
-                    Squircle keeps retrying. Pick another simulator with --device meanwhile.");
+                bail!(
+                    "{device_name} is still held by this thread's previous session, whose cleanup is failing ({error}); \
+                    Squircle keeps retrying. Pick another simulator with --device meanwhile."
+                );
             }
             return Ok(Started::Wait);
         }
-        if let Some(other) = reserved.iter().find(|s| s.device_id.eq_ignore_ascii_case(&device_id) && s.thread_id != thread) {
-            bail!("{device_name} is in use by thread {}; pick another with --device (squircle sim devices)", other.thread_id);
+        if let Some(other) = reserved
+            .iter()
+            .find(|s| s.device_id.eq_ignore_ascii_case(&device_id) && s.thread_id != thread)
+        {
+            bail!(
+                "{device_name} is in use by thread {}; pick another with --device (squircle sim devices)",
+                other.thread_id
+            );
         }
 
         // The reservation, saved (with its place in line given up) before T3
         // opens anything: whatever happens next, a close and a release are
         // owed. The startup exists first, so even a cancelled ask is rolled back.
         let id = uuid::Uuid::new_v4().to_string();
-        let session = Session::reserve(id.clone(), thread.into(), device_id, device_name, booted, now());
-        let mut startup = Startup { owner: self.owner.clone(), root: self.root.clone(), id: id.clone(), child: None, error: None };
+        let session = Session::reserve(
+            id.clone(),
+            thread.into(),
+            device_id,
+            device_name,
+            booted,
+            now(),
+        );
+        let mut startup = Startup {
+            owner: self.owner.clone(),
+            root: self.root.clone(),
+            id: id.clone(),
+            child: None,
+            error: None,
+        };
         let (reserving, claimant) = (session.clone(), thread.to_string());
         self.owner.ask(move |s| {
             ensure!(!s.excluded.contains_key(&reserving.device_id.to_ascii_uppercase()),
@@ -697,7 +1002,10 @@ impl Sims {
         }).await?;
         self.announce_waiting();
         match self.begin(&session, &mut startup).await {
-            Ok(session) => Ok(Started::Done(self.started(&session, "Recording. The user watches it live on their phone."))),
+            Ok(session) => Ok(Started::Done(self.started(
+                &session,
+                "Recording. The user watches it live on their phone.",
+            ))),
             Err(error) => {
                 startup.error = Some(format!("{error:#}"));
                 drop(startup);
@@ -711,65 +1019,133 @@ impl Sims {
     /// session if this fails or is cancelled.
     async fn begin(&self, session: &Session, startup: &mut Startup) -> Result<Session> {
         let name = &session.device_name;
-        self.host.device("device.open", json!({"threadId": session.thread_id, "hostId": session.host_id,
-            "deviceId": session.device_id, "platform": "ios", "boot": true})).await
+        self.host
+            .device(
+                "device.open",
+                json!({"threadId": session.thread_id, "hostId": session.host_id,
+            "deviceId": session.device_id, "platform": "ios", "boot": true}),
+            )
+            .await
             .context("T3 could not open the simulator")?;
         self.step(&session.id, Event::Opened).await?;
-        self.host.boot(&session.device_id).await.with_context(|| format!("{name} did not finish booting"))?;
+        self.host
+            .boot(&session.device_id)
+            .await
+            .with_context(|| format!("{name} did not finish booting"))?;
         self.step(&session.id, Event::Booted { at: now() }).await?;
 
         let path = media::recording_path(&self.root, &session.thread_id, &session.id)?;
         let log = std::fs::File::create(path.with_extension("log"))?;
-        let recorder = startup.child.insert(self.host.record(&session.device_id, &path, log)?);
+        let recorder = startup
+            .child
+            .insert(self.host.record(&session.device_id, &path, log)?);
         let pid = recorder.id().context("The recorder exited at once")?;
-        self.step(&session.id, Event::RecorderStarted(RecorderID { pid, start: process_start(pid) })).await?;
+        self.step(
+            &session.id,
+            Event::RecorderStarted(RecorderID {
+                pid,
+                start: process_start(pid),
+            }),
+        )
+        .await?;
         tokio::time::sleep(Duration::from_millis(1200)).await;
-        if let Some(status) = startup.child.as_mut().and_then(|c| c.try_wait().transpose()).transpose()? {
+        if let Some(status) = startup
+            .child
+            .as_mut()
+            .and_then(|c| c.try_wait().transpose())
+            .transpose()?
+        {
             let detail = std::fs::read_to_string(path.with_extension("log")).unwrap_or_default();
             bail!("Recording {name} failed ({status}): {}", detail.trim());
         }
         // In one letter with shutdown's collection of the sessions it ends:
         // either shutdown sees this recording, or this sees shutdown.
         let (id, child) = (session.id.clone(), startup.child.take());
-        self.owner.ask(move |s| {
-            let mut child = child;
-            let recording = if s.draining { Err(anyhow!("Squircle is shutting down")) } else { s.step(&id, Event::Recording).map(drop) };
-            if let Err(error) = recording {
-                // The partial movie is useless; tokio reaps the killed child.
-                if let Some(child) = &mut child { let _ = child.start_kill(); }
-                return Err(error);
-            }
-            if let Some(child) = child {
-                s.recorders.insert(id.clone(), Recorder::Owned(child));
-            }
-            s.starts.remove(&id);
-            s.ledger().session(&id).cloned().context("No such simulator session")
-        }).await
+        self.owner
+            .ask(move |s| {
+                let mut child = child;
+                let recording = if s.draining {
+                    Err(anyhow!("Squircle is shutting down"))
+                } else {
+                    s.step(&id, Event::Recording).map(drop)
+                };
+                if let Err(error) = recording {
+                    // The partial movie is useless; tokio reaps the killed child.
+                    if let Some(child) = &mut child {
+                        let _ = child.start_kill();
+                    }
+                    return Err(error);
+                }
+                if let Some(child) = child {
+                    s.recorders.insert(id.clone(), Recorder::Owned(child));
+                }
+                s.starts.remove(&id);
+                s.ledger()
+                    .session(&id)
+                    .cloned()
+                    .context("No such simulator session")
+            })
+            .await
     }
 
     /// Admission: None if `thread` may reserve a simulator now; otherwise it
     /// keeps (or takes) its place in line, saved, and this tells the agent.
     async fn admit(&self, thread: &str, max: usize) -> Result<Option<Value>> {
         let (asking, waiter) = (thread.to_string(), uuid::Uuid::new_v4().to_string());
-        let position = self.owner.ask(move |s| -> Result<Option<usize>> {
-            s.resolve()?;
-            let ledger = s.ledger();
-            let reservations = ledger.reservations();
-            let ask = admission::Event::Ask { thread: asking, now: now(), waiter };
-            let reduction = admission::reduce(ledger.queue.clone(), &Capacity { limit: max, reservations: &reservations }, ask);
-            let position = match reduction.effects.iter().find_map(|e| match e { admission::Effect::Answer(a) => Some(a.clone()), _ => None }) {
-                Some(Answer::Admitted) | None => return Ok(None),
-                Some(Answer::Queued { position }) => position,
-            };
-            if reduction.effects.contains(&admission::Effect::Commit) {
-                let queue = reduction.state;
-                s.change(|ledger| { ledger.queue = queue; Ok(()) })?;
-            }
-            Ok(Some(position))
-        }).await?;
-        let Some(position) = position else { return Ok(None) };
-        let holders: Vec<String> = self.ledger().sessions.iter().filter(|s| s.reserves())
-            .map(|s| format!("{} ({})", s.device_name, self.host.title(&s.thread_id).unwrap_or_else(|| s.thread_id.clone()))).collect();
+        let position = self
+            .owner
+            .ask(move |s| -> Result<Option<usize>> {
+                s.resolve()?;
+                let ledger = s.ledger();
+                let reservations = ledger.reservations();
+                let ask = admission::Event::Ask {
+                    thread: asking,
+                    now: now(),
+                    waiter,
+                };
+                let reduction = admission::reduce(
+                    ledger.queue.clone(),
+                    &Capacity {
+                        limit: max,
+                        reservations: &reservations,
+                    },
+                    ask,
+                );
+                let position = match reduction.effects.iter().find_map(|e| match e {
+                    admission::Effect::Answer(a) => Some(a.clone()),
+                    _ => None,
+                }) {
+                    Some(Answer::Admitted) | None => return Ok(None),
+                    Some(Answer::Queued { position }) => position,
+                };
+                if reduction.effects.contains(&admission::Effect::Commit) {
+                    let queue = reduction.state;
+                    s.change(|ledger| {
+                        ledger.queue = queue;
+                        Ok(())
+                    })?;
+                }
+                Ok(Some(position))
+            })
+            .await?;
+        let Some(position) = position else {
+            return Ok(None);
+        };
+        let holders: Vec<String> = self
+            .ledger()
+            .sessions
+            .iter()
+            .filter(|s| s.reserves())
+            .map(|s| {
+                format!(
+                    "{} ({})",
+                    s.device_name,
+                    self.host
+                        .title(&s.thread_id)
+                        .unwrap_or_else(|| s.thread_id.clone())
+                )
+            })
+            .collect();
         self.announce_waiting();
         let cli = self.host.cli();
         Ok(Some(json!({
@@ -786,25 +1162,40 @@ impl Sims {
 
     /// Whether `thread` has a session recording.
     pub fn running(&self, thread: &str) -> bool {
-        self.ledger().sessions.iter().any(|s| s.thread_id == thread && s.active())
+        self.ledger()
+            .sessions
+            .iter()
+            .any(|s| s.thread_id == thread && s.active())
     }
 
     /// Takes `thread` out of the line (a held slot frees for the next).
     pub async fn leave(&self, thread: &str) -> Result<bool> {
         let (max, leaving) = (self.host.max_leases(), thread.to_string());
-        let left = self.owner.ask(move |s| -> Result<bool> {
-            s.resolve()?;
-            let reservations = s.ledger().reservations();
-            let queue = s.ledger().queue.clone();
-            let reduction = admission::reduce(queue, &Capacity { limit: max, reservations: &reservations },
-                admission::Event::Leave { thread: leaving });
-            if reduction.disposition != Disposition::Applied {
-                return Ok(false);
-            }
-            let queue = reduction.state;
-            s.change(|ledger| { ledger.queue = queue; Ok(()) })?;
-            Ok(true)
-        }).await?;
+        let left = self
+            .owner
+            .ask(move |s| -> Result<bool> {
+                s.resolve()?;
+                let reservations = s.ledger().reservations();
+                let queue = s.ledger().queue.clone();
+                let reduction = admission::reduce(
+                    queue,
+                    &Capacity {
+                        limit: max,
+                        reservations: &reservations,
+                    },
+                    admission::Event::Leave { thread: leaving },
+                );
+                if reduction.disposition != Disposition::Applied {
+                    return Ok(false);
+                }
+                let queue = reduction.state;
+                s.change(|ledger| {
+                    ledger.queue = queue;
+                    Ok(())
+                })?;
+                Ok(true)
+            })
+            .await?;
         if left {
             self.announce_waiting();
         }
@@ -812,7 +1203,12 @@ impl Sims {
     }
 
     fn announce_waiting(&self) {
-        let threads = self.ledger().queue.iter().map(|w| w.thread_id.clone()).collect();
+        let threads = self
+            .ledger()
+            .queue
+            .iter()
+            .map(|w| w.thread_id.clone())
+            .collect();
         self.host.waiting(threads);
     }
 
@@ -823,53 +1219,107 @@ impl Sims {
         let max = self.host.max_leases();
         // What T3 says of each thread in line, read before the owner decides;
         // one that joined meanwhile is unknown, which keeps its place.
-        let seen: HashMap<String, Seen> = self.ledger().queue.iter().map(|w| (w.thread_id.clone(), self.host.seen(&w.thread_id))).collect();
-        let decided = self.owner.ask(move |s| -> Option<(Vec<Waiter>, bool)> {
-            s.resolve().ok()?;
-            let ledger = s.ledger();
-            let reservations = ledger.reservations();
-            let seen = ledger.queue.iter()
-                .map(|w| (w.thread_id.clone(), seen.get(&w.thread_id).cloned().unwrap_or(Seen::Unknown { turn: None }))).collect();
-            let reduction = admission::reduce(ledger.queue.clone(), &Capacity { limit: max, reservations: &reservations },
-                admission::Event::Advance { now: now(), seen });
-            if reduction.effects.contains(&admission::Effect::Commit) {
-                let queue = reduction.state;
-                if let Err(error) = s.change(|ledger| { ledger.queue = queue; Ok(()) }) {
-                    // Nothing was granted, so nobody is woken.
-                    eprintln!("Simulator queue not advanced: {error:#}");
-                    return None;
+        let seen: HashMap<String, Seen> = self
+            .ledger()
+            .queue
+            .iter()
+            .map(|w| (w.thread_id.clone(), self.host.seen(&w.thread_id)))
+            .collect();
+        let decided = self
+            .owner
+            .ask(move |s| -> Option<(Vec<Waiter>, bool)> {
+                s.resolve().ok()?;
+                let ledger = s.ledger();
+                let reservations = ledger.reservations();
+                let seen = ledger
+                    .queue
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.thread_id.clone(),
+                            seen.get(&w.thread_id)
+                                .cloned()
+                                .unwrap_or(Seen::Unknown { turn: None }),
+                        )
+                    })
+                    .collect();
+                let reduction = admission::reduce(
+                    ledger.queue.clone(),
+                    &Capacity {
+                        limit: max,
+                        reservations: &reservations,
+                    },
+                    admission::Event::Advance { now: now(), seen },
+                );
+                if reduction.effects.contains(&admission::Effect::Commit) {
+                    let queue = reduction.state;
+                    if let Err(error) = s.change(|ledger| {
+                        ledger.queue = queue;
+                        Ok(())
+                    }) {
+                        // Nothing was granted, so nobody is woken.
+                        eprintln!("Simulator queue not advanced: {error:#}");
+                        return None;
+                    }
                 }
-            }
-            let wakes = reduction.effects.iter().filter_map(|e| match e { admission::Effect::Wake(w) => Some(w.clone()), _ => None }).collect();
-            Some((wakes, reduction.effects.contains(&admission::Effect::Announce)))
-        }).await;
-        let Some((wakes, announce)) = decided else { return };
+                let wakes = reduction
+                    .effects
+                    .iter()
+                    .filter_map(|e| match e {
+                        admission::Effect::Wake(w) => Some(w.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((
+                    wakes,
+                    reduction.effects.contains(&admission::Effect::Announce),
+                ))
+            })
+            .await;
+        let Some((wakes, announce)) = decided else {
+            return;
+        };
         if announce {
             self.announce_waiting();
         }
         let cli = self.host.cli();
         for waiter in wakes {
             let thread = &waiter.thread_id;
-            let text = format!("[simulator ready]\nA simulator is free and held for this thread. Run {cli} sim start --thread {thread} \
-                now to take it, then carry on. If you no longer need it, run {cli} sim stop --thread {thread} to give it up.");
+            let text = format!(
+                "[simulator ready]\nA simulator is free and held for this thread. Run {cli} sim start --thread {thread} \
+                now to take it, then carry on. If you no longer need it, run {cli} sim stop --thread {thread} to give it up."
+            );
             if let Err(error) = self.host.wake(thread, &waiter.id, text).await {
                 eprintln!("Simulator wake for {thread} not queued: {error:#}");
                 continue;
             }
             let (thread, woken) = (thread.clone(), waiter.id.clone());
-            self.owner.ask(move |s| {
-                let reservations = s.ledger().reservations();
-                let queue = s.ledger().queue.clone();
-                let reduction = admission::reduce(queue, &Capacity { limit: max, reservations: &reservations },
-                    admission::Event::WakeQueued { waiter: woken });
-                if reduction.disposition == Disposition::Applied {
-                    let queue = reduction.state;
-                    if let Err(error) = s.change(|ledger| { ledger.queue = queue; Ok(()) }) {
-                        // The outbox dedupes by the waiter's ID; the wake is asked for again.
-                        eprintln!("Simulator wake for {thread} queued but not recorded: {error:#}");
+            self.owner
+                .ask(move |s| {
+                    let reservations = s.ledger().reservations();
+                    let queue = s.ledger().queue.clone();
+                    let reduction = admission::reduce(
+                        queue,
+                        &Capacity {
+                            limit: max,
+                            reservations: &reservations,
+                        },
+                        admission::Event::WakeQueued { waiter: woken },
+                    );
+                    if reduction.disposition == Disposition::Applied {
+                        let queue = reduction.state;
+                        if let Err(error) = s.change(|ledger| {
+                            ledger.queue = queue;
+                            Ok(())
+                        }) {
+                            // The outbox dedupes by the waiter's ID; the wake is asked for again.
+                            eprintln!(
+                                "Simulator wake for {thread} queued but not recorded: {error:#}"
+                            );
+                        }
                     }
-                }
-            }).await;
+                })
+                .await;
         }
     }
 
@@ -889,23 +1339,47 @@ impl Sims {
 
     /// Stops a thread's session (or one by ID) and files its recording.
     pub async fn stop(&self, thread: Option<&str>, id: Option<&str>) -> Result<StopReceipt> {
-        let session = self.ledger().sessions.iter().rev()
-            .find(|s| s.active() && (id.is_some_and(|i| s.id == i) || (id.is_none() && thread.is_some_and(|t| s.thread_id == t))))
+        let session = self
+            .ledger()
+            .sessions
+            .iter()
+            .rev()
+            .find(|s| {
+                s.active()
+                    && (id.is_some_and(|i| s.id == i)
+                        || (id.is_none() && thread.is_some_and(|t| s.thread_id == t)))
+            })
             .cloned();
         let Some(session) = session else {
-            bail!("No simulator session is running{}", thread.map(|t| format!(" for thread {t}")).unwrap_or_default());
+            bail!(
+                "No simulator session is running{}",
+                thread
+                    .map(|t| format!(" for thread {t}"))
+                    .unwrap_or_default()
+            );
         };
         let session = self.finish(&session.id, "stopped").await?;
-        let media_id = match &session.phase { Phase::Finished { media_id, .. } => Some(media_id.clone()), _ => None };
-        Ok(StopReceipt { session: Served::from(&session), media_id })
+        let media_id = match &session.phase {
+            Phase::Finished { media_id, .. } => Some(media_id.clone()),
+            _ => None,
+        };
+        Ok(StopReceipt {
+            session: Served::from(&session),
+            media_id,
+        })
     }
 
     /// Ends the recording, closes T3's device session, has the pool release
     /// the simulator and files the recording. Problems are recorded on the
     /// session; an error means a save failed, or another stop has it.
     async fn finish(&self, id: &str, reason: &str) -> Result<Session> {
-        let _finish = self.claim(id, Work::Finish).await.context("The session is already being stopped")?;
-        self.halt(id, reason, RECORDER_GRACE, false).await?.context("The session is already being stopped")?;
+        let _finish = self
+            .claim(id, Work::Finish)
+            .await
+            .context("The session is already being stopped")?;
+        self.halt(id, reason, RECORDER_GRACE, false)
+            .await?
+            .context("The session is already being stopped")?;
         self.cleanup(id, false).await;
         self.file(id, true).await
     }
@@ -913,7 +1387,9 @@ impl Sims {
     /// A session left part-way (a previous run's, or one whose step couldn't
     /// be saved) is finished from where it stands.
     async fn resume(&self, id: &str, reason: &str) {
-        let Some(_finish) = self.claim(id, Work::Finish).await else { return };
+        let Some(_finish) = self.claim(id, Work::Finish).await else {
+            return;
+        };
         if let Err(error) = self.halt(id, reason, RECORDER_GRACE, true).await {
             eprintln!("Simulator session {id} not stopped: {error:#}");
         }
@@ -926,20 +1402,37 @@ impl Sims {
     /// Claims a session (saved), stops its recorder and saves that it
     /// stopped: from then on its close, release and filing are owed. None if
     /// it isn't this call's to stop.
-    async fn halt(&self, id: &str, reason: &str, grace: Duration, recovering: bool) -> Result<Option<Session>> {
+    async fn halt(
+        &self,
+        id: &str,
+        reason: &str,
+        grace: Duration,
+        recovering: bool,
+    ) -> Result<Option<Session>> {
         let (stopping, reason) = (id.to_string(), reason.to_string());
-        let halted = self.owner.ask(move |s| -> Result<Option<(Session, Option<Recorder>)>> {
-            let (disposition, _) = s.step(&stopping, Event::Stop { reason, recovering })?;
-            if disposition != Disposition::Applied {
-                return Ok(None);
-            }
-            let session = s.ledger().session(&stopping).cloned().context("No such simulator session")?;
-            s.clocks.remove(&stopping);
-            Ok(Some((session, s.recorders.remove(&stopping))))
-        }).await?;
-        let Some((session, recorder)) = halted else { return Ok(None) };
+        let halted = self
+            .owner
+            .ask(move |s| -> Result<Option<(Session, Option<Recorder>)>> {
+                let (disposition, _) = s.step(&stopping, Event::Stop { reason, recovering })?;
+                if disposition != Disposition::Applied {
+                    return Ok(None);
+                }
+                let session = s
+                    .ledger()
+                    .session(&stopping)
+                    .cloned()
+                    .context("No such simulator session")?;
+                s.clocks.remove(&stopping);
+                Ok(Some((session, s.recorders.remove(&stopping))))
+            })
+            .await?;
+        let Some((session, recorder)) = halted else {
+            return Ok(None);
+        };
         if let Ok(raw) = media::recording_path(&self.root, &session.thread_id, id) {
-            self.host.poster(&session.device_id, &raw.with_extension("poster.jpg")).await;
+            self.host
+                .poster(&session.device_id, &raw.with_extension("poster.jpg"))
+                .await;
         }
         let mut warning = None;
         match recorder {
@@ -957,15 +1450,29 @@ impl Sims {
                 unsafe { libc::kill(recorder.pid as i32, libc::SIGINT) };
                 let polls = (grace.as_millis() / 250).max(1);
                 for _ in 0..polls {
-                    if !is_recorder(recorder, id) { break }
+                    if !is_recorder(recorder, id) {
+                        break;
+                    }
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
-            _ => if let Some(recorder) = session.recorder().filter(|r| alive(r.pid)) {
-                warning = Some(format!("Process {} is no longer this session's recorder; it was left alone", recorder.pid));
-            },
+            _ => {
+                if let Some(recorder) = session.recorder().filter(|r| alive(r.pid)) {
+                    warning = Some(format!(
+                        "Process {} is no longer this session's recorder; it was left alone",
+                        recorder.pid
+                    ));
+                }
+            }
         }
-        self.step(id, Event::RecorderStopped { now: now(), warning }).await?;
+        self.step(
+            id,
+            Event::RecorderStopped {
+                now: now(),
+                warning,
+            },
+        )
+        .await?;
         Ok(self.ledger().session(id).cloned())
     }
 
@@ -979,19 +1486,49 @@ impl Sims {
     /// Closes the session's T3 device session if a close is owed. A lost
     /// answer is settled by T3's list of open sessions; a failure stays owed.
     async fn close(&self, id: &str, force: bool) {
-        let Some(_close) = self.claim(id, Work::Close).await else { return };
+        let Some(_close) = self.claim(id, Work::Close).await else {
+            return;
+        };
         let time = if force { f64::INFINITY } else { now() };
-        let Some(session) = self.ledger().session(id).cloned().filter(|s| s.close_due(time)) else { return };
-        let closed = self.host.device("device.close", json!({"threadId": session.thread_id, "hostId": session.host_id,
-            "deviceId": session.device_id, "platform": "ios"})).await;
+        let Some(session) = self
+            .ledger()
+            .session(id)
+            .cloned()
+            .filter(|s| s.close_due(time))
+        else {
+            return;
+        };
+        let closed = self
+            .host
+            .device(
+                "device.close",
+                json!({"threadId": session.thread_id, "hostId": session.host_id,
+            "deviceId": session.device_id, "platform": "ios"}),
+            )
+            .await;
         let outcome = match closed {
             Ok(_) => Closed::Closed,
             Err(error) => match self.host.device_sessions().await {
-                Ok(open) if !open.iter().any(|(t, d)| *t == session.thread_id && d.eq_ignore_ascii_case(&session.device_id)) => Closed::Absent,
+                Ok(open)
+                    if !open.iter().any(|(t, d)| {
+                        *t == session.thread_id && d.eq_ignore_ascii_case(&session.device_id)
+                    }) =>
+                {
+                    Closed::Absent
+                }
                 _ => Closed::Failed(format!("T3 did not close the simulator: {error:#}")),
             },
         };
-        if let Err(error) = self.step(id, Event::CloseResult { outcome, now: now() }).await {
+        if let Err(error) = self
+            .step(
+                id,
+                Event::CloseResult {
+                    outcome,
+                    now: now(),
+                },
+            )
+            .await
+        {
             eprintln!("{error:#}");
         }
     }
@@ -999,25 +1536,61 @@ impl Sims {
     /// Asks the pool to release the simulator once T3's device session is
     /// closed. Its answer is the receipt that frees the slot; a failure stays owed.
     async fn release(&self, id: &str, force: bool) {
-        let Some(_release) = self.claim(id, Work::Release).await else { return };
+        let Some(_release) = self.claim(id, Work::Release).await else {
+            return;
+        };
         let time = if force { f64::INFINITY } else { now() };
         let ledger = self.ledger();
-        let Some(session) = ledger.session(id).cloned().filter(|s| s.release_due(time)) else { return };
-        let others: Vec<Lease> = ledger.sessions.iter().filter(|s| s.id != id && s.reserves())
-            .map(|s| Lease { device_id: s.device_id.to_ascii_uppercase(), thread_id: s.thread_id.clone() }).collect();
-        let outcome = self.host.release(&session.device_id, &session.thread_id, &others).await.map_err(|e| format!("{e:#}"));
+        let Some(session) = ledger.session(id).cloned().filter(|s| s.release_due(time)) else {
+            return;
+        };
+        let others: Vec<Lease> = ledger
+            .sessions
+            .iter()
+            .filter(|s| s.id != id && s.reserves())
+            .map(|s| Lease {
+                device_id: s.device_id.to_ascii_uppercase(),
+                thread_id: s.thread_id.clone(),
+            })
+            .collect();
+        let outcome = self
+            .host
+            .release(&session.device_id, &session.thread_id, &others)
+            .await
+            .map_err(|e| format!("{e:#}"));
         if let Err(error) = &outcome {
-            eprintln!("Simulator {} not released after its session: {error}", session.device_id);
+            eprintln!(
+                "Simulator {} not released after its session: {error}",
+                session.device_id
+            );
         }
-        if let Err(error) = self.step(id, Event::ReleaseResult { outcome, now: now() }).await {
+        if let Err(error) = self
+            .step(
+                id,
+                Event::ReleaseResult {
+                    outcome,
+                    now: now(),
+                },
+            )
+            .await
+        {
             eprintln!("{error:#}");
         }
     }
 
     /// Moves a stopped session's recording into the thread's media.
     async fn file(&self, id: &str, shrink: bool) -> Result<Session> {
-        let session = self.ledger().session(id).cloned().context("The session disappeared")?;
-        let Phase::Filing { ended_at, warning, .. } = session.phase.clone() else { return Ok(session) };
+        let session = self
+            .ledger()
+            .session(id)
+            .cloned()
+            .context("The session disappeared")?;
+        let Phase::Filing {
+            ended_at, warning, ..
+        } = session.phase.clone()
+        else {
+            return Ok(session);
+        };
         let raw = media::recording_path(&self.root, &session.thread_id, id);
         let path = match &raw {
             Ok(raw) => {
@@ -1025,7 +1598,11 @@ impl Sims {
                 let nonempty = |p: &Path| p.metadata().is_ok_and(|m| m.len() > 0);
                 if nonempty(raw) {
                     // Declared policy: if compressing fails, the original is filed as it is.
-                    Some(if shrink { self.host.compact(raw).await.unwrap_or(raw.clone()) } else { raw.clone() })
+                    Some(if shrink {
+                        self.host.compact(raw).await.unwrap_or(raw.clone())
+                    } else {
+                        raw.clone()
+                    })
                 } else {
                     // A previous run compacted it but stopped before filing.
                     Some(compacted(raw)).filter(|p| nonempty(p))
@@ -1034,13 +1611,24 @@ impl Sims {
             Err(_) => None,
         };
         let filed = path.map(|p| {
-            media::add_recording(&self.root, &session.thread_id, &p, SimulatorClip {
-                session_id: id.into(), device_id: session.device_id.clone(), device_name: session.device_name.clone(),
-                started_at: session.started_at, ended_at,
-            })
+            media::add_recording(
+                &self.root,
+                &session.thread_id,
+                &p,
+                SimulatorClip {
+                    session_id: id.into(),
+                    device_id: session.device_id.clone(),
+                    device_name: session.device_name.clone(),
+                    started_at: session.started_at,
+                    ended_at,
+                },
+            )
         });
         if let (Ok(raw), Some(Ok(media))) = (&raw, &filed) {
-            let _ = std::fs::rename(raw.with_extension("poster.jpg"), media.file.with_extension("poster.jpg"));
+            let _ = std::fs::rename(
+                raw.with_extension("poster.jpg"),
+                media.file.with_extension("poster.jpg"),
+            );
         }
         let result = match filed {
             Some(Ok(media)) => Ok(media.id),
@@ -1048,7 +1636,10 @@ impl Sims {
             None => Err(warning.unwrap_or_else(|| "simctl wrote no video".into())),
         };
         self.step(id, Event::Filed(result)).await?;
-        self.ledger().session(id).cloned().context("The session disappeared")
+        self.ledger()
+            .session(id)
+            .cloned()
+            .context("The session disappeared")
     }
 
     /// This Mac's iOS simulators, and which thread (if any) is using each.
@@ -1057,7 +1648,11 @@ impl Sims {
         let simulators = local_simulators(&inventory);
         ensure!(!simulators.is_empty(), "{}", no_simulators(&inventory));
         let ledger = self.ledger();
-        let held: Vec<&Session> = ledger.sessions.iter().filter(|s| s.holds_device()).collect();
+        let held: Vec<&Session> = ledger
+            .sessions
+            .iter()
+            .filter(|s| s.holds_device())
+            .collect();
         let devices: Vec<Value> = simulators.into_iter()
             .map(|d| {
                 let session = held.iter().find(|s| Some(s.device_id.as_str()) == d["id"].as_str());
@@ -1076,7 +1671,9 @@ impl Sims {
         let mut draining = self.draining.subscribe();
         let orphans = self.owner.ask(|s| std::mem::take(&mut s.orphans)).await;
         for id in orphans {
-            if *draining.borrow() { return }
+            if *draining.borrow() {
+                return;
+            }
             self.resume(&id, "service restarted").await;
         }
         loop {
@@ -1084,7 +1681,9 @@ impl Sims {
                 _ = tokio::time::sleep(Duration::from_secs(3)) => {}
                 _ = draining.wait_for(|d| *d) => return,
             }
-            if *draining.borrow() { return }
+            if *draining.borrow() {
+                return;
+            }
             self.tick().await;
         }
     }
@@ -1108,7 +1707,13 @@ impl Sims {
             tokio::spawn(async move { sims.resume(&id, "interrupted").await });
         }
         let time = now();
-        let owed: Vec<String> = self.ledger().sessions.iter().filter(|s| s.close_due(time) || s.release_due(time)).map(|s| s.id.clone()).collect();
+        let owed: Vec<String> = self
+            .ledger()
+            .sessions
+            .iter()
+            .filter(|s| s.close_due(time) || s.release_due(time))
+            .map(|s| s.id.clone())
+            .collect();
         for id in owed {
             self.cleanup(&id, false).await;
         }
@@ -1120,17 +1725,25 @@ impl Sims {
     /// their end: a start that couldn't save its failure, a stop or filing
     /// whose save failed.
     async fn stranded(&self) -> Vec<String> {
-        self.owner.ask(|s| {
-            let orphans: HashSet<&String> = s.orphans.iter().collect();
-            s.ledger().sessions.iter()
-                .filter(|session| match session.phase {
-                    Phase::Starting { .. } => !s.starts.contains(&session.id),
-                    Phase::Stopping { .. } | Phase::Filing { .. } => true,
-                    _ => false,
-                })
-                .filter(|session| !orphans.contains(&session.id) && !s.running.contains_key(&(session.id.clone(), Work::Finish)))
-                .map(|session| session.id.clone()).collect()
-        }).await
+        self.owner
+            .ask(|s| {
+                let orphans: HashSet<&String> = s.orphans.iter().collect();
+                s.ledger()
+                    .sessions
+                    .iter()
+                    .filter(|session| match session.phase {
+                        Phase::Starting { .. } => !s.starts.contains(&session.id),
+                        Phase::Stopping { .. } | Phase::Filing { .. } => true,
+                        _ => false,
+                    })
+                    .filter(|session| {
+                        !orphans.contains(&session.id)
+                            && !s.running.contains_key(&(session.id.clone(), Work::Finish))
+                    })
+                    .map(|session| session.id.clone())
+                    .collect()
+            })
+            .await
     }
 
     /// Sessions to stop now, and why: the recorder died, the time limit
@@ -1138,27 +1751,43 @@ impl Sims {
     async fn due(&self) -> Vec<(String, &'static str)> {
         let time = now();
         // What T3 says of each recording session's thread, read before the owner decides.
-        let seen: HashMap<String, Seen> = self.ledger().sessions.iter().filter(|s| s.active())
-            .map(|s| (s.thread_id.clone(), self.host.seen(&s.thread_id))).collect();
-        self.owner.ask(move |s| {
-            let active: Vec<Session> = s.ledger().sessions.iter().filter(|s| s.active()).cloned().collect();
-            let mut due = Vec::new();
-            for session in active {
-                let alive = match s.recorders.get_mut(&session.id) {
-                    Some(Recorder::Owned(child)) => matches!(child.try_wait(), Ok(None)),
-                    Some(Recorder::Recovered(recorder)) => is_recorder(*recorder, &session.id),
-                    None => false,
-                };
-                let seen = seen.get(&session.thread_id).cloned().unwrap_or(Seen::Unknown { turn: None });
-                let clock = s.clocks.get(&session.id).copied().unwrap_or_default();
-                let (clock, reason) = session::watch(&session, clock, alive, &seen, time);
-                s.clocks.insert(session.id.clone(), clock);
-                if let Some(reason) = reason {
-                    due.push((session.id, reason));
+        let seen: HashMap<String, Seen> = self
+            .ledger()
+            .sessions
+            .iter()
+            .filter(|s| s.active())
+            .map(|s| (s.thread_id.clone(), self.host.seen(&s.thread_id)))
+            .collect();
+        self.owner
+            .ask(move |s| {
+                let active: Vec<Session> = s
+                    .ledger()
+                    .sessions
+                    .iter()
+                    .filter(|s| s.active())
+                    .cloned()
+                    .collect();
+                let mut due = Vec::new();
+                for session in active {
+                    let alive = match s.recorders.get_mut(&session.id) {
+                        Some(Recorder::Owned(child)) => matches!(child.try_wait(), Ok(None)),
+                        Some(Recorder::Recovered(recorder)) => is_recorder(*recorder, &session.id),
+                        None => false,
+                    };
+                    let seen = seen
+                        .get(&session.thread_id)
+                        .cloned()
+                        .unwrap_or(Seen::Unknown { turn: None });
+                    let clock = s.clocks.get(&session.id).copied().unwrap_or_default();
+                    let (clock, reason) = session::watch(&session, clock, alive, &seen, time);
+                    s.clocks.insert(session.id.clone(), clock);
+                    if let Some(reason) = reason {
+                        due.push((session.id, reason));
+                    }
                 }
-            }
-            due
-        }).await
+                due
+            })
+            .await
     }
 
     /// For the service's graceful exit: refuses new starts and stops the
@@ -1170,13 +1799,26 @@ impl Sims {
         // Not in the start lane: a start booting a simulator could hold it
         // for minutes. One past its commit check is rolled back instead.
         self.draining.send_replace(true);
-        let live: Vec<String> = self.owner.ask(move |s| {
-            s.draining = true;
-            s.ledger().sessions.iter().filter(|s| s.active() && exit == Exit::Stop).map(|s| s.id.clone()).collect()
-        }).await;
+        let live: Vec<String> = self
+            .owner
+            .ask(move |s| {
+                s.draining = true;
+                s.ledger()
+                    .sessions
+                    .iter()
+                    .filter(|s| s.active() && exit == Exit::Stop)
+                    .map(|s| s.id.clone())
+                    .collect()
+            })
+            .await;
         futures_util::future::join_all(live.iter().map(|id| async move {
-            let Some(_finish) = self.claim(id, Work::Finish).await else { return };
-            match self.halt(id, "service stopped", SHUTDOWN_GRACE, false).await {
+            let Some(_finish) = self.claim(id, Work::Finish).await else {
+                return;
+            };
+            match self
+                .halt(id, "service stopped", SHUTDOWN_GRACE, false)
+                .await
+            {
                 Ok(Some(_)) => {
                     self.cleanup(id, true).await;
                     let _ = self.file(id, false).await;
@@ -1184,8 +1826,15 @@ impl Sims {
                 Ok(None) => {}
                 Err(error) => eprintln!("Simulator session {id} not stopped: {error:#}"),
             }
-        })).await;
-        let owed: Vec<String> = self.ledger().sessions.iter().filter(|s| s.close_due(f64::INFINITY) || s.release_owed()).map(|s| s.id.clone()).collect();
+        }))
+        .await;
+        let owed: Vec<String> = self
+            .ledger()
+            .sessions
+            .iter()
+            .filter(|s| s.close_due(f64::INFINITY) || s.release_owed())
+            .map(|s| s.id.clone())
+            .collect();
         futures_util::future::join_all(owed.iter().map(|id| self.cleanup(id, true))).await;
         if let Err(error) = self.owner.ask(|s| s.ledger.resolve()).await {
             eprintln!("Simulator session ledger not saved: {error}");
@@ -1199,10 +1848,21 @@ impl Holds for Sims {
     }
 
     fn boots(&self) -> Vec<(String, BootReceipt)> {
-        self.ledger().sessions.iter().filter_map(|s| match s.boot {
-            Boot::BootedHere { at } => Some((s.device_id.to_ascii_uppercase(), BootReceipt { at, thread: None, session: Some(s.id.clone()) })),
-            _ => None,
-        }).collect()
+        self.ledger()
+            .sessions
+            .iter()
+            .filter_map(|s| match s.boot {
+                Boot::BootedHere { at } => Some((
+                    s.device_id.to_ascii_uppercase(),
+                    BootReceipt {
+                        at,
+                        thread: None,
+                        session: Some(s.id.clone()),
+                    },
+                )),
+                _ => None,
+            })
+            .collect()
     }
 
     fn exclude<'a>(&'a self, udid: &'a str) -> Pending<'a, Option<Exclusion>> {
@@ -1210,20 +1870,29 @@ impl Holds for Sims {
             let (udid, token) = (udid.to_ascii_uppercase(), token());
             let (owner, released) = (self.owner.clone(), udid.clone());
             // Made before the owner is asked, so even a cancelled ask is released.
-            let exclusion = Exclusion::new(move || owner.tell(move |s| {
-                if s.excluded.get(&released) == Some(&token) {
-                    s.excluded.remove(&released);
-                }
-            }));
+            let exclusion = Exclusion::new(move || {
+                owner.tell(move |s| {
+                    if s.excluded.get(&released) == Some(&token) {
+                        s.excluded.remove(&released);
+                    }
+                })
+            });
             // In the owner's turn, as a start's reservation is: the two can't interleave.
-            let excluded = self.owner.ask(move |s| {
-                let reserved = s.ledger().sessions.iter().any(|s| s.reserves() && s.device_id.eq_ignore_ascii_case(&udid));
-                if reserved || s.excluded.contains_key(&udid) {
-                    return false;
-                }
-                s.excluded.insert(udid, token);
-                true
-            }).await;
+            let excluded = self
+                .owner
+                .ask(move |s| {
+                    let reserved = s
+                        .ledger()
+                        .sessions
+                        .iter()
+                        .any(|s| s.reserves() && s.device_id.eq_ignore_ascii_case(&udid));
+                    if reserved || s.excluded.contains_key(&udid) {
+                        return false;
+                    }
+                    s.excluded.insert(udid, token);
+                    true
+                })
+                .await;
             excluded.then_some(exclusion)
         })
     }
@@ -1239,7 +1908,8 @@ enum Started {
 /// Why a session's cleanup is failing, if it is.
 fn cleanup_error(session: &Session) -> Option<String> {
     let retry = match (&session.device, &session.release) {
-        (DeviceLease::CloseOwed(retry), _) | (DeviceLease::Closed, session::Release::Owed(retry)) => retry,
+        (DeviceLease::CloseOwed(retry), _)
+        | (DeviceLease::Closed, session::Release::Owed(retry)) => retry,
         _ => return None,
     };
     retry.error.clone()
@@ -1273,7 +1943,10 @@ impl Drop for Startup {
             let _ = child.start_kill();
         }
         let (root, id) = (self.root.clone(), self.id.clone());
-        let error = self.error.take().unwrap_or_else(|| "The start was cancelled".into());
+        let error = self
+            .error
+            .take()
+            .unwrap_or_else(|| "The start was cancelled".into());
         self.owner.tell(move |s| s.abandon_start(&root, &id, error));
     }
 }
@@ -1292,24 +1965,34 @@ fn trim(ledger: &mut Ledger) {
 /// snapshot is only a cache that starts empty when T3 starts and fills only
 /// when some client asks for a list, so read it through `device.list`.
 async fn inventory(host: &dyn Host) -> Result<Value> {
-    host.device("device.list", json!({})).await.context("T3 could not list its simulators")
+    host.device("device.list", json!({}))
+        .await
+        .context("T3 could not list its simulators")
 }
 
 fn local_simulators(inventory: &Value) -> Vec<&Value> {
-    inventory["devices"].as_array().into_iter().flatten()
-        .filter(|d| d["platform"] == "ios" && d["physical"] != true && d["hostId"] == "local").collect()
+    inventory["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|d| d["platform"] == "ios" && d["physical"] != true && d["hostId"] == "local")
+        .collect()
 }
 
 /// Why T3 listed no simulators, from its own host status.
 fn no_simulators(inventory: &Value) -> String {
     let status = inventory["hostStatus"].as_str().unwrap_or("unknown");
-    let detail = inventory["hostStatusDetail"].as_str()
+    let detail = inventory["hostStatusDetail"]
+        .as_str()
         .or_else(|| inventory["hostStatuses"]["local"]["detail"].as_str())
-        .map(|d| format!(": {d}")).unwrap_or_default();
+        .map(|d| format!(": {d}"))
+        .unwrap_or_default();
     if status == "disabled" {
         return "T3 lists no simulators because its device support is off; turn it on in T3's Device panel".into();
     }
-    format!("T3 lists no iOS simulators on this Mac (T3 device host {status}{detail}); check `xcrun simctl list devices` and T3's Device panel")
+    format!(
+        "T3 lists no iOS simulators on this Mac (T3 device host {status}{detail}); check `xcrun simctl list devices` and T3's Device panel"
+    )
 }
 
 #[cfg(test)]
@@ -1324,10 +2007,22 @@ mod tests {
     /// does not show (values from a real T3 0.0.45 device_open result).
     #[test]
     fn agent_device_session_matches_t3() {
-        let value = agent_device("f56d4de2-8173-425d-b251-84d841fd8d97", "local", "C800634B-1469-491D-9477-9BF9A883EEF7");
-        let args: Vec<&str> = value["target_args"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        let value = agent_device(
+            "f56d4de2-8173-425d-b251-84d841fd8d97",
+            "local",
+            "C800634B-1469-491D-9477-9BF9A883EEF7",
+        );
+        let args: Vec<&str> = value["target_args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
         assert_eq!(args.last(), Some(&"t3-b283255e0eea683562ba6ae8"));
-        assert!(args.iter().any(|a| a.ends_with("/hosts/25bf8e1a2393f1108d37029b.json")));
+        assert!(
+            args.iter()
+                .any(|a| a.ends_with("/hosts/25bf8e1a2393f1108d37029b.json"))
+        );
     }
 
     const THREAD: &str = "f56d4de2-8173-425d-b251-84d841fd8d97";
@@ -1356,7 +2051,12 @@ mod tests {
 
     impl Fake {
         fn count(&self, call: &str) -> usize {
-            self.calls.lock().unwrap().iter().filter(|c| *c == call).count()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| *c == call)
+                .count()
         }
 
         fn closes(&self) -> usize {
@@ -1368,8 +2068,16 @@ mod tests {
         }
     }
 
-    fn busy(turn: &str) -> Seen { Seen::Busy { turn: Some(turn.into()) } }
-    fn idle(turn: &str) -> Seen { Seen::Idle { turn: Some(turn.into()) } }
+    fn busy(turn: &str) -> Seen {
+        Seen::Busy {
+            turn: Some(turn.into()),
+        }
+    }
+    fn idle(turn: &str) -> Seen {
+        Seen::Idle {
+            turn: Some(turn.into()),
+        }
+    }
 
     impl Host for Fake {
         fn device<'a>(&'a self, method: &'a str, _: Value) -> Pending<'a, Result<Value>> {
@@ -1377,22 +2085,33 @@ mod tests {
             let fails = method == "device.close" && self.close_fails.load(SeqCst);
             Box::pin(async move {
                 ensure!(!fails, "disconnected");
-                Ok(json!({"devices": [{"id": "SIM1", "name": "iPhone", "platform": "ios", "hostId": "local", "booted": true},
-                                       {"id": "SIM2", "name": "iPad", "platform": "ios", "hostId": "local", "booted": false}]}))
+                Ok(
+                    json!({"devices": [{"id": "SIM1", "name": "iPhone", "platform": "ios", "hostId": "local", "booted": true},
+                                       {"id": "SIM2", "name": "iPad", "platform": "ios", "hostId": "local", "booted": false}]}),
+                )
             })
         }
         fn device_sessions(&self) -> Pending<'_, Result<Vec<(String, String)>>> {
             let open = self.lists_open.load(SeqCst);
             Box::pin(async move {
                 ensure!(open, "T3 is offline");
-                Ok(vec![(THREAD.to_string(), "SIM1".to_string()), (B.to_string(), "SIM1".to_string())])
+                Ok(vec![
+                    (THREAD.to_string(), "SIM1".to_string()),
+                    (B.to_string(), "SIM1".to_string()),
+                ])
             })
         }
         fn seen(&self, thread: &str) -> Seen {
-            self.threads.lock().unwrap().get(thread).cloned()
+            self.threads
+                .lock()
+                .unwrap()
+                .get(thread)
+                .cloned()
                 .unwrap_or_else(|| self.seen.lock().unwrap().clone().unwrap_or(busy("t0")))
         }
-        fn cli(&self) -> String { "squircle".into() }
+        fn cli(&self) -> String {
+            "squircle".into()
+        }
         fn boot<'a>(&'a self, _: &'a str) -> Pending<'a, Result<()>> {
             let outcome = *self.boot.lock().unwrap();
             Box::pin(async move {
@@ -1405,8 +2124,14 @@ mod tests {
         }
         fn record(&self, _: &str, path: &Path, log: std::fs::File) -> Result<Child> {
             Ok(Command::new("/bin/sh")
-                .args(["-c", "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done", "sh"])
-                .arg(path).stderr(log).spawn()?)
+                .args([
+                    "-c",
+                    "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done",
+                    "sh",
+                ])
+                .arg(path)
+                .stderr(log)
+                .spawn()?)
         }
         fn compact<'a>(&'a self, _: &'a Path) -> Pending<'a, Option<PathBuf>> {
             Box::pin(async { None })
@@ -1414,7 +2139,12 @@ mod tests {
         fn free<'a>(&'a self, _: &'a [Lease]) -> Pending<'a, Vec<String>> {
             Box::pin(async { vec!["SIM1".into()] })
         }
-        fn release<'a>(&'a self, device: &'a str, _: &'a str, _: &'a [Lease]) -> Pending<'a, Result<Released>> {
+        fn release<'a>(
+            &'a self,
+            device: &'a str,
+            _: &'a str,
+            _: &'a [Lease],
+        ) -> Pending<'a, Result<Released>> {
             self.calls.lock().unwrap().push(format!("release {device}"));
             let fails = self.release_fails.load(SeqCst);
             Box::pin(async move {
@@ -1422,17 +2152,26 @@ mod tests {
                 Ok(Released::ShutDown)
             })
         }
-        fn max_leases(&self) -> usize { self.max.load(SeqCst).max(1) }
-        fn title(&self, _: &str) -> Option<String> { None }
+        fn max_leases(&self) -> usize {
+            self.max.load(SeqCst).max(1)
+        }
+        fn title(&self, _: &str) -> Option<String> {
+            None
+        }
         fn wake<'a>(&'a self, thread: &'a str, id: &'a str, _: String) -> Pending<'a, Result<()>> {
             self.woken.lock().unwrap().push((thread.into(), id.into()));
             Box::pin(async { Ok(()) })
         }
-        fn waiting(&self, threads: Vec<String>) { *self.waiting.lock().unwrap() = threads }
+        fn waiting(&self, threads: Vec<String>) {
+            *self.waiting.lock().unwrap() = threads
+        }
     }
 
     fn sims(root: &Path, boot: Option<std::result::Result<(), ()>>) -> (Arc<Sims>, Arc<Fake>) {
-        let fake = Arc::new(Fake { boot: Mutex::new(boot), ..Fake::default() });
+        let fake = Arc::new(Fake {
+            boot: Mutex::new(boot),
+            ..Fake::default()
+        });
         (Sims::with_host(root, fake.clone()).unwrap(), fake)
     }
 
@@ -1445,22 +2184,41 @@ mod tests {
     }
 
     fn only_of(sims: &Sims, thread: &str) -> Session {
-        sims.ledger().sessions.iter().rev().find(|s| s.thread_id == thread).cloned().unwrap()
+        sims.ledger()
+            .sessions
+            .iter()
+            .rev()
+            .find(|s| s.thread_id == thread)
+            .cloned()
+            .unwrap()
     }
 
     fn queue(sims: &Sims) -> Vec<(String, bool)> {
-        sims.ledger().queue.iter().map(|w| (w.thread_id.clone(), w.grant.is_some())).collect()
+        sims.ledger()
+            .queue
+            .iter()
+            .map(|w| (w.thread_id.clone(), w.grant.is_some()))
+            .collect()
     }
 
     /// Makes every owed retry due now.
     async fn due_now(sims: &Sims) {
-        sims.owner.ask(|state| state.change(|ledger| {
-            for s in &mut ledger.sessions {
-                if let DeviceLease::CloseOwed(retry) = &mut s.device { retry.retry_at = 0.0 }
-                if let session::Release::Owed(retry) = &mut s.release { retry.retry_at = 0.0 }
-            }
-            Ok(())
-        })).await.unwrap();
+        sims.owner
+            .ask(|state| {
+                state.change(|ledger| {
+                    for s in &mut ledger.sessions {
+                        if let DeviceLease::CloseOwed(retry) = &mut s.device {
+                            retry.retry_at = 0.0
+                        }
+                        if let session::Release::Owed(retry) = &mut s.release {
+                            retry.retry_at = 0.0
+                        }
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
     }
 
     /// Waits for every letter told so far (a dropped guard's) to be read.
@@ -1478,16 +2236,30 @@ mod tests {
         let (sims, _) = sims(dir.path(), None);
         let held = sims.claim("s", Work::Release).await.expect("first claim");
         assert!(sims.claim("s", Work::Release).await.is_none());
-        assert!(sims.claim("s", Work::Release).await.is_none(), "a refused claim released the holder's");
+        assert!(
+            sims.claim("s", Work::Release).await.is_none(),
+            "a refused claim released the holder's"
+        );
         drop(held);
-        let again = sims.claim("s", Work::Release).await.expect("released on drop");
+        let again = sims
+            .claim("s", Work::Release)
+            .await
+            .expect("released on drop");
         drop(again);
         // Cancelled after asking, before the owner granted it: the guard,
         // made first, still releases what the owner then grants.
         let mut cancelled = Box::pin(sims.claim("s", Work::Close));
-        assert!(std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx).is_pending())).await);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                cancelled.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
         drop(cancelled);
-        assert!(sims.claim("s", Work::Close).await.is_some() && sims.claim("s", Work::Release).await.is_some());
+        assert!(
+            sims.claim("s", Work::Close).await.is_some()
+                && sims.claim("s", Work::Release).await.is_some()
+        );
     }
 
     /// The shapes that once deadlocked, all at once: sessions stopping and
@@ -1505,7 +2277,11 @@ mod tests {
             let racing = (0..16).map(|i| {
                 let sims = sims.clone();
                 tokio::spawn(async move {
-                    let work = if i % 2 == 0 { Work::Close } else { Work::Release };
+                    let work = if i % 2 == 0 {
+                        Work::Close
+                    } else {
+                        Work::Release
+                    };
                     let claim = sims.claim(if i % 3 == 0 { "x" } else { "y" }, work).await;
                     let exclusion = sims.exclude(if i % 2 == 0 { "SIM9" } else { "SIM1" }).await;
                     tokio::task::yield_now().await;
@@ -1513,17 +2289,35 @@ mod tests {
                 })
             });
             let _ = tokio::join!(
-                async { (sims.stop(Some(THREAD), None).await, sims.stop(Some(B), None).await) },
+                async {
+                    (
+                        sims.stop(Some(THREAD), None).await,
+                        sims.stop(Some(B), None).await,
+                    )
+                },
                 sims.tick(),
                 sims.tick(),
                 futures_util::future::join_all(racing),
-                async { (sims.start(C, None).await, sims.leave(C).await, sims.stop(Some(C), None).await) },
+                async {
+                    (
+                        sims.start(C, None).await,
+                        sims.leave(C).await,
+                        sims.stop(Some(C), None).await,
+                    )
+                },
             );
             sims.tick().await;
         };
-        tokio::time::timeout(Duration::from_secs(30), work).await.expect("the owners deadlocked");
+        tokio::time::timeout(Duration::from_secs(30), work)
+            .await
+            .expect("the owners deadlocked");
         settled(&sims).await;
-        assert!(sims.owner.ask(|s| s.running.is_empty() && s.excluded.is_empty()).await, "a dropped guard was never released");
+        assert!(
+            sims.owner
+                .ask(|s| s.running.is_empty() && s.excluded.is_empty())
+                .await,
+            "a dropped guard was never released"
+        );
     }
 
     /// Recovery signals a saved PID only while it is still that session's
@@ -1531,15 +2325,30 @@ mod tests {
     #[test]
     fn recorder_identity_is_the_session_file_and_start() {
         let id = uuid::Uuid::new_v4().to_string();
-        let mut child = std::process::Command::new("/bin/sh").args(["-c", "sleep 5; true", "sh"])
-            .arg(format!("/tmp/.{id}.recording.mp4")).spawn().unwrap();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 5; true", "sh"])
+            .arg(format!("/tmp/.{id}.recording.mp4"))
+            .spawn()
+            .unwrap();
         let pid = child.id();
         let start = process_start(pid);
         assert!(start.is_some());
         assert!(is_recorder(RecorderID { pid, start }, &id));
         assert!(is_recorder(RecorderID { pid, start: None }, &id));
-        assert!(!is_recorder(RecorderID { pid, start: Some((1, 0)) }, &id), "a different start time passed");
-        assert!(!is_recorder(RecorderID { pid, start }, &uuid::Uuid::new_v4().to_string()));
+        assert!(
+            !is_recorder(
+                RecorderID {
+                    pid,
+                    start: Some((1, 0))
+                },
+                &id
+            ),
+            "a different start time passed"
+        );
+        assert!(!is_recorder(
+            RecorderID { pid, start },
+            &uuid::Uuid::new_v4().to_string()
+        ));
         child.kill().unwrap();
         child.wait().unwrap();
         assert!(!is_recorder(RecorderID { pid, start }, &id));
@@ -1549,16 +2358,29 @@ mod tests {
     #[tokio::test]
     async fn restart_leaves_a_reused_pid_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let mut stranger = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let mut stranger = std::process::Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .unwrap();
         let ledger = json!({"sessions": [{"id": uuid::Uuid::new_v4().to_string(), "thread_id": THREAD, "host_id": "local",
             "device_id": "SIM1", "device_name": "iPhone", "started_at": 1.0, "state": "recording", "recorder_pid": stranger.id()}]});
         std::fs::write(dir.path().join("sims.json"), ledger.to_string()).unwrap();
         let (sims, fake) = sims(dir.path(), Some(Ok(())));
-        let id = sims.owner.ask(|s| std::mem::take(&mut s.orphans)).await.pop().unwrap();
+        let id = sims
+            .owner
+            .ask(|s| std::mem::take(&mut s.orphans))
+            .await
+            .pop()
+            .unwrap();
         sims.resume(&id, "service restarted").await;
         let session = only(&sims);
-        assert!(stranger.try_wait().unwrap().is_none(), "the unrelated process was signalled");
-        assert!(matches!(&session.phase, Phase::Failed { error, .. } if error.contains("left alone")));
+        assert!(
+            stranger.try_wait().unwrap().is_none(),
+            "the unrelated process was signalled"
+        );
+        assert!(
+            matches!(&session.phase, Phase::Failed { error, .. } if error.contains("left alone"))
+        );
         // A pre-upgrade record owes no close; the release is owed and runs.
         assert_eq!((fake.closes(), fake.count("release SIM1")), (0, 1));
         assert!(session.settled());
@@ -1574,14 +2396,24 @@ mod tests {
         let (sims, fake) = sims(dir.path(), Some(Err(())));
         assert!(sims.start(THREAD, None).await.is_err());
         let session = only(&sims);
-        assert_eq!((state(&session).as_str(), session.settled()), ("failed", true));
+        assert_eq!(
+            (state(&session).as_str(), session.settled()),
+            ("failed", true)
+        );
         assert_eq!((fake.closes(), fake.count("release SIM1")), (1, 1));
 
         *fake.boot.lock().unwrap() = None;
-        assert!(tokio::time::timeout(Duration::from_millis(100), sims.start(THREAD, None)).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), sims.start(THREAD, None))
+                .await
+                .is_err()
+        );
         settled(&sims).await;
         let session = only(&sims);
-        assert!(session.reserves() && matches!(&session.phase, Phase::Failed { error, .. } if error.contains("cancelled")));
+        assert!(
+            session.reserves()
+                && matches!(&session.phase, Phase::Failed { error, .. } if error.contains("cancelled"))
+        );
         sims.tick().await;
         assert!(only(&sims).settled());
         assert_eq!((fake.closes(), fake.count("release SIM1")), (2, 2));
@@ -1599,7 +2431,13 @@ mod tests {
         fake.lists_open.store(true, SeqCst);
         let session = sims.stop(Some(THREAD), None).await.unwrap().session;
         assert_eq!(session.state, "finished");
-        assert!(matches!(&session.device_session, Some(DeviceLease::CloseOwed(crate::fsm::sims::RetryState { error: Some(_), .. }))));
+        assert!(matches!(
+            &session.device_session,
+            Some(DeviceLease::CloseOwed(crate::fsm::sims::RetryState {
+                error: Some(_),
+                ..
+            }))
+        ));
         assert_eq!(media::list(dir.path(), THREAD).unwrap().len(), 1);
         // The blocked close keeps the slot: the next thread waits.
         assert_eq!(sims.start(B, None).await.unwrap()["status"], "queued");
@@ -1607,11 +2445,17 @@ mod tests {
         fake.close_fails.store(false, SeqCst);
         fake.release_fails.store(true, SeqCst);
         sims.tick().await;
-        assert!(only_of(&sims, THREAD).device.owed(), "retried before its backoff");
+        assert!(
+            only_of(&sims, THREAD).device.owed(),
+            "retried before its backoff"
+        );
         due_now(&sims).await;
         sims.tick().await;
         let s = only_of(&sims, THREAD);
-        assert!(!s.device.owed() && s.release_owed() && s.reserves(), "a failed release was cleared");
+        assert!(
+            !s.device.owed() && s.release_owed() && s.reserves(),
+            "a failed release was cleared"
+        );
         assert_eq!(queue(&sims), [(B.into(), false)]);
         fake.release_fails.store(false, SeqCst);
         due_now(&sims).await;
@@ -1620,7 +2464,10 @@ mod tests {
         assert_eq!(queue(&sims), [(B.into(), true)]);
         // Saved: a restart owes nothing.
         let (reopened, _) = super::tests::sims(dir.path(), Some(Ok(())));
-        assert!(reopened.owner.ask(|s| s.orphans.is_empty()).await && only_of(&reopened, THREAD).settled());
+        assert!(
+            reopened.owner.ask(|s| s.orphans.is_empty()).await
+                && only_of(&reopened, THREAD).settled()
+        );
     }
 
     /// A close whose answer is lost is settled by T3 no longer listing the session.
@@ -1645,7 +2492,10 @@ mod tests {
         sims.start(THREAD, None).await.unwrap();
         sims.shutdown(Exit::Stop).await;
         let session = only(&sims);
-        assert_eq!((state(&session).as_str(), session.settled()), ("finished", true));
+        assert_eq!(
+            (state(&session).as_str(), session.settled()),
+            ("finished", true)
+        );
         assert_eq!(fake.closes(), 1);
         assert!(sims.start(THREAD, None).await.is_err());
         assert!(sims.owner.ask(|s| s.recorders.is_empty()).await);
@@ -1662,15 +2512,30 @@ mod tests {
         fake.max.store(2, SeqCst);
         sims.start(THREAD, None).await.unwrap();
         sims.start(B, Some("SIM2")).await.unwrap();
-        let (ids, recorders): (Vec<String>, Vec<RecorderID>) = sims.ledger().sessions.iter()
-            .map(|s| (s.id.clone(), s.recorder().unwrap())).unzip();
+        let (ids, recorders): (Vec<String>, Vec<RecorderID>) = sims
+            .ledger()
+            .sessions
+            .iter()
+            .map(|s| (s.id.clone(), s.recorder().unwrap()))
+            .unzip();
         assert!(recorders.iter().all(|r| r.start.is_some()));
         sims.shutdown(Exit::Handover).await;
-        assert!(sims.start(THREAD, None).await.is_err(), "started while handing over");
+        assert!(
+            sims.start(THREAD, None).await.is_err(),
+            "started while handing over"
+        );
         assert_eq!((fake.closes(), fake.count("release SIM1")), (0, 0));
-        assert!(sims.ledger().sessions.iter().all(|s| s.active() && s.device == DeviceLease::Open));
+        assert!(
+            sims.ledger()
+                .sessions
+                .iter()
+                .all(|s| s.active() && s.device == DeviceLease::Open)
+        );
         drop(sims);
-        assert!(recorders.iter().all(|r| alive(r.pid)), "a recorder stopped with the old run");
+        assert!(
+            recorders.iter().all(|r| alive(r.pid)),
+            "a recorder stopped with the old run"
+        );
         // The second session's recorder dies between the runs.
         unsafe { libc::kill(recorders[1].pid as i32, libc::SIGKILL) };
         while is_recorder(recorders[1], &ids[1]) {
@@ -1683,9 +2548,14 @@ mod tests {
         // Watched again: only the one whose recorder died is due to end.
         assert_eq!(reopened.due().await, [(ids[1].clone(), "recorder stopped")]);
         let receipt = reopened.stop(Some(THREAD), None).await.unwrap();
-        assert!(matches!(only_of(&reopened, THREAD).phase, Phase::Finished { ref reason, .. } if reason == "stopped"));
+        assert!(
+            matches!(only_of(&reopened, THREAD).phase, Phase::Finished { ref reason, .. } if reason == "stopped")
+        );
         assert!(receipt.media_id.is_some());
-        assert_eq!(std::fs::read(&media::list(dir.path(), THREAD).unwrap()[0].file).unwrap(), b"movie");
+        assert_eq!(
+            std::fs::read(&media::list(dir.path(), THREAD).unwrap()[0].file).unwrap(),
+            b"movie"
+        );
         assert_eq!(fake.closes(), 1);
     }
 
@@ -1701,7 +2571,14 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("media")).unwrap();
         let path = media::recording_path(dir.path(), THREAD, &id).unwrap();
         let mut recorder = Command::new("/bin/sh")
-            .args(["-c", "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done", "sh"]).arg(&path).spawn().unwrap();
+            .args([
+                "-c",
+                "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done",
+                "sh",
+            ])
+            .arg(&path)
+            .spawn()
+            .unwrap();
         let pid = recorder.id().unwrap();
         let ledger = json!({
             "sessions": [
@@ -1713,19 +2590,38 @@ mod tests {
                  "device_session": {"phase": "closed"}, "release_pending": true}],
             "queue": [{"id": "w1", "thread_id": B, "queued_at": 1.0, "grant": {"at": 2.0, "turn": "t1", "woken": true}}]});
         std::fs::write(dir.path().join("sims.json"), ledger.to_string()).unwrap();
-        let fake = Arc::new(Fake { boot: Mutex::new(Some(Ok(()))), ..Fake::default() });
+        let fake = Arc::new(Fake {
+            boot: Mutex::new(Some(Ok(()))),
+            ..Fake::default()
+        });
         fake.max.store(3, SeqCst);
         let sims = Sims::with_host(dir.path(), fake.clone()).unwrap();
 
-        let original: Value = serde_json::from_slice(&std::fs::read(dir.path().join("sims.schema1.json")).unwrap()).unwrap();
+        let original: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("sims.schema1.json")).unwrap())
+                .unwrap();
         assert_eq!(original, ledger);
-        let saved: Value = serde_json::from_slice(&std::fs::read(dir.path().join("sims.json")).unwrap()).unwrap();
-        assert_eq!((saved["schema"].as_u64(), saved["queue"][0]["grant"]["wake"].as_str()), (Some(2), Some("queued")));
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("sims.json")).unwrap()).unwrap();
+        assert_eq!(
+            (
+                saved["schema"].as_u64(),
+                saved["queue"][0]["grant"]["wake"].as_str()
+            ),
+            (Some(2), Some("queued"))
+        );
         let live = only_of(&sims, THREAD);
-        assert!(live.active() && live.recorder().unwrap().start.is_some() && sims.owner.ask(|s| s.orphans.is_empty()).await);
+        assert!(
+            live.active()
+                && live.recorder().unwrap().start.is_some()
+                && sims.owner.ask(|s| s.orphans.is_empty()).await
+        );
         // The pre-upgrade release is still owed and runs; the grant is not woken again.
         sims.tick().await;
-        assert_eq!((fake.count("release SIM2"), fake.woken.lock().unwrap().len()), (1, 0));
+        assert_eq!(
+            (fake.count("release SIM2"), fake.woken.lock().unwrap().len()),
+            (1, 0)
+        );
         assert_eq!(queue(&sims), [(B.into(), true)]);
         // The handed-over recording still files as a whole movie.
         let receipt = sims.stop(Some(THREAD), None).await.unwrap();
@@ -1766,7 +2662,15 @@ mod tests {
         sims.stop(Some(THREAD), None).await.unwrap();
         sims.tick().await;
         assert_eq!(queue(&sims), [(B.into(), true), (C.into(), false)]);
-        assert_eq!(fake.woken.lock().unwrap().iter().map(|w| w.0.as_str()).collect::<Vec<_>>(), [B]);
+        assert_eq!(
+            fake.woken
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|w| w.0.as_str())
+                .collect::<Vec<_>>(),
+            [B]
+        );
         // The held slot isn't anyone else's, newcomer or next in line.
         assert_eq!(sims.start(D, None).await.unwrap()["position"], 2);
         assert_eq!(sims.start(C, None).await.unwrap()["status"], "queued");
@@ -1776,7 +2680,10 @@ mod tests {
         let reopened = Sims::with_host(dir.path(), fake.clone()).unwrap();
         reopened.tick().await;
         assert_eq!(fake.woken.lock().unwrap().len(), 1);
-        assert_eq!(queue(&reopened), [(B.into(), true), (C.into(), false), (D.into(), false)]);
+        assert_eq!(
+            queue(&reopened),
+            [(B.into(), true), (C.into(), false), (D.into(), false)]
+        );
 
         reopened.start(B, None).await.unwrap();
         assert_eq!(queue(&reopened), [(C.into(), false), (D.into(), false)]);
@@ -1797,10 +2704,17 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
         sims.tick().await;
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!((queue(&sims), fake.woken.lock().unwrap().len()), (vec![(B.into(), false)], 0));
+        assert_eq!(
+            (queue(&sims), fake.woken.lock().unwrap().len()),
+            (vec![(B.into(), false)], 0)
+        );
         sims.tick().await;
-        assert_eq!((queue(&sims), fake.woken.lock().unwrap().len()), (vec![(B.into(), true)], 1));
-        let saved: Value = serde_json::from_slice(&std::fs::read(dir.path().join("sims.json")).unwrap()).unwrap();
+        assert_eq!(
+            (queue(&sims), fake.woken.lock().unwrap().len()),
+            (vec![(B.into(), true)], 1)
+        );
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("sims.json")).unwrap()).unwrap();
         assert_eq!(saved["queue"][0]["grant"]["wake"], "queued");
     }
 
@@ -1827,7 +2741,12 @@ mod tests {
         // The turn that queued ends: it isn't the woken turn, so the slot stays held.
         fake.set(B, idle("t1"));
         sims.tick().await;
-        fake.set(B, Seen::Unknown { turn: Some("t2".into()) });
+        fake.set(
+            B,
+            Seen::Unknown {
+                turn: Some("t2".into()),
+            },
+        );
         sims.tick().await;
         assert_eq!(queue(&sims), [(B.into(), true)]);
         // The woken turn ends without taking it: the place goes.
@@ -1846,15 +2765,32 @@ mod tests {
         sims.start(THREAD, None).await.unwrap();
         *fake.seen.lock().unwrap() = Some(idle("t"));
         assert!(sims.due().await.is_empty(), "ended before its grace");
-        sims.owner.ask(|s| s.clocks.values_mut().for_each(|c| c.since = Some(0.0))).await;
+        sims.owner
+            .ask(|s| s.clocks.values_mut().for_each(|c| c.since = Some(0.0)))
+            .await;
         for seen in [Seen::Unknown { turn: None }, Seen::Waiting { turn: None }] {
             *fake.seen.lock().unwrap() = Some(seen);
-            assert!(sims.due().await.is_empty(), "ended on an unknown or waiting state");
+            assert!(
+                sims.due().await.is_empty(),
+                "ended on an unknown or waiting state"
+            );
         }
         *fake.seen.lock().unwrap() = Some(idle("t"));
-        assert!(sims.due().await.is_empty(), "uncertain time counted as idle");
-        sims.owner.ask(|s| s.clocks.values_mut().for_each(|c| c.since = Some(0.0))).await;
-        assert_eq!(sims.due().await.into_iter().map(|d| d.1).collect::<Vec<_>>(), ["turn ended"]);
+        assert!(
+            sims.due().await.is_empty(),
+            "uncertain time counted as idle"
+        );
+        sims.owner
+            .ask(|s| s.clocks.values_mut().for_each(|c| c.since = Some(0.0)))
+            .await;
+        assert_eq!(
+            sims.due()
+                .await
+                .into_iter()
+                .map(|d| d.1)
+                .collect::<Vec<_>>(),
+            ["turn ended"]
+        );
         sims.stop(Some(THREAD), None).await.unwrap();
     }
 }

@@ -147,12 +147,24 @@ impl Signals {
     /// The status linked work implies, if any: a question, then work, then
     /// the newest linked build having succeeded.
     fn implied(&self) -> Option<Status> {
-        if self.workers.iter().any(|w| w.phase == WorkerPhase::NeedsYou) {
+        if self
+            .workers
+            .iter()
+            .any(|w| w.phase == WorkerPhase::NeedsYou)
+        {
             Some(Status::NeedsYou)
         } else if self.workers.iter().any(|w| w.phase == WorkerPhase::Working)
-            || self.builds.iter().any(|b| matches!(b.phase, BuildPhase::Queued | BuildPhase::Running)) {
+            || self
+                .builds
+                .iter()
+                .any(|b| matches!(b.phase, BuildPhase::Queued | BuildPhase::Running))
+        {
             Some(Status::InProgress)
-        } else if self.builds.last().is_some_and(|b| b.phase == BuildPhase::Succeeded) {
+        } else if self
+            .builds
+            .last()
+            .is_some_and(|b| b.phase == BuildPhase::Succeeded)
+        {
             Some(Status::ReadyToTry)
         } else {
             None
@@ -166,7 +178,10 @@ impl Signals {
     /// `queued|running|succeeded|failed`).
     pub(crate) fn legacy(signature: &str) -> Self {
         let mut signals = Signals::default();
-        for (id, state) in signature.split(' ').filter_map(|entry| entry.rsplit_once(':')) {
+        for (id, state) in signature
+            .split(' ')
+            .filter_map(|entry| entry.rsplit_once(':'))
+        {
             let worker = match state {
                 "working" => Some(WorkerPhase::Working),
                 "needs-you" => Some(WorkerPhase::NeedsYou),
@@ -182,9 +197,16 @@ impl Signals {
                 _ => None,
             };
             if let Some(phase) = worker {
-                signals.workers.push(WorkerSignal { thread: id.into(), turn: None, phase });
+                signals.workers.push(WorkerSignal {
+                    thread: id.into(),
+                    turn: None,
+                    phase,
+                });
             } else if let Some(phase) = build {
-                signals.builds.push(BuildSignal { build: id.into(), phase });
+                signals.builds.push(BuildSignal {
+                    build: id.into(),
+                    phase,
+                });
             }
         }
         signals
@@ -234,31 +256,62 @@ enum News {
 }
 
 impl Observation {
-    fn next(&self, threads: &[String], builds: &[String], signals: &Signals) -> (Observation, News) {
-        let mut next = Observation { revision: self.revision, ..Default::default() };
+    fn next(
+        &self,
+        threads: &[String],
+        builds: &[String],
+        signals: &Signals,
+    ) -> (Observation, News) {
+        let mut next = Observation {
+            revision: self.revision,
+            ..Default::default()
+        };
         let mut news = News::None;
         for id in threads {
             let old = self.workers.get(id);
-            let fact = signals.workers.iter().find(|w| &w.thread == id && w.phase != WorkerPhase::Missing);
+            let fact = signals
+                .workers
+                .iter()
+                .find(|w| &w.thread == id && w.phase != WorkerPhase::Missing);
             let Some(fact) = fact else {
-                if let Some(old) = old { next.workers.insert(id.clone(), old.clone()); }
+                if let Some(old) = old {
+                    next.workers.insert(id.clone(), old.clone());
+                }
                 continue;
             };
             news = news.max(match old {
                 None => News::NewWork,
-                Some(WorkerSeen { turn: Some(turn), .. }) if fact.turn.as_ref().is_some_and(|t| t != turn) => News::NewWork,
+                Some(WorkerSeen {
+                    turn: Some(turn), ..
+                }) if fact.turn.as_ref().is_some_and(|t| t != turn) => News::NewWork,
                 Some(old) if old.phase == fact.phase => News::None,
-                Some(_) if matches!(fact.phase, WorkerPhase::Working | WorkerPhase::NeedsYou) => News::NewWork,
+                Some(_) if matches!(fact.phase, WorkerPhase::Working | WorkerPhase::NeedsYou) => {
+                    News::NewWork
+                }
                 Some(_) => News::Changed,
             });
-            let turn = fact.turn.clone().or_else(|| old.and_then(|o| o.turn.clone()));
-            next.workers.insert(id.clone(), WorkerSeen { turn, phase: fact.phase });
+            let turn = fact
+                .turn
+                .clone()
+                .or_else(|| old.and_then(|o| o.turn.clone()));
+            next.workers.insert(
+                id.clone(),
+                WorkerSeen {
+                    turn,
+                    phase: fact.phase,
+                },
+            );
         }
         for id in builds {
             let old = self.builds.get(id);
-            let fact = signals.builds.iter().find(|b| &b.build == id && b.phase != BuildPhase::Missing);
+            let fact = signals
+                .builds
+                .iter()
+                .find(|b| &b.build == id && b.phase != BuildPhase::Missing);
             let Some(fact) = fact else {
-                if let Some(old) = old { next.builds.insert(id.clone(), *old); }
+                if let Some(old) = old {
+                    next.builds.insert(id.clone(), *old);
+                }
                 continue;
             };
             news = news.max(match old {
@@ -329,16 +382,31 @@ struct StoredRecord {
 
 impl From<StoredRecord> for Record {
     fn from(s: StoredRecord) -> Self {
-        let placement = s.placement
+        let placement = s
+            .placement
             .or(s.archived_at.map(|since| Placement::History { since }))
             .unwrap_or(Placement::Active);
         let observed = s.observed.unwrap_or_else(|| {
-            Observation::default().next(&s.threads, &s.builds, &Signals::legacy(&s.seen)).0
+            Observation::default()
+                .next(&s.threads, &s.builds, &Signals::legacy(&s.seen))
+                .0
         });
         Record {
-            id: s.id, project_id: s.project_id, ask: s.ask, status: s.status, note: s.note, source: s.source,
-            threads: s.threads, builds: s.builds, order: s.order, created_at: s.created_at, updated_at: s.updated_at,
-            placement, revision: s.revision, observed, history: s.history,
+            id: s.id,
+            project_id: s.project_id,
+            ask: s.ask,
+            status: s.status,
+            note: s.note,
+            source: s.source,
+            threads: s.threads,
+            builds: s.builds,
+            order: s.order,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+            placement,
+            revision: s.revision,
+            observed,
+            history: s.history,
         }
     }
 }
@@ -346,11 +414,23 @@ impl From<StoredRecord> for Record {
 impl Record {
     fn publish(&self) -> Task {
         Task {
-            id: self.id.clone(), project_id: self.project_id.clone(), ask: self.ask.clone(), status: self.status,
-            note: self.note.clone(), source: self.source.clone(), threads: self.threads.clone(), builds: self.builds.clone(),
-            order: self.order, created_at: self.created_at, updated_at: self.updated_at,
-            archived_at: match self.placement { Placement::Active => None, Placement::History { since } => Some(since) },
-            revision: self.revision, history: self.history.clone(),
+            id: self.id.clone(),
+            project_id: self.project_id.clone(),
+            ask: self.ask.clone(),
+            status: self.status,
+            note: self.note.clone(),
+            source: self.source.clone(),
+            threads: self.threads.clone(),
+            builds: self.builds.clone(),
+            order: self.order,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            archived_at: match self.placement {
+                Placement::Active => None,
+                Placement::History { since } => Some(since),
+            },
+            revision: self.revision,
+            history: self.history.clone(),
         }
     }
 
@@ -371,12 +451,20 @@ impl Record {
         }
         self.status = status;
         self.touch(now);
-        self.history.push(Change { at: now, status, by, note: self.note.clone() });
+        self.history.push(Change {
+            at: now,
+            status,
+            by,
+            note: self.note.clone(),
+        });
     }
 
     fn record(&mut self, observed: Observation) {
         self.revision += 1;
-        self.observed = Observation { revision: self.revision, ..observed };
+        self.observed = Observation {
+            revision: self.revision,
+            ..observed
+        };
     }
 
     /// Follows linked workers and builds: when one of them has news since it
@@ -406,7 +494,10 @@ impl Record {
     /// chosen: that becomes the last observation, unless a newer one was
     /// recorded after `signals` were read.
     fn hold(&mut self, signals: &Signals) {
-        if signals.revision.is_some_and(|base| base < self.observed.revision) {
+        if signals
+            .revision
+            .is_some_and(|base| base < self.observed.revision)
+        {
             return;
         }
         let (next, _) = self.observed.next(&self.threads, &self.builds, signals);
@@ -414,15 +505,25 @@ impl Record {
     }
 
     fn ages(&self, now: u64) -> bool {
-        let limit = if self.status.open() { STALE_AGE } else { DONE_AGE };
+        let limit = if self.status.open() {
+            STALE_AGE
+        } else {
+            DONE_AGE
+        };
         self.placement == Placement::Active && now.saturating_sub(self.updated_at) >= limit
     }
 
     /// Whether linked work can still say anything: History tasks are skipped
     /// only when all they link is builds that have finished.
     fn watched(&self) -> bool {
-        self.placement == Placement::Active || !self.threads.is_empty()
-            || self.builds.iter().any(|b| !matches!(self.observed.builds.get(b), Some(BuildPhase::Succeeded | BuildPhase::Failed)))
+        self.placement == Placement::Active
+            || !self.threads.is_empty()
+            || self.builds.iter().any(|b| {
+                !matches!(
+                    self.observed.builds.get(b),
+                    Some(BuildPhase::Succeeded | BuildPhase::Failed)
+                )
+            })
     }
 }
 
@@ -439,7 +540,11 @@ impl Book {
     }
 
     pub fn list(&self, project: &str) -> Vec<Task> {
-        self.tasks.values().filter(|t| t.project_id == project).map(Record::publish).collect()
+        self.tasks
+            .values()
+            .filter(|t| t.project_id == project)
+            .map(Record::publish)
+            .collect()
     }
 
     pub fn all(&self) -> Vec<Task> {
@@ -448,7 +553,11 @@ impl Book {
 
     /// Tasks whose linked work a tick should read.
     pub fn watched(&self) -> Vec<Task> {
-        self.tasks.values().filter(|t| t.watched()).map(Record::publish).collect()
+        self.tasks
+            .values()
+            .filter(|t| t.watched())
+            .map(Record::publish)
+            .collect()
     }
 }
 
@@ -463,23 +572,50 @@ pub struct Update {
     pub to_top: bool,
 }
 
-
 /// Everything that can happen to the task book. Time and new IDs come in
 /// the event; the reducer never reads a clock or allocates.
 #[derive(Debug)]
 pub enum Event {
     /// The user's ask, through the agent or the phone.
-    Add { id: TaskID, project: String, ask: String, status: Option<Status>, note: Option<String>, by: By,
-          source: Option<Source>, threads: Vec<String>, now: u64 },
+    Add {
+        id: TaskID,
+        project: String,
+        ask: String,
+        status: Option<Status>,
+        note: Option<String>,
+        by: By,
+        source: Option<Source>,
+        threads: Vec<String>,
+        now: u64,
+    },
     /// An explicit change. A status set this way holds from `observed`, what
     /// linked work was doing when it was chosen.
-    Edit { id: String, update: Update, by: By, observed: Option<Signals>, now: u64 },
-    Link { id: String, thread: Option<ThreadID>, build: Option<BuildID>, now: u64 },
-    Unlink { id: String, thread: Option<ThreadID>, build: Option<BuildID>, now: u64 },
+    Edit {
+        id: String,
+        update: Update,
+        by: By,
+        observed: Option<Signals>,
+        now: u64,
+    },
+    Link {
+        id: String,
+        thread: Option<ThreadID>,
+        build: Option<BuildID>,
+        now: u64,
+    },
+    Unlink {
+        id: String,
+        thread: Option<ThreadID>,
+        build: Option<BuildID>,
+        now: u64,
+    },
     /// A screenshot or clip was stored for the task.
     Attached { id: String, now: u64 },
     /// What linked work said, each read against the task revision it names.
-    Observe { reads: Vec<(String, u64, Signals)>, now: u64 },
+    Observe {
+        reads: Vec<(String, u64, Signals)>,
+        now: u64,
+    },
     /// Untouched tasks move into History.
     AgeDue { now: u64 },
 }
@@ -493,12 +629,26 @@ pub enum Effect {
 pub struct M17;
 
 /// Adds (to the end) or removes a linked worker and build.
-fn link(mut book: Book, id: &str, thread: Option<ThreadID>, build: Option<BuildID>, now: u64, remove: bool) -> Reduction<Book, Effect> {
-    let Some(task) = book.tasks.get_mut(id) else { return missing(book, id) };
-    for (list, value) in [(&mut task.threads, thread.map(String::from)), (&mut task.builds, build.map(String::from))] {
+fn link(
+    mut book: Book,
+    id: &str,
+    thread: Option<ThreadID>,
+    build: Option<BuildID>,
+    now: u64,
+    remove: bool,
+) -> Reduction<Book, Effect> {
+    let Some(task) = book.tasks.get_mut(id) else {
+        return missing(book, id);
+    };
+    for (list, value) in [
+        (&mut task.threads, thread.map(String::from)),
+        (&mut task.builds, build.map(String::from)),
+    ] {
         let Some(value) = value else { continue };
         list.retain(|v| *v != value);
-        if !remove { list.push(value); }
+        if !remove {
+            list.push(value);
+        }
     }
     task.touch(now);
     changed(book)
@@ -519,38 +669,97 @@ impl Machine for M17 {
 
     fn reduce(mut book: Book, event: Event) -> Reduction<Book, Effect> {
         match event {
-            Event::Add { id, project, ask, status, note, by, source, threads, now } => {
+            Event::Add {
+                id,
+                project,
+                ask,
+                status,
+                note,
+                by,
+                source,
+                threads,
+                now,
+            } => {
                 let ask = ask.trim();
                 if ask.is_empty() {
-                    return Reduction::same(book, Disposition::Rejected("A task needs the user's ask".into()));
+                    return Reduction::same(
+                        book,
+                        Disposition::Rejected("A task needs the user's ask".into()),
+                    );
                 }
-                let order = book.tasks.values().filter(|t| t.project_id == project).map(|t| t.order).fold(0.0, f64::max) + 1.0;
+                let order = book
+                    .tasks
+                    .values()
+                    .filter(|t| t.project_id == project)
+                    .map(|t| t.order)
+                    .fold(0.0, f64::max)
+                    + 1.0;
                 let status = status.unwrap_or(Status::Queued);
                 let task = Record {
-                    id: id.into(), project_id: project, ask: ask.chars().take(500).collect(),
-                    status, note: note.map(|n| n.trim().chars().take(300).collect()).unwrap_or_default(), source, threads,
-                    builds: vec![], order, created_at: now, updated_at: now, placement: Placement::Active, revision: 1,
-                    observed: Observation::default(), history: vec![Change { at: now, status, by, note: String::new() }],
+                    id: id.into(),
+                    project_id: project,
+                    ask: ask.chars().take(500).collect(),
+                    status,
+                    note: note
+                        .map(|n| n.trim().chars().take(300).collect())
+                        .unwrap_or_default(),
+                    source,
+                    threads,
+                    builds: vec![],
+                    order,
+                    created_at: now,
+                    updated_at: now,
+                    placement: Placement::Active,
+                    revision: 1,
+                    observed: Observation::default(),
+                    history: vec![Change {
+                        at: now,
+                        status,
+                        by,
+                        note: String::new(),
+                    }],
                 };
                 book.tasks.insert(task.id.clone(), task);
                 changed(book)
             }
-            Event::Edit { id, update, by, observed, now } => {
-                let Some(project) = book.tasks.get(&id).map(|t| t.project_id.clone()) else { return missing(book, &id) };
-                let lowest = book.tasks.values().filter(|t| t.project_id == project).map(|t| t.order).fold(f64::INFINITY, f64::min);
+            Event::Edit {
+                id,
+                update,
+                by,
+                observed,
+                now,
+            } => {
+                let Some(project) = book.tasks.get(&id).map(|t| t.project_id.clone()) else {
+                    return missing(book, &id);
+                };
+                let lowest = book
+                    .tasks
+                    .values()
+                    .filter(|t| t.project_id == project)
+                    .map(|t| t.order)
+                    .fold(f64::INFINITY, f64::min);
                 let task = book.tasks.get_mut(&id).expect("checked above");
-                if let Some(ask) = update.ask.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+                if let Some(ask) = update
+                    .ask
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                {
                     task.ask = ask.chars().take(500).collect();
                     task.touch(now);
                 }
                 match update.status {
                     Some(status) => task.set(status, by, update.note.as_deref(), now),
-                    None => if let Some(note) = update.note.as_deref() {
-                        let status = task.status;
-                        task.set(status, by, Some(note), now);
-                    },
+                    None => {
+                        if let Some(note) = update.note.as_deref() {
+                            let status = task.status;
+                            task.set(status, by, Some(note), now);
+                        }
+                    }
                 }
-                if update.status.is_some() && let Some(observed) = observed {
+                if update.status.is_some()
+                    && let Some(observed) = observed
+                {
                     task.hold(&observed);
                 }
                 if update.to_top {
@@ -559,10 +768,22 @@ impl Machine for M17 {
                 }
                 changed(book)
             }
-            Event::Link { id, thread, build, now } => link(book, &id, thread, build, now, false),
-            Event::Unlink { id, thread, build, now } => link(book, &id, thread, build, now, true),
+            Event::Link {
+                id,
+                thread,
+                build,
+                now,
+            } => link(book, &id, thread, build, now, false),
+            Event::Unlink {
+                id,
+                thread,
+                build,
+                now,
+            } => link(book, &id, thread, build, now, true),
             Event::Attached { id, now } => {
-                let Some(task) = book.tasks.get_mut(&id) else { return missing(book, &id) };
+                let Some(task) = book.tasks.get_mut(&id) else {
+                    return missing(book, &id);
+                };
                 task.touch(now);
                 changed(book)
             }
@@ -570,10 +791,17 @@ impl Machine for M17 {
                 let mut any = false;
                 for (id, revision, signals) in &reads {
                     // Read before a change made meanwhile: older news, dropped (the next tick reads again).
-                    let Some(task) = book.tasks.get_mut(id).filter(|t| t.revision == *revision) else { continue };
+                    let Some(task) = book.tasks.get_mut(id).filter(|t| t.revision == *revision)
+                    else {
+                        continue;
+                    };
                     any |= task.follow(signals, now);
                 }
-                if any { changed(book) } else { Reduction::same(book, Disposition::Unchanged) }
+                if any {
+                    changed(book)
+                } else {
+                    Reduction::same(book, Disposition::Unchanged)
+                }
             }
             Event::AgeDue { now } => {
                 let mut any = false;
@@ -582,7 +810,11 @@ impl Machine for M17 {
                     task.revision += 1;
                     any = true;
                 }
-                if any { changed(book) } else { Reduction::same(book, Disposition::Unchanged) }
+                if any {
+                    changed(book)
+                } else {
+                    Reduction::same(book, Disposition::Unchanged)
+                }
             }
         }
     }
@@ -594,10 +826,20 @@ impl Machine for M17 {
                 found.push(Violation(format!("task {} kept under {key}", task.id)));
             }
             if task.observed.revision > task.revision {
-                found.push(Violation(format!("task {} observed at revision {} past its own {}", task.id, task.observed.revision, task.revision)));
+                found.push(Violation(format!(
+                    "task {} observed at revision {} past its own {}",
+                    task.id, task.observed.revision, task.revision
+                )));
             }
-            if task.history.last().is_some_and(|change| change.status != task.status) {
-                found.push(Violation(format!("task {} status differs from its last change", task.id)));
+            if task
+                .history
+                .last()
+                .is_some_and(|change| change.status != task.status)
+            {
+                found.push(Violation(format!(
+                    "task {} status differs from its last change",
+                    task.id
+                )));
             }
         }
         found
@@ -620,37 +862,91 @@ mod tests {
     /// A task linked to worker `w` and builds `b`, `c`; returns the book and its ID.
     fn book() -> (Book, String) {
         let id = TaskID::fresh();
-        let book = step(Book::default(), Event::Add {
-            id: id.clone(), project: "p".into(), ask: " Stack the sims ".into(), status: None, note: None, by: By::Agent,
-            source: None, threads: vec!["w".into()], now: 0,
-        });
+        let book = step(
+            Book::default(),
+            Event::Add {
+                id: id.clone(),
+                project: "p".into(),
+                ask: " Stack the sims ".into(),
+                status: None,
+                note: None,
+                by: By::Agent,
+                source: None,
+                threads: vec!["w".into()],
+                now: 0,
+            },
+        );
         let id = id.to_string();
-        let book = [B, C].into_iter().fold(book, |book, build| step(book, Event::Link {
-            id: id.clone(), thread: None, build: Some(BuildID::parse(build).unwrap()), now: 0,
-        }));
+        let book = [B, C].into_iter().fold(book, |book, build| {
+            step(
+                book,
+                Event::Link {
+                    id: id.clone(),
+                    thread: None,
+                    build: Some(BuildID::parse(build).unwrap()),
+                    now: 0,
+                },
+            )
+        });
         (book, id)
     }
 
     fn worker(turn: &str, phase: WorkerPhase) -> Signals {
-        Signals { revision: None, workers: vec![WorkerSignal { thread: "w".into(), turn: Some(turn.into()), phase }], builds: vec![] }
+        Signals {
+            revision: None,
+            workers: vec![WorkerSignal {
+                thread: "w".into(),
+                turn: Some(turn.into()),
+                phase,
+            }],
+            builds: vec![],
+        }
     }
 
     fn with_build(mut signals: Signals, build: &str, phase: BuildPhase) -> Signals {
-        signals.builds.push(BuildSignal { build: build.into(), phase });
+        signals.builds.push(BuildSignal {
+            build: build.into(),
+            phase,
+        });
         signals
     }
 
     /// Linked work as a tick reads it, against the task's current revision.
     fn observe(book: Book, id: &str, signals: Signals, now: u64) -> (Book, Disposition) {
         let revision = book.get(id).unwrap().revision;
-        let reduction = M17::reduce(book, Event::Observe { reads: vec![(id.into(), revision, signals)], now });
+        let reduction = M17::reduce(
+            book,
+            Event::Observe {
+                reads: vec![(id.into(), revision, signals)],
+                now,
+            },
+        );
         assert_eq!(M17::violations(&reduction.state), vec![]);
         (reduction.state, reduction.disposition)
     }
 
-    fn set(book: Book, id: &str, status: Status, by: By, observed: Option<Signals>, now: u64) -> Book {
-        let update = Update { status: Some(status), ..Default::default() };
-        step(book, Event::Edit { id: id.into(), update, by, observed, now })
+    fn set(
+        book: Book,
+        id: &str,
+        status: Status,
+        by: By,
+        observed: Option<Signals>,
+        now: u64,
+    ) -> Book {
+        let update = Update {
+            status: Some(status),
+            ..Default::default()
+        };
+        step(
+            book,
+            Event::Edit {
+                id: id.into(),
+                update,
+                by,
+                observed,
+                now,
+            },
+        )
     }
 
     #[test]
@@ -659,33 +955,82 @@ mod tests {
         let (book, _) = observe(book, &id, worker("1", WorkerPhase::Working), 10);
         assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
         // The agent says it's waiting on the user; the worker is still working.
-        let book = set(book, &id, Status::NeedsYou, By::Agent, Some(worker("1", WorkerPhase::Working)), 11);
+        let book = set(
+            book,
+            &id,
+            Status::NeedsYou,
+            By::Agent,
+            Some(worker("1", WorkerPhase::Working)),
+            11,
+        );
         let (book, unchanged) = observe(book, &id, worker("1", WorkerPhase::Working), 12);
-        assert_eq!((book.get(&id).unwrap().status, unchanged), (Status::NeedsYou, Disposition::Unchanged));
+        assert_eq!(
+            (book.get(&id).unwrap().status, unchanged),
+            (Status::NeedsYou, Disposition::Unchanged)
+        );
         // Something new: a build is ready.
-        let (book, _) = observe(book, &id, with_build(worker("1", WorkerPhase::Done), B, BuildPhase::Succeeded), 13);
+        let (book, _) = observe(
+            book,
+            &id,
+            with_build(worker("1", WorkerPhase::Done), B, BuildPhase::Succeeded),
+            13,
+        );
         let task = book.get(&id).unwrap();
-        assert_eq!((task.status, task.history.last().unwrap().by), (Status::ReadyToTry, By::Auto));
+        assert_eq!(
+            (task.status, task.history.last().unwrap().by),
+            (Status::ReadyToTry, By::Auto)
+        );
         // A worker or link going missing is no news.
         let (book, unchanged) = observe(book, &id, Signals::default(), 14);
-        assert_eq!((book.get(&id).unwrap().status, unchanged), (Status::ReadyToTry, Disposition::Unchanged));
+        assert_eq!(
+            (book.get(&id).unwrap().status, unchanged),
+            (Status::ReadyToTry, Disposition::Unchanged)
+        );
     }
 
     #[test]
     fn a_closed_task_ignores_old_work_finishing_but_reopens_for_the_next_turn() {
         let (book, id) = book();
-        let (book, _) = observe(book, &id, with_build(worker("1", WorkerPhase::Working), B, BuildPhase::Running), 10);
+        let (book, _) = observe(
+            book,
+            &id,
+            with_build(worker("1", WorkerPhase::Working), B, BuildPhase::Running),
+            10,
+        );
         // The user calls it done while the worker and its build still run.
         let book = set(book, &id, Status::Done, By::User, None, 11);
-        let (book, recorded) = observe(book, &id, with_build(worker("1", WorkerPhase::Done), B, BuildPhase::Succeeded), 12);
-        assert_eq!((book.get(&id).unwrap().status, recorded), (Status::Done, Disposition::Applied));
+        let (book, recorded) = observe(
+            book,
+            &id,
+            with_build(worker("1", WorkerPhase::Done), B, BuildPhase::Succeeded),
+            12,
+        );
+        assert_eq!(
+            (book.get(&id).unwrap().status, recorded),
+            (Status::Done, Disposition::Applied)
+        );
         // The next turn starts (B-T01: this read as nothing new).
-        let (book, _) = observe(book, &id, with_build(worker("2", WorkerPhase::Working), B, BuildPhase::Succeeded), 13);
+        let (book, _) = observe(
+            book,
+            &id,
+            with_build(worker("2", WorkerPhase::Working), B, BuildPhase::Succeeded),
+            13,
+        );
         assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
         // A whole turn between two reads still counts as new work.
         let book = set(book, &id, Status::Done, By::User, None, 14);
-        let (book, _) = observe(book, &id, with_build(worker("2", WorkerPhase::Done), B, BuildPhase::Succeeded), 15);
-        let (book, _) = observe(book, &id, with_build(worker("3", WorkerPhase::Done), B, BuildPhase::Succeeded), 16);
+        let (book, _) = observe(
+            book,
+            &id,
+            with_build(worker("2", WorkerPhase::Done), B, BuildPhase::Succeeded),
+            15,
+        );
+        let (book, _) = observe(
+            book,
+            &id,
+            with_build(worker("3", WorkerPhase::Done), B, BuildPhase::Succeeded),
+            16,
+        );
         assert_eq!(book.get(&id).unwrap().status, Status::ReadyToTry);
     }
 
@@ -694,7 +1039,13 @@ mod tests {
         let (book, id) = book();
         let read_at = book.get(&id).unwrap().revision;
         let book = set(book, &id, Status::NeedsYou, By::User, None, 5);
-        let reduction = M17::reduce(book, Event::Observe { reads: vec![(id.clone(), read_at, worker("1", WorkerPhase::Working))], now: 6 });
+        let reduction = M17::reduce(
+            book,
+            Event::Observe {
+                reads: vec![(id.clone(), read_at, worker("1", WorkerPhase::Working))],
+                now: 6,
+            },
+        );
         assert_eq!(reduction.disposition, Disposition::Unchanged);
         assert_eq!(reduction.state.get(&id).unwrap().status, Status::NeedsYou);
     }
@@ -702,8 +1053,14 @@ mod tests {
     #[test]
     fn linked_work_implies_questions_then_work_then_the_newest_build() {
         let implied = |signature: &str| Signals::legacy(signature).implied();
-        assert_eq!(implied("w:working v:needs-you b:succeeded"), Some(Status::NeedsYou));
-        assert_eq!(implied("w:done b:succeeded c:running"), Some(Status::InProgress));
+        assert_eq!(
+            implied("w:working v:needs-you b:succeeded"),
+            Some(Status::NeedsYou)
+        );
+        assert_eq!(
+            implied("w:done b:succeeded c:running"),
+            Some(Status::InProgress)
+        );
         assert_eq!(implied("b:failed c:succeeded"), Some(Status::ReadyToTry));
         assert_eq!(implied("b:succeeded c:failed"), None);
     }
@@ -718,20 +1075,56 @@ mod tests {
         assert_eq!(book.get(&id).unwrap().archived_at, Some(DONE_AGE));
         let book = set(book, &id, Status::Queued, By::User, None, DONE_AGE + 5);
         assert_eq!(book.get(&id).unwrap().archived_at, None);
-        let book = step(book, Event::AgeDue { now: DONE_AGE + 5 + STALE_AGE - 1 });
+        let book = step(
+            book,
+            Event::AgeDue {
+                now: DONE_AGE + 5 + STALE_AGE - 1,
+            },
+        );
         assert_eq!(book.get(&id).unwrap().archived_at, None);
-        let book = step(book, Event::AgeDue { now: DONE_AGE + 5 + STALE_AGE });
-        assert_eq!(book.get(&id).unwrap().archived_at, Some(DONE_AGE + 5 + STALE_AGE));
+        let book = step(
+            book,
+            Event::AgeDue {
+                now: DONE_AGE + 5 + STALE_AGE,
+            },
+        );
+        assert_eq!(
+            book.get(&id).unwrap().archived_at,
+            Some(DONE_AGE + 5 + STALE_AGE)
+        );
     }
 
     #[test]
     fn requests_about_no_task_or_without_an_ask_are_refused() {
         let (book, _) = book();
-        let refused = M17::reduce(book, Event::Attached { id: "nope".into(), now: 1 });
-        assert_eq!((refused.disposition, refused.effects), (Disposition::Rejected("No task nope".into()), vec![]));
-        let empty = M17::reduce(refused.state, Event::Add {
-            id: TaskID::fresh(), project: "p".into(), ask: "  ".into(), status: None, note: None, by: By::User, source: None, threads: vec![], now: 1,
-        });
-        assert_eq!(empty.disposition, Disposition::Rejected("A task needs the user's ask".into()));
+        let refused = M17::reduce(
+            book,
+            Event::Attached {
+                id: "nope".into(),
+                now: 1,
+            },
+        );
+        assert_eq!(
+            (refused.disposition, refused.effects),
+            (Disposition::Rejected("No task nope".into()), vec![])
+        );
+        let empty = M17::reduce(
+            refused.state,
+            Event::Add {
+                id: TaskID::fresh(),
+                project: "p".into(),
+                ask: "  ".into(),
+                status: None,
+                note: None,
+                by: By::User,
+                source: None,
+                threads: vec![],
+                now: 1,
+            },
+        );
+        assert_eq!(
+            empty.disposition,
+            Disposition::Rejected("A task needs the user's ask".into())
+        );
     }
 }

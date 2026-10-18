@@ -12,7 +12,9 @@ use url::{Host, Url};
 /// be sent there. `what` names the setting in errors, e.g. "--server".
 pub fn credential_origin(input: &str, what: &str) -> Result<String> {
     let Ok(url) = Url::parse(input.trim()) else {
-        bail!("{what} {input:?} is not a URL; use an origin such as http://127.0.0.1:8787 or https://your-mac.your-tailnet.ts.net");
+        bail!(
+            "{what} {input:?} is not a URL; use an origin such as http://127.0.0.1:8787 or https://your-mac.your-tailnet.ts.net"
+        );
     };
     if !matches!(url.scheme(), "http" | "https") {
         bail!("{what} must use http or https, not {}", url.scheme());
@@ -95,9 +97,18 @@ mod tests {
         assert_eq!(ok("http://[::1]:8787"), "http://[::1]:8787");
         assert_eq!(ok("http://LOCALHOST:8787"), "http://localhost:8787");
         assert_eq!(ok("http://100.64.0.1:8787"), "http://100.64.0.1:8787");
-        assert_eq!(ok("http://100.127.255.254:8787"), "http://100.127.255.254:8787");
-        assert_eq!(ok("http://[fd7a:115c:a1e0::1]:8787"), "http://[fd7a:115c:a1e0::1]:8787");
-        assert_eq!(ok("http://mac.tail1234.ts.net:8787"), "http://mac.tail1234.ts.net:8787");
+        assert_eq!(
+            ok("http://100.127.255.254:8787"),
+            "http://100.127.255.254:8787"
+        );
+        assert_eq!(
+            ok("http://[fd7a:115c:a1e0::1]:8787"),
+            "http://[fd7a:115c:a1e0::1]:8787"
+        );
+        assert_eq!(
+            ok("http://mac.tail1234.ts.net:8787"),
+            "http://mac.tail1234.ts.net:8787"
+        );
         assert_eq!(ok("https://192.168.1.20:8443"), "https://192.168.1.20:8443");
         assert_eq!(ok("https://example.com"), "https://example.com");
 

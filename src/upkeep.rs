@@ -29,7 +29,10 @@ pub struct Upkeep {
 fn var(name: &str, default: u64) -> Result<u64> {
     match std::env::var(name) {
         Ok(v) if v.trim() == "off" => Ok(0),
-        Ok(v) => v.trim().parse().with_context(|| format!("{name} must be a whole number or off")),
+        Ok(v) => v
+            .trim()
+            .parse()
+            .with_context(|| format!("{name} must be a whole number or off")),
         Err(_) => Ok(default),
     }
 }
@@ -42,7 +45,13 @@ impl Upkeep {
     pub fn from_env() -> Result<Self> {
         let hour = match std::env::var("SQUIRCLE_NIGHTLY_FRESH_HOUR") {
             Ok(v) if v.trim() == "off" => None,
-            Ok(v) => Some(v.trim().parse::<u32>().ok().filter(|h| *h < 24).context("SQUIRCLE_NIGHTLY_FRESH_HOUR must be 0-23 or off")?),
+            Ok(v) => Some(
+                v.trim()
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|h| *h < 24)
+                    .context("SQUIRCLE_NIGHTLY_FRESH_HOUR must be 0-23 or off")?,
+            ),
             Err(_) => Some(4),
         };
         Ok(Upkeep {
@@ -80,5 +89,9 @@ pub fn local_hour() -> u32 {
 
 /// `245K` for a token count.
 pub fn tokens(n: u64) -> String {
-    if n >= 1000 { format!("{}K", (n + 500) / 1000) } else { n.to_string() }
+    if n >= 1000 {
+        format!("{}K", (n + 500) / 1000)
+    } else {
+        n.to_string()
+    }
 }

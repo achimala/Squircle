@@ -55,7 +55,9 @@ enum Commands {
         public_url: Option<String>,
     },
     /// Restart or stop the running service for this data directory.
-    #[command(after_help = "restart: the running service hands its simulator sessions over (recordings keep going, T3's device sessions stay open) and the same command line starts again, picking up a binary rebuilt at the same path; returns once it answers. It builds nothing; its output goes to DATA_DIR/serve.log.\nstop: ends simulator sessions (recordings are filed) and exits.\nA plain SIGTERM to squircle serve is a restart's handover; SIGINT (Ctrl-C) is a stop.")]
+    #[command(
+        after_help = "restart: the running service hands its simulator sessions over (recordings keep going, T3's device sessions stay open) and the same command line starts again, picking up a binary rebuilt at the same path; returns once it answers. It builds nothing; its output goes to DATA_DIR/serve.log.\nstop: ends simulator sessions (recordings are filed) and exits.\nA plain SIGTERM to squircle serve is a restart's handover; SIGINT (Ctrl-C) is a stop."
+    )]
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
@@ -116,19 +118,25 @@ enum Commands {
         dsym: PathBuf,
     },
     /// Performance recordings made in the app on the phone: summary with symbolicated hitches, plus the raw file.
-    #[command(after_help = "The user records performance from the debug overlay's + menu (Record Performance) while using the app; the message links a .perf.json capture on this Mac.\n  squircle perf show PATH_OR_ID           worst hitches with main-thread stacks (app frames from the build's dSYM), heaviest functions, per-second timeline, log\n  squircle --json perf show PATH_OR_ID    the same as structured JSON\n  squircle perf list                      recent captures\nScreen recordings from the same menu are .mp4 files in the same folder; look at their frames (e.g. ffmpeg -i FILE -vf fps=2 /tmp/f%03d.png).")]
+    #[command(
+        after_help = "The user records performance from the debug overlay's + menu (Record Performance) while using the app; the message links a .perf.json capture on this Mac.\n  squircle perf show PATH_OR_ID           worst hitches with main-thread stacks (app frames from the build's dSYM), heaviest functions, per-second timeline, log\n  squircle --json perf show PATH_OR_ID    the same as structured JSON\n  squircle perf list                      recent captures\nScreen recordings from the same menu are .mp4 files in the same folder; look at their frames (e.g. ffmpeg -i FILE -vf fps=2 /tmp/f%03d.png)."
+    )]
     Perf {
         #[command(subcommand)]
         command: PerfCommand,
     },
     /// Publish a recording or image into a T3 thread so Squircle shows it inline (this Mac's service only).
-    #[command(after_help = "Writes this Mac's data directory directly, so it needs a --server on this Mac (the default) using that same --data-dir. Simulator sessions file their own recordings: squircle sim --help.")]
+    #[command(
+        after_help = "Writes this Mac's data directory directly, so it needs a --server on this Mac (the default) using that same --data-dir. Simulator sessions file their own recordings: squircle sim --help."
+    )]
     Media {
         #[command(subcommand)]
         command: MediaCommand,
     },
     /// Use an iOS simulator so the user can watch: start records it, stop files the recording in your turn.
-    #[command(after_help = "Start a session before you run, check or demo the app in a simulator:\n  squircle sim start --thread YOUR_T3_THREAD_ID [--device NAME_OR_UDID]\nIt opens the simulator for your thread, boots it, records its screen and returns the agent-device command to drive it. The user sees it live as a picture-in-picture on their phone and in your turn. When done: squircle sim stop --thread YOUR_T3_THREAD_ID; the recording appears in your turn. A session also stops when your turn ends.")]
+    #[command(
+        after_help = "Start a session before you run, check or demo the app in a simulator:\n  squircle sim start --thread YOUR_T3_THREAD_ID [--device NAME_OR_UDID]\nIt opens the simulator for your thread, boots it, records its screen and returns the agent-device command to drive it. The user sees it live as a picture-in-picture on their phone and in your turn. When done: squircle sim stop --thread YOUR_T3_THREAD_ID; the recording appears in your turn. A session also stops when your turn ends."
+    )]
     Sim {
         #[command(subcommand)]
         command: SimCommand,
@@ -144,37 +152,49 @@ enum Commands {
         command: T3Command,
     },
     /// One agent per app: set up T3's Squircle instance, start an app's agent, list agents.
-    #[command(after_help = "The app agent is a T3 thread on T3's \"Squircle agent\" Claude instance, in the project's folder. It can run worker threads with `squircle thread`; the service wakes it when a worker finishes.\nOnce: squircle t3 connect, squircle agent setup. Then: squircle agent start --project T3_PROJECT_ID.")]
+    #[command(
+        after_help = "The app agent is a T3 thread on T3's \"Squircle agent\" Claude instance, in the project's folder. It can run worker threads with `squircle thread`; the service wakes it when a worker finishes.\nOnce: squircle t3 connect, squircle agent setup. Then: squircle agent start --project T3_PROJECT_ID."
+    )]
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
     },
     /// Notifications and the Live Activity on the phone, sent from this Mac to Apple with your own APNs key.
-    #[command(after_help = "Once: create an APNs auth key (Apple Developer > Keys > +, Apple Push Notifications service), then:\n  squircle push setup --key-file ~/Downloads/AuthKey_ABC123DEFG.p8 --key-id ABC123DEFG --team-id YOURTEAMID\nThe key is copied into the data directory (owner-only) and never printed. Open Squircle on the phone and allow notifications, then: squircle push test.\nThe phone is told when an app's agent replies or asks, a worker finishes, errors or needs input, and a device build succeeds or fails; nothing for the thread it is showing. Bursts arrive as one notification.")]
+    #[command(
+        after_help = "Once: create an APNs auth key (Apple Developer > Keys > +, Apple Push Notifications service), then:\n  squircle push setup --key-file ~/Downloads/AuthKey_ABC123DEFG.p8 --key-id ABC123DEFG --team-id YOURTEAMID\nThe key is copied into the data directory (owner-only) and never printed. Open Squircle on the phone and allow notifications, then: squircle push test.\nThe phone is told when an app's agent replies or asks, a worker finishes, errors or needs input, and a device build succeeds or fails; nothing for the thread it is showing. Bursts arrive as one notification."
+    )]
     Push {
         #[command(subcommand)]
         command: PushCommand,
     },
     /// The user's asks to an app's agent and where each stands; the phone shows them as Tasks.
-    #[command(after_help = "One task per thing the user asked for, in their words. Status: queued, in_progress, needs_you, ready_to_try, done, dropped.\nLinked workers and builds move a task on by themselves (a worker working → in_progress, waiting on a question → needs_you, a linked build succeeding → ready_to_try); a status you set holds until one of them changes.\nDone and dropped tasks move to History after a day, untouched open ones after three days; any change brings one back.\n  squircle task add --thread YOUR_THREAD_ID --ask \"stack the sims and fan them out\"\n  squircle thread spawn ... --task TASK_ID      links the worker\n  squircle build start ... --task TASK_ID       links the build\n  squircle task update TASK_ID --status needs_you --note \"pick a layout\"\n  squircle task attach TASK_ID --file /abs/shot.png --caption \"New strip\"\n  squircle task list --thread YOUR_THREAD_ID")]
+    #[command(
+        after_help = "One task per thing the user asked for, in their words. Status: queued, in_progress, needs_you, ready_to_try, done, dropped.\nLinked workers and builds move a task on by themselves (a worker working → in_progress, waiting on a question → needs_you, a linked build succeeding → ready_to_try); a status you set holds until one of them changes.\nDone and dropped tasks move to History after a day, untouched open ones after three days; any change brings one back.\n  squircle task add --thread YOUR_THREAD_ID --ask \"stack the sims and fan them out\"\n  squircle thread spawn ... --task TASK_ID      links the worker\n  squircle build start ... --task TASK_ID       links the build\n  squircle task update TASK_ID --status needs_you --note \"pick a layout\"\n  squircle task attach TASK_ID --file /abs/shot.png --caption \"New strip\"\n  squircle task list --thread YOUR_THREAD_ID"
+    )]
     Task {
         #[command(subcommand)]
         command: TaskCommand,
     },
     /// Search an app's past where it lives (T3 conversations and tool activity, tasks, builds, git, docs); read-only, no copied store.
-    #[command(after_help = "Results are short ranked snippets with a reference; show expands one.\n  squircle history search \"why did we drop the 3D tilt\" --thread YOUR_THREAD_ID\n  squircle history search simulator deck --in messages,commits --since 14d\n  squircle history show msg:ID | thread:ID | act:ID | task:ID | build:ID | commit:SHA | doc:PATH#L12\nThe app is the project of --thread or --project, else of the current folder. Text unless --json. Nothing is indexed: each search reads T3's state.sqlite (read-only), Squircle's tasks and builds, git log and the project's Markdown files.")]
+    #[command(
+        after_help = "Results are short ranked snippets with a reference; show expands one.\n  squircle history search \"why did we drop the 3D tilt\" --thread YOUR_THREAD_ID\n  squircle history search simulator deck --in messages,commits --since 14d\n  squircle history show msg:ID | thread:ID | act:ID | task:ID | build:ID | commit:SHA | doc:PATH#L12\nThe app is the project of --thread or --project, else of the current folder. Text unless --json. Nothing is indexed: each search reads T3's state.sqlite (read-only), Squircle's tasks and builds, git log and the project's Markdown files."
+    )]
     History {
         #[command(subcommand)]
         command: HistoryCommand,
     },
     /// The app agent's durable notes (preferences, decisions, gotchas), shown in each turn's note.
-    #[command(after_help = "Keep a few lines worth knowing every turn, not a log: what happened stays searchable with squircle history.\n  squircle notes show --thread YOUR_THREAD_ID\n  squircle notes add --thread YOUR_THREAD_ID \"User wants builds only on request\"\n  squircle notes edit 2 --thread YOUR_THREAD_ID \"...\"\n  squircle notes remove 2 --thread YOUR_THREAD_ID\nA note is at most 300 characters, all of them at most 4000.")]
+    #[command(
+        after_help = "Keep a few lines worth knowing every turn, not a log: what happened stays searchable with squircle history.\n  squircle notes show --thread YOUR_THREAD_ID\n  squircle notes add --thread YOUR_THREAD_ID \"User wants builds only on request\"\n  squircle notes edit 2 --thread YOUR_THREAD_ID \"...\"\n  squircle notes remove 2 --thread YOUR_THREAD_ID\nA note is at most 300 characters, all of them at most 4000."
+    )]
     Notes {
         #[command(subcommand)]
         command: NotesCommand,
     },
     /// Worker threads of an app agent: spawn, message, read, answer, archive.
-    #[command(after_help = "Workers are ordinary T3 threads, each in its own worktree on a new branch. Do not poll: the app agent receives a [worker update] message when a worker finishes, errors or needs input.")]
+    #[command(
+        after_help = "Workers are ordinary T3 threads, each in its own worktree on a new branch. Do not poll: the app agent receives a [worker update] message when a worker finishes, errors or needs input."
+    )]
     Thread {
         #[command(subcommand)]
         command: ThreadCommand,
@@ -183,7 +203,9 @@ enum Commands {
 #[derive(Subcommand)]
 enum T3Command {
     /// Exchange a one-time T3 pairing token (read from stdin) for the service's own session.
-    #[command(after_help = "Create the pairing token in T3 (pair a new client), then: pbpaste | squircle t3 connect --url http://127.0.0.1:3773. Restart squircle serve afterwards.")]
+    #[command(
+        after_help = "Create the pairing token in T3 (pair a new client), then: pbpaste | squircle t3 connect --url http://127.0.0.1:3773. Restart squircle serve afterwards."
+    )]
     Connect {
         #[arg(long, default_value = "http://127.0.0.1:3773")]
         url: String,
@@ -204,7 +226,10 @@ enum AgentCommand {
         project: String,
         #[arg(long)]
         message: Option<String>,
-        #[arg(long, help = "Claude model slug; default: the project's default or claude-opus-5-5")]
+        #[arg(
+            long,
+            help = "Claude model slug; default: the project's default or claude-opus-5-5"
+        )]
         model: Option<String>,
         #[arg(long, value_parser = ["approval-required", "auto-accept-edits", "auto", "full-access"],
             help = "T3 runtime mode the agent's thread is created with, before its first turn; default: the service's")]
@@ -213,28 +238,40 @@ enum AgentCommand {
     /// List app agents and the service's T3 connection.
     List,
     /// Relaunch the agent's Claude session on the same thread: its next message starts with the current instructions and the same history.
-    #[command(after_help = "Happens now if the agent is between turns, otherwise when its current turn ends (an agent asking to restart itself just ends its turn).")]
+    #[command(
+        after_help = "Happens now if the agent is between turns, otherwise when its current turn ends (an agent asking to restart itself just ends its turn)."
+    )]
     Restart {
         #[command(flatten)]
         target: AgentTarget,
     },
     /// Replace the agent with a new thread seeded by a short handoff; the old conversation stays readable and its workers move to the new agent.
-    #[command(after_help = "The handoff has the app, recent commits, open workers, the user's recent messages, your last reply and your --handoff note. Happens now if the agent is between turns, otherwise when its current turn ends.")]
+    #[command(
+        after_help = "The handoff has the app, recent commits, open workers, the user's recent messages, your last reply and your --handoff note. Happens now if the agent is between turns, otherwise when its current turn ends."
+    )]
     Fresh {
         #[command(flatten)]
         target: AgentTarget,
-        #[arg(long, help = "What the new agent must know that git and the workers don't show: what the user asked to remember, plans in flight")]
+        #[arg(
+            long,
+            help = "What the new agent must know that git and the workers don't show: what the user asked to remember, plans in flight"
+        )]
         handoff: Option<String>,
     },
     /// Compact the agent's context now (Claude's /compact, keeping tasks, decisions, running work and recent exchanges).
-    #[command(after_help = "Refused while the agent's turn runs. The service also does this by itself when an agent sits idle with a large context; see docs/cli.md (agent upkeep).")]
+    #[command(
+        after_help = "Refused while the agent's turn runs. The service also does this by itself when an agent sits idle with a large context; see docs/cli.md (agent upkeep)."
+    )]
     Compact {
         #[command(flatten)]
         target: AgentTarget,
     },
     /// The note an app agent gets at the start of each turn (rules and live workers).
     Context {
-        #[arg(long, help = "Read a Claude Code hook event on stdin and answer in hook JSON")]
+        #[arg(
+            long,
+            help = "Read a Claude Code hook event on stdin and answer in hook JSON"
+        )]
         hook: bool,
         #[arg(long, help = "Worktree directory; default: current directory")]
         cwd: Option<PathBuf>,
@@ -260,13 +297,19 @@ enum ThreadCommand {
         title: String,
         #[arg(long, help = "New branch for the worker")]
         branch: String,
-        #[arg(long, help = "Base branch; default: the project checkout's current branch")]
+        #[arg(
+            long,
+            help = "Base branch; default: the project checkout's current branch"
+        )]
         base: Option<String>,
         #[arg(long)]
         prompt: String,
         #[arg(long, help = "T3 provider instance, e.g. codex; default: claudeAgent")]
         provider: Option<String>,
-        #[arg(long, help = "Model slug; default: the app agent's model for Claude, else the provider's default")]
+        #[arg(
+            long,
+            help = "Model slug; default: the app agent's model for Claude, else the provider's default"
+        )]
         model: Option<String>,
         #[arg(long, help = "Reasoning effort, e.g. high; default: the provider's")]
         effort: Option<String>,
@@ -288,10 +331,16 @@ enum ThreadCommand {
     /// Answer every question in a thread's pending request with this text.
     Answer { id: String, text: String },
     /// Archive a worker once its branch is merged: removes its worktree and deletes its branch.
-    #[command(after_help = "Refuses while the branch has commits not in its base, the worktree has uncommitted changes, or the worker is still working.")]
+    #[command(
+        after_help = "Refuses while the branch has commits not in its base, the worktree has uncommitted changes, or the worker is still working."
+    )]
     Archive {
         id: String,
-        #[arg(long, alias = "force", help = "Archive anyway, dropping unmerged commits and uncommitted changes")]
+        #[arg(
+            long,
+            alias = "force",
+            help = "Archive anyway, dropping unmerged commits and uncommitted changes"
+        )]
         discard: bool,
     },
     /// Archive your finished workers whose work is merged, delete their branches and worktrees, and list what is left and why.
@@ -331,7 +380,10 @@ enum TaskCommand {
         thread: Option<String>,
         #[arg(long, help = "T3 project ID instead of a thread")]
         project: Option<String>,
-        #[arg(long, help = "What the user asked for, in their words, trimmed to a line")]
+        #[arg(
+            long,
+            help = "What the user asked for, in their words, trimmed to a line"
+        )]
         ask: String,
         #[arg(long, value_enum)]
         status: Option<squircle::tasks::Status>,
@@ -376,7 +428,11 @@ enum TaskCommand {
         project: Option<String>,
         #[arg(long)]
         all: bool,
-        #[arg(long, requires = "all", help = "With --all: the next History page, from a reply's history_next")]
+        #[arg(
+            long,
+            requires = "all",
+            help = "With --all: the next History page, from a reply's history_next"
+        )]
         history_before: Option<String>,
     },
     /// One task with its linked threads, builds, media and history.
@@ -385,7 +441,9 @@ enum TaskCommand {
 #[derive(Subcommand)]
 enum SimCommand {
     /// Open, boot and start recording a simulator for your thread; returns the agent-device command to drive it.
-    #[command(after_help = "Idempotent: starting again on the same simulator returns the running session. Without --device: the simulator this thread used last, else a booted one of Squircle's that nothing holds, else a shut-down one (never a simulator the user or another agent has booted). At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once; past that, start puts your thread in line (first come, first served) and returns status \"queued\" with your position: end your turn, and Squircle wakes your thread with a [simulator ready] message once one is held for you; run start again then. sim stop leaves the line. Stopping (or the turn ending) shuts the simulator down. Use this for every simulator: don't boot or create simulators with simctl or xcodebuild.")]
+    #[command(
+        after_help = "Idempotent: starting again on the same simulator returns the running session. Without --device: the simulator this thread used last, else a booted one of Squircle's that nothing holds, else a shut-down one (never a simulator the user or another agent has booted). At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once; past that, start puts your thread in line (first come, first served) and returns status \"queued\" with your position: end your turn, and Squircle wakes your thread with a [simulator ready] message once one is held for you; run start again then. sim stop leaves the line. Stopping (or the turn ending) shuts the simulator down. Use this for every simulator: don't boot or create simulators with simctl or xcodebuild."
+    )]
     Start {
         #[arg(long, help = "Your T3 thread ID")]
         thread: String,
@@ -407,9 +465,14 @@ enum SimCommand {
     /// This Mac's iOS simulators and which thread is recording each.
     Devices,
     /// Shut down simulators Squircle or its agents booted that nothing holds, and delete agent-created ones unused for a day.
-    #[command(after_help = "Only simulators Squircle leased (sim start) or an agent's own simctl/xcodebuild command created or booted are touched; never one the user booted, one open in T3's device tools for the user or a working thread, the preview simulator (SQUIRCLE_SIMULATOR_ID), or one in a session. The service applies the same policy every minute, shutting a free simulator down after SQUIRCLE_SIM_IDLE_MINUTES (default 10); cleanup skips that wait. At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once.")]
+    #[command(
+        after_help = "Only simulators Squircle leased (sim start) or an agent's own simctl/xcodebuild command created or booted are touched; never one the user booted, one open in T3's device tools for the user or a working thread, the preview simulator (SQUIRCLE_SIMULATOR_ID), or one in a session. The service applies the same policy every minute, shutting a free simulator down after SQUIRCLE_SIM_IDLE_MINUTES (default 10); cleanup skips that wait. At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once."
+    )]
     Cleanup {
-        #[arg(long, help = "Report what would be shut down or deleted; change nothing")]
+        #[arg(
+            long,
+            help = "Report what would be shut down or deleted; change nothing"
+        )]
         dry_run: bool,
     },
 }
@@ -428,7 +491,11 @@ enum HistoryCommand {
         query: Vec<String>,
         #[command(flatten)]
         scope: AppScope,
-        #[arg(long = "in", value_delimiter = ',', help = "Only these sources: messages, threads, activities, tasks, builds, commits, docs")]
+        #[arg(
+            long = "in",
+            value_delimiter = ',',
+            help = "Only these sources: messages, threads, activities, tasks, builds, commits, docs"
+        )]
         sources: Vec<String>,
         #[arg(long, default_value_t = 8)]
         limit: usize,
@@ -443,7 +510,11 @@ enum HistoryCommand {
         scope: AppScope,
         #[arg(long, default_value_t = 4000, help = "Cap on the text shown")]
         max_chars: usize,
-        #[arg(long, default_value_t = 30, help = "Messages of a thread, changes of a task")]
+        #[arg(
+            long,
+            default_value_t = 30,
+            help = "Messages of a thread, changes of a task"
+        )]
         limit: usize,
     },
 }
@@ -480,7 +551,10 @@ enum PerfCommand {
     Show {
         #[arg(help = "Capture path (from the message) or ID (perf list)")]
         capture: String,
-        #[arg(long, help = "A .dSYM bundle or binary for the app, when Squircle's builds and Spotlight don't have it")]
+        #[arg(
+            long,
+            help = "A .dSYM bundle or binary for the app, when Squircle's builds and Spotlight don't have it"
+        )]
         dsym: Vec<PathBuf>,
     },
     /// Recent performance captures and screen recordings uploaded from the phone.
@@ -489,7 +563,9 @@ enum PerfCommand {
 #[derive(Subcommand)]
 enum MediaCommand {
     /// Copy an mp4/mov/png/jpg into the thread's media; the phone shows it in the conversation.
-    #[command(after_help = "To show a simulator flow, use squircle sim start / sim stop instead: the session records itself and the recording appears in your turn.")]
+    #[command(
+        after_help = "To show a simulator flow, use squircle sim start / sim stop instead: the session records itself and the recording appears in your turn."
+    )]
     Add {
         #[arg(long, help = "T3 thread ID shown in the agent's instructions")]
         thread: String,
@@ -550,9 +626,15 @@ enum BuildCommand {
             help = "Leave out the Squircle debug overlay that device builds otherwise carry (never in App Store exports)"
         )]
         no_overlay: bool,
-        #[arg(long, help = "Link the build to this task; it becomes ready to try when the build succeeds")]
+        #[arg(
+            long,
+            help = "Link the build to this task; it becomes ready to try when the build succeeds"
+        )]
         task: Option<String>,
-        #[arg(long, help = "Your T3 thread ID: when the build finishes, your app's agent and the user's chat get it (Install, or why it failed)")]
+        #[arg(
+            long,
+            help = "Your T3 thread ID: when the build finishes, your app's agent and the user's chat get it (Install, or why it failed)"
+        )]
         thread: Option<String>,
     },
     /// List persisted build records, newest first.
@@ -693,7 +775,10 @@ enum ServiceCommand {
 /// Whether `server` is a service on this Mac, which local-only commands
 /// (`media`) can stand in for by writing its data directory.
 fn local_server(server: &str) -> bool {
-    url::Url::parse(server).is_ok_and(|url| url.host().is_some_and(|host| squircle::origin::loopback(&host)))
+    url::Url::parse(server).is_ok_and(|url| {
+        url.host()
+            .is_some_and(|host| squircle::origin::loopback(&host))
+    })
 }
 
 fn root(cli: &Cli) -> Result<PathBuf> {
@@ -781,10 +866,7 @@ async fn request(
         .timeout(Duration::from_secs(60))
         .build()?;
     let mut request = client
-        .request(
-            method,
-            format!("{origin}{path}"),
-        )
+        .request(method, format!("{origin}{path}"))
         .bearer_auth(key);
     if let Some(payload) = payload {
         request = request.json(&payload);

@@ -1,5 +1,16 @@
 use crate::actor::{Lane, Owner, Rank};
-use crate::{agents::Agents, apps, push::Push, simpool::Pool, sims::{Exit, Sims}, tasks::{self, Tasks}, artifact, model::*, preview, projects, store::{AdmitError, JobView, Jobs, MAX_OPERATIONS, Store}, xcode};
+use crate::{
+    agents::Agents,
+    apps, artifact,
+    model::*,
+    preview, projects,
+    push::Push,
+    simpool::Pool,
+    sims::{Exit, Sims},
+    store::{AdmitError, JobView, Jobs, MAX_OPERATIONS, Store},
+    tasks::{self, Tasks},
+    xcode,
+};
 use anyhow::Result;
 use axum::{
     Json, Router,
@@ -79,7 +90,10 @@ impl AppState {
 /// Runs blocking file work in `lane`, off the async workers, to its end even
 /// if the request that asked for it goes away (so the lane is held for as
 /// long as the work runs).
-async fn in_lane<T: Send + 'static>(lane: &Arc<Lane>, work: impl FnOnce() -> T + Send + 'static) -> std::result::Result<T, tokio::task::JoinError> {
+async fn in_lane<T: Send + 'static>(
+    lane: &Arc<Lane>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::result::Result<T, tokio::task::JoinError> {
     let lane = lane.clone();
     tokio::spawn(async move { lane.run(tokio::task::spawn_blocking(work)).await }).await?
 }
@@ -94,17 +108,43 @@ struct ApiError {
     retryable: bool,
 }
 impl ApiError {
-    fn new(status: StatusCode, code: &'static str, message: impl ToString, next: &'static str) -> Self {
-        Self { status, code, message: message.to_string(), next, retryable: false }
+    fn new(
+        status: StatusCode,
+        code: &'static str,
+        message: impl ToString,
+        next: &'static str,
+    ) -> Self {
+        Self {
+            status,
+            code,
+            message: message.to_string(),
+            next,
+            retryable: false,
+        }
     }
     fn bad(message: impl ToString) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, "invalid_request", message, "Check the command help and supplied values.")
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            message,
+            "Check the command help and supplied values.",
+        )
     }
     fn missing(message: impl ToString) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "not_found", message, "Check the build ID or request a new install link.")
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            message,
+            "Check the build ID or request a new install link.",
+        )
     }
     fn internal(error: impl ToString) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "operation_failed", error, "Inspect the saved build log or run squircle doctor.")
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "operation_failed",
+            error,
+            "Inspect the saved build log or run squircle doctor.",
+        )
     }
     fn unavailable() -> Self {
         // Admission is refused before any work starts; retry after a restart.
@@ -119,27 +159,53 @@ impl ApiError {
         }
     }
     fn too_large(message: impl ToString) -> Self {
-        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message, "Send a smaller request body.")
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            message,
+            "Send a smaller request body.",
+        )
     }
     /// Axum's own rejections (query, path, body, size, method) in the same
     /// envelope as handler errors.
     fn rejection(status: StatusCode, message: String) -> Self {
         let (code, next) = match status {
-            StatusCode::UNAUTHORIZED => ("unauthorized", "Use the control token for builds; the diagnostics token only permits uploads."),
+            StatusCode::UNAUTHORIZED => (
+                "unauthorized",
+                "Use the control token for builds; the diagnostics token only permits uploads.",
+            ),
             StatusCode::NOT_FOUND => ("not_found", "Check the endpoint and IDs."),
-            StatusCode::METHOD_NOT_ALLOWED => ("method_not_allowed", "Check the HTTP method for this endpoint."),
+            StatusCode::METHOD_NOT_ALLOWED => (
+                "method_not_allowed",
+                "Check the HTTP method for this endpoint.",
+            ),
             StatusCode::PAYLOAD_TOO_LARGE => ("payload_too_large", "Send a smaller request body."),
-            StatusCode::UNSUPPORTED_MEDIA_TYPE => ("invalid_request", "Send JSON with Content-Type: application/json."),
-            s if s.is_client_error() => ("invalid_request", "Check the command help and supplied values."),
-            _ => ("operation_failed", "Inspect service output or run squircle doctor."),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => (
+                "invalid_request",
+                "Send JSON with Content-Type: application/json.",
+            ),
+            s if s.is_client_error() => (
+                "invalid_request",
+                "Check the command help and supplied values.",
+            ),
+            _ => (
+                "operation_failed",
+                "Inspect service output or run squircle doctor.",
+            ),
         };
         let message = if message.is_empty() {
-            status.canonical_reason().unwrap_or("Request failed").to_string()
+            status
+                .canonical_reason()
+                .unwrap_or("Request failed")
+                .to_string()
         } else {
             message
         };
         Self {
-            retryable: matches!(status, StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE),
+            retryable: matches!(
+                status,
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+            ),
             ..Self::new(status, code, message, next)
         }
     }
@@ -148,7 +214,12 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (
             self.status,
-            Json(failure_with(self.code, self.message, self.next, self.retryable)),
+            Json(failure_with(
+                self.code,
+                self.message,
+                self.next,
+                self.retryable,
+            )),
         )
             .into_response()
     }
@@ -195,7 +266,11 @@ async fn require_control(State(state): State<AppState>, request: Request, next: 
         Err(error) => error.into_response(),
     }
 }
-async fn require_diagnostics(State(state): State<AppState>, request: Request, next: Next) -> Response {
+async fn require_diagnostics(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
     match auth(&state, request.headers(), true) {
         Ok(()) => next.run(request).await,
         Err(error) => error.into_response(),
@@ -239,28 +314,46 @@ async fn compact_json(request: Request, next: Next) -> Response {
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.starts_with("application/json"));
-    if !get || response.status() != StatusCode::OK || !json || response.headers().contains_key(header::CONTENT_ENCODING) {
+    if !get
+        || response.status() != StatusCode::OK
+        || !json
+        || response.headers().contains_key(header::CONTENT_ENCODING)
+    {
         return response;
     }
     let (mut parts, body) = response.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, 64 << 20).await else {
-        return ApiError::rejection(StatusCode::INTERNAL_SERVER_ERROR, "Reply too large".into()).into_response();
+        return ApiError::rejection(StatusCode::INTERNAL_SERVER_ERROR, "Reply too large".into())
+            .into_response();
     };
     let digest = Sha256::digest(&bytes);
     let tag: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
     let etag = HeaderValue::from_str(&format!("\"{tag}\"")).expect("hex ETag");
     parts.headers.insert(header::ETAG, etag.clone());
-    parts.headers.insert(header::VARY, HeaderValue::from_static("accept-encoding"));
-    if known.as_ref().is_some_and(|k| k.as_bytes().split(|&c| c == b',').any(|t| t.trim_ascii() == etag.as_bytes())) {
+    parts
+        .headers
+        .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    if known.as_ref().is_some_and(|k| {
+        k.as_bytes()
+            .split(|&c| c == b',')
+            .any(|t| t.trim_ascii() == etag.as_bytes())
+    }) {
         parts.status = StatusCode::NOT_MODIFIED;
         parts.headers.remove(header::CONTENT_TYPE);
         parts.headers.remove(header::CONTENT_LENGTH);
         return Response::from_parts(parts, Body::empty());
     }
     if gzip && bytes.len() >= 1024 {
-        let mut encoder = flate2::write::GzEncoder::new(Vec::with_capacity(bytes.len() / 4), flate2::Compression::fast());
-        if encoder.write_all(&bytes).is_ok() && let Ok(compressed) = encoder.finish() {
-            parts.headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        let mut encoder = flate2::write::GzEncoder::new(
+            Vec::with_capacity(bytes.len() / 4),
+            flate2::Compression::fast(),
+        );
+        if encoder.write_all(&bytes).is_ok()
+            && let Ok(compressed) = encoder.finish()
+        {
+            parts
+                .headers
+                .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
             parts.headers.remove(header::CONTENT_LENGTH);
             return Response::from_parts(parts, Body::from(compressed));
         }
@@ -271,13 +364,26 @@ async fn compact_json(request: Request, next: Next) -> Response {
 /// Whether an Accept-Encoding value allows gzip: listed (or `*` when gzip
 /// isn't) with a nonzero quality, so `gzip;q=0` refuses it.
 fn accepts_gzip(header: &str) -> bool {
-    let quality = |coding: &str| header.split(',').find_map(|entry| {
-        let mut parts = entry.split(';');
-        if !parts.next()?.trim().eq_ignore_ascii_case(coding) { return None; }
-        let q = parts.find_map(|p| p.trim().strip_prefix("q=").or_else(|| p.trim().strip_prefix("Q=")));
-        Some(q.map_or(Some(1.0), |q| q.trim().parse::<f32>().ok()).unwrap_or(0.0))
-    });
-    quality("gzip").or_else(|| quality("*")).is_some_and(|q| q > 0.0)
+    let quality = |coding: &str| {
+        header.split(',').find_map(|entry| {
+            let mut parts = entry.split(';');
+            if !parts.next()?.trim().eq_ignore_ascii_case(coding) {
+                return None;
+            }
+            let q = parts.find_map(|p| {
+                p.trim()
+                    .strip_prefix("q=")
+                    .or_else(|| p.trim().strip_prefix("Q="))
+            });
+            Some(
+                q.map_or(Some(1.0), |q| q.trim().parse::<f32>().ok())
+                    .unwrap_or(0.0),
+            )
+        })
+    };
+    quality("gzip")
+        .or_else(|| quality("*"))
+        .is_some_and(|q| q > 0.0)
 }
 
 pub fn router(state: AppState) -> Router {
@@ -289,19 +395,37 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/projects", get(browse_projects))
         .route("/v1/projects/inspect", get(inspect_project))
         .route("/v1/apps/{id}", get(get_app).patch(update_app))
-        .route("/v1/apps/{id}/preview", get(app_preview).post(publish_app_preview))
+        .route(
+            "/v1/apps/{id}/preview",
+            get(app_preview).post(publish_app_preview),
+        )
         .route("/v1/builds/{id}", get(status))
         .route("/v1/builds/{id}/cancel", post(cancel))
         .route("/v1/builds/{id}/log", get(build_log))
-        .route("/v1/builds/{id}/preview", get(download_preview).post(capture_preview))
+        .route(
+            "/v1/builds/{id}/preview",
+            get(download_preview).post(capture_preview),
+        )
         .route("/v1/builds/{id}/install-link", post(create_link))
         .route("/v1/builds/{id}/diagnostics", get(diagnostics))
         .route("/v1/t3/threads/{thread}/steps", get(t3_steps))
-        .route("/v1/t3/projects/{project}/screenshot", get(t3_project_screenshot))
-        .route("/v1/t3/threads/{thread}/media", get(thread_media).post(add_thread_media))
+        .route(
+            "/v1/t3/projects/{project}/screenshot",
+            get(t3_project_screenshot),
+        )
+        .route(
+            "/v1/t3/threads/{thread}/media",
+            get(thread_media).post(add_thread_media),
+        )
         .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
-        .route("/v1/t3/threads/{thread}/media/{id}/poster", get(thread_media_poster))
-        .route("/v1/t3/threads/{thread}/steps/{call}/images/{index}", get(t3_step_image))
+        .route(
+            "/v1/t3/threads/{thread}/media/{id}/poster",
+            get(thread_media_poster),
+        )
+        .route(
+            "/v1/t3/threads/{thread}/steps/{call}/images/{index}",
+            get(t3_step_image),
+        )
         .route("/v1/sims", get(list_sims).post(start_sim))
         .route("/v1/sims/stop", post(stop_sim))
         .route("/v1/sims/devices", get(sim_devices))
@@ -332,10 +456,16 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/captures", post(upload_capture))
         .route("/v1/install-links/{token}", get(link_status))
         .route_layer(middleware::from_fn(compact_json))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_control));
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_control,
+        ));
     let diagnostics = Router::new()
         .route("/v1/diagnostics", post(ingest))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_diagnostics));
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_diagnostics,
+        ));
     // Install links carry their own unguessable, expiring token.
     let public = Router::new()
         .route(
@@ -353,7 +483,9 @@ pub fn router(state: AppState) -> Router {
         .merge(control)
         .merge(diagnostics)
         .merge(public)
-        .fallback(|| async { ApiError::rejection(StatusCode::NOT_FOUND, "Unknown endpoint".into()) })
+        .fallback(|| async {
+            ApiError::rejection(StatusCode::NOT_FOUND, "Unknown endpoint".into())
+        })
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(middleware::map_response(envelope_errors))
         .with_state(state)
@@ -383,7 +515,11 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         .transpose()?;
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let tasks = Arc::new(Tasks::open(&store.root)?);
-    let agents = Agents::open(&store.root, &format!("http://{}", listener.local_addr()?), tasks.clone())?;
+    let agents = Agents::open(
+        &store.root,
+        &format!("http://{}", listener.local_addr()?),
+        tasks.clone(),
+    )?;
     let push = Push::open(&store.root)?;
     agents.attach_push(push.clone());
     let pool = Pool::open(&store.root, agents.clone())?;
@@ -428,14 +564,21 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         #[cfg(unix)]
         tokio::select! { _ = tokio::signal::ctrl_c() => Exit::Stop, _ = terminate.recv() => Exit::Handover }
         #[cfg(not(unix))]
-        { let _ = tokio::signal::ctrl_c().await; Exit::Stop }
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            Exit::Stop
+        }
     };
     let shutdown = state.clone();
     crate::serving::serve(listener, router(state), signal, |exit| async move {
-        eprintln!("{}", match exit {
-            Exit::Handover => "Restarting: simulator sessions keep running for the next start to adopt.",
-            Exit::Stop => "Stopping: simulator sessions end and their recordings are filed.",
-        });
+        eprintln!(
+            "{}",
+            match exit {
+                Exit::Handover =>
+                    "Restarting: simulator sessions keep running for the next start to adopt.",
+                Exit::Stop => "Stopping: simulator sessions end and their recordings are filed.",
+            }
+        );
         // The jobs owner refuses admission and cancels what runs in one turn,
         // so no job registers after the cutoff.
         shutdown.draining.store(true, Ordering::Release);
@@ -469,41 +612,65 @@ async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let jobs = state.jobs.list();
     let mut views = serde_json::to_value(&jobs).map_err(ApiError::internal)?;
     if let (Some(agents), Some(views)) = (&state.agents, views.as_array_mut()) {
-        let owners = agents.build_owners(jobs.iter().map(|v| (v.job.request().and_then(|r| r.thread.as_deref()), v.job.id.as_str())));
+        let owners = agents.build_owners(jobs.iter().map(|v| {
+            (
+                v.job.request().and_then(|r| r.thread.as_deref()),
+                v.job.id.as_str(),
+            )
+        }));
         for (view, owner) in views.iter_mut().zip(owners) {
-            if let Some(owner) = owner { view["agent_thread"] = json!(owner); }
+            if let Some(owner) = owner {
+                view["agent_thread"] = json!(owner);
+            }
         }
     }
     Ok(Json(success(views)))
 }
-async fn status(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let view = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
+async fn status(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let view = state
+        .jobs
+        .get(&id)
+        .ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     let job = &view.job;
     let launches = {
         let (files, id) = (state.files.clone(), id.clone());
-        in_lane(&state.diagnostics, move || files.diagnostics(&id, 0, 1, Some(DiagnosticKind::Launch)))
+        in_lane(&state.diagnostics, move || {
+            files.diagnostics(&id, 0, 1, Some(DiagnosticKind::Launch))
+        })
         .await
         .map_err(ApiError::internal)?
         .map_err(ApiError::internal)?
     };
-    let log = state.files.job_dir(&id).ok().map(|dir| dir.join("build.log"));
+    let log = state
+        .files
+        .job_dir(&id)
+        .ok()
+        .map(|dir| dir.join("build.log"));
     let failure = match (job.state(), log) {
         (BuildState::Failed | BuildState::Interrupted, Some(log)) => {
             let text = log_tail(&log, FAILURE_LOG_TAIL_BYTES).await;
-            let root = job.request().and_then(|r| r.project.parent()).map(|p| p.to_string_lossy().into_owned());
-            let mut failure = crate::buildlog::failure(&String::from_utf8_lossy(&text), root.as_deref());
+            let root = job
+                .request()
+                .and_then(|r| r.project.parent())
+                .map(|p| p.to_string_lossy().into_owned());
+            let mut failure =
+                crate::buildlog::failure(&String::from_utf8_lossy(&text), root.as_deref());
             failure.message = job.error().map(|error| {
-                error.rsplit_once("; see /").map_or(error, |(message, _)| message).to_string()
+                error
+                    .rsplit_once("; see /")
+                    .map_or(error, |(message, _)| message)
+                    .to_string()
             });
             Some(failure)
         }
         _ => None,
     };
     let mut view = serde_json::to_value(&view).map_err(ApiError::internal)?;
-    if let Some(owner) = state.agents.as_ref().and_then(|a| a.build_owner(job.request().and_then(|r| r.thread.as_deref()), &job.id)) {
+    if let Some(owner) = state
+        .agents
+        .as_ref()
+        .and_then(|a| a.build_owner(job.request().and_then(|r| r.thread.as_deref()), &job.id))
+    {
         view["agent_thread"] = json!(owner.thread_id);
     }
     Ok(Json(success(
@@ -577,7 +744,10 @@ async fn start(
     }
     // A worker that didn't say who it is is known by its worktree.
     if request.thread.is_none() {
-        request.thread = state.agents.as_ref().and_then(|a| a.worker_at(&request.project));
+        request.thread = state
+            .agents
+            .as_ref()
+            .and_then(|a| a.worker_at(&request.project));
     }
     let (revision, dirty) = source_provenance(&request.project).await;
     if state.draining.load(Ordering::Acquire) {
@@ -585,7 +755,12 @@ async fn start(
     }
     let replay = |prior: JobView| -> ApiResult<Json<Value>> {
         if prior.job.request() != Some(&request) {
-            return Err(ApiError::new(StatusCode::CONFLICT, "request_id_conflict", "Request ID already belongs to different build arguments", "Use a new request ID for different work."));
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "request_id_conflict",
+                "Request ID already belongs to different build arguments",
+                "Use a new request ID for different work.",
+            ));
         }
         Ok(Json(success(json!({"job":prior,"replayed":true}))))
     };
@@ -598,7 +773,10 @@ async fn start(
         id: uuid::Uuid::new_v4().to_string(),
         created_at: now(),
         updated_at: now(),
-        origin: BuildOrigin::Project { request: request.clone(), provenance: Provenance { revision, dirty } },
+        origin: BuildOrigin::Project {
+            request: request.clone(),
+            provenance: Provenance { revision, dirty },
+        },
         phase: JobPhase::Queued,
     };
     let dir = state.files.job_dir(&job.id).map_err(ApiError::internal)?;
@@ -613,9 +791,14 @@ async fn start(
     tokio::spawn(async move {
         let mut job = job;
         if let Some(agents) = &state.agents
-            && let Err(error) = agents.build_started(&job.id, request.thread.as_deref()).await
+            && let Err(error) = agents
+                .build_started(&job.id, request.thread.as_deref())
+                .await
         {
-            eprintln!("Build {} start not recorded for its agent: {error:#}", job.id);
+            eprintln!(
+                "Build {} start not recorded for its agent: {error:#}",
+                job.id
+            );
         }
         let mut receiver = lease.cancelled.clone();
         let permit = tokio::select! {
@@ -635,15 +818,24 @@ async fn start(
                 }
             };
             job.phase = match result {
-                Ok(output) => JobPhase::Succeeded { output, preview: PreviewState::Absent },
-                Err(error) if *receiver.borrow() => JobPhase::Cancelled { message: Some(format!("{error:#}")) },
-                Err(error) => JobPhase::Failed { message: format!("{error:#}") },
+                Ok(output) => JobPhase::Succeeded {
+                    output,
+                    preview: PreviewState::Absent,
+                },
+                Err(error) if *receiver.borrow() => JobPhase::Cancelled {
+                    message: Some(format!("{error:#}")),
+                },
+                Err(error) => JobPhase::Failed {
+                    message: format!("{error:#}"),
+                },
             };
             if request.capture_preview && job.set_preview(PreviewState::Absent.capturing()) {
                 job.updated_at = now();
                 let capture = match state.jobs.commit(&lease, &job).await {
                     Ok(()) => match preview::simulator_id(None) {
-                        Ok(simulator) => preview::capture(&job, &dir, &simulator, receiver.clone()).await,
+                        Ok(simulator) => {
+                            preview::capture(&job, &dir, &simulator, receiver.clone()).await
+                        }
                         Err(error) => Err(error),
                     },
                     Err(error) => {
@@ -656,7 +848,10 @@ async fn start(
         }
         job.updated_at = now();
         if let Err(error) = state.jobs.finish(lease, &job).await {
-            eprintln!("Cannot persist job {}: {error:#}. Service paused; the result is served from memory until shutdown.", job.id);
+            eprintln!(
+                "Cannot persist job {}: {error:#}. Service paused; the result is served from memory until shutdown.",
+                job.id
+            );
             state.draining.store(true, Ordering::Release);
         }
         let app = build_app(&state, &job).await;
@@ -671,26 +866,59 @@ async fn start(
 
 /// A succeeded or failed build goes to its app agent's conversation.
 async fn tell_agent(state: &AppState, job: &Job, app: Option<&apps::AppRecord>) {
-    let (Some(agents), Some(request)) = (&state.agents, job.request()) else { return };
+    let (Some(agents), Some(request)) = (&state.agents, job.request()) else {
+        return;
+    };
     let succeeded = match job.state() {
         BuildState::Succeeded => true,
         BuildState::Failed => false,
         _ => return,
     };
-    let reason = if succeeded { None } else {
-        let log = state.files.job_dir(&job.id).ok().map(|dir| dir.join("build.log"));
-        let text = match log { Some(log) => log_tail(&log, FAILURE_LOG_TAIL_BYTES).await, None => vec![] };
-        let root = request.project.parent().map(|p| p.to_string_lossy().into_owned());
+    let reason = if succeeded {
+        None
+    } else {
+        let log = state
+            .files
+            .job_dir(&job.id)
+            .ok()
+            .map(|dir| dir.join("build.log"));
+        let text = match log {
+            Some(log) => log_tail(&log, FAILURE_LOG_TAIL_BYTES).await,
+            None => vec![],
+        };
+        let root = request
+            .project
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned());
         let failure = crate::buildlog::failure(&String::from_utf8_lossy(&text), root.as_deref());
-        let first = failure.errors.first().map(|e| e.message.clone())
-            .or_else(|| job.error().map(|e| e.rsplit_once("; see /").map_or(e, |(m, _)| m).to_string()));
+        let first = failure
+            .errors
+            .first()
+            .map(|e| e.message.clone())
+            .or_else(|| {
+                job.error()
+                    .map(|e| e.rsplit_once("; see /").map_or(e, |(m, _)| m).to_string())
+            });
         first.map(|r| {
             let line = r.lines().next().unwrap_or_default().trim().to_string();
-            if line.chars().count() > 200 { line.chars().take(199).collect::<String>() + "…" } else { line }
+            if line.chars().count() > 200 {
+                line.chars().take(199).collect::<String>() + "…"
+            } else {
+                line
+            }
         })
     };
-    let title = app.map(|a| a.name.clone()).or_else(|| job.output().map(|o| o.title.clone())).unwrap_or_else(|| request.scheme.clone());
-    let build = crate::agents::FinishedBuild { id: job.id.clone(), thread: request.thread.clone(), app: title, succeeded, reason };
+    let title = app
+        .map(|a| a.name.clone())
+        .or_else(|| job.output().map(|o| o.title.clone()))
+        .unwrap_or_else(|| request.scheme.clone());
+    let build = crate::agents::FinishedBuild {
+        id: job.id.clone(),
+        thread: request.thread.clone(),
+        app: title,
+        succeeded,
+        reason,
+    };
     if let Err(error) = agents.build_finished(&build).await {
         eprintln!("Build {} not queued for its agent: {error:#}", job.id);
     }
@@ -698,12 +926,22 @@ async fn tell_agent(state: &AppState, job: &Job, app: Option<&apps::AppRecord>) 
 
 fn admit_error(error: AdmitError) -> ApiError {
     match error {
-        AdmitError::Full => ApiError::bad(format!("Build/preview queue is full ({MAX_OPERATIONS} jobs); wait or cancel a job")),
-        AdmitError::Busy => ApiError::new(StatusCode::CONFLICT, "preview_in_progress", "This build already has work in progress", "Poll build status before recapturing."),
+        AdmitError::Full => ApiError::bad(format!(
+            "Build/preview queue is full ({MAX_OPERATIONS} jobs); wait or cancel a job"
+        )),
+        AdmitError::Busy => ApiError::new(
+            StatusCode::CONFLICT,
+            "preview_in_progress",
+            "This build already has work in progress",
+            "Poll build status before recapturing.",
+        ),
         AdmitError::Refused(message) => ApiError::bad(message),
         AdmitError::Persist(error) => ApiError::internal(format!("{error:#}")),
         AdmitError::Closed => ApiError::unavailable(),
-        AdmitError::Duplicate(prior) => ApiError::bad(format!("Build {} already has this request ID", prior.job.id)),
+        AdmitError::Duplicate(prior) => ApiError::bad(format!(
+            "Build {} already has this request ID",
+            prior.job.id
+        )),
     }
 }
 
@@ -749,7 +987,10 @@ async fn capture_preview(
         let result = if permit.is_none() || *receiver.borrow() {
             Err(anyhow::anyhow!("Preview cancelled before capture"))
         } else {
-            let capturing = job.preview().map(PreviewState::capturing).unwrap_or_default();
+            let capturing = job
+                .preview()
+                .map(PreviewState::capturing)
+                .unwrap_or_default();
             job.set_preview(capturing);
             job.updated_at = now();
             match state.jobs.commit(&lease, &job).await {
@@ -782,9 +1023,13 @@ async fn build_app(state: &AppState, job: &Job) -> Option<apps::AppRecord> {
     // Copies the preview in the catalog's lane, off the async workers.
     let result = in_lane(&state.catalog, move || {
         if job.output().is_some() && job.request().is_some() {
-            apps::sync_build_preview(&store, &job).map(Some).map_err(|e| (job.id.clone(), e))
+            apps::sync_build_preview(&store, &job)
+                .map(Some)
+                .map_err(|e| (job.id.clone(), e))
         } else {
-            Ok(apps::list(&store).ok().and_then(|apps| apps::owner_of(&apps, &job).cloned()))
+            Ok(apps::list(&store)
+                .ok()
+                .and_then(|apps| apps::owner_of(&apps, &job).cloned()))
         }
     })
     .await;
@@ -838,7 +1083,12 @@ async fn browse_projects(
 fn inspection_busy() -> ApiError {
     ApiError {
         retryable: true,
-        ..ApiError::new(StatusCode::TOO_MANY_REQUESTS, "inspection_busy", "Two Xcode inspections are already running", "Wait for an existing inspection to finish, then retry.")
+        ..ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "inspection_busy",
+            "Two Xcode inspections are already running",
+            "Wait for an existing inspection to finish, then retry.",
+        )
     }
 }
 async fn inspect_project(
@@ -906,10 +1156,7 @@ async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     Ok(Json(success(apps)))
 }
 
-async fn get_app(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
+async fn get_app(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
     let app = tokio::task::spawn_blocking(move || apps::get(&state.files, &id).map(public_app))
         .await
         .map_err(ApiError::internal)?
@@ -1010,9 +1257,7 @@ async fn t3_steps(
 }
 
 /// The newest real screenshot captured in a project's threads; see `t3steps`.
-async fn t3_project_screenshot(
-    Path(project): Path<String>,
-) -> ApiResult<Response> {
+async fn t3_project_screenshot(Path(project): Path<String>) -> ApiResult<Response> {
     let image = crate::t3steps::project_screenshot(&project)
         .await
         .map_err(|e| ApiError::bad(e.to_string()))?
@@ -1049,11 +1294,15 @@ async fn add_thread_media(
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
     let root = state.files.root.clone();
-    let media = tokio::task::spawn_blocking(move || crate::media::add(&root, &thread, &r.file, r.caption.as_deref()))
-        .await
-        .map_err(ApiError::internal)?
-        .map_err(ApiError::bad)?;
-    Ok(Json(success(json!({"id":media.id,"thread_id":media.thread_id,"kind":media.kind,"caption":media.caption,"content_type":media.content_type,"bytes":media.bytes,"created_at":media.created_at}))))
+    let media = tokio::task::spawn_blocking(move || {
+        crate::media::add(&root, &thread, &r.file, r.caption.as_deref())
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::bad)?;
+    Ok(Json(success(
+        json!({"id":media.id,"thread_id":media.thread_id,"kind":media.kind,"caption":media.caption,"content_type":media.content_type,"bytes":media.bytes,"created_at":media.created_at}),
+    )))
 }
 
 async fn thread_media_file(
@@ -1078,9 +1327,10 @@ async fn thread_media_file(
         Body::from_stream(ReaderStream::new(file)),
     )
         .into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_LENGTH, metadata.len().to_string().parse().unwrap());
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        metadata.len().to_string().parse().unwrap(),
+    );
     Ok(response)
 }
 
@@ -1091,7 +1341,12 @@ async fn thread_media_poster(
     let media = crate::media::get(&state.files.root, &thread, &id).map_err(ApiError::missing)?;
     let poster = crate::media::poster(&media).map_err(ApiError::missing)?;
     let bytes = tokio::fs::read(&poster).await.map_err(ApiError::internal)?;
-    Ok((private_headers(), [(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response())
+    Ok((
+        private_headers(),
+        [(header::CONTENT_TYPE, "image/jpeg")],
+        bytes,
+    )
+        .into_response())
 }
 
 async fn t3_step_image(
@@ -1124,7 +1379,12 @@ async fn app_preview(
             .as_ref()
             .is_some_and(|version| version != &preview.id)
         {
-            return Err(ApiError::new(StatusCode::CONFLICT, "preview_changed", "App preview has changed since metadata was read", "Refresh app metadata and request its current preview version."));
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "preview_changed",
+                "App preview has changed since metadata was read",
+                "Refresh app metadata and request its current preview version.",
+            ));
         }
         let file = apps::open_preview(&app).map_err(ApiError::missing)?;
         Ok((file, preview.id))
@@ -1153,7 +1413,11 @@ async fn download_preview(
     Path(id): Path<String>,
 ) -> ApiResult<Response> {
     let path = {
-        let job = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?.job;
+        let job = state
+            .jobs
+            .get(&id)
+            .ok_or_else(|| ApiError::missing(format!("No build {id}")))?
+            .job;
         let path = job
             .preview()
             .and_then(|preview| preview.artifact())
@@ -1200,7 +1464,14 @@ async fn source_provenance(project: &std::path::Path) -> (Option<String>, Option
         return (None, None);
     };
     let limit = std::time::Duration::from_secs(5);
-    let Ok(revision) = crate::git::run(directory, &["rev-parse", "--verify", "HEAD^{commit}"], limit, 128).await else {
+    let Ok(revision) = crate::git::run(
+        directory,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        limit,
+        128,
+    )
+    .await
+    else {
         return (None, None);
     };
     let Ok(revision) = String::from_utf8(revision) else {
@@ -1211,16 +1482,25 @@ async fn source_provenance(project: &std::path::Path) -> (Option<String>, Option
     {
         return (None, None);
     }
-    let status = ["status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"];
-    let dirty = crate::git::run(directory, &status, limit, 1024 * 1024).await.ok().map(|output| !output.is_empty());
+    let status = [
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+    ];
+    let dirty = crate::git::run(directory, &status, limit, 1024 * 1024)
+        .await
+        .ok()
+        .map(|output| !output.is_empty());
     (Some(revision.to_owned()), dirty)
 }
 
-async fn cancel(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let (job_state, operation) = state.jobs.cancel(&id).await.ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
+async fn cancel(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+    let (job_state, operation) = state
+        .jobs
+        .cancel(&id)
+        .await
+        .ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     Ok(Json(success(
         json!({"build_id":id,"cancel_requested":operation.is_some(),"state":job_state}),
     )))
@@ -1235,7 +1515,9 @@ async fn import(
     input: std::result::Result<Json<ImportRequest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
-    let job = import_job(state, input.ipa, copy_and_inspect_ipa).await.map_err(ApiError::bad)?;
+    let job = import_job(state, input.ipa, copy_and_inspect_ipa)
+        .await
+        .map_err(ApiError::bad)?;
     Ok(Json(success(job)))
 }
 
@@ -1249,7 +1531,8 @@ async fn import_job(
 ) -> Result<Job> {
     tokio::spawn(async move {
         let importing = state.clone();
-        let job = tokio::task::spawn_blocking(move || import_ipa(&importing, &source, prepare)).await??;
+        let job =
+            tokio::task::spawn_blocking(move || import_ipa(&importing, &source, prepare)).await??;
         state.jobs.insert(job.clone()).await?;
         Ok(job)
     })
@@ -1306,7 +1589,10 @@ fn import_ipa(
         created_at: now(),
         updated_at: now(),
         origin: BuildOrigin::Imported,
-        phase: JobPhase::Succeeded { output, preview: PreviewState::Absent },
+        phase: JobPhase::Succeeded {
+            output,
+            preview: PreviewState::Absent,
+        },
     };
     // Work admitted before shutdown may finish. Publication (`Jobs::insert`)
     // occurs only after the copied IPA has been synced and its metadata validated.
@@ -1337,7 +1623,11 @@ async fn create_link(
             "Start serve with --public-url https://YOUR-MAC-HOSTNAME to create install links",
         )
     })?;
-    let job = state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?.job;
+    let job = state
+        .jobs
+        .get(&id)
+        .ok_or_else(|| ApiError::missing(format!("No build {id}")))?
+        .job;
     if job.ipa().is_none() {
         return Err(ApiError::bad(
             "Build has no exported IPA; simulator products cannot be installed this way",
@@ -1351,7 +1641,11 @@ async fn create_link(
         transfer: TransferEvidence::NotStarted,
     };
     let saved = ticket.clone();
-    state.tickets.ask(move |store| store.save_ticket(&saved)).await.map_err(ApiError::internal)?;
+    state
+        .tickets
+        .ask(move |store| store.save_ticket(&saved))
+        .await
+        .map_err(ApiError::internal)?;
     let page = format!("{base}/install/{}", ticket.token);
     Ok(Json(success(
         json!({"build_id":id,"page_url":page,"manifest_url":format!("{page}/manifest.plist"),"install_url":artifact::install_url(&format!("{page}/manifest.plist")),"expires_at":ticket.expires_at,"installation_confirmed":false}),
@@ -1359,11 +1653,22 @@ async fn create_link(
 }
 /// A ticket's build, which has an IPA: only that can be installed.
 async fn ticket_job(state: &AppState, token: &str) -> ApiResult<(Ticket, String, BuildOutput)> {
-    let ticket = load_ticket(state, token).await.map_err(|_| ApiError::missing("Invalid install link"))?;
+    let ticket = load_ticket(state, token)
+        .await
+        .map_err(|_| ApiError::missing("Invalid install link"))?;
     if ticket.expires_at <= now() {
-        return Err(ApiError::new(StatusCode::GONE, "link_expired", "Install link expired", "Request a new install link for the same build."));
+        return Err(ApiError::new(
+            StatusCode::GONE,
+            "link_expired",
+            "Install link expired",
+            "Request a new install link for the same build.",
+        ));
     }
-    let job = state.jobs.get(&ticket.build_id).ok_or_else(|| ApiError::missing("No IPA for this build"))?.job;
+    let job = state
+        .jobs
+        .get(&ticket.build_id)
+        .ok_or_else(|| ApiError::missing("No IPA for this build"))?
+        .job;
     match job.output() {
         Some(output) if output.ipa_path.is_some() => Ok((ticket, job.id.clone(), output.clone())),
         _ => Err(ApiError::missing("No IPA for this build")),
@@ -1376,7 +1681,9 @@ async fn link_status(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let ticket = load_ticket(&state, &token).await.map_err(|_| ApiError::missing("Unknown install link"))?;
+    let ticket = load_ticket(&state, &token)
+        .await
+        .map_err(|_| ApiError::missing("Unknown install link"))?;
     let mut view = json!({"build_id":ticket.build_id,"expires_at":ticket.expires_at,
         "download_started_at":null,"downloaded_at":null});
     if let (Some(view), Value::Object(transfer)) = (view.as_object_mut(), json!(ticket.transfer)) {
@@ -1445,7 +1752,11 @@ async fn download_ipa(
     }
     // Hyper stops polling a body once Content-Length bytes are out, so the
     // finish is recorded when it drops the body, not by a trailing chunk.
-    let sent = Delivered { sent: 0, size, ticket: Some((state.tickets.clone(), token)) };
+    let sent = Delivered {
+        sent: 0,
+        size,
+        ticket: Some((state.tickets.clone(), token)),
+    };
     use futures_util::StreamExt;
     let stream = ReaderStream::new(file).scan(sent, |sent, chunk| {
         if let Ok(chunk) = &chunk {
@@ -1479,7 +1790,9 @@ impl Drop for Delivered {
             return;
         }
         if let Some((tickets, token)) = self.ticket.take() {
-            tickets.tell(move |store| { let _ = advance_ticket(store, &token, |t| t.completed(now())); });
+            tickets.tell(move |store| {
+                let _ = advance_ticket(store, &token, |t| t.completed(now()));
+            });
         }
     }
 }
@@ -1489,15 +1802,31 @@ impl Drop for Delivered {
 /// A ticket as its owner has it, after every mark told before.
 async fn load_ticket(state: &AppState, token: &str) -> Result<Ticket> {
     let token = token.to_string();
-    state.tickets.ask(move |store| store.load_ticket(&token)).await
+    state
+        .tickets
+        .ask(move |store| store.load_ticket(&token))
+        .await
 }
 
-async fn mark_ticket(state: &AppState, token: &str, mark: impl FnOnce(TransferEvidence) -> TransferEvidence + Send + 'static) {
+async fn mark_ticket(
+    state: &AppState,
+    token: &str,
+    mark: impl FnOnce(TransferEvidence) -> TransferEvidence + Send + 'static,
+) {
     let token = token.to_string();
-    state.tickets.ask(move |store| { let _ = advance_ticket(store, &token, mark); }).await
+    state
+        .tickets
+        .ask(move |store| {
+            let _ = advance_ticket(store, &token, mark);
+        })
+        .await
 }
 
-fn advance_ticket(store: &Store, token: &str, mark: impl FnOnce(TransferEvidence) -> TransferEvidence) -> Result<()> {
+fn advance_ticket(
+    store: &Store,
+    token: &str,
+    mark: impl FnOnce(TransferEvidence) -> TransferEvidence,
+) -> Result<()> {
     let mut ticket = store.load_ticket(token)?;
     let next = mark(ticket.transfer);
     if next == ticket.transfer {
@@ -1620,9 +1949,9 @@ async fn ingest(
         .to_string();
     let (files, stored) = (state.files.clone(), event.clone());
     let inserted = in_lane(&state.diagnostics, move || files.append_diagnostic(&stored))
-    .await
-    .map_err(ApiError::internal)?
-    .map_err(ApiError::bad)?;
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::bad)?;
     Ok(Json(success(
         json!({"event_id":event.event_id,"stored":inserted,"duplicate":!inserted}),
     )))
@@ -1639,8 +1968,15 @@ async fn build_log(
     page: std::result::Result<Query<LogPage>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let page = parse_query(page)?;
-    state.jobs.get(&id).ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
-    let path = state.files.job_dir(&id).map_err(ApiError::bad)?.join("build.log");
+    state
+        .jobs
+        .get(&id)
+        .ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
+    let path = state
+        .files
+        .job_dir(&id)
+        .map_err(ApiError::bad)?
+        .join("build.log");
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
@@ -1672,8 +2008,16 @@ mod tests {
 
     #[test]
     fn gzip_quality_zero_refuses_gzip() {
-        assert!(accepts_gzip("gzip, deflate, br") && accepts_gzip("br;q=1.0, GZIP;q=0.5") && accepts_gzip("*"));
-        assert!(!accepts_gzip("gzip;q=0") && !accepts_gzip("gzip; q=0.000, *") && !accepts_gzip("deflate"));
+        assert!(
+            accepts_gzip("gzip, deflate, br")
+                && accepts_gzip("br;q=1.0, GZIP;q=0.5")
+                && accepts_gzip("*")
+        );
+        assert!(
+            !accepts_gzip("gzip;q=0")
+                && !accepts_gzip("gzip; q=0.000, *")
+                && !accepts_gzip("deflate")
+        );
         assert!(!accepts_gzip("*;q=0") && !accepts_gzip("xgzip"));
     }
 
@@ -1681,37 +2025,57 @@ mod tests {
     async fn polled_json_revalidates_and_compresses() {
         use tower::ServiceExt;
         let app = Router::new()
-            .route("/big", get(|| async { Json(json!({"rows": vec!["build"; 2000]})) }))
+            .route(
+                "/big",
+                get(|| async { Json(json!({"rows": vec!["build"; 2000]})) }),
+            )
             .route_layer(middleware::from_fn(compact_json));
         let call = |headers: &[(header::HeaderName, &str)]| {
             let mut request = axum::http::Request::get("/big");
-            for (name, value) in headers { request = request.header(name, *value); }
+            for (name, value) in headers {
+                request = request.header(name, *value);
+            }
             app.clone().oneshot(request.body(Body::empty()).unwrap())
         };
         let plain = call(&[]).await.unwrap();
         assert_eq!(plain.status(), StatusCode::OK);
         assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
         let etag = plain.headers()[header::ETAG].to_str().unwrap().to_string();
-        let body = axum::body::to_bytes(plain.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(plain.into_body(), usize::MAX)
+            .await
+            .unwrap();
 
         let same = call(&[(header::IF_NONE_MATCH, &etag)]).await.unwrap();
         assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
-        assert!(axum::body::to_bytes(same.into_body(), usize::MAX).await.unwrap().is_empty());
+        assert!(
+            axum::body::to_bytes(same.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let stale = call(&[(header::IF_NONE_MATCH, "\"other\"")]).await.unwrap();
         assert_eq!(stale.status(), StatusCode::OK);
 
-        let zipped = call(&[(header::ACCEPT_ENCODING, "br, gzip;q=0.9")]).await.unwrap();
+        let zipped = call(&[(header::ACCEPT_ENCODING, "br, gzip;q=0.9")])
+            .await
+            .unwrap();
         assert_eq!(zipped.headers()[header::CONTENT_ENCODING], "gzip");
-        let bytes = axum::body::to_bytes(zipped.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(zipped.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert!(bytes.len() < body.len() / 10);
         let mut unzipped = Vec::new();
-        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut unzipped).unwrap();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut unzipped)
+            .unwrap();
         assert_eq!(unzipped, body);
     }
 
     #[test]
     fn history_pages_are_stable_and_complete() {
-        let at = |t: &(&'static str, u64)| HistoryCursor { archived_at: t.1, id: t.0.into() };
+        let at = |t: &(&'static str, u64)| HistoryCursor {
+            archived_at: t.1,
+            id: t.0.into(),
+        };
         let history = || vec![("a", 5), ("b", 9), ("c", 5), ("d", 1), ("e", 7)];
         let mut seen = vec![];
         let mut cursor = None;
@@ -1727,7 +2091,14 @@ mod tests {
         // A task leaving History doesn't shift the next page.
         let first = history_page(history(), at, None, 2).1.unwrap();
         let fewer: Vec<_> = history().into_iter().filter(|t| t.0 != "b").collect();
-        assert_eq!(history_page(fewer, at, Some(&first), 2).0.iter().map(|t| t.0).collect::<Vec<_>>(), ["c", "a"]);
+        assert_eq!(
+            history_page(fewer, at, Some(&first), 2)
+                .0
+                .iter()
+                .map(|t| t.0)
+                .collect::<Vec<_>>(),
+            ["c", "a"]
+        );
         assert!(HistoryCursor::parse("x").is_err());
     }
 
@@ -1783,7 +2154,8 @@ mod tests {
             let output = copy_and_inspect_ipa(source, destination)?;
             assert!(checking.jobs.list().is_empty() && checking.files.list_jobs()?.is_empty());
             Ok(output)
-        }).await?;
+        })
+        .await?;
         let stored = state.files.load_job(&job.id)?;
         assert_eq!(stored.state(), BuildState::Succeeded);
         assert_eq!(stored.origin, BuildOrigin::Imported);
@@ -1804,10 +2176,7 @@ mod tests {
         test_ipa(&source)?;
         let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
         let job = import_job(state.clone(), source.clone(), copy_and_inspect_ipa).await?;
-        let diagnostic_token = state
-            .files.settings
-            .diagnostic_token
-            .clone();
+        let diagnostic_token = state.files.settings.diagnostic_token.clone();
         let mut authorization = HeaderMap::new();
         authorization.insert(
             header::AUTHORIZATION,
@@ -1822,33 +2191,24 @@ mod tests {
             timestamp: 1,
             attributes: json!({}),
         };
-        let Json(first) = ingest(
-            State(state.clone()),
-            Ok(Json(event.clone())),
-        )
-        .await
-        .unwrap();
+        let Json(first) = ingest(State(state.clone()), Ok(Json(event.clone())))
+            .await
+            .unwrap();
         assert_eq!(first["data"]["event_id"], event_id);
         assert_eq!(first["data"]["stored"], true);
         event.event_id = event_id.into();
         event.build_id = job.id.clone();
-        let Json(retry) = ingest(
-            State(state.clone()),
-            Ok(Json(event.clone())),
-        )
-        .await
-        .unwrap();
+        let Json(retry) = ingest(State(state.clone()), Ok(Json(event.clone())))
+            .await
+            .unwrap();
         assert_eq!(retry["data"]["duplicate"], true);
-        let stored = state
-            .files.diagnostics(&job.id, 0, 10, None)?;
+        let stored = state.files.diagnostics(&job.id, 0, 10, None)?;
         assert_eq!(stored["events"].as_array().unwrap().len(), 1);
         assert_eq!(stored["events"][0]["event_id"], event_id);
         assert_eq!(stored["events"][0]["build_id"], job.id);
 
         event.build_id = "../outside".into();
-        let error = ingest(State(state), Ok(Json(event)))
-            .await
-            .unwrap_err();
+        let error = ingest(State(state), Ok(Json(event))).await.unwrap_err();
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         Ok(())
     }
@@ -1884,19 +2244,13 @@ mod tests {
         let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
         let _active = state.slots.clone().acquire_owned().await.unwrap();
         let request = request(dir.path());
-        let Json(first) = start(
-            State(state.clone()),
-            Ok(Json(request.clone())),
-        )
-        .await
-        .unwrap();
+        let Json(first) = start(State(state.clone()), Ok(Json(request.clone())))
+            .await
+            .unwrap();
         let id = first["data"]["job"]["id"].as_str().unwrap().to_owned();
-        let Json(retry) = start(
-            State(state.clone()),
-            Ok(Json(request.clone())),
-        )
-        .await
-        .unwrap();
+        let Json(retry) = start(State(state.clone()), Ok(Json(request.clone())))
+            .await
+            .unwrap();
         assert_eq!(retry["data"]["job"]["id"], id);
         assert_eq!(retry["data"]["replayed"], true);
         let mut changed = request;
@@ -1913,8 +2267,7 @@ mod tests {
             .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                if state.files.load_job(&id).unwrap().state() == BuildState::Cancelled
-                {
+                if state.files.load_job(&id).unwrap().state() == BuildState::Cancelled {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -1922,25 +2275,16 @@ mod tests {
         })
         .await
         .expect("queued cancellation should be immediate");
-        assert!(
-            !state
-                .files.job_dir(&id)
-                .unwrap()
-                .join("build.log")
-                .exists()
-        );
+        assert!(!state.files.job_dir(&id).unwrap().join("build.log").exists());
     }
     #[tokio::test]
     async fn draining_refuses_new_side_effects() {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
         state.draining.store(true, Ordering::Release);
-        let error = start(
-            State(state.clone()),
-            Ok(Json(request(dir.path()))),
-        )
-        .await
-        .unwrap_err();
+        let error = start(State(state.clone()), Ok(Json(request(dir.path()))))
+            .await
+            .unwrap_err();
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         // Refused before any side effect, so clients may send it again.
         assert!(error.retryable);
@@ -1951,11 +2295,20 @@ mod tests {
 // MARK: Simulator sessions
 
 fn sims(state: &AppState) -> ApiResult<Arc<Sims>> {
-    state.sims.clone().ok_or_else(|| sim_error(anyhow::anyhow!("Simulator sessions are not running in this service")))
+    state.sims.clone().ok_or_else(|| {
+        sim_error(anyhow::anyhow!(
+            "Simulator sessions are not running in this service"
+        ))
+    })
 }
 
 fn sim_error(error: anyhow::Error) -> ApiError {
-    ApiError::new(StatusCode::CONFLICT, "simulator_failed", format!("{error:#}"), "Read the message; run squircle sim --help.")
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "simulator_failed",
+        format!("{error:#}"),
+        "Read the message; run squircle sim --help.",
+    )
 }
 
 #[derive(Deserialize)]
@@ -1975,7 +2328,10 @@ async fn list_sims(
     let mut list = sims.list(query.thread.as_deref());
     // Every booted simulator and who holds it; without T3 the sessions still show.
     if let Some(pool) = state.pool.as_ref().filter(|_| query.simulators) {
-        list["simulators"] = pool.status(&sims.leases()).await.unwrap_or_else(|e| json!({"error": format!("{e:#}")}));
+        list["simulators"] = pool
+            .status(&sims.leases())
+            .await
+            .unwrap_or_else(|e| json!({"error": format!("{e:#}")}));
     }
     Ok(Json(success(list)))
 }
@@ -1992,8 +2348,16 @@ async fn cleanup_sims(
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
     let sims = sims(&state)?;
-    let pool = state.pool.clone().ok_or_else(|| sim_error(anyhow::anyhow!("The simulator pool is not running in this service")))?;
-    Ok(Json(success(pool.cleanup(&sims.leases(), request.dry_run).await.map_err(sim_error)?)))
+    let pool = state.pool.clone().ok_or_else(|| {
+        sim_error(anyhow::anyhow!(
+            "The simulator pool is not running in this service"
+        ))
+    })?;
+    Ok(Json(success(
+        pool.cleanup(&sims.leases(), request.dry_run)
+            .await
+            .map_err(sim_error)?,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -2007,7 +2371,10 @@ async fn start_sim(
     payload: std::result::Result<Json<StartSim>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
-    let started = sims(&state)?.start(&request.thread_id, request.device.as_deref()).await.map_err(sim_error)?;
+    let started = sims(&state)?
+        .start(&request.thread_id, request.device.as_deref())
+        .await
+        .map_err(sim_error)?;
     Ok(Json(success(started)))
 }
 
@@ -2024,37 +2391,65 @@ async fn stop_sim(
     let request = body(payload)?;
     let sims = sims(&state)?;
     // A thread in line for a simulator gives up its place.
-    let left = match request.thread_id.as_deref() { Some(thread) => sims.leave(thread).await.map_err(sim_error)?, None => false };
+    let left = match request.thread_id.as_deref() {
+        Some(thread) => sims.leave(thread).await.map_err(sim_error)?,
+        None => false,
+    };
     if left && !sims.running(request.thread_id.as_deref().unwrap_or_default()) {
-        return Ok(Json(success(json!({"left_queue": true, "next": "This thread is no longer waiting for a simulator."}))));
+        return Ok(Json(success(
+            json!({"left_queue": true, "next": "This thread is no longer waiting for a simulator."}),
+        )));
     }
     // Filing a long recording takes minutes. A caller that gives up first
     // must not cancel it halfway: the session would stay "filing" until the
     // service restarts.
-    let stop = tokio::spawn(async move { sims.stop(request.thread_id.as_deref(), request.id.as_deref()).await });
-    let session = stop.await.map_err(|e| sim_error(anyhow::anyhow!(e)))?.map_err(sim_error)?;
-    let next = if session.media_id.is_some() { "The recording now shows in this turn on the phone." } else { "No recording was saved; see error." };
+    let stop = tokio::spawn(async move {
+        sims.stop(request.thread_id.as_deref(), request.id.as_deref())
+            .await
+    });
+    let session = stop
+        .await
+        .map_err(|e| sim_error(anyhow::anyhow!(e)))?
+        .map_err(sim_error)?;
+    let next = if session.media_id.is_some() {
+        "The recording now shows in this turn on the phone."
+    } else {
+        "No recording was saved; see error."
+    };
     Ok(Json(success(json!({"session": session, "next": next}))))
 }
 
 async fn sim_devices(State(state): State<AppState>) -> ApiResult<Json<Value>> {
-    Ok(Json(success(sims(&state)?.devices().await.map_err(sim_error)?)))
+    Ok(Json(success(
+        sims(&state)?.devices().await.map_err(sim_error)?,
+    )))
 }
 
 // MARK: App agents
 
 fn agent_error(error: anyhow::Error) -> ApiError {
-    ApiError::new(StatusCode::CONFLICT, "agent_failed", format!("{error:#}"), "Read the message; run squircle agent --help or squircle thread --help.")
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "agent_failed",
+        format!("{error:#}"),
+        "Read the message; run squircle agent --help or squircle thread --help.",
+    )
 }
 
 fn agents(state: &AppState) -> ApiResult<Arc<Agents>> {
-    state.agents.clone().ok_or_else(|| agent_error(anyhow::anyhow!("App agents are not running in this service")))
+    state.agents.clone().ok_or_else(|| {
+        agent_error(anyhow::anyhow!(
+            "App agents are not running in this service"
+        ))
+    })
 }
 
 async fn list_agents(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let agents = agents(&state)?;
     // How agents and the phone's worker prompts invoke this service's CLI.
-    Ok(Json(success(json!({"agents": agents.list(), "t3": agents.status(), "cli": agents.cli()}))))
+    Ok(Json(success(
+        json!({"agents": agents.list(), "t3": agents.status(), "cli": agents.cli()}),
+    )))
 }
 
 #[derive(Deserialize)]
@@ -2066,7 +2461,12 @@ struct EnsureAgent {
     runtime_mode: Option<String>,
 }
 
-const RUNTIME_MODES: [&str; 4] = ["approval-required", "auto-accept-edits", "auto", "full-access"];
+const RUNTIME_MODES: [&str; 4] = [
+    "approval-required",
+    "auto-accept-edits",
+    "auto",
+    "full-access",
+];
 
 async fn ensure_agent(
     State(state): State<AppState>,
@@ -2076,10 +2476,18 @@ async fn ensure_agent(
     if let Some(mode) = &request.runtime_mode
         && !RUNTIME_MODES.contains(&mode.as_str())
     {
-        return Err(ApiError::bad(format!("runtime_mode must be one of {}", RUNTIME_MODES.join(", "))));
+        return Err(ApiError::bad(format!(
+            "runtime_mode must be one of {}",
+            RUNTIME_MODES.join(", ")
+        )));
     }
     let agent = agents(&state)?
-        .ensure(&request.project_id, request.message.as_deref(), request.model.as_deref(), request.runtime_mode.as_deref())
+        .ensure(
+            &request.project_id,
+            request.message.as_deref(),
+            request.model.as_deref(),
+            request.runtime_mode.as_deref(),
+        )
         .await
         .map_err(agent_error)?;
     Ok(Json(success(json!({"agent": agent}))))
@@ -2098,8 +2506,13 @@ async fn restart_agent(
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
     let result = agents(&state)?
-        .reset(request.project_id.as_deref(), request.thread_id.as_deref(), crate::agents::Reset::Restart)
-        .await.map_err(agent_error)?;
+        .reset(
+            request.project_id.as_deref(),
+            request.thread_id.as_deref(),
+            crate::agents::Reset::Restart,
+        )
+        .await
+        .map_err(agent_error)?;
     Ok(Json(success(result)))
 }
 
@@ -2109,8 +2522,15 @@ async fn fresh_agent(
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
     let result = agents(&state)?
-        .reset(request.project_id.as_deref(), request.thread_id.as_deref(), crate::agents::Reset::Fresh { note: request.handoff })
-        .await.map_err(agent_error)?;
+        .reset(
+            request.project_id.as_deref(),
+            request.thread_id.as_deref(),
+            crate::agents::Reset::Fresh {
+                note: request.handoff,
+            },
+        )
+        .await
+        .map_err(agent_error)?;
     Ok(Json(success(result)))
 }
 
@@ -2121,7 +2541,8 @@ async fn compact_agent(
     let request = body(payload)?;
     let result = agents(&state)?
         .compact(request.project_id.as_deref(), request.thread_id.as_deref())
-        .await.map_err(agent_error)?;
+        .await
+        .map_err(agent_error)?;
     Ok(Json(success(result)))
 }
 
@@ -2140,7 +2561,9 @@ async fn agent_context(
     query: std::result::Result<Query<ContextQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
-    Ok(Json(success(json!({"context": agents(&state)?.context(&query.cwd).await}))))
+    Ok(Json(success(
+        json!({"context": agents(&state)?.context(&query.cwd).await}),
+    )))
 }
 
 #[derive(Deserialize)]
@@ -2153,7 +2576,9 @@ async fn list_workers(
     query: std::result::Result<Query<WorkerQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
-    Ok(Json(success(json!({"workers": agents(&state)?.workers(query.coordinator.as_deref())}))))
+    Ok(Json(success(
+        json!({"workers": agents(&state)?.workers(query.coordinator.as_deref())}),
+    )))
 }
 
 #[derive(Deserialize)]
@@ -2181,18 +2606,35 @@ async fn spawn_worker(
         tasks_of(&state)?.get(task).map_err(ApiError::missing)?;
     }
     let worker = agents(&state)?
-        .spawn(&r.coordinator, &r.title, &r.branch, r.base.as_deref(), &r.prompt, r.provider.as_deref(), r.model.as_deref(), r.effort.as_deref(),
-               r.runtime_mode.as_deref())
+        .spawn(
+            &r.coordinator,
+            &r.title,
+            &r.branch,
+            r.base.as_deref(),
+            &r.prompt,
+            r.provider.as_deref(),
+            r.model.as_deref(),
+            r.effort.as_deref(),
+            r.runtime_mode.as_deref(),
+        )
         .await
         .map_err(agent_error)?;
     if let (Some(task), Some(id)) = (&r.task, worker["id"].as_str()) {
-        tasks_of(&state)?.link(task, Some(id), None, false).await.map_err(task_error)?;
+        tasks_of(&state)?
+            .link(task, Some(id), None, false)
+            .await
+            .map_err(task_error)?;
     }
     Ok(Json(success(worker)))
 }
 
-async fn read_worker(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
-    Ok(Json(success(agents(&state)?.read(&id).await.map_err(agent_error)?)))
+async fn read_worker(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(success(
+        agents(&state)?.read(&id).await.map_err(agent_error)?,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -2209,7 +2651,10 @@ async fn message_worker(
     if text.trim().is_empty() {
         return Err(ApiError::bad("Message text is empty"));
     }
-    agents(&state)?.message(&id, &text).await.map_err(agent_error)?;
+    agents(&state)?
+        .message(&id, &text)
+        .await
+        .map_err(agent_error)?;
     Ok(Json(success(json!({"sent": id}))))
 }
 
@@ -2219,7 +2664,10 @@ async fn answer_worker(
     payload: std::result::Result<Json<WorkerText>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let text = body(payload)?.text;
-    agents(&state)?.answer(&id, &text).await.map_err(agent_error)?;
+    agents(&state)?
+        .answer(&id, &text)
+        .await
+        .map_err(agent_error)?;
     Ok(Json(success(json!({"answered": id}))))
 }
 
@@ -2235,7 +2683,12 @@ async fn archive_worker(
     payload: std::result::Result<Json<ArchiveWorker>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let discard = body(payload)?.discard;
-    Ok(Json(success(agents(&state)?.archive(&id, discard).await.map_err(agent_error)?)))
+    Ok(Json(success(
+        agents(&state)?
+            .archive(&id, discard)
+            .await
+            .map_err(agent_error)?,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -2250,11 +2703,19 @@ async fn cleanup_workers(
     payload: std::result::Result<Json<CleanupWorkers>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
-    Ok(Json(success(agents(&state)?.cleanup(&request.coordinator, request.dry_run).await.map_err(agent_error)?)))
+    Ok(Json(success(
+        agents(&state)?
+            .cleanup(&request.coordinator, request.dry_run)
+            .await
+            .map_err(agent_error)?,
+    )))
 }
 
 fn push(state: &AppState) -> ApiResult<Arc<Push>> {
-    state.push.clone().ok_or_else(|| ApiError::internal("Notifications run only inside squircle serve"))
+    state
+        .push
+        .clone()
+        .ok_or_else(|| ApiError::internal("Notifications run only inside squircle serve"))
 }
 
 async fn push_status(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -2265,7 +2726,10 @@ async fn push_register(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::Registration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.register(body(payload)?).await.map_err(ApiError::bad)?;
+    push(&state)?
+        .register(body(payload)?)
+        .await
+        .map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
@@ -2273,7 +2737,10 @@ async fn push_activity(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::ActivityRegistration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.register_activity(body(payload)?).await.map_err(ApiError::bad)?;
+    push(&state)?
+        .register_activity(body(payload)?)
+        .await
+        .map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
@@ -2281,7 +2748,10 @@ async fn push_presence(
     State(state): State<AppState>,
     payload: std::result::Result<Json<crate::push::PresenceReport>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
-    push(&state)?.report_presence(body(payload)?).await.map_err(ApiError::bad)?;
+    push(&state)?
+        .report_presence(body(payload)?)
+        .await
+        .map_err(ApiError::bad)?;
     Ok(Json(success(json!({}))))
 }
 
@@ -2296,17 +2766,27 @@ async fn push_test(
     payload: std::result::Result<Json<PushTest>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
-    Ok(Json(success(push(&state)?.test(request.live_activity).await)))
+    Ok(Json(success(
+        push(&state)?.test(request.live_activity).await,
+    )))
 }
 
 // MARK: Tasks
 
 fn task_error(error: anyhow::Error) -> ApiError {
-    ApiError::new(StatusCode::BAD_REQUEST, "task_failed", format!("{error:#}"), "Read the message; run squircle task --help.")
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "task_failed",
+        format!("{error:#}"),
+        "Read the message; run squircle task --help.",
+    )
 }
 
 fn tasks_of(state: &AppState) -> ApiResult<Arc<Tasks>> {
-    state.tasks.clone().ok_or_else(|| task_error(anyhow::anyhow!("Tasks are not running in this service")))
+    state
+        .tasks
+        .clone()
+        .ok_or_else(|| task_error(anyhow::anyhow!("Tasks are not running in this service")))
 }
 
 /// What a task's linked workers and builds are doing, from memory only (the
@@ -2314,43 +2794,74 @@ fn tasks_of(state: &AppState) -> ApiResult<Arc<Tasks>> {
 /// too. A thread T3 hasn't sent, or a shell that isn't current, is no fact
 /// (`Missing`), never news.
 fn task_signals(state: &AppState, task: &tasks::Task) -> tasks::Signals {
-    use tasks::{BuildPhase, WorkerPhase};
     use crate::agents::Phase;
-    let workers = task.threads.iter().map(|id| {
-        // Only a current shell fact moves a task; stale or unknown is no fact.
-        let observed = state.agents.as_ref().and_then(|a| a.observe(id).current().flatten());
-        let phase = match observed.as_ref().map(|o| o.phase()) {
-            Some(Phase::NeedsYou) => WorkerPhase::NeedsYou,
-            Some(Phase::Working) => WorkerPhase::Working,
-            Some(Phase::Error) => WorkerPhase::Error,
-            Some(Phase::Done) => WorkerPhase::Done,
-            None => WorkerPhase::Missing,
-        };
-        tasks::WorkerSignal { thread: id.clone(), turn: observed.and_then(|o| o.turn), phase }
-    }).collect();
-    let builds = task.builds.iter().map(|id| {
-        let phase = match state.jobs.state(id) {
-            Some(BuildState::Queued) => BuildPhase::Queued,
-            Some(BuildState::Running) => BuildPhase::Running,
-            Some(BuildState::Succeeded) => BuildPhase::Succeeded,
-            Some(BuildState::Failed | BuildState::Cancelled | BuildState::Interrupted) => BuildPhase::Failed,
-            None => BuildPhase::Missing,
-        };
-        tasks::BuildSignal { build: id.clone(), phase }
-    }).collect();
-    tasks::Signals { revision: Some(task.revision), workers, builds }
+    use tasks::{BuildPhase, WorkerPhase};
+    let workers = task
+        .threads
+        .iter()
+        .map(|id| {
+            // Only a current shell fact moves a task; stale or unknown is no fact.
+            let observed = state
+                .agents
+                .as_ref()
+                .and_then(|a| a.observe(id).current().flatten());
+            let phase = match observed.as_ref().map(|o| o.phase()) {
+                Some(Phase::NeedsYou) => WorkerPhase::NeedsYou,
+                Some(Phase::Working) => WorkerPhase::Working,
+                Some(Phase::Error) => WorkerPhase::Error,
+                Some(Phase::Done) => WorkerPhase::Done,
+                None => WorkerPhase::Missing,
+            };
+            tasks::WorkerSignal {
+                thread: id.clone(),
+                turn: observed.and_then(|o| o.turn),
+                phase,
+            }
+        })
+        .collect();
+    let builds = task
+        .builds
+        .iter()
+        .map(|id| {
+            let phase = match state.jobs.state(id) {
+                Some(BuildState::Queued) => BuildPhase::Queued,
+                Some(BuildState::Running) => BuildPhase::Running,
+                Some(BuildState::Succeeded) => BuildPhase::Succeeded,
+                Some(BuildState::Failed | BuildState::Cancelled | BuildState::Interrupted) => {
+                    BuildPhase::Failed
+                }
+                None => BuildPhase::Missing,
+            };
+            tasks::BuildSignal {
+                build: id.clone(),
+                phase,
+            }
+        })
+        .collect();
+    tasks::Signals {
+        revision: Some(task.revision),
+        workers,
+        builds,
+    }
 }
 
 /// A task as the phone and the agent see it: linked threads and builds
 /// with their titles and states, and its media.
 fn task_view(state: &AppState, task: &tasks::Task) -> Value {
-    let threads: Vec<Value> = task.threads.iter().map(|id| {
-        let row = state.agents.as_ref().and_then(|a| a.thread_row(id));
-        let title = row.as_ref().and_then(|r| r["title"].as_str()).map(str::to_string)
-            .or_else(|| state.agents.as_ref().and_then(|a| a.worker_title(id)));
-        json!({"id": id, "title": title,
+    let threads: Vec<Value> = task
+        .threads
+        .iter()
+        .map(|id| {
+            let row = state.agents.as_ref().and_then(|a| a.thread_row(id));
+            let title = row
+                .as_ref()
+                .and_then(|r| r["title"].as_str())
+                .map(str::to_string)
+                .or_else(|| state.agents.as_ref().and_then(|a| a.worker_title(id)));
+            json!({"id": id, "title": title,
                "state": row.as_ref().map_or("missing", crate::agents::worker_state)})
-    }).collect();
+        })
+        .collect();
     let builds: Vec<Value> = task.builds.iter().map(|id| match state.jobs.get(id) {
         Some(view) => {
             let output = view.job.output();
@@ -2371,10 +2882,19 @@ fn task_view(state: &AppState, task: &tasks::Task) -> Value {
 }
 
 /// The app a request is about: a T3 project ID, or any of its threads.
-fn task_project(state: &AppState, project: Option<String>, thread: Option<&str>) -> ApiResult<String> {
-    if let Some(project) = project { return Ok(project); }
-    let thread = thread.ok_or_else(|| ApiError::bad("Pass --thread (your thread ID) or --project"))?;
-    agents(state)?.project_of(thread).ok_or_else(|| ApiError::bad(format!("T3 has no thread {thread} in any project")))
+fn task_project(
+    state: &AppState,
+    project: Option<String>,
+    thread: Option<&str>,
+) -> ApiResult<String> {
+    if let Some(project) = project {
+        return Ok(project);
+    }
+    let thread =
+        thread.ok_or_else(|| ApiError::bad("Pass --thread (your thread ID) or --project"))?;
+    agents(state)?
+        .project_of(thread)
+        .ok_or_else(|| ApiError::bad(format!("T3 has no thread {thread} in any project")))
 }
 
 #[derive(Deserialize)]
@@ -2401,13 +2921,19 @@ async fn list_tasks(
     if !(1..=100).contains(&limit) {
         return Err(ApiError::bad("history_limit must be between 1 and 100"));
     }
-    let before = query.history_before.as_deref().map(HistoryCursor::parse).transpose().map_err(ApiError::bad)?;
+    let before = query
+        .history_before
+        .as_deref()
+        .map(HistoryCursor::parse)
+        .transpose()
+        .map_err(ApiError::bad)?;
     let project = task_project(&state, query.project, query.thread.as_deref())?;
     let tasks = tasks_of(&state)?;
     let view = tokio::task::spawn_blocking(move || {
         let mut all = tasks.list(&project);
         all.sort_by(|a, b| a.order.total_cmp(&b.order));
-        let (history, active): (Vec<_>, Vec<_>) = all.into_iter().partition(|t| t.archived_at.is_some());
+        let (history, active): (Vec<_>, Vec<_>) =
+            all.into_iter().partition(|t| t.archived_at.is_some());
         let (page, next) = history_page(history, HistoryCursor::of, before.as_ref(), limit);
         json!({
             "project_id": project,
@@ -2430,16 +2956,25 @@ struct HistoryCursor {
 
 impl HistoryCursor {
     fn of(task: &tasks::Task) -> Self {
-        Self { archived_at: task.archived_at.unwrap_or_default(), id: task.id.clone() }
+        Self {
+            archived_at: task.archived_at.unwrap_or_default(),
+            id: task.id.clone(),
+        }
     }
     fn parse(value: &str) -> std::result::Result<Self, String> {
         let invalid = || format!("Invalid history cursor {value:?}");
         let (at, id) = value.split_once('.').ok_or_else(invalid)?;
-        Ok(Self { archived_at: at.parse().map_err(|_| invalid())?, id: id.to_owned() })
+        Ok(Self {
+            archived_at: at.parse().map_err(|_| invalid())?,
+            id: id.to_owned(),
+        })
     }
     /// Newest first: later archive time, then higher ID.
     fn key(&self) -> (std::cmp::Reverse<u64>, std::cmp::Reverse<&str>) {
-        (std::cmp::Reverse(self.archived_at), std::cmp::Reverse(self.id.as_str()))
+        (
+            std::cmp::Reverse(self.archived_at),
+            std::cmp::Reverse(self.id.as_str()),
+        )
     }
 }
 
@@ -2457,15 +2992,21 @@ fn history_page<T>(
     before: Option<&HistoryCursor>,
     limit: usize,
 ) -> (Vec<T>, Option<HistoryCursor>) {
-    let mut history: Vec<(HistoryCursor, T)> = history.into_iter().map(|t| (position(&t), t)).collect();
+    let mut history: Vec<(HistoryCursor, T)> =
+        history.into_iter().map(|t| (position(&t), t)).collect();
     history.sort_by(|a, b| a.0.key().cmp(&b.0.key()));
-    let mut page: Vec<(HistoryCursor, T)> = history.into_iter()
+    let mut page: Vec<(HistoryCursor, T)> = history
+        .into_iter()
         .filter(|(at, _)| before.is_none_or(|b| at.key() > b.key()))
         .take(limit + 1)
         .collect();
     let more = page.len() > limit;
     page.truncate(limit);
-    let next = if more { page.last().map(|(at, _)| at.clone()) } else { None };
+    let next = if more {
+        page.last().map(|(at, _)| at.clone())
+    } else {
+        None
+    };
     (page.into_iter().map(|(_, t)| t).collect(), next)
 }
 
@@ -2490,16 +3031,31 @@ async fn add_task(
         (Some(thread), Some(agents)) if !r.by_user => agents.source_message(thread).await,
         _ => None,
     };
-    let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
+    let by = if r.by_user {
+        tasks::By::User
+    } else {
+        tasks::By::Agent
+    };
     let task = tasks_of(&state)?
-        .add(&project, &r.ask, r.status, r.note.as_deref(), by, source, vec![])
+        .add(
+            &project,
+            &r.ask,
+            r.status,
+            r.note.as_deref(),
+            by,
+            source,
+            vec![],
+        )
         .await
         .map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task),
         "next": "Link its workers and builds as you start them; set its status when it changes."}))))
 }
 
-async fn show_task(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<Value>> {
+async fn show_task(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
     let task = tasks_of(&state)?.get(&id).map_err(ApiError::missing)?;
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
 }
@@ -2521,8 +3077,15 @@ async fn update_task(
     let tasks = tasks_of(&state)?;
     let current = tasks.get(&id).map_err(ApiError::missing)?;
     let observed = task_signals(&state, &current);
-    let by = if r.by_user { tasks::By::User } else { tasks::By::Agent };
-    let task = tasks.update(&id, r.update, by, Some(observed)).await.map_err(task_error)?;
+    let by = if r.by_user {
+        tasks::By::User
+    } else {
+        tasks::By::Agent
+    };
+    let task = tasks
+        .update(&id, r.update, by, Some(observed))
+        .await
+        .map_err(task_error)?;
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
 }
 
@@ -2540,13 +3103,23 @@ async fn link_task(
     payload: std::result::Result<Json<LinkTask>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
-    let task = tasks_of(&state)?.link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove).await.map_err(task_error)?;
+    let task = tasks_of(&state)?
+        .link(&id, r.thread.as_deref(), r.build.as_deref(), r.remove)
+        .await
+        .map_err(task_error)?;
     // A build that finished before it was linked (a fast failure) still
     // reaches the agent; one that finished long ago is no news.
-    if let Some(view) = r.build.as_deref().filter(|_| !r.remove).and_then(|b| state.jobs.get(b))
-        && view.job.state().terminal() && now().saturating_sub(view.job.updated_at) < 600
+    if let Some(view) = r
+        .build
+        .as_deref()
+        .filter(|_| !r.remove)
+        .and_then(|b| state.jobs.get(b))
+        && view.job.state().terminal()
+        && now().saturating_sub(view.job.updated_at) < 600
     {
-        let app = apps::list(&state.files).ok().and_then(|apps| apps::owner_of(&apps, &view.job).cloned());
+        let app = apps::list(&state.files)
+            .ok()
+            .and_then(|apps| apps::owner_of(&apps, &view.job).cloned());
         tell_agent(&state, &view.job, app.as_ref()).await;
     }
     Ok(Json(success(json!({"task": task_view(&state, &task)}))))
@@ -2565,9 +3138,14 @@ async fn attach_task(
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
     let tasks = tasks_of(&state)?;
-    let media = tasks.attach(&id, &r.file, r.caption.as_deref()).await.map_err(task_error)?;
-    Ok(Json(success(json!({"id": media.id, "task_id": id, "kind": media.kind, "caption": media.caption,
-        "next": "It shows on the task on the phone within a few seconds."}))))
+    let media = tasks
+        .attach(&id, &r.file, r.caption.as_deref())
+        .await
+        .map_err(task_error)?;
+    Ok(Json(success(
+        json!({"id": media.id, "task_id": id, "kind": media.kind, "caption": media.caption,
+        "next": "It shows on the task on the phone within a few seconds."}),
+    )))
 }
 
 async fn task_media_file(
@@ -2592,8 +3170,9 @@ async fn task_media_file(
         Body::from_stream(ReaderStream::new(file)),
     )
         .into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_LENGTH, metadata.len().to_string().parse().unwrap());
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        metadata.len().to_string().parse().unwrap(),
+    );
     Ok(response)
 }
