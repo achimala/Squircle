@@ -1,0 +1,24 @@
+# Secret scan for this repository: gitleaks' default rules plus personal
+# paths. Run before publishing and, optionally, as a pre-commit check:
+#   gitleaks git --config .gitleaks.toml -v                  # whole history
+#   gitleaks git --config .gitleaks.toml --pre-commit --staged
+title = "Squircle"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "home-directory-path"
+description = "Absolute macOS home-directory path (identifies a machine and user)"
+regex = '''/Users/[a-z][a-z0-9._-]+/'''
+
+[allowlist]
+description = "Placeholders and generated test keys, not secrets"
+regexes = [
+  '''YOUR[_-][A-Z_-]+''',
+  '''X{10}''',
+]
+paths = [
+  # The review quotes what was found, with values elided.
+  '''docs/oss-review\.md''',
+]

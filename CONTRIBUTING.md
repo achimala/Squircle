@@ -39,6 +39,10 @@ The app's unit tests run on a simulator you started through Squircle
 There is no CI yet, and `cargo fmt --check` doesn't pass on the whole tree
 yet; format the files you touch.
 
+If you have [gitleaks](https://github.com/gitleaks/gitleaks), it can check
+staged changes for secrets and personal paths with the repository's config:
+`gitleaks git --config .gitleaks.toml --pre-commit --staged`.
+
 For UI changes, run the app and look at it: describe or attach what you saw.
 Motion counts as checked only when you've looked at it frame by frame in
 rendered output. Compiling is not visual verification.

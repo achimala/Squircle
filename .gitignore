@@ -6,3 +6,13 @@
 .DS_Store
 *.xcuserstate
 xcuserdata/
+
+# Signing material, credentials and build products: never commit these.
+*.p8
+*.p12
+*.pem
+*.mobileprovision
+*.ipa
+*.xcarchive/
+*.dSYM/
+client*.json
