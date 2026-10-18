@@ -18,10 +18,23 @@ in the same place.
   The panel opens with the recording flying into the field (a screen
   recording from the screen, a performance one from the bubble).
 - Screen recording (`ScreenRecorder`): the app's own windows below the overlay
-  drawn with `drawHierarchy` 30 fps (15 if drawing costs over 12 ms), finger
-  dots, H.264 1.8 Mbit/s, long side 1280 px: no overlay, no system prompt.
-  Video/Metal layers may show stale or blank. Simulator check: 11 s → 435 KB,
-  588×1280, overlay absent.
+  at 30 fps, finger dots, H.264 1.8 Mbit/s, long side 1280 px: no overlay, no
+  system prompt. Simulator check: 11 s → 435 KB, 588×1280, overlay absent.
+  **2026-10-18 (user: the app drops frames while recording):** frames used to
+  come from `drawHierarchy` on the main thread, measured at 55 ms a frame in
+  the simulator (3× screen), the app falling from 60 to 15 fps.
+  The render-server snapshot under it was ~8 ms; the rest was CoreGraphics
+  converting the full-size snapshot (8-bit extended-range sRGB, which no
+  8-bit context matches) pixel by pixel and resampling it. Now each window is
+  rendered by QuartzCore's private `CARenderServerSnapshot` (layer mode, the
+  call UIKit makes, keys from QuartzCore's own `kCASnapshot*` constants)
+  straight into the encoder's IOSurface-backed buffer at recording scale, in
+  an actor off the main thread; windows above the bottom one go to a scratch
+  surface and are blended with vImage (each render clears its destination).
+  Measured: main thread 0.04 ms a frame, 60 fps, no late frames while
+  recording; 7–9 ms a frame off the main thread for two windows; 30 fps
+  output, overlay absent. If the private call is missing the recorder does
+  not start. Not yet measured on the phone.
 - Performance (`PerfRecorder`, `MainThreadSampler`): display-link frame times
   (hitch = frame more than 1.5 periods apart), main-thread stack every ~1 ms
   (suspend, `thread_get_state`, frame-pointer walk bounded to the main
