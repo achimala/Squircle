@@ -81,26 +81,23 @@ pub async fn pair(root: &Path, url: &str, pairing_token: &str) -> Result<T3Confi
 
 /// ISO 8601 UTC with milliseconds, as T3 commands expect.
 pub fn iso_now() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}.{:03}Z", iso_seconds(now.as_secs() as i64), now.subsec_millis())
+    time::OffsetDateTime::now_utc()
+        .format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"))
+        .unwrap_or_default()
 }
 
 /// `YYYY-MM-DDTHH:MM:SS` (UTC) for Unix seconds.
-pub fn iso_seconds(secs: i64) -> String {
-    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+pub fn iso_utc(secs: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(secs).unwrap_or(time::OffsetDateTime::UNIX_EPOCH)
+        .format(time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]"))
+        .unwrap_or_default()
+}
+
+/// An RFC 3339 time as T3 writes it (`2026-10-14T22:23:14.016Z`) as Unix
+/// seconds; `None` for anything that isn't a real date and time.
+pub fn iso_parse(text: &str) -> Option<f64> {
+    let at = time::OffsetDateTime::parse(text, &time::format_description::well_known::Rfc3339).ok()?;
+    Some(at.unix_timestamp_nanos() as f64 / 1e9)
 }
 
 /// How a request ended that did not succeed.
@@ -512,6 +509,15 @@ mod tests {
         silence: Duration::from_millis(100),
         write: Duration::from_millis(100),
     };
+
+    #[test]
+    fn iso_times_round_trip_and_reject_impossible_dates() {
+        assert_eq!(iso_parse("2026-10-14T22:23:14.016Z").map(|s| s.round()), Some(1_792_016_594.0));
+        assert_eq!(iso_parse("2026-10-15T00:23:14+02:00").map(|s| s as i64), Some(1_792_016_594));
+        assert_eq!(iso_utc(1_792_016_594), "2026-10-14T22:23:14");
+        assert_eq!(iso_parse("2026-02-30T00:00:00Z"), None);
+        assert_eq!(iso_parse("2026-13-01T00:00:00Z"), None);
+    }
 
     fn config() -> T3Config {
         T3Config { url: "http://t3.test".into(), token: String::new(), expires_at: None }

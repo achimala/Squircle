@@ -2001,7 +2001,7 @@ impl Agents {
             latest("created_at"), latest("json_extract(payload_json,'$.usedTokens')")), crate::t3steps::DETAIL_READ).await?;
         let row = rows.first().context("no reading")?;
         let (Some(reading), Some(used), Some(last)) = (row["reading_at"].as_str(), row["used"].as_u64(),
-            row["last_at"].as_str().and_then(crate::simpool::iso_seconds)) else { return Ok(()) };
+            row["last_at"].as_str().and_then(crate::t3::iso_parse)) else { return Ok(()) };
         let idle = (crate::model::now() as f64 - last).max(0.0) as u64;
         let wanted = config.decide(used, idle, crate::upkeep::local_hour())
             .map(|decision| Reading { origin: Origin::Automatic, decision, at: Some(reading.into()), tokens: used });

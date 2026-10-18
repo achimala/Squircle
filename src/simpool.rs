@@ -165,7 +165,7 @@ fn merge_activity(saved: &mut Saved, rows: &[Activity], devices: &[Device]) {
     };
     for row in rows {
         let used = parse_use(&row.command, &row.output);
-        let at = iso_seconds(&row.created_at).unwrap_or_else(now);
+        let at = crate::t3::iso_parse(&row.created_at).unwrap_or_else(now);
         for udid in used.created.iter().cloned().chain(used.created_names.iter().filter_map(|n| by_name(n))) {
             let entry = saved.known.entry(udid).or_default();
             entry.created_by.get_or_insert_with(|| row.thread.clone());
@@ -536,23 +536,6 @@ impl Pool {
     }
 }
 
-/// T3's ISO-8601 UTC times (`2026-10-14T22:23:14.016Z`) as Unix seconds.
-pub(crate) fn iso_seconds(text: &str) -> Option<f64> {
-    let (date, time) = text.trim_end_matches('Z').split_once('T')?;
-    let mut d = date.split('-').map(|p| p.parse::<i64>().ok());
-    let (y, m, day) = (d.next()??, d.next()??, d.next()??);
-    let mut t = time.split(':');
-    let (h, min, s) = (t.next()?.parse::<i64>().ok()?, t.next()?.parse::<i64>().ok()?, t.next()?.parse::<f64>().ok()?);
-    // Days from civil (Howard Hinnant).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    Some((days * 86400 + h * 3600 + min * 60) as f64 + s)
-}
-
 /// The real simctl and ps.
 pub struct Xcrun;
 
@@ -673,7 +656,6 @@ mod tests {
         assert!(again.booted.is_empty() && again.touched.len() == 1);
         // Listing, reading or recording is not a use; nor is the literal "booted".
         assert_eq!(parse_use("xcrun simctl list devices; xcrun simctl io booted screenshot /tmp/a.png; simctl boot booted", "x"), Use::default());
-        assert_eq!(iso_seconds("2026-10-14T22:23:14.016Z").map(|s| s.round()), Some(1_792_016_594.0));
     }
 
     #[derive(Default)]

@@ -230,7 +230,11 @@ pub fn snippet(text: &str, terms: &[String], width: usize) -> String {
 /// `7d`, `12h`, `30m` ago or a `YYYY-MM-DD` date, as Unix seconds.
 pub fn since(text: &str, now: i64) -> Result<i64> {
     let text = text.trim();
-    if let Some(at) = crate::simpool::iso_seconds(&format!("{text}T00:00:00Z")) { return Ok(at as i64); }
+    if text.contains('-') {
+        let date = time::Date::parse(text, time::macros::format_description!("[year]-[month]-[day]"))
+            .with_context(|| format!("--since {text} is not a real YYYY-MM-DD date"))?;
+        return Ok(date.midnight().assume_utc().unix_timestamp());
+    }
     let (number, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit()).context("--since takes 7d, 12h, 30m or YYYY-MM-DD")?);
     let number: i64 = number.parse().context("--since takes 7d, 12h, 30m or YYYY-MM-DD")?;
     let seconds = match unit { "d" => 86400, "h" => 3600, "m" => 60, "w" => 7 * 86400, _ => bail!("--since takes 7d, 12h, 30m or YYYY-MM-DD") };
@@ -243,12 +247,12 @@ pub fn now() -> i64 {
 
 /// `2026-10-14 22:23` (UTC) for display.
 pub fn when(at: i64) -> String {
-    let iso = crate::t3::iso_seconds(at);
+    let iso = crate::t3::iso_utc(at);
     iso[..16].replace('T', " ")
 }
 
 fn t3_time(text: &str) -> Option<i64> {
-    crate::simpool::iso_seconds(text).map(|s| s as i64)
+    crate::t3::iso_parse(text).map(|s| s as i64)
 }
 
 fn sql_like(column: &str, terms: &[String]) -> String {
@@ -265,7 +269,7 @@ async fn gather(root: &Path, scope: &Scope, terms: &[String], kinds: &[Kind], af
     let mut unavailable = Vec::new();
     let project = &scope.project_id;
     ensure!(valid(project, &[]), "Invalid project ID");
-    let after_iso = after.map(|a| format!("{}Z", crate::t3::iso_seconds(a)));
+    let after_iso = after.map(|a| format!("{}Z", crate::t3::iso_utc(a)));
     let after_sql = |column: &str| after_iso.as_ref().map_or(String::new(), |a| format!(" and {column} >= '{a}'"));
     let mut parts = Vec::new();
     if kinds.contains(&Kind::Message) {
@@ -649,6 +653,7 @@ mod tests {
         assert_eq!(since("2d", 1_000_000).unwrap(), 1_000_000 - 172_800);
         assert_eq!(since("1970-01-02", 0).unwrap(), 86400);
         assert!(since("soon", 0).is_err());
+        assert!(since("2026-02-30", 0).is_err() && since("2026-13-01", 0).is_err());
         assert_eq!(when(86400 + 3661), "1970-01-02 01:01");
     }
 }
