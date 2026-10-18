@@ -1,11 +1,20 @@
 # Reinvention audit (2026-10-18)
 
-**Status: proposal; the service items are done.** Items 2, 3, 4, 5, 11, 12
+**Status: proposal; the service and app items are done.** Items 2, 3, 4, 5, 11, 12
 and the `gzip;q=0` bug were fixed on 2026-10-18 (branch
 `service-reinvention-fixes`): `time` for dates, `src/git.rs` on
 `run_bounded`, `run_bounded_with_input` for perf, std `File::try_lock`,
-`store::write_private`/`publish_private`, and `Snapshot::wait_for`. Item 21
-still waits on the user. The rest of this page is the audit as written. It covers the
+`store::write_private`/`publish_private`, and `Snapshot::wait_for`. The app and
+overlay items 1, 6–10, 14–16, 18 and 20 (and the `BoundedCache` copy and
+fallback-UUID side notes) were done on 2026-10-18 (branch
+`app-reinvention-fixes`): the diff parser follows each hunk's line counts,
+both line diffs use `difference(from:)`, T3 payloads are `JSONValue`
+literals encoded once (`JSONValue.from`/`.foundation` are gone), one reply
+`Envelope` in `SquircleClient`, `ISODate.format`, `Elapsed` on
+`Duration.formatted`, ImageIO `Downsample` for thumbnails, shared helpers,
+and the dead code here and in [oss-review](oss-review.md) D1–D6 deleted.
+Unit tests pass; the diff viewer and a picture send were checked in the
+simulator. Items 22–25 stay optional. Item 21 still waits on the user. The rest of this page is the audit as written. It covers the
 Rust service/CLI (`src/`), the iPhone app, overlay and widgets
 (`app/Squircle`), and `scripts/`, looking for hand-written code that redoes
 what the platform or a maintained package already does well. Markdown parsing
