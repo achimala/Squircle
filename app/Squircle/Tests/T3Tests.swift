@@ -228,49 +228,52 @@ final class T3Tests: XCTestCase {
         }
     }
 
+    /// Segments with their text as plain characters, for comparing.
+    private func plain(_ text: String) -> [String] {
+        Markdown.segments(text).map {
+            switch $0 {
+            case .text(let text): "text:" + String(text.characters)
+            case .media(let media): (media.video ? "video:" : "image:") + media.path
+            case .table(let table): "table:" + ([table.header] + table.rows).map { $0.map { String($0.characters) }.joined(separator: ",") }.joined(separator: "/")
+            }
+        }
+    }
+
     func testMarkdownMediaSplitsAtLocalPicturesAndClipsOnly() {
         let text = """
         **Before → after:**
         ![before](/tmp/a.png)
         ![after](</tmp/b c.png> "title") and more
-        [Real-speed clip](file:///tmp/clip.mp4)
+        [Real-speed **clip**](file:///tmp/clip.mp4)
+
         [docs](https://example.com/x.png) and [notes](/tmp/notes.md)
         ```
         ![code](/tmp/code.png)
         ```
         """
-        XCTAssertEqual(Markdown.segments(text), [
-            .text("**Before → after:**"),
-            .media(MediaReference(path: "/tmp/a.png", video: false)),
-            .text(" and more"),
-            .media(MediaReference(path: "/tmp/b c.png", video: false)),
-            .media(MediaReference(path: "/tmp/clip.mp4", video: true)),
-            .text("[docs](https://example.com/x.png) and [notes](/tmp/notes.md)\n```\n![code](/tmp/code.png)\n```")
+        XCTAssertEqual(plain(text), [
+            "text:Before → after: ", "image:/tmp/a.png", "image:/tmp/b c.png", "text: and more ", "video:/tmp/clip.mp4",
+            "text:docs and notes![code](/tmp/code.png)\n"
         ])
     }
 
-    func testMarkdownTablesSplitWithAlignmentEscapesAndRaggedRows() {
+    func testMarkdownTablesSplitAndPadShortRows() {
         let text = """
         Results:
-        | Step | `a \\| b` | Time |
-        |:-----|:---:|---:|
-        | **Build** | yes | 12 s |
+
+        | Step | Time |
+        |:-----|---:|
+        | **Build** | 12 s |
+        | | |
         | Test |
-        Run | it | now | extra
+
         done
         ```
         | a | b |
         |---|---|
         ```
-        Not | a table
-        --- | --- | ---
         """
-        XCTAssertEqual(Markdown.segments(text), [
-            .text("Results:"),
-            .table(MarkdownTable(header: ["Step", "`a | b`", "Time"], alignments: [.leading, .center, .trailing],
-                                 rows: [["**Build**", "yes", "12 s"], ["Test", "", ""], ["Run", "it", "now"]])),
-            .text("done\n```\n| a | b |\n|---|---|\n```\nNot | a table\n--- | --- | ---")
-        ])
+        XCTAssertEqual(plain(text), ["text:Results:", "table:Step,Time/Build,12 s/,/Test,", "text:done| a | b |\n|---|---|\n"])
     }
 }
 

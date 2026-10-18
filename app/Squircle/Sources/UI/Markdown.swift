@@ -1,106 +1,134 @@
 import UIKit
 
-/// The subset of Markdown coding agents actually write: paragraphs, headings,
-/// lists, fenced code, tables, and inline emphasis, code and links.
+/// Markdown as agents write it, parsed by Foundation (CommonMark with GitHub
+/// tables) and drawn in the app's type. Every line the agent wrote stays a
+/// line: a single newline inside a paragraph breaks it, as it does on GitHub
+/// comments, because agents rely on that.
 enum Markdown {
+    static func parse(_ text: String) -> AttributedString {
+        let options = AttributedString.MarkdownParsingOptions(allowsExtendedAttributes: false, interpretedSyntax: .full,
+                                                              failurePolicy: .returnPartiallyParsedIfPossible)
+        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+    }
+
     static func render(_ text: String, font: UIFont, color: UIColor) -> NSAttributedString {
+        render(parse(text), font: font, color: color)
+    }
+
+    /// Blocks one after another; a blank line's worth of room between them,
+    /// except before a list, between a table's rows and after a heading.
+    static func render(_ markdown: AttributedString, font: UIFont, color: UIColor) -> NSAttributedString {
         let output = NSMutableAttributedString()
         let mono = monospaced(for: font)
-        var inCode = false
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
-        for (index, raw) in lines.enumerated() {
-            let trimmed = raw.trimmingCharacters(in: .whitespaces)
-            let line: NSAttributedString
-            if trimmed.hasPrefix("```") {
-                inCode.toggle()
-                continue
-            } else if inCode || (trimmed.hasPrefix("|") && trimmed.hasSuffix("|")) {
-                let style = NSMutableParagraphStyle()
-                style.firstLineHeadIndent = inCode ? 12 : 0
-                style.headIndent = inCode ? 12 : 0
-                style.lineBreakMode = inCode ? .byCharWrapping : .byWordWrapping
-                line = NSAttributedString(string: raw, attributes: [
-                    .font: mono, .foregroundColor: inCode ? color : UIColor.secondaryLabel, .paragraphStyle: style
-                ])
-            } else if trimmed.isEmpty {
-                // A blank line between paragraphs: room to breathe.
-                line = NSAttributedString(string: "", attributes: [.font: font.withSize(font.pointSize * 0.75)])
-            } else {
-                line = paragraph(raw, font: font, mono: mono, color: color)
+        var previous: [PresentationIntent.IntentType] = []
+        var marked = Set<Int>()
+        for (intent, range) in markdown.runs[\.presentationIntent] {
+            let blocks = intent?.components ?? []
+            if output.length > 0 {
+                let last = output.attributes(at: output.length - 1, effectiveRange: nil)
+                if let row = row(of: blocks), row == Self.row(of: previous) {
+                    output.append(NSAttributedString(string: "\t", attributes: last))
+                } else {
+                    output.append(NSAttributedString(string: "\n", attributes: last))
+                    // A list hangs from the line that introduces it.
+                    let header = previous.first.map { if case .header = $0.kind { true } else { false } } ?? false
+                    if !header, !blocks.contains(where: isList), table(of: blocks) == nil || table(of: blocks) != table(of: previous) {
+                        output.append(NSAttributedString(string: "\n", attributes: [.font: font.withSize(font.pointSize * 0.45)]))
+                    }
+                }
             }
-            output.append(line)
-            if index < lines.count - 1 {
-                output.append(NSAttributedString(string: "\n", attributes: line.length > 0
-                    ? line.attributes(at: line.length - 1, effectiveRange: nil)
-                    : [.font: font.withSize(font.pointSize * 0.45)]))
-            }
+            output.append(block(markdown[range], blocks, marked: &marked, font: font, mono: mono, color: color))
+            previous = blocks
         }
-        // Agents end messages with newlines; a trailing blank line is only height.
-        while output.string.hasSuffix("\n") { output.deleteCharacters(in: NSRange(location: output.length - 1, length: 1)) }
+        // Agents end messages with newlines, and a piece cut at a picture
+        // can start with one; either is only height.
+        while output.string.last?.isNewline == true { output.deleteCharacters(in: NSRange(location: output.length - 1, length: 1)) }
+        while output.string.first?.isNewline == true { output.deleteCharacters(in: NSRange(location: 0, length: 1)) }
         return output
     }
 
-    private static func paragraph(_ raw: String, font: UIFont, mono: UIFont, color: UIColor) -> NSAttributedString {
-        var text = Substring(raw)
-        let indent = CGFloat(text.prefix { $0 == " " }.count) * 5
-        text = text.drop { $0 == " " }
-        var base = font
-        var prefix = ""
-        var hanging: CGFloat = 0
-        if text.hasPrefix("#") {
-            let level = text.prefix { $0 == "#" }.count
-            let rest = text.dropFirst(level)
-            if level <= 6, rest.hasPrefix(" ") {
-                text = rest.dropFirst()
-                base = bold(font.withSize(font.pointSize + (level <= 2 ? 3 : 1)))
+    /// One paragraph, heading, code block, quote or table cell.
+    private static func block(_ text: AttributedSubstring, _ blocks: [PresentationIntent.IntentType], marked: inout Set<Int>,
+                              font: UIFont, mono: UIFont, color: UIColor) -> NSAttributedString {
+        var indent: CGFloat = 0, hanging: CGFloat = 0, prefix = "", color = color
+        // Each list it nests in indents it a little; its own item shows the
+        // marker on its first block, and later blocks line up with the text.
+        let items = blocks.indices.filter { if case .listItem = blocks[$0].kind { true } else { false } }
+        if let index = items.first, case .listItem(let ordinal) = blocks[index].kind {
+            let ordered = index + 1 < blocks.count && blocks[index + 1].kind == .orderedList
+            let width: CGFloat = ordered ? 24 : 16
+            indent = CGFloat(items.count - 1) * 10
+            if marked.insert(blocks[index].identity).inserted {
+                prefix = ordered ? "\(ordinal).\t" : "•\t"
+                hanging = width
+            } else {
+                indent += width
             }
-        } else if text.hasPrefix("- ") || text.hasPrefix("* ") || text.hasPrefix("• ") {
-            text = text.dropFirst(2)
-            prefix = "•\t"
-            hanging = 16
-        } else if let dot = text.firstIndex(of: "."), text[..<dot].count <= 3, !text[..<dot].isEmpty,
-                  text[..<dot].allSatisfy(\.isNumber), text[text.index(after: dot)...].hasPrefix(" ") {
-            prefix = String(text[...dot]) + "\t"
-            text = text[text.index(dot, offsetBy: 2)...]
-            hanging = 24
         }
+        if blocks.contains(where: { $0.kind == .blockQuote }) { indent += 12; color = .secondaryLabel }
         let style = NSMutableParagraphStyle()
+        switch blocks.first?.kind {
+        case .codeBlock?:
+            style.firstLineHeadIndent = indent + 12
+            style.headIndent = indent + 12
+            style.lineBreakMode = .byCharWrapping
+            var code = String(text.characters)
+            while code.last?.isNewline == true { code.removeLast() }
+            return NSAttributedString(string: code, attributes: [.font: mono, .foregroundColor: color, .paragraphStyle: style])
+        case .tableCell?:
+            let header = blocks.contains { $0.kind == .tableHeaderRow }
+            return inline(text, font: header ? bold(font) : font, mono: mono, color: .secondaryLabel)
+        default:
+            break
+        }
+        var base = font
+        if case .header(let level)? = blocks.first?.kind { base = bold(font.withSize(font.pointSize + (level <= 2 ? 3 : 1))) }
+        if blocks.first?.kind == .thematicBreak { color = .tertiaryLabel }
         style.firstLineHeadIndent = indent
         style.headIndent = indent + hanging
         style.lineSpacing = 3
         // List items sit closer together than paragraphs do.
-        style.paragraphSpacing = hanging > 0 ? 4 : font.pointSize * 0.35
+        style.paragraphSpacing = items.isEmpty ? font.pointSize * 0.35 : 4
         if hanging > 0 { style.tabStops = [NSTextTab(textAlignment: .left, location: indent + hanging)] }
         let result = NSMutableAttributedString(string: prefix, attributes: [.font: base, .foregroundColor: UIColor.secondaryLabel])
-        result.append(inline(String(text), font: base, mono: mono, color: color))
+        // A new line inside a list item or quote wraps under its text, not
+        // its marker.
+        result.append(inline(text, font: base, mono: mono, color: color, lineBreak: indent + hanging > 0 ? "\u{2028}" : "\n"))
         result.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: result.length))
         return result
     }
 
-    /// Emphasis, code and links within one line of text.
-    static func inline(_ text: String, font base: UIFont, mono: UIFont, color: UIColor) -> NSAttributedString {
+    private static func isList(_ block: PresentationIntent.IntentType) -> Bool {
+        switch block.kind { case .orderedList, .unorderedList: true; default: false }
+    }
+
+    private static func table(of blocks: [PresentationIntent.IntentType]) -> Int? {
+        blocks.first { if case .table = $0.kind { true } else { false } }?.identity
+    }
+
+    private static func row(of blocks: [PresentationIntent.IntentType]) -> Int? {
+        blocks.first { switch $0.kind { case .tableRow, .tableHeaderRow: true; default: false } }?.identity
+    }
+
+    /// Emphasis, code and links; line breaks become `lineBreak`.
+    static func inline(_ text: AttributedSubstring, font base: UIFont, mono: UIFont, color: UIColor,
+                       lineBreak: String = "\n") -> NSAttributedString {
         let result = NSMutableAttributedString()
-        let options = AttributedString.MarkdownParsingOptions(allowsExtendedAttributes: false,
-                                                              interpretedSyntax: .inlineOnlyPreservingWhitespace,
-                                                              failurePolicy: .returnPartiallyParsedIfPossible)
-        if let parsed = try? AttributedString(markdown: text, options: options) {
-            for run in parsed.runs {
-                var attributes: [NSAttributedString.Key: Any] = [.font: base, .foregroundColor: color]
-                let intent = run.inlinePresentationIntent ?? []
-                if intent.contains(.code) {
-                    attributes[.font] = mono
-                    attributes[.backgroundColor] = Theme.codeFill
-                } else if intent.contains(.stronglyEmphasized) {
-                    attributes[.font] = bold(base)
-                } else if intent.contains(.emphasized), let descriptor = base.fontDescriptor.withSymbolicTraits(.traitItalic) {
-                    attributes[.font] = UIFont(descriptor: descriptor, size: base.pointSize)
-                }
-                if intent.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
-                if let link = run.link { attributes[.link] = link }
-                result.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attributes))
+        for run in text.runs {
+            var attributes: [NSAttributedString.Key: Any] = [.font: base, .foregroundColor: color]
+            let intent = run.inlinePresentationIntent ?? []
+            if intent.contains(.code) {
+                attributes[.font] = mono
+                attributes[.backgroundColor] = Theme.codeFill
+            } else if intent.contains(.stronglyEmphasized) {
+                attributes[.font] = bold(base)
+            } else if intent.contains(.emphasized), let descriptor = base.fontDescriptor.withSymbolicTraits(.traitItalic) {
+                attributes[.font] = UIFont(descriptor: descriptor, size: base.pointSize)
             }
-        } else {
-            result.append(NSAttributedString(string: text, attributes: [.font: base, .foregroundColor: color]))
+            if intent.contains(.strikethrough) { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
+            if let link = run.link ?? run.imageURL { attributes[.link] = link }
+            let string = intent.contains(.softBreak) || intent.contains(.lineBreak) ? lineBreak : String(text[run.range].characters)
+            result.append(NSAttributedString(string: string, attributes: attributes))
         }
         return result
     }
@@ -122,7 +150,8 @@ struct MediaReference: Equatable {
 
 extension Markdown {
     enum Segment: Equatable {
-        case text(String)
+        /// Parsed Markdown, drawn with `render`.
+        case text(AttributedString)
         case media(MediaReference)
         case table(MarkdownTable)
     }
@@ -133,146 +162,93 @@ extension Markdown {
     /// Splits a message at the pictures and clips it embeds (`![alt](path)`,
     /// or a link straight to an image or video file), and at its tables, so
     /// each shows in place. The alt text is a caption and is dropped; the
-    /// rest of the line stays. Web URLs, references and tables inside code
-    /// fences stay text.
+    /// rest of its paragraph stays. Web URLs and anything in code stay text.
     static func segments(_ text: String) -> [Segment] {
+        let parsed = parse(text)
         var segments: [Segment] = []
-        var pending: [String] = []
-        func flush() {
-            let joined = pending.joined(separator: "\n")
-            pending = []
-            guard !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            segments.append(.text(joined))
+        var start = parsed.startIndex
+        func flush(to end: AttributedString.Index) {
+            let piece = AttributedString(parsed[start..<end])
+            start = end
+            guard !String(piece.characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            segments.append(.text(piece))
         }
-        var inCode = false
-        let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
-        var index = 0
-        while index < lines.count {
-            let line = lines[index]
-            index += 1
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") { inCode.toggle() }
-            guard !inCode else { pending.append(line); continue }
-            if let (table, end) = table(lines, at: index - 1) {
-                flush()
-                segments.append(.table(table))
-                index = end
+        var table: TableCells?
+        func finish() {
+            if let table { segments.append(.table(table.table)) }
+            table = nil
+        }
+        for run in parsed.runs {
+            if let cell = TableCells.Cell(run.presentationIntent) {
+                if table?.id != cell.table {
+                    finish()
+                    flush(to: run.range.lowerBound)
+                    table = TableCells(id: cell.table, columns: cell.columns)
+                }
+                table?.cells[cell.row, default: [:]][cell.column, default: AttributedString()].append(parsed[run.range])
+                start = run.range.upperBound
                 continue
             }
-            let (rest, media) = extractMedia(line)
-            guard !media.isEmpty else { pending.append(line); continue }
-            if !rest.trimmingCharacters(in: .whitespaces).isEmpty { pending.append(rest) }
-            flush()
-            segments += media.map(Segment.media)
+            finish()
+            guard let url = run.imageURL ?? run.link, let media = reference(url) else { continue }
+            // A link with emphasis inside is several runs, one picture.
+            if case .media(media)? = segments.last, start == run.range.lowerBound { start = run.range.upperBound; continue }
+            flush(to: run.range.lowerBound)
+            segments.append(.media(media))
+            start = run.range.upperBound
         }
-        flush()
+        finish()
+        flush(to: parsed.endIndex)
         return segments
     }
 
-    private static func extractMedia(_ line: String) -> (String, [MediaReference]) {
-        var rest = ""
-        var media: [MediaReference] = []
-        var index = line.startIndex
-        while index < line.endIndex {
-            let bang = line[index] == "!"
-            let open = bang ? line.index(after: index) : index
-            if open < line.endIndex, line[open] == "[",
-               let close = line[open...].firstIndex(of: "]"),
-               line.index(after: close) < line.endIndex, line[line.index(after: close)] == "(",
-               let end = line[close...].firstIndex(of: ")") {
-                let target = String(line[line.index(close, offsetBy: 2)..<end])
-                if let reference = reference(target) {
-                    media.append(reference)
-                    index = line.index(after: end)
-                    continue
-                }
-            }
-            rest.append(line[index])
-            index = line.index(after: index)
-        }
-        return (rest, media)
-    }
-
     /// A local file path to an image or video, else nil.
-    private static func reference(_ target: String) -> MediaReference? {
-        var path = target.trimmingCharacters(in: .whitespaces)
-        if path.hasPrefix("<"), let close = path.firstIndex(of: ">") { path = String(path[path.index(after: path.startIndex)..<close]) }
-        else if let space = path.firstIndex(of: " ") { path = String(path[..<space]) }
-        if path.hasPrefix("file://") { path = String(path.dropFirst("file://".count)) }
-        if path.contains("%") { path = path.removingPercentEncoding ?? path }
-        guard !path.isEmpty, !path.contains("://"), !path.hasPrefix("#"), !path.hasPrefix("mailto:") else { return nil }
+    private static func reference(_ url: URL) -> MediaReference? {
+        guard url.scheme == nil || url.isFileURL else { return nil }
+        let path = url.path
+        guard !path.isEmpty else { return nil }
         let ext = (path as NSString).pathExtension.lowercased()
         if videoExtensions.contains(ext) { return MediaReference(path: path, video: true) }
         return imageExtensions.contains(ext) ? MediaReference(path: path, video: false) : nil
     }
+
+    /// One table's cells as Foundation hands them out, run by run.
+    private struct TableCells {
+        struct Cell {
+            let table: Int, columns: [PresentationIntent.TableColumn], row: Int, column: Int
+            init?(_ intent: PresentationIntent?) {
+                var table: (Int, [PresentationIntent.TableColumn])?, row: Int?, column: Int?
+                for component in intent?.components ?? [] {
+                    switch component.kind {
+                    case .table(let columns): table = (component.identity, columns)
+                    case .tableHeaderRow: row = 0
+                    case .tableRow(let index): row = index
+                    case .tableCell(let index): column = index
+                    default: break
+                    }
+                }
+                guard let table, let row, let column else { return nil }
+                (self.table, columns, self.row, self.column) = (table.0, table.1, row, column)
+            }
+        }
+        let id: Int
+        let columns: [PresentationIntent.TableColumn]
+        var cells: [Int: [Int: AttributedString]] = [:]
+
+        /// Empty cells and rows have no runs at all, so they are filled in.
+        var table: MarkdownTable {
+            let rows = (0...(cells.keys.max() ?? 0)).map { row in columns.indices.map { cells[row]?[$0] ?? AttributedString() } }
+            return MarkdownTable(header: rows[0], alignments: columns.map(\.alignment), rows: Array(rows.dropFirst()))
+        }
+    }
 }
 
 /// A GitHub-style table: its header, how each column aligns, and its rows,
-/// as raw cell text (inline Markdown still in it), each as wide as the header.
+/// each cell parsed inline Markdown, each row as wide as the header.
 struct MarkdownTable: Equatable {
-    enum Alignment: Equatable { case leading, center, trailing }
-    var header: [String]
-    var alignments: [Alignment]
-    var rows: [[String]]
-}
-
-extension Markdown {
-    /// The table that starts at `lines[start]` and the index of the line
-    /// after it: a header row, a delimiter row with as many cells (`---`,
-    /// `:--`, `--:`, `:-:`), then every following line with a pipe in it.
-    /// Rows with too few cells are padded, extra cells are dropped.
-    static func table(_ lines: [String], at start: Int) -> (MarkdownTable, Int)? {
-        guard start + 1 < lines.count, hasPipe(lines[start]), hasPipe(lines[start + 1]) else { return nil }
-        let header = cells(lines[start])
-        let delimiter = cells(lines[start + 1])
-        guard !header.isEmpty, header.count == delimiter.count else { return nil }
-        var alignments: [MarkdownTable.Alignment] = []
-        for cell in delimiter {
-            let dashes = cell.drop { $0 == ":" }.reversed().drop { $0 == ":" }
-            guard !dashes.isEmpty, dashes.allSatisfy({ $0 == "-" }), cell.count - dashes.count <= 2 else { return nil }
-            let left = cell.hasPrefix(":"), right = cell.hasSuffix(":")
-            alignments.append(left && right ? .center : right ? .trailing : .leading)
-        }
-        var rows: [[String]] = []
-        var end = start + 2
-        while end < lines.count, hasPipe(lines[end]) {
-            let row = cells(lines[end])
-            rows.append(Array((row + Array(repeating: "", count: max(0, header.count - row.count))).prefix(header.count)))
-            end += 1
-        }
-        return (MarkdownTable(header: header, alignments: alignments, rows: rows), end)
-    }
-
-    private static func hasPipe(_ line: String) -> Bool {
-        var escaped = false
-        for character in line {
-            if character == "|", !escaped { return true }
-            escaped = character == "\\" && !escaped
-        }
-        return false
-    }
-
-    /// A row's cells, trimmed, without its outer pipes; `\|` is a pipe in a cell.
-    private static func cells(_ line: String) -> [String] {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        var cells: [String] = []
-        var cell = ""
-        var index = trimmed.startIndex
-        while index < trimmed.endIndex {
-            let character = trimmed[index]
-            let next = trimmed.index(after: index)
-            if character == "\\", next < trimmed.endIndex, trimmed[next] == "|" {
-                cell.append("|")
-                index = trimmed.index(after: next)
-                continue
-            }
-            if character == "|" { cells.append(cell); cell = "" } else { cell.append(character) }
-            index = next
-        }
-        cells.append(cell)
-        if trimmed.hasPrefix("|") { cells.removeFirst() }
-        if trimmed.count > 1, trimmed.hasSuffix("|"), !trimmed.hasSuffix("\\|"), !cells.isEmpty { cells.removeLast() }
-        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
-    }
+    var header: [AttributedString]
+    var alignments: [PresentationIntent.TableColumn.Alignment]
+    var rows: [[AttributedString]]
 }
 
 /// A table measured for one width: each column's width, each row's height
@@ -295,11 +271,11 @@ struct MarkdownTableLayout {
         available = width
         let mono = Markdown.monospaced(for: font)
         let header = Markdown.bold(font)
-        func render(_ text: String, row: Int, column: Int) -> NSAttributedString {
+        func render(_ text: AttributedString, row: Int, column: Int) -> NSAttributedString {
             let style = NSMutableParagraphStyle()
-            style.alignment = [.leading: .natural, .center: .center, .trailing: .right][table.alignments[column]] ?? .natural
+            style.alignment = [.left: .natural, .center: .center, .right: .right][table.alignments[column]] ?? .natural
             style.lineSpacing = 2
-            let cell = NSMutableAttributedString(attributedString: Markdown.inline(text, font: row == 0 ? header : font, mono: mono,
+            let cell = NSMutableAttributedString(attributedString: Markdown.inline(text[text.startIndex..<text.endIndex], font: row == 0 ? header : font, mono: mono,
                                                                                     color: row == 0 ? .label : color))
             cell.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: cell.length))
             return cell
