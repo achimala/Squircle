@@ -313,6 +313,7 @@ pub async fn framework(
 pub async fn inject(
     app: &Path,
     framework: &Path,
+    build_id: &str,
     log_path: &Path,
     deadline: Instant,
     cancel: watch::Receiver<bool>,
@@ -337,13 +338,29 @@ pub async fn inject(
     // The overlay's creature animates on a display link, which iOS caps at
     // 60 Hz on ProMotion iPhones unless the app opts in.
     const FRAME_RATE_KEY: &str = "CADisableMinimumFrameDurationOnPhone";
+    // The overlay reports the host's launch under this build, as Squircle
+    // and apps built with SQUIRCLE_BUILD_ID do; without it an injected
+    // build never shows whether its overlay started.
+    const BUILD_ID_KEY: &str = "SquircleBuildID";
     let mut info = info;
-    if let Some(dict) = info.as_dictionary_mut()
-        && dict.get(FRAME_RATE_KEY).and_then(|v| v.as_boolean()) != Some(true)
-    {
-        dict.insert(FRAME_RATE_KEY.into(), true.into());
-        info.to_file_binary(app.join("Info.plist"))?;
-        writeln!(log, "Allowed 120 Hz display links ({FRAME_RATE_KEY})")?;
+    if let Some(dict) = info.as_dictionary_mut() {
+        let mut changed = false;
+        if dict.get(FRAME_RATE_KEY).and_then(|v| v.as_boolean()) != Some(true) {
+            dict.insert(FRAME_RATE_KEY.into(), true.into());
+            writeln!(log, "Allowed 120 Hz display links ({FRAME_RATE_KEY})")?;
+            changed = true;
+        }
+        if dict.get(BUILD_ID_KEY).and_then(|v| v.as_string()) != Some(build_id) {
+            dict.insert(BUILD_ID_KEY.into(), build_id.into());
+            writeln!(
+                log,
+                "Overlay reports launches as build {build_id} ({BUILD_ID_KEY})"
+            )?;
+            changed = true;
+        }
+        if changed {
+            info.to_file_binary(app.join("Info.plist"))?;
+        }
     }
 
     let destination = app.join("Frameworks").join(FRAMEWORK);
