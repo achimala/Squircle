@@ -84,11 +84,11 @@ final class SquircleModel {
     private(set) var recording: [JSONValue] = [] { didSet { if recording != oldValue { changed() } } }
     private var simulatorRefresh: Task<Void, Never>?
     /// The open thread's requests, as T3 last reported them.
-    private var observedRequests: [JSONValue] = [] { didSet { if observedRequests != oldValue { changed() } } }
+    private var observedRequests: [PendingRequest] = [] { didSet { if observedRequests != oldValue { changed() } } }
     /// Requests waiting for you: T3's, less those being answered.
-    var requests: [JSONValue] {
+    var requests: [PendingRequest] {
         let answering = commands.answering
-        return answering.isEmpty ? observedRequests : observedRequests.filter { !answering.contains($0["payload"]["requestId"].string ?? "") }
+        return answering.isEmpty ? observedRequests : observedRequests.filter { !answering.contains($0.id) }
     }
     private(set) var changes: [TurnChanges] = [] { didSet { changed() } }
     /// Every worker Squircle started, archived ones too, by thread ID.
@@ -223,7 +223,7 @@ final class SquircleModel {
             if open.isAgentDraft { return agentProviders.isEmpty ? providers : agentProviders }
             return providers.filter { $0["instanceId"].string != Self.agentInstance }
         }
-        let instance = state.thread["session"]["providerInstanceId"].string
+        let instance = state.thread["providerInstanceId"].string
             ?? state.thread["modelSelection"]["instanceId"].string
             ?? sessions.first(where: { $0.id == thread })?.modelSelection["instanceId"].string
         guard let instance else { return [] }
@@ -502,7 +502,19 @@ final class SquircleModel {
     }
     private func consumeShell(_ item: JSONValue, batched: Bool = false) {
         liveShell = true
-        if item["kind"].string == "snapshot" { shell = item["snapshot"]; ConnectionTrace.mark("shell.snapshot") }
+        if item["kind"].string == "snapshot", item["resolvedRepositoryIdentityRoots"] != .null {
+            // Only a refresh of some projects' metadata; it carries no threads.
+            var s = shell.object, projects = s["projects"]?.array ?? []
+            for project in item["snapshot"]["projects"].array {
+                if let i = projects.firstIndex(where: { $0["id"] == project["id"] }) { projects[i] = project } else { projects.append(project) }
+            }
+            s["projects"] = .array(projects); shell = .object(s)
+        }
+        else if item["kind"].string == "snapshot" {
+            // Archived threads are T3's archive, never Home.
+            var s = item["snapshot"].object; s["archivedThreads"] = nil; shell = .object(s)
+            ConnectionTrace.mark("shell.snapshot")
+        }
         else if item["kind"].string == "synchronized" {
             // Up to date with T3, whether or not anything changed.
             if ConnectionTrace.enabled, !tracedHome, !projects.isEmpty { tracedHome = true; ConnectionTrace.mark("home.live", "synchronized") }
@@ -516,14 +528,19 @@ final class SquircleModel {
             var s = shell.object
             if let sequence { s["snapshotSequence"] = .number(Double(sequence)) }
             switch item["kind"].string {
-            case "project-upserted", "thread-upserted":
-                let key = item["kind"].string == "project-upserted" ? "projects" : "threads"
+            // An archived thread leaves the active shell; one leaving the archive
+            // (unarchived, deleted) changes nothing here.
+            case "thread.updated" where item["location"].string == "archive":
+                s["threads"] = .array((s["threads"]?.array ?? []).filter { $0["id"] != item["thread"]["id"] })
+            case "project.updated", "thread.updated":
+                let key = item["kind"].string == "project.updated" ? "projects" : "threads"
                 let value = item[key == "projects" ? "project" : "thread"]
                 var rows = s[key]?.array ?? []
                 if let i = rows.firstIndex(where: { $0["id"] == value["id"] }) { rows[i] = value } else { rows.append(value) }
                 s[key] = .array(rows)
-            case "project-removed", "thread-removed":
-                let project = item["kind"].string == "project-removed"; let key = project ? "projects" : "threads"
+            case "thread.removed" where item["location"].string == "archive": break
+            case "project.removed", "thread.removed":
+                let project = item["kind"].string == "project.removed"; let key = project ? "projects" : "threads"
                 s[key] = .array((s[key]?.array ?? []).filter { $0["id"] != item[project ? "projectId" : "threadId"] })
             default: break
             }
@@ -543,10 +560,12 @@ final class SquircleModel {
     private func shellChanged() {
         sessions = shell["threads"].array.filter { $0["deletedAt"] == .null && $0["archivedAt"] == .null }.map { t in
             if let id = t["id"].string { sessionProjects[id] = t["projectId"].string }
-            let working = ["running","starting"].contains(t["session"]["status"].string ?? "")
-            let phase: ChatSession.Phase = t["hasPendingApprovals"].bool || t["hasPendingUserInput"].bool ? .needsYou : working ? .working : .idle
+            // `status` is `idle` or the latest run's; a question or approval is `pendingRuntimeRequest`.
+            let status = t["status"].string ?? "idle"
+            let phase: ChatSession.Phase = t["pendingRuntimeRequest"] != .null || status == "waiting" ? .needsYou
+                : T3ThreadState.activeRunStatuses.contains(status) ? .working : .idle
             return ChatSession(id:t["id"].string ?? "",title:t["title"].string ?? "New thread",updatedAt:t["updatedAt"].date,
-                               phase:phase,modelSelection:t["modelSelection"],latestTurn:TurnObservation(t["latestTurn"]))
+                               phase:phase,modelSelection:t["modelSelection"],latestTurn:TurnObservation(shell: t))
         }.sorted { $0.updatedAt > $1.updatedAt }
         reconcileProjects()
         observeCreations()
@@ -762,7 +781,7 @@ final class SquircleModel {
         }
         if ConnectionTrace.enabled {
             switch item["kind"].string {
-            case "snapshot": ConnectionTrace.mark("thread.snapshot", "seq=\(item["snapshot"]["snapshotSequence"].int ?? -1)")
+            case "snapshot": ConnectionTrace.mark("thread.snapshot", "seq=\(item["snapshotSequence"].int ?? -1)")
             default: if tracedRows, let at = item["event"]["occurredAt"].string { tracedEventAt = at }
             }
         }
@@ -771,7 +790,7 @@ final class SquircleModel {
         // A revert rewrote history the phone can't replay: start from a snapshot.
         if held >= 0, state.sequence < 0, let id = selectedSessionID { link?.send(.followReverted(threadID: id)) }
         scheduleCacheWrite()
-        if state.activityCount != stepDetailsCount { stepDetailsCount = state.activityCount; scheduleStepDetails() }
+        if state.itemCount != stepDetailsCount { stepDetailsCount = state.itemCount; scheduleStepDetails() }
         observeOpenThread()
         guard let open else { return }
         // Choices T3 now reports are T3's again.
@@ -780,7 +799,7 @@ final class SquircleModel {
             if let mode = choice.mode, state.thread["runtimeMode"].string == mode.rawValue { choice.mode = nil }
             choices[open] = choice.model == nil && choice.mode == nil ? nil : choice
         }
-        if let last = state.thread["session"]["lastError"].string { error = last }
+        if let last = shell["threads"].array.first(where: { $0["id"].string == selectedSessionID })?["lastError"].string { error = last }
     }
     /// The open thread is working, or a message T3 just took is about to.
     var isRunning: Bool {
@@ -812,9 +831,9 @@ final class SquircleModel {
         }
         // A copy on disk may lack what T3 has since: only T3's own state settles a command.
         guard state.isLive, commands.entries.contains(where: { $0.intent.kind.thread == thread }) else { return }
-        command(.threadObserved(.init(threadID: thread, pendingRequests: Set(state.pendingRequests.compactMap { $0["payload"]["requestId"].string }),
+        command(.threadObserved(.init(threadID: thread, pendingRequests: Set(state.pendingRequests.map(\.id)),
                                       runtimeMode: state.thread["runtimeMode"].string, running: state.isRunning,
-                                      activeTurn: state.thread["session"]["activeTurnId"].string)))
+                                      activeTurn: state.activeRunID)))
     }
 
     // MARK: Message field
@@ -964,7 +983,7 @@ final class SquircleModel {
                                                                                  mode: mode, identity: .fresh()))
         }
         // The app's agent gets its instructions from the Mac; other threads get Squircle's once.
-        let messages = id.threadID == nil ? [] : state.thread["messages"].array
+        let messages = id.threadID == nil ? [] : state.projection["messages"].array
         let agentThread = id.isAgentDraft || id.threadID.map { agents[project.id] == $0 } == true
             || (id.threadID != nil && state.thread["modelSelection"]["instanceId"].string == Self.agentInstance)
         var context = ""
@@ -1287,23 +1306,24 @@ final class SquircleModel {
             return result["diff"].string
         } catch { self.error = error.localizedDescription; return nil }
     }
-    /// Stops the turn running now (never a later one, if T3's answer is lost).
+    /// Stops the run going now (never a later one, if T3's answer is lost).
     func stop() async {
-        guard let id = selectedSessionID else { return }
-        await propose(.interrupt(thread: id, turn: state.thread["session"]["activeTurnId"].string),
-                      command: ["type": "thread.turn.interrupt", "threadId": .string(id)])
+        guard let id = selectedSessionID, let run = state.activeRunID else { return }
+        await propose(.interrupt(thread: id, turn: run),
+                      command: ["type": "run.interrupt", "threadId": .string(id), "runId": .string(run)])
     }
     /// Answers a request. It leaves `requests` while the answer is on its
     /// way and for good once T3 reports it resolved; back only if T3 refuses.
     /// An approval needs its decision: none is ever assumed.
-    func respond(to request: JSONValue, decision: String? = nil, answers: [String: JSONValue]? = nil) async {
-        guard let id = selectedSessionID, let requestID = request["payload"]["requestId"].string, !commands.answering.contains(requestID) else { return }
-        var c: [String: JSONValue] = ["threadId": .string(id), "requestId": .string(requestID)]
+    func respond(to request: PendingRequest, decision: String? = nil, answers: [String: JSONValue]? = nil) async {
+        let requestID = request.id
+        guard let id = selectedSessionID, !commands.answering.contains(requestID) else { return }
+        var c: [String: JSONValue] = ["type": "runtime-request.respond", "threadId": .string(id), "requestId": .string(requestID)]
         let kind: Commands.Kind
         if let answers {
-            kind = .answer(thread: id, request: requestID, answers: .object(answers)); c["type"] = "thread.user-input.respond"; c["answers"] = .object(answers)
+            kind = .answer(thread: id, request: requestID, answers: .object(answers)); c["answers"] = .object(answers)
         } else if let decision {
-            kind = .approval(thread: id, request: requestID, decision: decision); c["type"] = "thread.approval.respond"; c["decision"] = .string(decision)
+            kind = .approval(thread: id, request: requestID, decision: decision); c["decision"] = .string(decision)
         } else { log("Request \(requestID) offered no decision; nothing sent"); return }
         await propose(kind, command: c)
     }

@@ -329,21 +329,24 @@ enum Delivery {
         return done()
     }
 
-    /// `thread.turn.start` exactly as T3 gets it, every time.
+    /// `message.dispatch` exactly as T3 gets it, every time. T3 starts a
+    /// run on an idle thread and steers or queues behind one in progress,
+    /// as its own clients do. Pictures go as uploads (`dataUrl`); T3 takes
+    /// them first (`T3Gateway.persistPictures`), always to the same IDs.
     static func turnCommand(_ intent: Intent, text: String, threadID: String) -> JSONValue {
-        // T3 stores each picture under its attachments folder and hands the provider its path.
         let uploads: [JSONValue] = intent.pictures.enumerated().map { index, picture in
             ["type": "image", "name": "image-\(index + 1).jpg", "mimeType": "image/jpeg", "sizeBytes": .int(picture.jpeg.count),
              "dataUrl": .string("data:image/jpeg;base64," + picture.jpeg.base64EncodedString())]
         }
-        return intent.turn.stamp(["type": "thread.turn.start", "threadId": .string(threadID),
-            "message": ["messageId": .string(intent.messageID), "role": "user", "text": .string(text + intent.context), "attachments": .array(uploads)],
-            "modelSelection": intent.selection, "runtimeMode": .string(intent.mode),
-            "interactionMode": "default", "titleSeed": .string(intent.titleSeed)])
+        return intent.turn.stamp(["type": "message.dispatch", "threadId": .string(threadID), "messageId": .string(intent.messageID),
+            "text": .string(text + intent.context), "attachments": .array(uploads), "createdBy": "user", "creationSource": "mobile",
+            "modelSelection": intent.selection, "titleSeed": .string(intent.titleSeed),
+            "dispatchMode": ["type": "start_immediately"], "deliveryIntent": "auto"])
     }
     /// A draft's `thread.create`, made when it is sent.
     static func createCommand(threadID: String, projectID: String, selection: JSONValue, mode: String, identity: CommandIdentity) -> JSONValue {
         identity.stamp(["type": "thread.create", "threadId": .string(threadID), "projectId": .string(projectID), "title": "New thread",
+                        "createdBy": "user", "creationSource": "mobile",
                         "modelSelection": selection, "runtimeMode": .string(mode), "interactionMode": "default",
                         "branch": .null, "worktreePath": .null])
     }
@@ -357,7 +360,7 @@ enum Delivery {
             if !owners.insert(e.owner).inserted { found.append("two messages on their way in one conversation") }
             switch e.stage {
             case .sending(let r), .accepted(let r):
-                if r.command["commandId"].string != e.intent.turn.id || r.command["message"]["messageId"].string != id {
+                if r.command["commandId"].string != e.intent.turn.id || r.command["messageId"].string != id {
                     found.append("turn command lost its identity")
                 }
                 if case .thread(let t) = e.intent.destination, t != r.threadID { found.append("message moved threads") }

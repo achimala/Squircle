@@ -14,7 +14,7 @@ final class T3Tests: XCTestCase {
     func testRejectedApprovalModeChangeRestoresSelection() async {
         let model = SquircleModel(configuration:nil)
         await model.open(.thread("existing", appID: "app"))
-        model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["runtimeMode":"approval-required"]]]))
+        model.consumeThread(.from(["kind":"snapshot","snapshotSequence":1,"projection":["thread":["runtimeMode":"approval-required"]]]))
         await model.setRuntimeMode(.fullAccess)
         XCTAssertEqual(model.runtimeMode, .approvalRequired)
         XCTAssertNotNil(model.error)
@@ -40,7 +40,7 @@ final class T3Tests: XCTestCase {
         let astra: JSONValue = ["instanceId":"codex","model":"astra"]
         let claude: JSONValue = ["instanceId":"claudeAgent","model":"fable"]
         func snapshot(_ selection:JSONValue, sequence:Int) -> JSONValue {
-            ["kind":"snapshot","snapshot":["snapshotSequence":.int(sequence),"thread":["modelSelection":selection]]]
+            ["kind":"snapshot","snapshotSequence":.int(sequence),"projection":["thread":["modelSelection":selection]]]
         }
         await model.open(.thread("first", appID: "app"))
         XCTAssertTrue(model.availableModelSelections.isEmpty, "Do not offer other providers while the thread loads")
@@ -125,20 +125,45 @@ final class T3Tests: XCTestCase {
         let rotated = SimulatorSurface.point(CGPoint(x:162.5,y:75),bounds:bounds,size:size,orientation:"landscape_left")!
         XCTAssertEqual(rotated.x,0.25,accuracy:0.001); XCTAssertEqual(rotated.y,0.75,accuracy:0.001)
     }
-    func testThreadSnapshotReplayAndIncrementalToolProgress() {
+    /// Every protocol 2 event carries one whole entity: a replayed one
+    /// applies once, a newer one replaces the old in place, and a late
+    /// snapshot never rolls the thread back.
+    func testEntityEventsReplaceInPlaceAndApplyOnce() {
+        func event(_ seq: Int, _ type: String, _ payload: [String: Any]) -> JSONValue {
+            .from(["kind": "event", "sequence": seq, "event": ["type": type, "payload": payload]])
+        }
+        func message(_ text: String, streaming: Bool) -> [String: Any] {
+            ["id": "a", "role": "assistant", "text": text, "streaming": streaming, "runId": "r1", "createdAt": "2026-10-19T10:00:00.000Z"]
+        }
         var state = T3ThreadState()
-        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":40,"thread":["id":"thread","messages":[],"activities":[]]]]))
-        let event = JSONValue.from(["kind":"event","event":["sequence":41,"type":"thread.message-sent","payload":["messageId":"a","role":"assistant","text":"Hello","streaming":true,"createdAt":"2026-10-05T10:00:00.000Z"]]])
-        state.consume(event); state.consume(event)
-        XCTAssertEqual(state.messages.count,1); XCTAssertEqual(state.messages[0].content,"Hello"); XCTAssertTrue(state.messages[0].isStreaming)
-        state.consume(.from(["kind":"event","event":["sequence":42,"type":"thread.message-sent","payload":["messageId":"a","role":"assistant","text":" world","streaming":true,"createdAt":"2026-10-05T10:00:00.000Z"]]]))
-        XCTAssertEqual(state.messages.count,1); XCTAssertEqual(state.messages[0].content,"Hello world")
-        state.consume(.from(["kind":"event","event":["sequence":43,"type":"thread.message-sent","payload":["messageId":"a","role":"assistant","text":"","streaming":false]]]))
-        XCTAssertEqual(state.messages[0].content,"Hello world"); XCTAssertFalse(state.messages[0].isStreaming)
-        state.consume(.from(["kind":"event","event":["sequence":44,"type":"thread.activity-appended","payload":["activity":["id":"tool","kind":"tool.completed","summary":"Ran command","createdAt":"2026-10-05T10:00:01.000Z","payload":["data":["item":["command":"pwd","aggregatedOutput":"/work"]]]]]]]))
-        XCTAssertEqual(state.messages.last?.detail,"pwd\n\n/work")
-        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":39,"thread":["messages":[]]]]))
-        XCTAssertEqual(state.messages.count,2)
+        // Events before any snapshot can't be placed.
+        state.consume(event(39, "message.updated", message("Lost", streaming: false)))
+        XCTAssertTrue(state.messages.isEmpty)
+        state.consume(.from(["kind": "snapshot", "snapshotSequence": 40, "projection": ["thread": ["id": "t"], "messages": [],
+            "runs": [["id": "r1", "status": "running"]], "turnItems": [], "nodes": [["id": "n"]]]]))
+        XCTAssertTrue(state.isRunning)
+        XCTAssertEqual(state.projection["nodes"], .null, "only what the phone reads is kept")
+        let hello = event(41, "message.updated", message("Hello", streaming: true))
+        state.consume(hello); state.consume(hello)
+        XCTAssertEqual(state.messages.map(\.content), ["Hello"]); XCTAssertTrue(state.messages[0].isStreaming)
+        state.consume(event(42, "message.updated", message("Hello world", streaming: false)))
+        XCTAssertEqual(state.messages.map(\.content), ["Hello world"]); XCTAssertFalse(state.messages[0].isStreaming)
+        let tool: [String: Any] = ["id": "turn-item:x", "type": "command_execution", "runId": "r1", "status": "running", "input": "pwd",
+                                   "nativeItemRef": ["nativeId": "toolu_1"], "startedAt": "2026-10-19T10:00:01.000Z"]
+        state.consume(event(43, "turn-item.updated", tool))
+        XCTAssertEqual(state.messages.last?.id, "toolu_1"); XCTAssertTrue(state.messages.last!.isStreaming)
+        state.consume(event(44, "turn-item.updated", tool.merging(["status": "completed", "output": "/work"]) { $1 }))
+        XCTAssertEqual(state.messages.count, 2)
+        XCTAssertEqual(state.messages.last?.detail, "pwd\n\n/work"); XCTAssertFalse(state.messages.last!.isStreaming)
+        state.consume(event(45, "run.updated", ["id": "r1", "status": "completed"]))
+        XCTAssertFalse(state.isRunning)
+        state.consume(event(46, "thread.metadata-updated", ["id": "t", "title": "Renamed"]))
+        XCTAssertEqual(state.thread["title"].string, "Renamed")
+        state.consume(.from(["kind": "snapshot", "snapshotSequence": 39, "projection": ["thread": ["id": "t"], "messages": []]]))
+        XCTAssertEqual(state.messages.count, 2)
+        // A rollback rewrites history: only a fresh snapshot shows it.
+        state.consume(event(47, "checkpoint.rollback-requested", ["scopeId": "s"]))
+        XCTAssertLessThan(state.sequence, 0)
     }
     /// Everything Squircle sends in your place (any `squircle-` record, even a
     /// kind this build doesn't know, or an early worker update's text) is
@@ -161,7 +186,7 @@ final class T3Tests: XCTestCase {
             return ["id": id, "role": "user", "text": text, "createdAt": "2026-10-15T10:00:00.000Z"].merging(extra) { a, _ in a }
         } + [["id": "you", "role": "user", "text": "Make it blue", "createdAt": "2026-10-15T10:00:00.000Z"]]
         var state = T3ThreadState()
-        state.consume(.from(["kind": "snapshot", "snapshot": ["snapshotSequence": 1, "thread": ["messages": rows, "activities": []]]]))
+        state.consume(.from(["kind": "snapshot", "snapshotSequence": 1, "projection": ["thread": ["id": "t"], "messages": rows]]))
         let messages = Dictionary(uniqueKeysWithValues: state.messages.map { ($0.id, $0) })
         for (id, _) in marked {
             let message = messages[id]!
@@ -175,57 +200,70 @@ final class T3Tests: XCTestCase {
         XCTAssertEqual(messages["later"]?.content, "Later news")
         XCTAssertFalse(messages["you"]!.isUpdate); XCTAssertNil(messages["you"]!.agent)
     }
-    /// After a reconnect T3 resends a snapshot and may replay events the
-    /// thread already has; neither may lose or duplicate the transcript.
-    func testQuestionsShowOnlyWhileOpenInTheRunningTurn() {
-        func activity(_ id: String, _ kind: String, _ request: String?, turn: String, at second: Int) -> [String: Any] {
-            (["id": id, "kind": kind, "turnId": turn, "createdAt": String(format: "2026-10-15T07:%02d:%02d.000Z", second / 60, second % 60),
-                   "payload": request.map { ["requestId": $0] } ?? [String: String]()])
+    /// A question or approval shows only while it is pending in the run
+    /// going now, also after a long run pushes its item out of the kept
+    /// history.
+    func testRequestsShowOnlyWhilePendingInTheActiveRun() {
+        func event(_ seq: Int, _ type: String, _ payload: [String: Any]) -> JSONValue {
+            .from(["kind": "event", "sequence": seq, "event": ["type": type, "payload": payload]])
+        }
+        func request(_ id: String, _ status: String) -> [String: Any] {
+            ["id": id, "kind": "user_input", "status": status, "responseCapability": ["type": "live", "providerSessionId": "p"]]
+        }
+        func item(_ id: String, request: String, run: String) -> [String: Any] {
+            ["id": id, "type": "user_input_request", "requestId": request, "runId": run, "status": "waiting",
+             "questions": [["id": "q", "header": "Pick", "question": "Which?", "options": []]], "startedAt": "2026-10-19T07:00:00.000Z"]
         }
         var state = T3ThreadState()
-        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[],
-            "session":["status":"running","activeTurnId":"old"],
-            "activities":[activity("q", "user-input.requested", "r1", turn: "old", at: 0),
-                          activity("a", "user-input.resolved", "r1", turn: "old", at: 1)]]]]))
-        XCTAssertTrue(state.pendingRequests.isEmpty)
-        // 600 later activities push the resolution out; the answered question must not come back.
-        for i in 0..<620 {
-            state.consume(.from(["kind":"event","event":["sequence":2 + i,"type":"thread.activity-appended",
-                "payload":["activity":activity("s\(i)", "tool.completed", nil, turn: "old", at: 2 + i)]]]))
+        state.consume(.from(["kind": "snapshot", "snapshotSequence": 1, "projection": ["thread": ["id": "t"],
+            "runs": [["id": "old", "status": "waiting"]],
+            "runtimeRequests": [request("r1", "resolved"), request("r2", "pending")],
+            "turnItems": [item("i1", request: "r1", run: "old"), item("i2", request: "r2", run: "old")]]]))
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["r2"])
+        XCTAssertEqual(state.pendingRequests.first?.questions.count, 1)
+        // 1300 later tool calls: the open request's item stays, and it still shows.
+        for i in 0..<1300 {
+            state.consume(event(2 + i, "turn-item.updated", ["id": "s\(i)", "type": "dynamic_tool", "toolName": "Read", "runId": "old",
+                                                            "status": "completed", "input": ["file_path": "/a"]]))
         }
+        XCTAssertLessThan(state.itemCount, 1300)
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["r2"])
+        // Its run ended: it can never be answered.
+        state.consume(event(2000, "run.updated", ["id": "old", "status": "interrupted"]))
+        state.consume(event(2001, "run.created", ["id": "new", "status": "running"]))
         XCTAssertTrue(state.pendingRequests.isEmpty)
-        XCTAssertFalse(state.thread["activities"].array.contains { $0["id"].string == "q" })
-        // Open in the running turn: shown. A later turn makes it unanswerable.
-        state.consume(.from(["kind":"event","event":["sequence":700,"type":"thread.activity-appended",
-            "payload":["activity":activity("q2", "user-input.requested", "r2", turn: "old", at: 700)]]]))
-        XCTAssertEqual(state.pendingRequests.map { $0["id"].string }, ["q2"])
-        state.consume(.from(["kind":"event","event":["sequence":701,"type":"thread.session-set",
-            "payload":["session":["status":"running","activeTurnId":"new"]]]]))
+        state.consume(event(2002, "runtime-request.updated", request("r3", "pending")))
+        state.consume(event(2003, "turn-item.updated", item("i3", request: "r3", run: "new")))
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["r3"])
+        state.consume(event(2004, "runtime-request.updated", request("r3", "resolved")))
         XCTAssertTrue(state.pendingRequests.isEmpty)
     }
-    func testResubscribeAfterReconnectKeepsTranscript() {
-        func message(_ id: String, _ text: String, _ seq: Int) -> JSONValue {
-            .from(["kind":"event","event":["sequence":seq,"type":"thread.message-sent","payload":["messageId":id,"role":"assistant","text":text,"streaming":false,"createdAt":"2026-10-14T10:00:0\(seq % 10).000Z"]]])
+    /// T3's shell: a project-metadata refresh carries no threads and keeps
+    /// them; an archived thread leaves Home, and leaving the archive is not
+    /// a removal; a row's status and pending request say what it is doing.
+    @MainActor
+    func testShellKeepsThreadsThroughRefreshesAndDropsArchived() async {
+        let model = SquircleModel(configuration: nil)
+        func row(_ id: String, status: String = "idle", pending: Bool = false) -> [String: Any] {
+            ["id": id, "projectId": "p", "title": id, "status": status, "latestRunId": "run-\(id)", "updatedAt": "2026-10-19T10:00:00.000Z",
+             "archivedAt": NSNull(), "deletedAt": NSNull(), "pendingRuntimeRequest": pending ? ["id": "q", "kind": "user_input"] : NSNull()]
         }
-        var state = T3ThreadState()
-        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":10,"thread":["id":"t","messages":[],"activities":[]]]]))
-        state.consume(message("a", "First", 11))
-        // Resubscribed with nothing new: same sequence, same transcript.
-        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":11,"thread":["id":"t","messages":[
-            ["id":"a","role":"assistant","text":"First","createdAt":"2026-10-14T10:00:01.000Z"]],"activities":[]]]]))
-        XCTAssertEqual(state.messages.map(\.content), ["First"])
-        // A message sent while the socket was down arrives in the snapshot;
-        // replayed events it already includes change nothing.
-        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":12,"thread":["id":"t","messages":[
-            ["id":"a","role":"assistant","text":"First","createdAt":"2026-10-14T10:00:01.000Z"],
-            ["id":"b","role":"assistant","text":"Second","createdAt":"2026-10-14T10:00:02.000Z"]],"activities":[]]]]))
-        state.consume(message("a", "First", 11)); state.consume(message("b", "Second", 12))
-        state.consume(message("c", "Third", 13))
-        XCTAssertEqual(state.messages.map(\.content), ["First", "Second", "Third"])
-        // A late snapshot from the old socket never rolls the thread back.
-        state.consume(.from(["kind":"snapshot","snapshot":["snapshotSequence":11,"thread":["id":"t","messages":[],"activities":[]]]]))
-        XCTAssertEqual(state.messages.count, 3)
+        func settle() async { for _ in 0..<20 { await Task.yield() } }
+        model.linkReceived(shell: .from(["kind": "snapshot", "snapshot": ["snapshotSequence": 5, "projects": [["id": "p", "title": "Old"]],
+            "threads": [row("a", status: "running"), row("b", pending: true), row("c", status: "failed")], "archivedThreads": []]]))
+        model.linkReceived(shell: .from(["kind": "snapshot", "resolvedRepositoryIdentityRoots": ["/x"],
+            "snapshot": ["snapshotSequence": 6, "projects": [["id": "p", "title": "New"]], "threads": [], "archivedThreads": []]]))
+        await settle()
+        XCTAssertEqual(Set(model.sessions.map(\.id)), ["a", "b", "c"])
+        let phases = Dictionary(uniqueKeysWithValues: model.sessions.map { ($0.id, $0.phase) })
+        XCTAssertEqual(phases, ["a": .working, "b": .needsYou, "c": .idle])
+        XCTAssertEqual(model.sessions.first { $0.id == "c" }?.latestTurn?.completion?.outcome, .failed)
+        model.linkReceived(shell: .from(["kind": "thread.updated", "sequence": 7, "location": "archive", "thread": row("a")]))
+        model.linkReceived(shell: .from(["kind": "thread.removed", "sequence": 8, "location": "archive", "threadId": "b"]))
+        await settle()
+        XCTAssertEqual(Set(model.sessions.map(\.id)), ["b", "c"])
     }
+
     func testConfigurationRejectsCredentialOriginTricks() throws {
         let valid: [String:Any] = ["t3_url":"https://mac.example","t3_token":"token","squircle_url":"https://mac.example:8443","squircle_token":"build","diagnostic_token":"diagnostic"]
         XCTAssertNoThrow(try JSONDecoder().decode(AppConfiguration.self,from:JSONSerialization.data(withJSONObject:valid)))
@@ -381,7 +419,7 @@ final class NativeStateTests: XCTestCase {
         await model.open(.thread("other", appID: project.id))
         gate.release()
         await gate.until(2)
-        XCTAssertEqual(gate.commands[1]["type"].string, "thread.turn.start")
+        XCTAssertEqual(gate.commands[1]["type"].string, "message.dispatch")
         XCTAssertEqual(gate.commands[1]["threadId"].string, created)
         gate.release()
         let outcome = await sending.value
@@ -417,13 +455,13 @@ final class NativeStateTests: XCTestCase {
         let (model, _) = await draftWithPicture(gate)
         let thread = ConversationID.thread("t", appID: project.id)
         await model.open(thread)
-        model.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[],
-                                   "modelSelection":["instanceId":"codex","model":"sol"]]]]))
+        model.consumeThread(.from(["kind":"snapshot","snapshotSequence":1,"projection":["thread":["id":"t",
+                                   "modelSelection":["instanceId":"codex","model":"sol"]],"messages":[]]]))
         let sending = try start(model, "hello", from: thread)
         await gate.until(1)
-        let messageID = try XCTUnwrap(gate.commands[0]["message"]["messageId"].string)
-        model.consumeThread(.from(["kind":"event","event":["sequence":2,"type":"thread.message-sent",
-            "payload":["messageId":messageID,"role":"user","text":"hello","createdAt":"2026-10-15T10:00:00.000Z"]]]))
+        let messageID = try XCTUnwrap(gate.commands[0]["messageId"].string)
+        model.consumeThread(.from(["kind":"event","sequence":2,"event":["type":"message.updated",
+            "payload":["id":messageID,"role":"user","text":"hello","createdAt":"2026-10-15T10:00:00.000Z"]]]))
         XCTAssertNil(model.pendingSend(for: thread), "T3 has it: nothing pending")
         gate.release(lost: true)
         guard case .accepted = await sending.value else { return XCTFail("It landed") }
@@ -450,7 +488,7 @@ final class NativeStateTests: XCTestCase {
         let sending = try start(model, "look", from: draft)
         await gate.until(1); gate.release()
         await gate.until(2)
-        XCTAssertTrue((gate.commands[1]["message"]["text"].string ?? "").contains("/mac/clip.mp4"))
+        XCTAssertTrue((gate.commands[1]["text"].string ?? "").contains("/mac/clip.mp4"))
         gate.release()
         _ = await sending.value
         XCTAssertEqual(uploads, 2)
@@ -675,9 +713,9 @@ private struct FakeT3 {
         if let taken = receipts[id] { return taken ? .accepted(.object([:])) : .refused("previously rejected") }
         switch command["type"].string {
         case "thread.create": threads.insert(command["threadId"].string!)
-        case "thread.turn.start":
+        case "message.dispatch":
             guard threads.contains(command["threadId"].string!) else { receipts[id] = false; return .refused("no such thread") }
-            messages.append(command["message"]["messageId"].string!)
+            messages.append(command["messageId"].string!)
         default: break
         }
         receipts[id] = true
@@ -951,8 +989,8 @@ final class PendingJournalTests: XCTestCase {
         let before = await launch(first)
         let thread = ConversationID.thread("t", appID: project.id)
         await before.open(thread)
-        before.consumeThread(.from(["kind":"snapshot","snapshot":["snapshotSequence":1,"thread":["id":"t","messages":[["id":"m0","role":"user","text":"earlier sim start --thread t"]],
-                                    "modelSelection":["instanceId":"codex","model":"sol"]]]]))
+        before.consumeThread(.from(["kind":"snapshot","snapshotSequence":1,"projection":["thread":["id":"t",
+                                    "modelSelection":["instanceId":"codex","model":"sol"]],"messages":[["id":"m0","role":"user","text":"earlier sim start --thread t"]]]]))
         before.attach(ImageAttachment(UIImage(systemName: "star")!, id: "picture")!)
         guard case .started = before.startSend("hello", in: project, from: thread) else { return XCTFail("refused") }
         await first.until(1)

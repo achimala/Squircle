@@ -8,7 +8,7 @@ final class RequestCard {
     enum Change { case appeared, changed }
 
     let view = Theme.glassSurface(cornerRadius: 22)
-    var onRespond: ((_ request: JSONValue, _ decision: String?, _ answers: [String: JSONValue]?) -> Void)?
+    var onRespond: ((_ request: PendingRequest, _ decision: String?, _ answers: [String: JSONValue]?) -> Void)?
     /// The next question slid in and the card's height changed.
     var onResize: (() -> Void)?
 
@@ -44,8 +44,8 @@ final class RequestCard {
 
     /// Shows `current` (none hides the card). Nil when it is the request
     /// already shown.
-    func show(_ current: JSONValue?) -> Change? {
-        let id = current?["id"].string
+    func show(_ current: PendingRequest?) -> Change? {
+        let id = current?.id
         guard id != renderedID else { return nil }
         let appearing = renderedID == nil && current != nil
         renderedID = id
@@ -54,7 +54,7 @@ final class RequestCard {
         questionPicks = []
         view.isHidden = current == nil
         if let current {
-            if (current["kind"].string ?? "").contains("user-input") { renderQuestion(current) } else { renderApproval(current) }
+            if current.isQuestion { renderQuestion(current) } else { renderApproval(current) }
         }
         return appearing ? .appeared : .changed
     }
@@ -88,11 +88,10 @@ final class RequestCard {
         return button
     }
 
-    private func renderApproval(_ current: JSONValue) {
+    private func renderApproval(_ current: PendingRequest) {
         buttons.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let payload = current["payload"]
-        title.text = current["summary"].string ?? "The agent needs your response"
-        let text = payload["detail"].string ?? ""
+        title.text = current.title
+        let text = current.prompt
         if let stack = title.superview as? UIStackView {
             stack.insertArrangedSubview(detail, at: 1)
             stack.setCustomSpacing(6, after: title)
@@ -102,11 +101,11 @@ final class RequestCard {
         detail.textColor = .secondaryLabel
         detail.text = text
         detail.isHidden = text.isEmpty
-        if payload["options"].array.isEmpty {
+        if current.options.isEmpty {
             _ = button("Decline", prominent: false) { [weak self] in self?.onRespond?(current, "decline", nil) }
             _ = button("Allow", prominent: true) { [weak self] in self?.onRespond?(current, "accept", nil) }
         } else {
-            for option in payload["options"].array {
+            for option in current.options {
                 _ = button(option["label"].string ?? "Choose", subtitle: option["warning"].string,
                            prominent: ["accept", "acceptForSession", "acceptAlways"].contains(option["decision"].string ?? "")) { [weak self] in
                     self?.onRespond?(current, option["decision"].string, nil)
@@ -117,8 +116,8 @@ final class RequestCard {
 
     /// One of the agent's questions at a time, answered by tapping a choice
     /// or typing; the card slides to the next question.
-    private func renderQuestion(_ current: JSONValue, advancing: Bool = false) {
-        let questions = current["payload"]["questions"].array
+    private func renderQuestion(_ current: PendingRequest, advancing: Bool = false) {
+        let questions = current.questions
         guard questionIndex < questions.count else {
             buttons.arrangedSubviews.forEach { $0.isUserInteractionEnabled = false }
             onRespond?(current, nil, questionAnswers)

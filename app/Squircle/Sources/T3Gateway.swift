@@ -104,6 +104,10 @@ final class RefuseRedirects: NSObject, URLSessionTaskDelegate {
 /// The paired session is isolated from cookies; its credential comes from
 /// the build's configuration.
 final class T3HTTP {
+    /// The orchestration protocol this client speaks (T3 0.1.0's: runs,
+    /// runtime requests and turn items). T3 refuses the socket (HTTP 426)
+    /// to a client that doesn't declare it.
+    static let orchestrationProtocol = "2"
     let configuration: AppConfiguration
     let token: String
     let session: URLSession
@@ -139,6 +143,7 @@ final class T3HTTP {
         parts.path = path; parts.queryItems = query.isEmpty ? nil : query
         var r = URLRequest(url: parts.url!)
         r.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        r.setValue(Self.orchestrationProtocol, forHTTPHeaderField: "x-t3-orchestration-protocol")
         return r
     }
     func json(_ path: String, body: JSONValue? = nil) async throws -> JSONValue {
@@ -153,7 +158,7 @@ final class T3HTTP {
     /// HTTPS request: no ticket round trip (a second TLS connection on a
     /// cold start) before the socket can open.
     func bearerSocketRequest(_ path: String) throws -> URLRequest {
-        var r = try request(path)
+        var r = try request(path, query: [URLQueryItem(name: "orchestrationProtocol", value: Self.orchestrationProtocol)])
         var c = URLComponents(url: r.url!, resolvingAgainstBaseURL: false)!
         c.scheme = "wss"; r.url = c.url
         return r
@@ -205,7 +210,7 @@ final class T3HTTP {
     }
 }
 
-/// Effect RPC JSON framing, pinned to the installed T3 0.0.45 contract.
+/// Effect RPC JSON framing, speaking T3 0.1.0's orchestration protocol 2.
 @MainActor
 final class T3Gateway {
     let http: T3HTTP
@@ -361,12 +366,32 @@ final class T3Gateway {
     /// An orchestration command, sent exactly as given (its identity was
     /// fixed with its intent), and how T3 answered: only a typed refusal
     /// proves nothing ran; a lost answer is `unknown`, never a refusal.
+    /// A message's pictures go to T3 first; if they don't, nothing was sent.
     func dispatch(_ command: JSONValue) async -> CommandOutcome {
+        var command = command
+        if command["attachments"].array.contains(where: { $0["dataUrl"] != .null }) {
+            switch await persistPictures(of: command) {
+            case .stored(let attachments): var c = command.object; c["attachments"] = .array(attachments); command = .object(c)
+            case .failed(let outcome): return outcome
+            }
+        }
         switch await request("orchestration.dispatchCommand", command) {
         case .exit(let exit): return .t3(exit: exit)
         case .notSent: return .notSent("Not connected to T3.")
         case .lost(let error): return .unknown(error.localizedDescription)
         case .cancelled: return .unknown("Cancelled after it was sent.")
+        }
+    }
+    /// Hands T3 a message's pictures, which it stores under IDs made from
+    /// the thread, message and bytes: the same pictures always become the
+    /// same attachments, so this can run before every send of a message.
+    private enum Pictures { case stored([JSONValue]), failed(CommandOutcome) }
+    private func persistPictures(of command: JSONValue) async -> Pictures {
+        let payload: JSONValue = ["threadId": command["threadId"], "messageId": command["messageId"], "attachments": command["attachments"]]
+        switch await request("assets.persistChatAttachments", payload) {
+        case .exit(let exit) where exit["_tag"].string == "Success": return .stored(exit["value"]["attachments"].array)
+        case .exit(let exit): return .failed(.refused("T3 refused the pictures: \(exit["cause"].formatted.prefix(700))"))
+        case .notSent, .lost, .cancelled: return .failed(.notSent("The pictures didn't reach T3."))
         }
     }
     /// `ended` runs if T3 finishes or rejects the subscription while the

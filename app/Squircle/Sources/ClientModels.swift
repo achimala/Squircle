@@ -33,17 +33,19 @@ struct TurnObservation: Equatable {
     let turnID: String
     let state: State
     let endedAt: Date?
-    init?(_ value: JSONValue) {
-        guard let turn = value["turnId"].string else { return nil }
-        turnID = turn
-        switch value["state"].string ?? "" {
-        case "running": state = .running
+    /// From a thread's shell row: its latest run, whose status is the
+    /// row's `status` (`idle` only for a thread with no run).
+    init?(shell row: JSONValue) {
+        guard let run = row["latestRunId"].string else { return nil }
+        turnID = run
+        switch row["status"].string ?? "" {
+        case "preparing", "queued", "starting", "running", "waiting": state = .running
         case "completed": state = .completed
-        case "interrupted": state = .interrupted
-        case "error": state = .error
+        case "interrupted", "cancelled": state = .interrupted
+        case "failed": state = .error
         case let other: state = .unknown(other)
         }
-        endedAt = value["completedAt"].string.flatMap(ISODate.parse)
+        endedAt = row["latestRunCompletedAt"].string.flatMap(ISODate.parse)
     }
     /// The turn's end, when it has ended.
     var completion: TurnCompletion? {
@@ -76,7 +78,6 @@ struct ChatMessage: Identifiable, Equatable {
     var markdown: AttributedString?
     var isStreaming = false
     var detail: String = ""
-    var activity: String?
     var failed = false
     /// SF Symbol for a tool step.
     var symbol: String = ""

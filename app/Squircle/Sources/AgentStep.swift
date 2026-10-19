@@ -26,26 +26,14 @@ struct AgentStep: Equatable {
     /// and an edit with its text beats one without.
     var richness: Int { (literal ? 0 : 1) + (diff != nil ? 2 : 0) + (title.count > 8 ? 1 : 0) + (actions.isEmpty ? 0 : 4) }
 
-    /// Identity-free description for one activity payload.
-    static func describe(_ activity: JSONValue) -> AgentStep {
-        let p = activity["payload"], data = p["data"]
-        let input = data["input"]
-        let tool = data["toolName"].string ?? ""
-        let detail = p["detail"].string ?? ""
-        let kind = activity["kind"].string ?? ""
-        if kind.hasPrefix("task.") {
-            return AgentStep(kind: .agent, title: sentence(p["title"].string ?? p["detail"].string ?? activity["summary"].string ?? "Background task"), symbol: "person.2")
-        }
-        // Claude's tool input arrives structured; Codex sometimes only as "Name: {json}".
-        var args = input
-        if args == .null, let colon = detail.range(of: ": "),
-           let json = try? JSONDecoder().decode(JSONValue.self, from: Data(detail[colon.upperBound...].utf8)) { args = json }
-        let name = tool.isEmpty ? String(detail.prefix { $0 != ":" }) : tool
+    /// Identity-free description of one tool call.
+    static func describe(_ call: ToolCall) -> AgentStep {
+        let args = call.input, name = call.tool
 
         switch name {
         case "Bash", "BashOutput":
-            let command = args["command"].string ?? data["command"].string ?? ""
-            let actions = SquircleAction.parse(command: command, result: data["squircleResult"].string)
+            let command = args["command"].string ?? ""
+            let actions = SquircleAction.parse(command: command, result: call.result)
             if let first = actions.first(where: \.visible) ?? actions.first {
                 return AgentStep(kind: .squircle, title: first.sentence(worker: nil) + (first.refused ? " · refused" : ""),
                                  symbol: first.symbol, actions: actions)
@@ -116,37 +104,7 @@ struct AgentStep: Equatable {
             return AgentStep(kind: .other, title: sentence(tool.replacingOccurrences(of: "_", with: " ")), symbol: "puzzlepiece.extension")
         }
 
-        // Codex native items.
-        let item = data["item"]
-        if let command = data["command"].string ?? item["command"].string ?? (p["itemType"].string == "command_execution" ? detail : nil) {
-            let actions = item["commandActions"].array
-            if !actions.isEmpty, actions.allSatisfy({ $0["type"].string == "read" }) {
-                let names = actions.compactMap { $0["name"].string ?? $0["path"].string.map(file) }
-                return AgentStep(kind: .read, title: "Read " + names.joined(separator: ", "), symbol: "doc.text",
-                                 live: names.count == 1 ? "Reading " + names[0] : "Reading \(names.count) files")
-            }
-            if let search = actions.first(where: { $0["type"].string == "search" }), let query = search["query"].string {
-                return AgentStep(kind: .search, title: "Searched for “\(query)”", symbol: "magnifyingglass", live: "Searching for “\(query)”")
-            }
-            if actions.count == 1, actions[0]["type"].string == "listFiles" {
-                return AgentStep(kind: .search, title: "Listed files", symbol: "folder", live: "Listing files")
-            }
-            return AgentStep(kind: .command, title: humanCommand(command), symbol: "terminal", live: CommandLabel.label(command), literal: true)
-        }
-        switch p["itemType"].string {
-        case "file_change":
-            let paths = item["changes"].array.compactMap { $0["path"].string }
-            let title = paths.isEmpty ? "Edited files" : "Edited " + paths.map(file).joined(separator: ", ")
-            let live = paths.count == 1 ? "Editing " + file(paths[0]) : paths.isEmpty ? "Editing files" : "Editing \(paths.count) files"
-            return AgentStep(kind: .edit, title: title, symbol: "pencil.line", live: live)
-        case "web_search": return AgentStep(kind: .web, title: "Searched the web", symbol: "globe", live: "Searching the web")
-        case "image_view":
-            let name = file(data["imagePath"].string ?? "an image")
-            return AgentStep(kind: .read, title: "Looked at " + name, symbol: "photo", live: "Looking at " + name)
-        default: break
-        }
-        let fallback = p["title"].string ?? activity["summary"].string ?? "Worked"
-        return AgentStep(kind: .other, title: sentence(detail.isEmpty ? fallback : detail), symbol: "wrench.and.screwdriver")
+        return AgentStep(kind: .other, title: sentence(call.title ?? "Worked"), symbol: "wrench.and.screwdriver")
     }
 
     /// "/a/b/Theme.swift" → "Theme.swift".

@@ -1357,7 +1357,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         rise.startAnimation()
     }
 
-    private var debugRequest: JSONValue?
+    private var debugRequest: PendingRequest?
     private func renderRequest() {
         guard let change = requestCard.show(debugRequest ?? model.requests.first) else { return }
         view.setNeedsLayout()
@@ -1386,12 +1386,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     #if DEBUG
     /// Verification only: a sample agent question, never sent to T3.
     func debugShowQuestion() {
-        debugRequest = ["id": "debug-question", "kind": "user-input.requested", "payload": ["requestId": "debug", "questions": [
+        debugRequest = PendingRequest(id: "debug", item: ["id": "debug-question", "type": "user_input_request", "requestId": "debug", "questions": [
             ["id": "effects", "header": "Effects", "question": "How bold should the glass effects be?", "multiSelect": false, "options": [
                 ["label": "Bold and flashy", "description": "Flowing spectrum glow, shimmer and ripples"],
                 ["label": "Calm", "description": "Soft shimmer, restrained glow"]]],
             ["id": "media", "header": "Media", "question": "What should appear inline?", "multiSelect": true, "options": [
-                ["label": "Screenshots"], ["label": "Recordings"], ["label": "Diffs"]]]]]]
+                ["label": "Screenshots"], ["label": "Recordings"], ["label": "Diffs"]]]]])
         renderRequest()
     }
     /// Verification only: types and sends a real message, as the composer does.
