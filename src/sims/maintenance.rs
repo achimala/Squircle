@@ -181,6 +181,28 @@ impl Sims {
     }
 }
 
+impl Sims {
+    /// Records `note` in the session holding `device`, if one does; returns
+    /// that session's thread.
+    pub async fn note(&self, device: &str, note: String) -> Option<String> {
+        let device = device.to_string();
+        self.owner
+            .ask(move |s| {
+                let session = s
+                    .ledger()
+                    .sessions
+                    .iter()
+                    .find(|s| s.holds_device() && s.device_id.eq_ignore_ascii_case(&device))?;
+                let (id, thread) = (session.id.clone(), session.thread_id.clone());
+                if let Err(error) = s.step(&id, Event::Noted(note)) {
+                    eprintln!("{error:#}");
+                }
+                Some(thread)
+            })
+            .await
+    }
+}
+
 impl Holds for Sims {
     fn leases(&self) -> Vec<Lease> {
         Sims::leases(self)

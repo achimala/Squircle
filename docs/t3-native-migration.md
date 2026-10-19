@@ -1948,6 +1948,61 @@ never given up. A thread waiting on the user (needs-you) keeps its simulator and
 protects it like a working one. Simulators booted before this change carry no
 receipt and are left alone.
 
+**2026-10-19 (owner-requested: "make sure sims are cleaned up appropriately
+and do not hammer resources indefinitely").** Observed: 82 simulators (164 GB,
+disk 97%); the service hadn't come back after a reboot, so nothing ran the
+policy; an app hot-looped a core for hours in a simulator counted as held; and
+SimRenderServer crash-looped, then hung, so every `simctl launch` hung.
+- *Stale deletion, any creator.* A shut-down iOS simulator unused for
+  `SQUIRCLE_SIM_STALE_DAYS` (default 14; 0 turns it off) is deleted whoever
+  made it. Last use is the latest of CoreSimulator's `lastUsedAt` (set at
+  each boot; `simctl list -j`), its `device.plist`'s modification time
+  (written at boot, shutdown and rename) and what Squircle saw (sessions,
+  agents' commands). The data folder's own time is not used: it changes
+  with unrelated writes. A device with no sign at all is kept. Never a
+  booted or shutting-down one, one in a session, open in T3's device tools,
+  the preview simulator, one an agent may still be using, while T3's
+  activity log can't be read, or one on the owner's keep list
+  (`DATA_DIR/sim-keep.json`, `squircle sim keep add|remove|list`, by exact
+  name or UDID). The pool applies it every minute; `squircle sim prune
+  [--dry-run]` runs it now and reports the space freed. On this Mac on
+  2026-10-19 the dry run found nothing to delete (2 simulators, both used
+  that day; the pile-up had already been cleared by hand).
+- *Idle holds.* A simulator of Squircle's kept booted only by T3 device
+  sessions of Squircle threads whose turns are running (no Squircle
+  session) is shut down once nothing used it for
+  `SQUIRCLE_SIM_HOLD_IDLE_MINUTES` (default 30), and those T3 device
+  sessions are closed. A use is a lease, a boot, or an agent command on it,
+  now including T3's `agent-device --udid`. A hold by a thread waiting on
+  the user, of unknown state or the user's own still protects, and a
+  simulator the user booted is never touched.
+- *Runaway apps* (`src/simwatch.rs`). Every minute the service reads each
+  simulator app's CPU time (`ps`; apps under the device's
+  `data/Containers/Bundle/Application`, not the simulator's own system
+  processes). One above 90% of a core over every interval for 20 minutes
+  (a gap over 3 minutes in sampling, a cool minute or a new process behind
+  the PID restarts the clock) is killed, in any simulator. The kill is
+  noted in the session holding that simulator, and its thread (else a
+  Squircle thread with it open in T3) is woken with a `squircle-sim-health`
+  message; with neither, the phone gets a notification.
+- *Host health.* Every 10 minutes and before every `sim start`: three or
+  more SimRenderServer crash reports (`~/Library/Logs/DiagnosticReports`)
+  within 30 minutes, or a probe that gets no answer in 60 s, is a failing
+  host. The probe launches Settings on a free booted simulator of
+  Squircle's, or takes a screenshot of a session's (a launch would take
+  the screen from the agent's app); with neither it is skipped. A failing
+  host wakes the app agent of each app with a simulator session (else
+  notifies the phone) with the explanation and the fix (`killall -9
+  SimRenderServer`, else reboot); starts are refused with the same text
+  until a fresh check passes. The service never kills system processes.
+- *Reboots.* `squircle service install` makes the service a launchd user
+  agent (`dev.squircle.service`: RunAtLoad, KeepAlive unless it exited
+  cleanly, log in `DATA_DIR/serve.log`). It copies the running service's
+  command line and environment into the plist and hands its sessions over
+  (SIGTERM) to launchd's. `service restart` is then `launchctl kickstart -k`
+  (still a handover), `service stop` stays stopped until `service start`
+  or the next login, `service uninstall` removes it.
+
 ## 2026-10-14 simulator deck
 
 User, after trying several simulators on the phone: "we need to stack em

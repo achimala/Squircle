@@ -2,8 +2,9 @@
 
 Squircle is a Rust CLI and local service. The commands below run on your Mac and
 exercise the build, install and diagnostics path with the bundled sample app.
-Keep the service running in a separate terminal. Squircle does not install
-itself as a login service and does not configure Tailscale or HTTPS.
+Keep the service running in a separate terminal (or install it as a launchd
+user agent with `squircle service install`). Squircle does not configure
+Tailscale or HTTPS.
 
 For the iPhone app's own setup see the [app guide](../app/Squircle/README.md).
 

@@ -13,7 +13,9 @@
 //! an agent that used it outside a session may still be working; otherwise
 //! it is shut down once it has been free for the idle time (at once when a
 //! session releases it, or on `squircle sim cleanup`). A device an agent
-//! created is deleted once nothing has used it for a day.
+//! created is deleted once nothing has used it for a day; any shut-down
+//! device, once nothing has for two weeks, unless the owner keeps it
+//! (`sim-keep.json`, `squircle sim keep`).
 //!
 //! What is known is saved through the commit gate before anything acts on
 //! it; a cleanup is saved as an intent, revalidated on a fresh snapshot
@@ -54,7 +56,29 @@ impl Policy {
             max_leases: number("SQUIRCLE_MAX_SIMULATORS").map_or(3, |v| (v as usize).max(1)),
             idle: number("SQUIRCLE_SIM_IDLE_MINUTES").map_or(600.0, |m| m * 60.0),
             delete_after: 24.0 * 3600.0,
+            stale_after: number("SQUIRCLE_SIM_STALE_DAYS").unwrap_or(14.0) * 24.0 * 3600.0,
+            hold_idle: number("SQUIRCLE_SIM_HOLD_IDLE_MINUTES").map_or(1800.0, |m| m * 60.0),
         }
+    }
+}
+
+/// The owner's keep list: device names and UDIDs never deleted.
+const KEEP_FILE: &str = "sim-keep.json";
+
+#[derive(Default, Serialize, Deserialize)]
+struct KeepList {
+    #[serde(default)]
+    keep: Vec<String>,
+}
+
+fn read_keep(root: &Path) -> Result<Vec<String>> {
+    let path = root.join(KEEP_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(serde_json::from_slice::<KeepList>(&bytes)
+            .with_context(|| format!("{} is not a keep list; fix or remove it", path.display()))?
+            .keep),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(error) => Err(error).with_context(|| format!("Cannot read {}", path.display())),
     }
 }
 
@@ -121,7 +145,7 @@ fn argument(rest: &str) -> Option<String> {
 /// Parses a shell command an agent ran (and its output) for simulators it
 /// created (`simctl create/clone`, whose output is the new UDID), booted
 /// (`simctl boot`) and used (`simctl boot/install/launch`, `xcodebuild
-/// -destination`).
+/// -destination`, T3's `agent-device --udid`).
 pub fn parse_use(command: &str, output: &str) -> Use {
     let mut found = Use::default();
     let mut segments = command.split("simctl ");
@@ -170,6 +194,13 @@ pub fn parse_use(command: &str, output: &str) -> Use {
                 found.touched.extend(ids.into_iter().take(1));
             }
             _ => {}
+        }
+    }
+    // T3's agent-device driving a simulator (`--udid`): a use.
+    for segment in command.split("agent-device").skip(1) {
+        let segment = segment.split(['\n', ';', '|']).next().unwrap_or("");
+        if let Some((_, rest)) = segment.split_once("--udid") {
+            found.touched.extend(uuids(rest).into_iter().take(1));
         }
     }
     if command.contains("xcodebuild") {
@@ -268,6 +299,8 @@ pub trait World: Send + Sync {
     fn title(&self, id: &str) -> Option<String>;
     /// Simulator and xcodebuild commands agents ran after `since` (ISO time).
     fn activity<'a>(&'a self, since: &'a str) -> Pending<'a, Result<Vec<Activity>>>;
+    /// Closes `thread`'s T3 device session on `device` (its simulator was shut down).
+    fn close<'a>(&'a self, thread: &'a str, device: &'a str) -> Pending<'a, Result<()>>;
 }
 
 /// The session owner, the one authority on which simulators are reserved.
@@ -310,8 +343,11 @@ struct Saved {
 
 /// The pool owner's state, reached only by its letters.
 struct State {
+    root: std::path::PathBuf,
     gate: Gate<Saved, Infallible, JsonFile>,
     idle_since: HashMap<String, f64>,
+    /// When each simulator was first seen kept only by a working thread's T3 hold.
+    held_since: HashMap<String, f64>,
     /// Cleanups a previous run left unanswered have been settled from an inventory.
     reconciled: bool,
 }
@@ -341,6 +377,8 @@ pub struct Pool {
     holds: OnceLock<Weak<dyn Holds>>,
     /// One plan-and-apply at a time.
     applying: Lane,
+    /// The simulator host's health, as the watch last found it.
+    health: crate::actor::Published<crate::simwatch::Health>,
 }
 
 fn now() -> f64 {
@@ -384,8 +422,10 @@ impl Pool {
         let file = JsonFile::new(root.join("simpool.json"));
         let (saved, revision) = file.read::<Saved>()?.unwrap_or_default();
         let state = State {
+            root: root.to_path_buf(),
             gate: Gate::restore(saved, revision, file),
             idle_since: HashMap::new(),
+            held_since: HashMap::new(),
             reconciled: false,
         };
         Ok(Arc::new(Self {
@@ -396,7 +436,43 @@ impl Pool {
             owner: Owner::spawn("simulator pool", state),
             holds: OnceLock::new(),
             applying: Lane::new(Rank::PoolApply),
+            health: crate::actor::Published::new(crate::simwatch::Health::default()).0,
         }))
+    }
+
+    pub fn health(&self) -> Arc<crate::simwatch::Health> {
+        self.health.get()
+    }
+
+    pub fn set_health(&self, health: crate::simwatch::Health) {
+        self.health.set(health);
+    }
+
+    /// The owner's keep list.
+    pub async fn keep_list(&self) -> Result<Vec<String>> {
+        self.owner.ask(|s| read_keep(&s.root)).await
+    }
+
+    /// Adds or removes device names or UDIDs on the keep list; returns it.
+    pub async fn keep(&self, add: Vec<String>, remove: Vec<String>) -> Result<Vec<String>> {
+        self.owner
+            .ask(move |s| {
+                let mut keep = read_keep(&s.root)?;
+                for entry in add {
+                    let entry = entry.trim().to_string();
+                    ensure!(!entry.is_empty(), "Name a simulator or its UDID");
+                    if !keep.iter().any(|k| k.eq_ignore_ascii_case(&entry)) {
+                        keep.push(entry);
+                    }
+                }
+                keep.retain(|k| !remove.iter().any(|r| r.trim().eq_ignore_ascii_case(k)));
+                crate::store::atomic_json(
+                    &s.root.join(KEEP_FILE),
+                    &KeepList { keep: keep.clone() },
+                )?;
+                Ok(keep)
+            })
+            .await
     }
 
     /// The session owner: its reservations, boots and cleanup exclusions.
@@ -477,9 +553,10 @@ impl Pool {
         let complete = activity.is_some();
         let boots = self.holds().map(|h| h.boots()).unwrap_or_default();
         let facts = snapshot.clone();
-        let (known, idle_since) = self
+        let (known, idle_since, held_since, keep) = self
             .owner
             .ask(move |s| -> Result<_> {
+                let keep = read_keep(&s.root)?;
                 let reconcile = !s.reconciled;
                 s.change(|saved| {
                     merge_activity(
@@ -508,7 +585,12 @@ impl Pool {
                     }
                 })?;
                 s.reconciled = true;
-                Ok((s.gate.committed().known.clone(), s.idle_since.clone()))
+                Ok((
+                    s.gate.committed().known.clone(),
+                    s.idle_since.clone(),
+                    s.held_since.clone(),
+                    keep,
+                ))
             })
             .await?;
         // The policy is pure; it runs here, on what was just saved, asking T3
@@ -527,18 +609,24 @@ impl Pool {
             reserved: &self.reserved,
             policy: self.policy,
             now_please,
+            keep: &keep,
+            held_since: &held_since,
         });
-        let free: Vec<String> = rows
-            .iter()
-            .filter(|r| r.free)
-            .map(|r| r.udid.clone())
-            .collect();
+        let ids = |keep: fn(&Row) -> bool| -> Vec<String> {
+            rows.iter()
+                .filter(|r| keep(r))
+                .map(|r| r.udid.clone())
+                .collect()
+        };
+        let (free, held) = (ids(|r| r.free), ids(|r| r.hold));
         let seen_at = snapshot.now;
         self.owner
             .ask(move |s| {
-                s.idle_since.retain(|udid, _| free.contains(udid));
-                for udid in free {
-                    s.idle_since.entry(udid).or_insert(seen_at);
+                for (clock, ids) in [(&mut s.idle_since, free), (&mut s.held_since, held)] {
+                    clock.retain(|udid, _| ids.contains(udid));
+                    for udid in ids {
+                        clock.entry(udid).or_insert(seen_at);
+                    }
                 }
             })
             .await;
@@ -602,8 +690,19 @@ impl Pool {
             self.owner
                 .ask(move |s| {
                     s.idle_since.remove(&udid);
+                    s.held_since.remove(&udid);
                 })
                 .await;
+            // A working thread's idle hold: its T3 device session goes with it.
+            if let (Action::Shutdown, "t3 session", Some(thread)) =
+                (action, row.owner, row.thread.as_deref())
+                && let Err(close) = self.world.close(thread, &row.udid).await
+            {
+                eprintln!(
+                    "Simulator pool: {} shut down, but T3's device session not closed: {close:#}",
+                    row.name
+                );
+            }
         }
         report(error)
     }
@@ -698,6 +797,34 @@ impl Pool {
             .await
     }
 
+    /// `sim prune`: deletes what the policy deletes now (shut-down devices
+    /// unused for the stale age, agent-created ones unused for a day);
+    /// `dry_run` only reports them and the space they would free.
+    pub async fn prune(&self, leases: &[Lease], dry_run: bool) -> Result<Value> {
+        self.applying
+            .run(async {
+                let rows: Vec<Row> = self
+                    .refresh(leases, false)
+                    .await?
+                    .into_iter()
+                    .filter(|r| r.action == Some(Action::Delete))
+                    .collect();
+                let bytes: u64 = rows.iter().map(|r| r.bytes).sum();
+                let keep = self.keep_list().await?;
+                let done = if dry_run {
+                    Value::Null
+                } else {
+                    Value::Array(self.apply(&rows, false).await)
+                };
+                Ok(
+                    json!({"dry_run": dry_run, "would_delete": rows, "count": rows.len(),
+                          "bytes": bytes, "freed": gigabytes(bytes), "kept_by_owner": keep,
+                          "stale_days": self.policy.stale_after / 86400.0, "done": done}),
+                )
+            })
+            .await
+    }
+
     /// Every booted simulator with its owner, for `sim status`.
     pub async fn status(&self, leases: &[Lease]) -> Result<Value> {
         let rows = self.refresh(leases, false).await?;
@@ -715,8 +842,14 @@ impl Pool {
             })
             .collect();
         Ok(
-            json!({"booted": booted, "max_leases": self.policy.max_leases, "idle_minutes": self.policy.idle / 60.0}),
+            json!({"booted": booted, "max_leases": self.policy.max_leases, "idle_minutes": self.policy.idle / 60.0,
+                   "host_health": *self.health()}),
         )
+    }
+
+    /// This Mac's iOS simulators, as simctl lists them now.
+    pub async fn devices(&self) -> Result<Vec<Device>> {
+        self.simctl.devices().await
     }
 
     /// T3's open device sessions: (thread, device).
@@ -747,6 +880,11 @@ impl Pool {
             }
         }
     }
+}
+
+/// `12.3 GB`.
+pub fn gigabytes(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
 /// The real simctl and ps.
@@ -795,11 +933,17 @@ impl Simctl for Xcrun {
                         .and_then(|p| p.metadata().ok()?.modified().ok())
                         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                         .map_or(0.0, |d| d.as_secs_f64());
+                    let size = |key: &str| d[key].as_u64().unwrap_or(0);
                     devices.push(Device {
                         udid: udid.to_ascii_uppercase(),
                         name: d["name"].as_str().unwrap_or("").into(),
                         state: d["state"].as_str().unwrap_or("").into(),
                         changed_at,
+                        last_booted: d["lastUsedAt"]
+                            .as_str()
+                            .and_then(crate::t3::iso_parse)
+                            .unwrap_or(0.0),
+                        bytes: size("dataPathSize") + size("logPathSize"),
                     });
                 }
             }
@@ -893,6 +1037,20 @@ impl World for T3World {
     fn activity<'a>(&'a self, since: &'a str) -> Pending<'a, Result<Vec<Activity>>> {
         Box::pin(crate::t3steps::simulator_commands(since))
     }
+
+    fn close<'a>(&'a self, thread: &'a str, device: &'a str) -> Pending<'a, Result<()>> {
+        Box::pin(async move {
+            self.0
+                .connection()
+                .await?
+                .call(
+                    "device.close",
+                    json!({"threadId": thread, "hostId": "local", "deviceId": device, "platform": "ios"}),
+                )
+                .await
+                .map(drop)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -907,6 +1065,8 @@ mod tests {
         max_leases: 3,
         idle: 600.0,
         delete_after: 24.0 * 3600.0,
+        stale_after: 14.0 * 24.0 * 3600.0,
+        hold_idle: 1800.0,
     };
 
     fn device(udid: &str, state: &str) -> Device {
@@ -915,6 +1075,8 @@ mod tests {
             name: format!("sim {udid}"),
             state: state.into(),
             changed_at: 0.0,
+            last_booted: 0.0,
+            bytes: 0,
         }
     }
 
@@ -950,6 +1112,15 @@ mod tests {
             "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):\nUnable to boot device in current state: Booted",
         );
         assert!(again.booted.is_empty() && again.touched.len() == 1);
+        // Driving it with T3's agent-device is a use.
+        assert_eq!(
+            parse_use(
+                "~/.t3/userdata/device/bin/agent-device tap 10 20 --platform ios --udid 389df2c3-2656-40ad-830a-a8a90667d730 --session t3-x",
+                ""
+            )
+            .touched,
+            ["389DF2C3-2656-40AD-830A-A8A90667D730"]
+        );
         // Listing, reading or recording is not a use; nor is the literal "booted".
         assert_eq!(
             parse_use(
@@ -1017,6 +1188,9 @@ mod tests {
         }
         fn title(&self, _: &str) -> Option<String> {
             None
+        }
+        fn close<'a>(&'a self, _: &'a str, _: &'a str) -> Pending<'a, Result<()>> {
+            Box::pin(async { Ok(()) })
         }
         fn activity<'a>(&'a self, since: &'a str) -> Pending<'a, Result<Vec<Activity>>> {
             let rows = if since.is_empty() {

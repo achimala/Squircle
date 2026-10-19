@@ -49,7 +49,7 @@ pub(super) enum Commands {
     },
     /// Restart or stop the running service for this data directory.
     #[command(
-        after_help = "restart: the running service hands its simulator sessions over (recordings keep going, T3's device sessions stay open) and the same command line starts again, picking up a binary rebuilt at the same path; returns once it answers. It builds nothing; its output goes to DATA_DIR/serve.log.\nstop: ends simulator sessions (recordings are filed) and exits.\nA plain SIGTERM to squircle serve is a restart's handover; SIGINT (Ctrl-C) is a stop."
+        after_help = "install: runs the service as a launchd user agent (dev.squircle.service) so it starts at login and comes back after a crash; it takes over from the running service without ending its simulator sessions. Installed, restart is launchd's kickstart and stop lasts until service start or the next login.\nrestart: the running service hands its simulator sessions over (recordings keep going, T3's device sessions stay open) and the same command line starts again, picking up a binary rebuilt at the same path; returns once it answers. It builds nothing; its output goes to DATA_DIR/serve.log.\nstop: ends simulator sessions (recordings are filed) and exits.\nA plain SIGTERM to squircle serve is a restart's handover; SIGINT (Ctrl-C) is a stop."
     )]
     Service {
         #[command(subcommand)]

@@ -60,6 +60,11 @@ pub trait Host: Send + Sync {
     /// The threads now waiting in line for a simulator (their ended turns wake nobody).
     fn waiting(&self, threads: Vec<String>);
 
+    /// Why no simulator can start now, if this Mac's simulator host is failing.
+    fn unhealthy<'a>(&'a self, _leases: &'a [Lease]) -> Pending<'a, Option<String>> {
+        Box::pin(async { None })
+    }
+
     /// Saves the device's screen as a small JPEG at `path`, best effort:
     /// the recording's poster, so the phone needn't download the movie to
     /// show it.
@@ -175,6 +180,10 @@ impl Host for AgentsHost {
 
     fn waiting(&self, threads: Vec<String>) {
         self.0.set_sim_waiting(threads);
+    }
+
+    fn unhealthy<'a>(&'a self, leases: &'a [Lease]) -> Pending<'a, Option<String>> {
+        Box::pin(crate::simwatch::before_start(&self.1, leases))
     }
 
     fn poster<'a>(&'a self, device: &'a str, path: &'a Path) -> Pending<'a, ()> {

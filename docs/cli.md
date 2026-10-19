@@ -25,6 +25,7 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | Command | Result |
 | --- | --- |
 | `init`, `serve` | Private state/credentials; foreground HTTP service |
+| `service install`, `service start`, `service uninstall` | Install writes and loads a launchd user agent (`dev.squircle.service`, RunAtLoad, KeepAlive unless it exited cleanly) from the running service's command line and environment, handing its sessions over; restart then uses `launchctl kickstart -k`, and a stop stays stopped until `service start` |
 | `service restart`, `service stop` | Restart hands simulator sessions over to a new process running the same command line (recorders keep going, T3 device sessions stay open), builds nothing and returns once it answers; stop ends them. SIGTERM to `serve` is the handover, SIGINT a stop |
 | `auth show --scope diagnostics` | Explicitly reveal the phone upload credential |
 | `build start` | Durable job ID; archive/export or unsigned simulator mode. Non-App-Store device exports get the debug overlay injected unless `--no-overlay` |
@@ -46,6 +47,7 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `sim start --thread T3_ID [--device NAME\|UDID]` | Open, boot and record a simulator for that thread; returns the agent-device command. The phone shows it live. Past `SQUIRCLE_MAX_SIMULATORS` it returns `status: queued` with the thread's place in a first-come line; the service wakes the thread with a `[simulator ready]` message when a slot is held for it, and the next `sim start` takes it |
 | `sim stop --thread T3_ID`, `sim status [--thread T3_ID]`, `sim devices` | File the recording in the turn, close T3's device session and shut the simulator down (or leave the line) (also when T3 currently shows the turn ended for 8 s; an unknown T3 state, or a turn waiting on the user, never ends it); every booted simulator with its owner (session, T3 device session, agent outside a session, or unowned: not proven created or booted by Squircle or its agents) plus sessions; simulators in use. JSON keeps its flat session keys plus `device_session` (`{phase: opening\|open\|close_owed\|closed, …}`; a close is never given up) |
 | `sim cleanup [--dry-run]` | Apply the simulator policy now: shut down simulators Squircle or its agents booted that nothing holds, delete agent-created ones unused for a day. The service applies it every minute (`SQUIRCLE_SIM_IDLE_MINUTES`, default 10); at most `SQUIRCLE_MAX_SIMULATORS` sessions (default 3) |
+| `sim prune [--dry-run]`, `sim keep add\|remove\|list DEVICE` | Delete shut-down simulators unused for `SQUIRCLE_SIM_STALE_DAYS` (default 14) whoever made them, never one on the owner's keep list (`DATA_DIR/sim-keep.json`, exact name or UDID), booted, in a session or open in T3; the dry run lists them with `bytes` and `freed`. The service applies it every minute |
 | `logs ID --since N --limit N` | Persisted diagnostic events, record cursor |
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
 | `symbolicate --report PATH --dsym PATH` | Local Xcode symbolication attempt for Apple-text reports |

@@ -21,10 +21,13 @@ pub enum Note {
     SimReady,
     /// The service compacting an idle agent's context.
     Upkeep,
+    /// The service's news about this Mac's simulators: a runaway app it
+    /// stopped, or the simulator host failing.
+    SimHealth,
 }
 
 impl Note {
-    pub const ALL: [Note; 7] = [
+    pub const ALL: [Note; 8] = [
         Note::WorkerUpdate,
         Note::BuildUpdate,
         Note::Handoff,
@@ -32,6 +35,7 @@ impl Note {
         Note::AgentMessage,
         Note::SimReady,
         Note::Upkeep,
+        Note::SimHealth,
     ];
 
     pub(super) fn kind(self) -> &'static str {
@@ -43,6 +47,7 @@ impl Note {
             Note::AgentMessage => "squircle-agent-message",
             Note::SimReady => "squircle-sim-ready",
             Note::Upkeep => "squircle-upkeep",
+            Note::SimHealth => "squircle-sim-health",
         }
     }
 
@@ -54,6 +59,7 @@ impl Note {
             Note::Task | Note::AgentMessage => "Agent message",
             Note::SimReady => "Simulator ready",
             Note::Upkeep => "Tidied up",
+            Note::SimHealth => "Simulator trouble",
         }
     }
 

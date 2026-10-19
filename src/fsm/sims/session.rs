@@ -150,6 +150,9 @@ pub struct Session {
     pub device: DeviceLease,
     pub release: Release,
     pub boot: Boot,
+    /// What the service did to the simulator meanwhile (a runaway app it
+    /// stopped), for the agent and `sim status`.
+    pub notes: Vec<String>,
 }
 
 impl Session {
@@ -177,6 +180,7 @@ impl Session {
             } else {
                 Boot::WasShutdown
             },
+            notes: vec![],
         }
     }
 
@@ -297,6 +301,8 @@ pub enum Event {
         outcome: Result<Released, String>,
         now: f64,
     },
+    /// The service did something to the simulator while the session holds it.
+    Noted(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -330,6 +336,12 @@ fn owe_cleanup(mut session: Session) -> Session {
 
 pub fn reduce(session: Session, event: Event) -> Reduction<Session, Effect> {
     match (session.phase.clone(), event) {
+        (_, Event::Noted(note)) if session.holds_device() => {
+            let mut notes = session.notes.clone();
+            notes.push(note);
+            Reduction::applied(Session { notes, ..session }, vec![Effect::Commit])
+        }
+        (_, Event::Noted(_)) => Reduction::same(session, Disposition::NotApplicable),
         (Phase::Starting { .. }, Event::Opened) if session.device == DeviceLease::Opening => {
             Reduction::applied(
                 Session {
@@ -674,6 +686,8 @@ pub struct Served {
     pub close_error: Option<String>,
     #[serde(default)]
     pub release_pending: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl From<Stored> for Session {
@@ -751,6 +765,7 @@ impl From<Stored> for Session {
             device,
             release,
             boot: stored.boot.unwrap_or(Boot::Unknown),
+            notes: r.notes,
         }
     }
 }
@@ -804,6 +819,7 @@ impl From<&Session> for Served {
             close_pending: false,
             close_error: None,
             release_pending: s.release_owed(),
+            notes: s.notes.clone(),
         }
     }
 }

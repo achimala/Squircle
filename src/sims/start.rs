@@ -31,6 +31,9 @@ impl Sims {
             !*self.draining.borrow(),
             "Squircle is restarting or stopping; start the simulator again once it is back"
         );
+        if let Some(why) = self.host.unhealthy(&self.leases()).await {
+            bail!("{why}");
+        }
         let inventory = inventory(&*self.host).await?;
         ensure!(
             self.host.seen(thread) != Seen::Gone,
