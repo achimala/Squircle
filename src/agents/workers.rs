@@ -104,18 +104,17 @@ impl Agents {
                  (copied out of /tmp into ~/.t3/userdata/attachments), and don't present bare paths or IDs as information.",
                 cli = self.cli
             );
-            let now = crate::t3::iso_now();
             let message_id = uuid::Uuid::new_v4().to_string();
+            let message = Note::Task.message(&message_id, &text, json!({"from": coordinator}));
+            // T3 creates the thread, its worktree (running the project's
+            // setup) and its first run in one launch.
             let command = json!({
-                "type": "thread.turn.start", "threadId": id,
-                "message": Note::Task.message(&message_id, &text, json!({"from": coordinator})),
+                "type": crate::fsm::coordinator::LAUNCH, "threadId": id,
+                "projectId": agent.project_id, "title": title, "creationSource": "server",
                 "modelSelection": selection, "runtimeMode": mode, "interactionMode": "default",
-                "bootstrap": {
-                    "createThread": {"projectId": agent.project_id, "title": title, "modelSelection": selection,
-                                     "runtimeMode": mode, "interactionMode": "default", "branch": null, "worktreePath": null, "createdAt": now},
-                    "prepareWorktree": {"projectCwd": project["workspaceRoot"], "baseBranch": base, "branch": branch},
-                    "runSetupScript": true,
-                },
+                "workspaceStrategy": {"type": "worktree", "baseRef": base, "branch": branch},
+                "initialMessage": {"messageId": message_id, "text": message["text"],
+                                   "attachments": [], "context": message["context"]},
             });
             // Reserved before T3 is asked, so wake-ups follow it from its first
             // turn and a lost acknowledgement or a restart finishes this worker.
@@ -139,9 +138,10 @@ impl Agents {
     /// acknowledgement, the thread in the shell or its first message counts.
     /// `again`: spawn was asked again for it, so T3's shell is looked at
     /// first and the bootstrap is sent again (with the same thread and
-    /// message IDs) only if T3 doesn't show it. T3 runs a bootstrap's
-    /// worktree setup before its receipt check, so each attempt is its own
-    /// command. Call in the worker's operation lane.
+    /// message IDs) only if T3 doesn't show it. T3 keeps a rejected receipt
+    /// per command ID and a launch fails part way (its thread made, its
+    /// workspace not), so each attempt is its own command. Call in the
+    /// worker's operation lane.
     pub(super) async fn bootstrap(&self, client: &dyn Peer, id: &str, again: bool) -> Result<()> {
         let mut effects = match again {
             true => {
@@ -268,16 +268,17 @@ impl Agents {
                 match effect {
                     m15::ArchiveEffect::Commit => {}
                     m15::ArchiveEffect::Send(order, identity) => {
-                        let kind = match order {
-                            ArchiveOrder::Stop => "thread.session.stop",
-                            ArchiveOrder::Archive => "thread.archive",
+                        let outcome = match order {
+                            ArchiveOrder::Stop => self.stop(client, id, &identity).await,
+                            ArchiveOrder::Archive => {
+                                client
+                                    .dispatch(&Command::new(
+                                        &identity,
+                                        json!({"type": "thread.archive", "threadId": id}),
+                                    ))
+                                    .await
+                            }
                         };
-                        let outcome = client
-                            .dispatch(&Command::new(
-                                &identity,
-                                json!({"type": kind, "threadId": id}),
-                            ))
-                            .await;
                         if order == ArchiveOrder::Stop && matches!(outcome, Dispatched::Accepted(_))
                         {
                             result["stopped"] = json!(true);

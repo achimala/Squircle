@@ -3,18 +3,21 @@
 
 use serde_json::Value;
 
-/// Whether T3 runs a provider session for a thread. T3 counts any session
-/// not `stopped` as live (it stops one before archiving), and a stop it
-/// carries out always ends in `stopped`.
+/// Whether a thread has work running in T3 and a provider session.
+/// T3's (protocol 2) shell row shows only its runs; whether a provider
+/// session is still attached between runs is in the thread's projection
+/// (`providerSessions`), so a shell row alone says `Stopped` for any thread
+/// without a running run, and `Idle` comes only from a projection
+/// (`with_sessions`). T3 detaches every session of a thread it archives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Execution {
-    /// No session, or T3 reports it stopped.
+    /// No run in progress and, as far as is known, no session.
     Stopped,
-    /// A session between turns (`idle`, `ready`, `interrupted`, `error`).
+    /// No run in progress, but a provider session is still attached.
     Idle,
-    /// A turn is running, possibly waiting on a question or approval.
+    /// A run is preparing, queued, starting, running or waiting on the user.
     Running,
-    /// A session status this service does not know; possibly running.
+    /// A run status this service does not know; possibly running.
     Unknown,
 }
 
@@ -51,28 +54,37 @@ impl Phase {
 }
 
 impl ThreadObservation {
+    /// From a protocol 2 shell row (`OrchestrationV2ThreadShell`): `status`
+    /// is `idle` or the latest run's status, `latestRunId` names the turn,
+    /// and a pending question or approval is `pendingRuntimeRequest`.
     pub fn decode(row: &Value) -> Self {
-        let session = &row["session"];
-        let waiting = row["hasPendingApprovals"] == true || row["hasPendingUserInput"] == true;
-        let turn_running =
-            row["latestTurn"]["state"] == "running" || session["activeTurnId"].is_string();
-        let execution = match session["status"].as_str() {
-            Some("stopped") => Execution::Stopped,
-            _ if turn_running => Execution::Running,
-            _ if session.is_null() => Execution::Stopped,
-            Some("starting" | "running") => Execution::Running,
-            // T3 asks only from within a turn.
-            Some("idle" | "ready" | "interrupted" | "error") if waiting => Execution::Running,
-            Some("idle" | "ready" | "interrupted" | "error") => Execution::Idle,
-            _ => Execution::Unknown,
+        let status = row["status"].as_str();
+        let waiting = !row["pendingRuntimeRequest"].is_null() || status == Some("waiting");
+        let execution = match status {
+            Some("preparing" | "queued" | "starting" | "running" | "waiting") => Execution::Running,
+            None
+            | Some("idle" | "completed" | "interrupted" | "failed" | "cancelled" | "rolled_back") => {
+                Execution::Stopped
+            }
+            Some(_) => Execution::Unknown,
         };
         ThreadObservation {
-            turn: row["latestTurn"]["turnId"].as_str().map(str::to_string),
+            turn: row["latestRunId"].as_str().map(str::to_string),
             execution,
             waiting,
-            failed: session["status"] == "error" || row["latestTurn"]["state"] == "error",
+            failed: status == Some("failed"),
             archived: !row["archivedAt"].is_null(),
         }
+    }
+
+    /// Refines a shell observation with the thread's projection: a thread
+    /// with no run in progress is `Idle` while a provider session is still
+    /// attached to it.
+    pub fn with_sessions(mut self, projection: &Value) -> Self {
+        if self.execution == Execution::Stopped && live_session(projection).is_some() {
+            self.execution = Execution::Idle;
+        }
+        self
     }
 
     /// What it shows as. A waiting thread shows as needs-you whatever its
@@ -98,4 +110,13 @@ impl ThreadObservation {
     pub fn stopped(&self) -> bool {
         self.execution == Execution::Stopped
     }
+}
+
+/// A provider session T3 still has attached to a thread, from its projection.
+pub fn live_session(projection: &Value) -> Option<&str> {
+    projection["providerSessions"]
+        .as_array()?
+        .iter()
+        .find(|s| s["status"] != "stopped")
+        .and_then(|s| s["id"].as_str())
 }

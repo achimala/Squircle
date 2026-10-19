@@ -97,7 +97,8 @@ iPhone app ──HTTPS/WebSocket──> T3 Code (agents, threads, simulators)
 | Probe | `examples/SquircleProbe` | A sample app with crash and log reporting, used to test the build and diagnostics path. |
 
 The service never runs a model and never writes to T3's database; it reads
-T3's `state.sqlite` read-only for details T3 doesn't stream.
+T3's state database (`statev2.sqlite` since T3 0.1.0) read-only for details T3
+doesn't stream.
 
 ## Read more
 

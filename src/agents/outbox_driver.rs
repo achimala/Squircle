@@ -208,25 +208,21 @@ impl Agents {
     }
 
     /// The update as T3 is sent it, under `identity`. T3 dedupes by command
-    /// ID alone, so the rest may follow the thread's current mode.
+    /// ID alone.
     pub(super) fn wake_command(
         &self,
         wake: &Wake,
         identity: &Identity,
     ) -> std::result::Result<Command, String> {
-        let agent = self
-            .thread(&wake.coordinator)
+        self.thread(&wake.coordinator)
             .ok_or("T3's shell no longer has the agent's thread")?;
-        let mode = thread_mode(&agent).map_err(|e| e.to_string())?;
         Ok(Command::new(
             identity,
-            json!({
-                "type": "thread.turn.start", "threadId": wake.coordinator,
-                "message": {"messageId": wake.message_id, "role": "user", "text": wake.text, "attachments": [],
-                            "context": {"version": 1, "records": [wake.record]}},
-                "runtimeMode": mode,
-                "interactionMode": "default",
-            }),
+            deliver(
+                &wake.coordinator,
+                json!({"messageId": wake.message_id, "text": wake.text, "attachments": [],
+                       "context": {"version": 1, "records": [wake.record]}}),
+            ),
         ))
     }
 

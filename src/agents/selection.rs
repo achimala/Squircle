@@ -22,14 +22,6 @@ pub(super) fn runtime_mode(mode: Option<&str>) -> Result<String> {
     Ok(mode.into())
 }
 
-/// The runtime mode T3 reports for a thread, as the commands that continue
-/// it send it back. None if T3 doesn't say: then nothing is sent.
-pub(super) fn thread_mode(row: &Value) -> Result<&str> {
-    row["runtimeMode"]
-        .as_str()
-        .context("T3 doesn't say which runtime mode the thread runs in, so nothing was sent")
-}
-
 /// A worker's runtime mode, and what T3 makes of it on the worker's provider
 /// (its driver): the mode asked for, else its coordinator's. Claude, Codex,
 /// Cursor and Grok each have an `auto` that runs unattended behind the

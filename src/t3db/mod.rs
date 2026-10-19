@@ -1,6 +1,6 @@
 //! T3 owns this database. Each read gets its own read-only connection on the
 //! blocking pool; no shared connection, lock, writable handle or copied store.
-//! See `sql` for the T3 0.0.45 projection schema used by the consumers.
+//! See `sql` for the T3 0.1.0 schema used by the consumers.
 
 pub(crate) mod sql;
 use anyhow::{Context, Result, bail, ensure};
@@ -28,14 +28,15 @@ pub(crate) const STEP_READ: Duration = Duration::from_secs(3);
 pub(crate) const DETAIL_READ: Duration = Duration::from_secs(15);
 const MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
-/// `SQUIRCLE_T3_STATE`, else T3's default `~/.t3/userdata/state.sqlite`.
+/// `SQUIRCLE_T3_STATE`, else T3's default `~/.t3/userdata/statev2.sqlite`
+/// (T3 0.1.0 moved to it; the old `state.sqlite` no longer changes).
 pub fn state_path() -> PathBuf {
     std::env::var_os("SQUIRCLE_T3_STATE")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_default()
-                .join(".t3/userdata/state.sqlite")
+                .join(".t3/userdata/statev2.sqlite")
         })
 }
 
@@ -137,7 +138,7 @@ fn read_rows(
     stopped: impl Fn() -> bool,
 ) -> Result<Vec<Value>> {
     let mut statement = connection.prepare(sql).context(
-        "T3 database schema/query is incompatible with the supported projection schema (T3 0.0.45)",
+        "T3 database schema/query is incompatible with the supported schema (T3 0.1.0, statev2.sqlite)",
     )?;
     ensure!(
         statement.readonly(),
@@ -200,6 +201,7 @@ impl Write for Budget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn fixture() -> (tempfile::TempDir, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
@@ -322,8 +324,10 @@ mod tests {
                 .is_err()
         );
     }
-    /// Sanitized projection fixture: checks SQLite JSON typing, IDs, limits,
-    /// literal search terms and every query against the same schema.
+    /// Sanitized projection fixture: V2 tables beside the 0.0.45 ones T3
+    /// leaves in the same file. Checks SQLite JSON typing, IDs, limits,
+    /// literal search terms, the V2 / 0.0.45 merge and every query against
+    /// the same schema.
     #[test]
     fn projection_queries_preserve_json_and_scope() {
         let db = Connection::open_in_memory().unwrap();
@@ -332,22 +336,44 @@ mod tests {
             create table projection_threads (thread_id text, project_id text, title text, branch text, worktree_path text, created_at text, updated_at text, archived_at text, deleted_at text);
             create table projection_thread_messages (message_id text, thread_id text, role text, created_at text, text text, context_json text);
             create table projection_thread_activities (activity_id text, thread_id text, sequence integer, created_at text, turn_id text, kind text, tone text, summary text, payload_json text);
+            create table orchestration_v2_projection_threads (thread_id text primary key, project_id text, title text, default_provider text, runtime_mode text, interaction_mode text, active_provider_thread_id text, created_at text, updated_at text, archived_at text, deleted_at text, payload_json text, provider_instance_id text);
+            create table orchestration_v2_projection_messages (message_id text primary key, thread_id text, run_id text, node_id text, role text, streaming integer, created_at text, updated_at text, payload_json text);
+            create table orchestration_v2_projection_turn_items (turn_item_id text primary key, thread_id text, run_id text, node_id text, provider_thread_id text, provider_turn_id text, parent_item_id text, ordinal integer, type text, status text, updated_at text, payload_json text);
+            create table orchestration_v2_projection_provider_turns (provider_turn_id text primary key, thread_id text, provider_thread_id text, node_id text, run_attempt_id text, ordinal integer, status text, started_at text, completed_at text, payload_json text);
             insert into projection_projects values ('p','App','/app',null);
-            insert into projection_threads values ('t','p','test_name',null,'/app/work','2026-10-18','2026-10-18',null,null);
-            insert into projection_thread_messages values ('m','t','user','2026-10-18','test_name',null);
+            insert into projection_threads values ('t','p','old title',null,null,'2026-10-18','2026-10-18',null,null);
+            insert into orchestration_v2_projection_threads values ('t','p','test_name','claudeAgent','auto','default',null,'2026-10-18','2026-10-19',null,null,
+                '{"branch":"work","worktreePath":"/app/work"}','claudeAgent');
+            insert into projection_thread_messages values ('m','t','user','2026-10-18','test_name imported',null);
+            insert into projection_thread_messages values ('m0','t','assistant','2026-10-18T01','test_name not imported','{"records":[{"kind":"squircle-task"}]}');
+            insert into orchestration_v2_projection_messages values ('m','t',null,null,'user',0,'2026-10-18','2026-10-18','{"text":"test_name"}');
             insert into projection_thread_activities values ('a','t',1,'2026-10-18','turn','tool.completed',null,'test_name',
                 '{"toolCallId":"call","data":{"toolName":"mcp__t3-code__device_screenshot","input":{"command":"simctl list"},"result":{"content":[{"type":"image","source":{"media_type":"image/png","data":"AAAA"}}]}}}');
+            insert into orchestration_v2_projection_turn_items values ('i1','t','r',null,null,null,null,1,'command_execution','completed','2026-10-19',
+                '{"title":"test_name","startedAt":"2026-10-19","input":"xcrun simctl list","output":"done","nativeItemRef":{"nativeId":"toolu_1"}}');
+            insert into orchestration_v2_projection_turn_items values ('i2','t','r',null,null,null,null,2,'dynamic_tool','completed','2026-10-19',
+                '{"toolName":"mcp__t3-code__device_screenshot","input":{"deviceId":"D"},"output":{"content":[{"type":"text","text":"x"},{"type":"image","data":"BBBB","mimeType":"image/png"}]},"nativeItemRef":{"nativeId":"toolu_2"}}');
+            insert into orchestration_v2_projection_provider_turns values ('pt','t','pth','n',null,1,'completed','2026-10-19','2026-10-19',
+                '{"tokenUsage":{"usedTokens":1200,"updatedAt":"2026-10-19T00:00:01Z"}}');
         "#).unwrap();
         let text = |s: &str| SqlValue::Text(s.into());
+        let read = |sql: &str, params: Vec<SqlValue>| {
+            read_rows(&db, sql, params, MAX_OUTPUT, || false).unwrap()
+        };
         for (sql, params) in [
             (sql::CURRENT_STEP, vec![text("t")]),
             (sql::SIMULATOR_COMMANDS, vec![text("")]),
             (sql::STEPS, vec![text("t"), SqlValue::Null]),
             (sql::IMAGES, vec![text("t"), text("call")]),
+            (sql::IMAGES, vec![text("t"), text("toolu_2")]),
             (sql::PROJECT_SCREENSHOTS, vec![text("p")]),
             (
                 sql::SCREENSHOT_DATA,
-                vec![text("a"), text("$.data.result.content[0].source.data")],
+                vec![text("a"), text("$.data.result.content[0]")],
+            ),
+            (
+                sql::SCREENSHOT_DATA_V2,
+                vec![text("i2"), text("$.output.content[1]")],
             ),
             (sql::THREAD_PROJECT, vec![text("t")]),
             (sql::PROJECT, vec![text("p")]),
@@ -356,35 +382,60 @@ mod tests {
             (sql::THREAD, vec![text("t")]),
             (sql::MESSAGES, vec![text("t"), 1.into()]),
             (sql::ACTIVITY, vec![text("a"), 100.into()]),
+            (sql::ACTIVITY, vec![text("i1"), 100.into()]),
             (sql::CONTEXT_READING, vec![text("t")]),
         ] {
+            let rows = read(sql, params);
             assert!(
-                !read_rows(&db, sql, params, MAX_OUTPUT, || false)
-                    .unwrap()
-                    .is_empty(),
+                !rows.is_empty()
+                    && rows
+                        .iter()
+                        .all(|r| r.as_object().unwrap().values().any(|v| !v.is_null())),
                 "{sql}"
             );
         }
-        let rows = read_rows(
-            &db,
-            sql::STEPS,
-            vec![text("t"), SqlValue::Null],
-            MAX_OUTPUT,
-            || false,
-        )
-        .unwrap();
-        assert_eq!(rows[0]["images"], 1);
+        let steps = read(sql::STEPS, vec![text("t"), SqlValue::Null]);
+        assert_eq!(steps[0]["id"], "toolu_1");
         assert_eq!(
-            serde_json::from_str::<Value>(rows[0]["input"].as_str().unwrap()).unwrap()["command"],
-            "simctl list"
+            serde_json::from_str::<Value>(steps[0]["input"].as_str().unwrap()).unwrap()["command"],
+            "xcrun simctl list"
         );
+        assert_eq!(steps[1]["images"], 1);
+        assert_eq!(
+            read(sql::IMAGES, vec![text("t"), text("toolu_2")])[0]["data"],
+            "BBBB"
+        );
+        let shots = read(sql::PROJECT_SCREENSHOTS, vec![text("p")]);
+        assert_eq!(
+            (&shots[0]["src"], &shots[0]["path"], &shots[0]["head"]),
+            (&json!("v2"), &json!("$.output.content[1]"), &json!("BBBB"))
+        );
+        assert_eq!(
+            read(
+                sql::SCREENSHOT_DATA_V2,
+                vec![text("i2"), text("$.output.content[1]")]
+            )[0]["data"],
+            "BBBB"
+        );
+        // One thread, its V2 metadata; a message T3 imported once.
+        let thread = read(sql::THREAD, vec![text("t")]);
+        assert_eq!(
+            (
+                &thread[0]["title"],
+                &thread[0]["branch"],
+                &thread[0]["total"]
+            ),
+            (&json!("test_name"), &json!("work"), &json!(2))
+        );
+        assert_eq!(read(sql::MESSAGE, vec![text("m")])[0]["after_id"], "m0");
+        assert_eq!(read(sql::CONTEXT_READING, vec![text("t")])[0]["used"], 1200);
         for (terms, expected) in [
-            (r#"["test_name"]"#, 3),
+            // V2 and 0.0.45 messages, the thread, an activity and a turn item.
+            (r#"["test_name"]"#, 5),
             (r#"["test%name"]"#, 0),
             (r#"["' OR 1=1 --"]"#, 0),
         ] {
-            let rows = read_rows(
-                &db,
+            let rows = read(
                 sql::SEARCH,
                 vec![
                     text("p"),
@@ -394,11 +445,8 @@ mod tests {
                     true.into(),
                     true.into(),
                 ],
-                MAX_OUTPUT,
-                || false,
-            )
-            .unwrap();
-            assert_eq!(rows.len(), expected);
+            );
+            assert_eq!(rows.len(), expected, "{terms}: {rows:?}");
         }
     }
 }

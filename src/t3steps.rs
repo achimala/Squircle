@@ -1,6 +1,6 @@
-//! Read-only details of a T3 thread's tool calls that T3 removes from what it
-//! sends to clients: a command's own description, an edit's old and new text
-//! and the screenshots a tool returned. T3 stays the owner of the thread; this
+//! Read-only details of a T3 thread's tool calls that T3 trims from what it
+//! sends to clients: a tool's whole input, a command's output and the
+//! screenshots a tool returned. T3 stays the owner of the thread; this
 //! only reads its local state database through the read-only `t3db` adapter.
 
 use anyhow::{Result, bail};
@@ -152,12 +152,11 @@ fn describe(tool: &str, input: &Value) -> Option<String> {
     )
 }
 
-/// One entry per tool call that has an input or returned images, keyed by
-/// T3's `toolCallId`. `since` (an ISO timestamp) limits to newer activity.
-/// Each also says when it started, its turn and whether it finished or
-/// failed: T3 sends a client only a thread's newest 500 activities, so the
-/// app rebuilds older steps from these. A Squircle command keeps its output,
-/// which names the worker or build it made.
+/// One entry per tool call (T3's turn items), keyed by the provider's call
+/// ID (Claude's `toolu_…`) or else the item's ID. `since` (an ISO timestamp)
+/// limits to calls changed after it. Each also says when it started, its run
+/// (`turn_id`) and whether it finished or failed. A Squircle command keeps
+/// its output, which names the worker or build it made.
 pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
     if !valid(thread, &[]) {
         bail!("invalid thread id");
@@ -223,7 +222,7 @@ pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
 
 /// The `index`th distinct image a tool call returned, as base64 with its type.
 pub async fn image(thread: &str, call: &str, index: usize) -> Result<Option<Value>> {
-    if !valid(thread, &[]) || !valid(call, &['_']) {
+    if !valid(thread, &[]) || !valid(call, &['_', ':', '%', '.']) {
         bail!("invalid identifier");
     }
     let rows = query(sql::IMAGES, params![thread, call], DETAIL_READ).await?;
@@ -307,21 +306,17 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
         if size.0 == 0 || size.1 == 0 {
             continue;
         }
-        let (Some(activity), Some(index)) = (row["activity"].as_str(), row["idx"].as_u64()) else {
+        let (Some(item), Some(path)) = (row["item"].as_str(), row["path"].as_str()) else {
             continue;
         };
-        if !valid(activity, &['_', ':']) {
+        if !valid(item, &['_', ':', '%', '.']) || !path.starts_with("$.") {
             continue;
         }
-        let full = query(
-            sql::SCREENSHOT_DATA,
-            params![
-                activity,
-                format!("$.data.result.content[{index}].source.data")
-            ],
-            DETAIL_READ,
-        )
-        .await?;
+        let read = match row["src"].as_str() {
+            Some("v2") => sql::SCREENSHOT_DATA_V2,
+            _ => sql::SCREENSHOT_DATA,
+        };
+        let full = query(read, params![item, path], DETAIL_READ).await?;
         let Some(data) = full.first().and_then(|r| r["data"].as_str()) else {
             continue;
         };

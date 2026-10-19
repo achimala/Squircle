@@ -144,7 +144,7 @@ pub(super) fn observe(app: &AppView) -> (LiveState, Option<StepKey>) {
         .filter(|_| agent == Some(Phase::Working) && !needs_you)
         .map(|(id, row)| StepKey {
             thread: id.clone(),
-            turn: row["latestTurn"]["turnId"].as_str().map(str::to_string),
+            turn: row["latestRunId"].as_str().map(str::to_string),
         });
     (
         LiveState {

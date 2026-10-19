@@ -170,6 +170,7 @@ impl Agents {
             identity,
             json!({
                 "type": "thread.create", "threadId": thread_id, "projectId": project_id,
+                "createdBy": "user", "creationSource": "server",
                 "title": format!("{name} agent"),
                 "modelSelection": {"instanceId": INSTANCE, "model": model},
                 "runtimeMode": mode, "interactionMode": "default",
@@ -379,7 +380,7 @@ impl Agents {
 
     /// What T3 shows now of the agent's thread and, during a replacement,
     /// of the new one: what a reset step decides on.
-    pub(super) fn look(&self, agent: &Agent) -> m14::Event {
+    pub(super) async fn look(&self, client: &dyn Peer, agent: &Agent) -> m14::Event {
         let successor = match &agent.lifecycle {
             Lifecycle::Replacing { replacement, .. } => {
                 self.seen(&replacement.thread_id, |o| o.is_some())
@@ -387,10 +388,71 @@ impl Agents {
             _ => core::Observed::Unavailable("no replacement".into()),
         };
         m14::Event::Look {
-            agent: self.seen(&agent.thread_id, |o| o),
+            agent: self.seen_live(client, &agent.thread_id).await,
             successor,
             next: identity(),
         }
+    }
+
+    /// What T3 shows of a thread, with whether a provider session is still
+    /// attached to it when no run is in progress: the shell does not say,
+    /// the thread's projection does. A restart is that session's end.
+    pub(super) async fn seen_live(
+        &self,
+        client: &dyn Peer,
+        thread: &str,
+    ) -> core::Observed<Option<ThreadObservation>> {
+        match self.seen(thread, |o| o) {
+            core::Observed::Current {
+                epoch,
+                revision,
+                value: Some(o),
+            } if o.execution == Execution::Stopped => {
+                match self.thread_detail(client, thread).await {
+                    Ok(projection) => core::Observed::Current {
+                        epoch,
+                        revision,
+                        value: Some(o.with_sessions(&projection)),
+                    },
+                    Err(error) => core::Observed::Unavailable(format!("{error:#}")),
+                }
+            }
+            seen => seen,
+        }
+    }
+
+    /// Stops a thread's work in T3 under `identity`: interrupts its run in
+    /// progress, else detaches the provider session still attached to it.
+    /// T3 (protocol 2) has no single "stop the session" command; with
+    /// neither, there is nothing to stop.
+    pub(super) async fn stop(
+        &self,
+        client: &dyn Peer,
+        thread: &str,
+        identity: &Identity,
+    ) -> Dispatched {
+        let row = self.thread(thread);
+        let run = row
+            .as_ref()
+            .filter(|row| ThreadObservation::decode(row).busy())
+            .and_then(|row| row["activeRunId"].as_str().or(row["latestRunId"].as_str()));
+        let body = match run {
+            Some(run) => json!({"type": "run.interrupt", "threadId": thread, "runId": run,
+                                "reason": "Stopped by Squircle"}),
+            None => match self.thread_detail(client, thread).await {
+                Err(error) => return Dispatched::NotSent(format!("{error:#}")),
+                Ok(projection) => {
+                    match crate::fsm::coordinator::thread::live_session(&projection) {
+                        Some(session) => {
+                            json!({"type": "provider-session.detach", "threadId": thread,
+                                            "providerSessionId": session, "reason": "Stopped by Squircle"})
+                        }
+                        None => return Dispatched::Accepted(json!({"stopped": "nothing to stop"})),
+                    }
+                }
+            },
+        };
+        client.dispatch(&Command::new(identity, body)).await
     }
 
     /// Carries out the project's queued or interrupted reset (M14), each
@@ -417,13 +479,26 @@ impl Agents {
                 );
             }
         };
-        let mut event = self.look(&start);
+        let mut event = self.look(&*client, &start).await;
         loop {
             let mut next = None;
             for effect in self.reduce_agent(project, event).await? {
                 let agent = self.find_agent(Some(project), None)?;
                 match effect {
                     m14::Effect::Commit | m14::Effect::Rebind => {}
+                    m14::Effect::Send(Order::Stop, identity) => {
+                        let thread = match &agent.lifecycle {
+                            Lifecycle::Replacing { replacement, .. } => {
+                                replacement.previous.clone()
+                            }
+                            _ => agent.thread_id.clone(),
+                        };
+                        let outcome = self.stop(&*client, &thread, &identity).await;
+                        next = Some(m14::Event::Sent {
+                            outcome,
+                            next: self::identity(),
+                        });
+                    }
                     m14::Effect::Send(order, identity) => {
                         let command = self.order(&agent, order, &identity)?;
                         let outcome = client.dispatch(&command).await;
@@ -443,7 +518,7 @@ impl Agents {
                         // Gathering took a while: what counts is the agent right after.
                         next = Some(m14::Event::Gathered {
                             plan,
-                            agent: self.seen(&agent.thread_id, |o| o),
+                            agent: self.seen_live(&*client, &agent.thread_id).await,
                             next: identity(),
                         });
                     }
@@ -492,14 +567,8 @@ impl Agents {
         identity: &Identity,
     ) -> Result<Command> {
         let body = match (order, &agent.lifecycle) {
-            (Order::Stop, Lifecycle::Restarting { .. }) => {
-                json!({"type": "thread.session.stop", "threadId": agent.thread_id})
-            }
-            (Order::Stop, Lifecycle::Replacing { replacement, .. }) => {
-                json!({"type": "thread.session.stop", "threadId": replacement.previous})
-            }
             (Order::Rename, Lifecycle::Replacing { replacement, .. }) => json!({
-                "type": "thread.meta.update", "threadId": replacement.previous,
+                "type": "thread.metadata.update", "threadId": replacement.previous,
                 "title": replacement.title.as_deref().context("The fresh start has no title for the old thread")?}),
             (Order::Create, Lifecycle::Replacing { replacement, .. }) => {
                 return self.create_command(
@@ -510,11 +579,14 @@ impl Agents {
                     identity,
                 );
             }
-            (Order::Handoff, Lifecycle::Replacing { replacement, .. }) => json!({
-                "type": "thread.turn.start", "threadId": replacement.thread_id,
-                "message": Note::Handoff.message(&replacement.message_id, &replacement.handoff, json!({"previous": replacement.previous})),
-                "runtimeMode": replacement.runtime_mode, "interactionMode": "default",
-            }),
+            (Order::Handoff, Lifecycle::Replacing { replacement, .. }) => deliver(
+                &replacement.thread_id,
+                Note::Handoff.message(
+                    &replacement.message_id,
+                    &replacement.handoff,
+                    json!({"previous": replacement.previous}),
+                ),
+            ),
             (order, lifecycle) => bail!("No {order:?} command for an agent that is {lifecycle:?}"),
         };
         Ok(Command::new(identity, body))
