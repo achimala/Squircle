@@ -43,9 +43,14 @@ pub(super) enum Commands {
         listen: SocketAddr,
         #[arg(
             long,
-            help = "Externally reachable HTTPS origin for installation links; you configure HTTPS separately"
+            help = "Externally reachable HTTPS origin for installation links; you configure HTTPS separately. Kept in the data directory's config.json: later starts without it use the last one"
         )]
         public_url: Option<String>,
+        #[arg(
+            long,
+            help = "Append the service's output to this file (launchd's service: DATA_DIR/serve.log)"
+        )]
+        log: Option<PathBuf>,
     },
     /// Restart or stop the running service for this data directory.
     #[command(

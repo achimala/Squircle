@@ -48,6 +48,7 @@ impl Store {
                 schema_version: SCHEMA_VERSION,
                 control_token: token(),
                 diagnostic_token: token(),
+                public_url: None,
             };
             if persist_json(&path, &settings, false)? {
                 settings
@@ -70,6 +71,18 @@ impl Store {
             "control and diagnostic tokens must differ"
         );
         Ok(Self { root, settings })
+    }
+
+    /// Keeps `url` as the service's public URL for later starts.
+    pub fn set_public_url(&mut self, url: String) -> Result<()> {
+        if self.settings.public_url.as_deref() == Some(&url) {
+            return Ok(());
+        }
+        let mut settings = self.settings.clone();
+        settings.public_url = Some(url);
+        persist_json(&self.root.join("config.json"), &settings, true)?;
+        self.settings = settings;
+        Ok(())
     }
 
     pub fn job_dir(&self, id: &str) -> Result<PathBuf> {
@@ -848,6 +861,23 @@ fn persist_json(path: &Path, value: &impl Serialize, replace: bool) -> Result<bo
         serde_json::to_writer_pretty(&mut *file, value)?;
         Ok(file.write_all(b"\n")?)
     })
+}
+
+/// Bytes on disk in the files under `path` (symlinks not followed), each
+/// hard-linked file counted once across calls sharing `seen`.
+pub fn tree_size(path: &Path, seen: &mut std::collections::HashSet<(u64, u64)>) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if metadata.is_dir() {
+        let entries: Vec<_> = fs::read_dir(path).into_iter().flatten().flatten().collect();
+        return entries.iter().map(|e| tree_size(&e.path(), seen)).sum();
+    }
+    if metadata.nlink() > 1 && !seen.insert((metadata.dev(), metadata.ino())) {
+        return 0;
+    }
+    metadata.blocks() * 512
 }
 
 /// A new private file (0600); fails if anything, a symlink included, is

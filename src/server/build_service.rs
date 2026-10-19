@@ -148,6 +148,8 @@ pub(super) async fn start_build(state: AppState, mut request: BuildRequest) -> A
             );
             state.draining.store(true, Ordering::Release);
         }
+        // Before the slot frees, so no recapture of this job is building.
+        xcode::shed(dir.clone(), job.request().map(|r| r.mode.clone())).await;
         let app = build_app(&state, &job).await;
         if let Some(push) = &state.push {
             push.build_finished(&job, app.as_ref());
@@ -302,6 +304,7 @@ pub(super) async fn start_preview(
         } else {
             build_app(&state, &job).await;
         }
+        xcode::shed(directory, job.request().map(|r| r.mode.clone())).await;
         drop(permit);
     });
     Ok(success(json!({"job":response})))

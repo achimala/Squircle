@@ -1999,10 +1999,36 @@ SimRenderServer crash-looped, then hung, so every `simctl launch` hung.
 - *Reboots.* `squircle service install` makes the service a launchd user
   agent (`dev.squircle.service`: RunAtLoad, KeepAlive unless it exited
   cleanly, log in `DATA_DIR/serve.log`). It copies the running service's
-  command line and environment into the plist and hands its sessions over
+  serve arguments and environment into the plist and hands its sessions over
   (SIGTERM) to launchd's. `service restart` is then `launchctl kickstart -k`
   (still a handover), `service stop` stays stopped until `service start`
   or the next login, `service uninstall` removes it.
+- *TCC (2026-10-19, verified).* The first install never ran: launchd's
+  log said `Unable to open stdout path (…/.squircle/serve.log), error 0x1 -
+  Operation not permitted`, and xpcproxy exits 78 (EX_CONFIG, "spawn
+  failed"). macOS keeps background jobs out of ~/Documents (also Desktop,
+  Downloads, iCloud Drive) unless their program is allowed; a test agent
+  running `/bin/sh` there got `Operation not permitted` on every
+  pre-existing file while the same commands worked from a terminal. Two
+  handovers then left nothing running: `service.rs` didn't parse
+  `last exit code = 78: EX_CONFIG`, so it waited instead of reporting, after
+  the old service had already gone. Now launchd runs a copy in
+  `~/Library/Application Support/dev.squircle.service/`, signed with the
+  Mac's Apple Development identity under identifier `dev.squircle.service`
+  (TCC keys a grant on that designated requirement, so one grant survives
+  rebuilds; `restart` re-copies and re-signs the source binary). launchd
+  opens nothing in the data directory: its working directory and its own
+  log are in that folder and `serve --log DATA_DIR/serve.log` opens the log
+  itself. Install, restart and start first run the copy once as a launchd
+  job (`service check`) and stop only if it can read the data directory;
+  otherwise they say what to grant (macOS's prompt, or Full Disk Access for
+  the copy) and leave the running service alone. Verified with label
+  `SQUIRCLE_SERVICE_LABEL=dev.tcctest.svc` and a /tmp data directory:
+  handover from a hand-started service, `kill -9` back in 10 s, restart,
+  stop stays stopped, start, uninstall; a signed copy reading ~/Documents
+  raised macOS's consent prompt (not answered in the test).
+- *Public URL.* `serve --public-url` is kept in `config.json`; starts
+  without it use the last one, so install links survive a restart by hand.
 
 **2026-10-19 (owner-reported: every worker queued forever).** After the
 prune only three simulators were left, all booted by the user or other
@@ -2688,8 +2714,17 @@ service and a migration off the same file. Needs Homebrew's ffmpeg
 (`SQUIRCLE_FFMPEG` overrides); without it, recordings stay as simctl wrote
 them. `squircle media shrink [--dry-run] [--orphans] [--limit N]` migrates
 existing media; `--orphans` also makes the unfiled ones light, files them into
-their threads, and deletes the debris. It never touches recordings of a
-session that is not settled in `sims.json`, or that a running process names.
+their threads, and deletes the debris. `--orphans=delete` (user decision,
+2026-10-19) instead deletes them with their posters, avconvert's leftovers
+and logs, encoding nothing (`--dry-run` lists each file and size). Neither
+touches recordings of a session that is not settled in `sims.json`, that a
+running process names, or a file a shrink is working on.
+
+Build jobs (2026-10-19): an archive job's DerivedData (~600 MB, never read
+again: the archive keeps the app and dSYMs, the export the IPA) and each
+preview rebuild's are deleted once the build or recapture finishes;
+simulator jobs keep theirs (their app lives there). `squircle build prune
+[--dry-run]` clears finished jobs from before.
 
 **Measured** (same clips, M-series Mac, ffmpeg 8.1.2). Clip A: 92 s of
 constant animation, simctl H.264 1206×2622, 6095 frames. Clip B: 299 s of

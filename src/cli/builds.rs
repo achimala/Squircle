@@ -65,6 +65,14 @@ pub(super) enum BuildCommand {
         #[arg(long, default_value_t = 32768)]
         limit: usize,
     },
+    /// Delete finished builds' DerivedData, which nothing reads again.
+    #[command(
+        after_help = "Archive builds keep their archive (app, dSYMs for symbolication), exported IPA, logs and job.json; their DerivedData and every preview rebuild's go. Simulator builds keep theirs (their app lives there). Queued and running builds, and builds capturing a preview, are skipped. The service does this itself as each build finishes; this clears builds from before.\n  --dry-run    list what would go and its size (deletes nothing)"
+    )]
+    Prune {
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Copy an existing IPA into Squircle. Apple signature validity is not certified by import.
     Import {
         #[arg(long)]
@@ -177,6 +185,46 @@ pub(super) async fn run(cli: &Cli, command: &BuildCommand) -> Result<Option<Valu
                 ),
             )
             .await?
+        }
+        BuildCommand::Prune { dry_run } => {
+            ensure!(
+                local_server(&cli.server),
+                "build prune deletes from this Mac's data directory; run it on the service's Mac"
+            );
+            let store = Store::open(root(cli)?)?;
+            let (jobs, _) = store.scan_jobs()?;
+            let (mut builds, mut bytes, mut failed) = (Vec::new(), 0u64, Vec::new());
+            let mut seen = std::collections::HashSet::new();
+            for job in jobs {
+                let busy = matches!(job.state(), BuildState::Queued | BuildState::Running)
+                    || job.preview().is_some_and(PreviewState::in_progress);
+                if busy {
+                    continue;
+                }
+                let spent = squircle::xcode::spent(
+                    &store.job_dir(&job.id)?,
+                    job.request().map(|r| &r.mode),
+                );
+                if spent.is_empty() {
+                    continue;
+                }
+                let size: u64 = spent
+                    .iter()
+                    .map(|d| squircle::store::tree_size(d, &mut seen))
+                    .sum();
+                bytes += size;
+                if !dry_run {
+                    for dir in &spent {
+                        if let Err(error) = std::fs::remove_dir_all(dir) {
+                            failed.push(json!({"path": dir, "error": error.to_string()}));
+                        }
+                    }
+                }
+                builds.push(json!({"build_id": job.id, "mb": size / 1_000_000, "deleted": spent}));
+            }
+            success(
+                json!({"dry_run": dry_run, "builds": builds.len(), "gb": (bytes as f64 / 1e7).round() / 100.0, "failed": failed, "pruned": builds}),
+            )
         }
         BuildCommand::Import { ipa } => {
             post(cli, "/v1/import", json!({"ipa":ipa.canonicalize()?})).await?
