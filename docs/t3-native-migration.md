@@ -652,7 +652,11 @@ the Keychain.
   `.squircle/overlay/<hash>/`, copies it into the app, adds a weak
   `LC_LOAD_WEAK_DYLIB` in the header padding, adds the
   `<team>.ai.dreamslate.squircle.shared` Keychain group to the app's entitlements
-  (its own group stays first) and re-signs. The export then signs it like any
+  (its own group stays first), stamps the job's ID as the host's
+  `SquircleBuildID` (2026-10-19: so the overlay reports a launch and
+  `build status` shows `launch_observed` for injected builds; before, it was
+  always false and couldn't tell a silent overlay from a working one) and
+  re-signs. The export then signs it like any
   embedded framework. Default on; `build start --no-overlay` (or
   `"no_overlay": true`) leaves it out.
 - **Never in production.** Injection happens only for `development`, `debugging`,

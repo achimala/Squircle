@@ -158,7 +158,19 @@ pub async fn build(
                     .context("job directory is not inside a Squircle data directory")?;
                 let framework =
                     overlay::framework(data_root, &log, deadline, cancel.clone()).await?;
-                overlay::inject(&archived, &framework, &log, deadline, cancel.clone()).await?;
+                let build_id = job_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .context("job directory must have a build ID as its final component")?;
+                overlay::inject(
+                    &archived,
+                    &framework,
+                    build_id,
+                    &log,
+                    deadline,
+                    cancel.clone(),
+                )
+                .await?;
             }
             let args = export_args(
                 &archive,
