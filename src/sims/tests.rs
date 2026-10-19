@@ -136,8 +136,8 @@ impl Host for Fake {
             .stderr(log)
             .spawn()?)
     }
-    fn compact<'a>(&'a self, _: &'a Path) -> Pending<'a, Option<PathBuf>> {
-        Box::pin(async { None })
+    fn shrink<'a>(&'a self, _: &'a Path) -> Pending<'a, ()> {
+        Box::pin(async {})
     }
     fn free<'a>(&'a self, _: &'a [Lease]) -> Pending<'a, Vec<String>> {
         Box::pin(async { vec!["SIM1".into()] })

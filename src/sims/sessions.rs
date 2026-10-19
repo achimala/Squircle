@@ -263,14 +263,9 @@ impl Sims {
                 let _ = std::fs::remove_file(raw.with_extension("log"));
                 let nonempty = |p: &Path| p.metadata().is_ok_and(|m| m.len() > 0);
                 if nonempty(raw) {
-                    // Declared policy: if compressing fails, the original is filed as it is.
-                    Some(if shrink {
-                        self.host.compact(raw).await.unwrap_or(raw.clone())
-                    } else {
-                        raw.clone()
-                    })
+                    Some(raw.clone())
                 } else {
-                    // A previous run compacted it but stopped before filing.
+                    // An earlier version compacted it but stopped before filing.
                     Some(compacted(raw)).filter(|p| nonempty(p))
                 }
             }
@@ -295,6 +290,12 @@ impl Sims {
                 raw.with_extension("poster.jpg"),
                 media.file.with_extension("poster.jpg"),
             );
+        }
+        if let (true, Some(Ok(media))) = (shrink, &filed) {
+            // Filed as recorded so the turn shows it now; made light in the
+            // background and replaced in place (a long one takes minutes).
+            let (host, file) = (self.host.clone(), media.file.clone());
+            tokio::spawn(async move { host.shrink(&file).await });
         }
         let result = match filed {
             Some(Ok(media)) => Ok(media.id),

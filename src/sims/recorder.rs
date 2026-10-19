@@ -17,35 +17,26 @@ pub(super) fn key(value: &str) -> String {
         .collect()
 }
 
-/// simctl records at about 6 Mbit/s; the phone downloads recordings over
-/// cellular. macOS's own `avconvert` re-encodes them far smaller (mostly
-/// still screens). Returns the smaller file, having removed the original.
-pub(super) async fn compact(raw: &Path) -> Option<PathBuf> {
-    let small = compacted(raw);
-    let converted = tokio::time::timeout(
-        Duration::from_secs(180),
-        Command::new("/usr/bin/avconvert")
-            .args(["--preset", "Preset1280x720", "--replace", "--source"])
-            .arg(raw)
-            .arg("--output")
-            .arg(&small)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status(),
-    )
-    .await;
-    if matches!(converted, Ok(Ok(status)) if status.success())
-        && small.metadata().is_ok_and(|m| m.len() > 0)
-    {
-        let _ = std::fs::remove_file(raw);
-        Some(small)
-    } else {
-        let _ = std::fs::remove_file(&small);
-        None
+/// Makes a filed recording light in place (`crate::recordings`). A failure
+/// leaves it as simctl wrote it; `squircle media shrink` retries those.
+pub(super) async fn shrink(file: &Path) {
+    let outcome = match crate::recordings::Tools::find() {
+        Ok(tools) => crate::recordings::shrink(&tools, file).await,
+        Err(error) => Err(error),
+    };
+    match outcome {
+        Ok(crate::recordings::Outcome::Replaced { before, after, .. }) => eprintln!(
+            "Recording {} made light: {} MB to {} MB",
+            file.display(),
+            before / 1_000_000,
+            after / 1_000_000
+        ),
+        Ok(_) => {}
+        Err(error) => eprintln!("Recording {} left as recorded: {error:#}", file.display()),
     }
 }
 
+/// Where an earlier version left avconvert's smaller copy.
 pub(super) fn compacted(raw: &Path) -> PathBuf {
     raw.with_extension("compact.mp4")
 }

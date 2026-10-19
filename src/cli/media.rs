@@ -35,6 +35,18 @@ pub(super) enum MediaCommand {
         #[arg(long)]
         thread: String,
     },
+    /// Re-encode existing recordings light: full-resolution HEVC at constant quality, every frame kept.
+    #[command(
+        after_help = "Each filed video (threads' and tasks' media) not yet light is re-encoded with VideoToolbox HEVC, then replaces the original under the same name only once it decodes with the same frames and duration and is smaller. Already-light and small (<2 MB) files are skipped; a file the service is re-encoding is skipped. New recordings are made light by the service as they are filed.\n  --dry-run    count what would be done and estimate the savings (encodes nothing)\n  --orphans    also recover recordings older versions left unfiled (over the old 512 MB cap): make them light, file them into their threads, delete avconvert's leftovers. Recordings of a session still running are never touched.\n  --limit N    encode at most N movies (largest first)\nNeeds Homebrew's ffmpeg (or SQUIRCLE_FFMPEG). Progress goes to stderr."
+    )]
+    Shrink {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        orphans: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 pub(super) async fn perf(cli: &Cli, command: &PerfCommand) -> Result<Option<Value>> {
@@ -76,6 +88,22 @@ pub(super) async fn media(cli: &Cli, command: &MediaCommand) -> Result<Option<Va
             }
             MediaCommand::List { thread } => {
                 success(json!({"media":squircle::media::list(&root, thread)?}))
+            }
+            MediaCommand::Shrink {
+                dry_run,
+                orphans,
+                limit,
+            } => {
+                use squircle::recordings;
+                let tools = recordings::Tools::find()?;
+                let plan = recordings::plan(&tools, &root).await?;
+                let summary = recordings::summary(&plan);
+                if *dry_run {
+                    success(json!({"dry_run": true, "plan": summary}))
+                } else {
+                    let result = recordings::migrate(&tools, &root, plan, *orphans, *limit).await;
+                    success(json!({"plan": summary, "result": result}))
+                }
             }
         }
     };
