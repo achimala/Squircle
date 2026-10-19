@@ -40,7 +40,12 @@ impl Sims {
             "T3 has no thread {thread}"
         );
         let simulators = local_simulators(&inventory);
-        ensure!(!simulators.is_empty(), "{}", no_simulators(&inventory));
+        // T3's device support off: nothing to create one for.
+        ensure!(
+            !simulators.is_empty() || inventory["hostStatus"] != "disabled",
+            "{}",
+            no_simulators(&inventory)
+        );
 
         // At most `max_leases` simulators at once; past that, the thread waits its turn.
         let max = self.host.max_leases();
@@ -73,7 +78,8 @@ impl Sims {
                 })
                 .with_context(|| {
                     format!("No iOS simulator {wanted} on this Mac; run squircle sim devices")
-                })?,
+                })
+                .map(|d| (*d).clone())?,
             None => {
                 let last = ledger
                     .sessions
@@ -101,11 +107,33 @@ impl Sims {
                 let takeable = |d: &Value| {
                     !taken(d) && (d["booted"] != true || free.contains(&id(d)) || mine(d))
                 };
-                simulators.iter().copied().find(|d| last.as_deref().is_some_and(|l| l.eq_ignore_ascii_case(&id(d))) && takeable(d))
-                    .or_else(|| simulators.iter().copied().find(|d| d["booted"] == true && takeable(d)))
-                    .or_else(|| simulators.iter().copied().find(|d| used.contains(&id(d)) && takeable(d)))
-                    .or_else(|| simulators.iter().copied().find(|d| takeable(d)))
-                    .context("No free simulator: the booted ones are the user's or other agents'; pass --device (squircle sim devices)")?
+                let found = simulators
+                    .iter()
+                    .copied()
+                    .find(|d| {
+                        last.as_deref()
+                            .is_some_and(|l| l.eq_ignore_ascii_case(&id(d)))
+                            && takeable(d)
+                    })
+                    .or_else(|| {
+                        simulators
+                            .iter()
+                            .copied()
+                            .find(|d| d["booted"] == true && takeable(d))
+                    })
+                    .or_else(|| {
+                        simulators
+                            .iter()
+                            .copied()
+                            .find(|d| used.contains(&id(d)) && takeable(d))
+                    })
+                    .or_else(|| simulators.iter().copied().find(|d| takeable(d)));
+                match found {
+                    Some(found) => found.clone(),
+                    // Every one is someone else's or reserved, and admission
+                    // left a slot: a new one, the pool's to clean up later.
+                    None => self.create(thread).await?,
+                }
             }
         };
         let device_id = chosen["id"]
@@ -215,6 +243,25 @@ impl Sims {
                 Err(error)
             }
         }
+    }
+
+    /// A new simulator for `thread`, as T3 lists it.
+    async fn create(&self, thread: &str) -> Result<Value> {
+        let udid = self
+            .host
+            .create(thread)
+            .await
+            .context("No free simulator, and a new one could not be created")?;
+        let inventory = inventory(&*self.host).await?;
+        local_simulators(&inventory)
+            .into_iter()
+            .find(|d| {
+                d["id"]
+                    .as_str()
+                    .is_some_and(|id| id.eq_ignore_ascii_case(&udid))
+            })
+            .cloned()
+            .with_context(|| format!("T3 does not list the simulator just created ({udid})"))
     }
 
     /// Opens, boots and records, saving each step; `startup` ends the

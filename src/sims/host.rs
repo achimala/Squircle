@@ -52,6 +52,8 @@ pub trait Host: Send + Sync {
         thread: &'a str,
         others: &'a [Lease],
     ) -> Pending<'a, Result<Released>>;
+    /// Creates a simulator for `thread`, Squircle's from the start; returns its UDID.
+    fn create<'a>(&'a self, thread: &'a str) -> Pending<'a, Result<String>>;
     /// How many simulators may be reserved at once.
     fn max_leases(&self) -> usize;
     fn title(&self, thread: &str) -> Option<String>;
@@ -158,6 +160,10 @@ impl Host for AgentsHost {
         others: &'a [Lease],
     ) -> Pending<'a, Result<Released>> {
         Box::pin(self.1.release(device, thread, others))
+    }
+
+    fn create<'a>(&'a self, thread: &'a str) -> Pending<'a, Result<String>> {
+        Box::pin(async move { Ok(self.1.create(thread).await?.0) })
     }
 
     fn max_leases(&self) -> usize {

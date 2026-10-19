@@ -2004,6 +2004,26 @@ SimRenderServer crash-looped, then hung, so every `simctl launch` hung.
   (still a handover), `service stop` stays stopped until `service start`
   or the next login, `service uninstall` removes it.
 
+**2026-10-19 (owner-reported: every worker queued forever).** After the
+prune only three simulators were left, all booted by the user or other
+agents, so `sim start` failed with "No free simulator" though no Squircle
+session held a slot. Now, when nothing is free and admission leaves a slot
+(the 3-session cap), the pool creates one (`Pool::create`): the newest
+numbered iPhone Pro (not Max) on the newest available iOS runtime that has
+one (here iPhone 18 Pro, iOS 27.0; the newer 27.1 runtime has only iPhone
+Duo), named `Squircle <model>`, recorded as created by the thread so the
+idle shutdown and the one-day deletion apply. It is booted once right
+away: T3's device hub (`expo-device-hub` 0.15.3) lists only simulators
+with a `lastUsedAt`/`lastBootedAt`, so a never-booted one is invisible to
+`device.open`. An empty simulator list no longer blocks a start either
+(unless T3's device support is off). Prune deletes only shut-down
+simulators that no session reserves and no T3 device session is on, so it
+can't take a held one; leaving none just means the next start creates one.
+**Verified (this Mac, separate data dir on :8797, all three simulators
+booted and not free):** `sim start` created and booted "Squircle iPhone 18
+Pro" and recorded it in 19 s; `sim stop` filed the recording and shut it
+down; the three others stayed booted.
+
 ## 2026-10-14 simulator deck
 
 User, after trying several simulators on the phone: "we need to stack em
