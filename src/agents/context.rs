@@ -93,6 +93,25 @@ impl Note {
     }
 }
 
+/// The protocol 2 command that delivers a user message (`messageId`,
+/// `text`, `attachments`, optional `context`) to a thread. T3 resolves
+/// `deliveryIntent: auto` against the thread as it stands when the command
+/// runs: it starts a run on an idle thread and steers or queues behind one
+/// in progress, as T3's own clients do.
+pub(super) fn deliver(thread: &str, message: Value) -> Value {
+    let mut command = json!({
+        "type": "message.dispatch", "threadId": thread,
+        "messageId": message["messageId"], "text": message["text"],
+        "attachments": message.get("attachments").cloned().unwrap_or(json!([])),
+        "createdBy": "user", "creationSource": "server",
+        "dispatchMode": {"type": "start_immediately"}, "deliveryIntent": "auto",
+    });
+    if let Some(context) = message.get("context") {
+        command["context"] = context.clone();
+    }
+    command
+}
+
 /// Whether the user wrote this T3 message: a user message no note marks.
 pub(super) fn users_own(message: &Value) -> bool {
     message["role"] == "user"

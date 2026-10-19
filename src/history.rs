@@ -816,7 +816,7 @@ pub async fn show(
             ))
         }
         Kind::Activity => {
-            ensure!(valid(id, &[':', '_', '.']), "Invalid activity ID");
+            ensure!(valid(id, &[':', '_', '.', '%']), "Invalid activity ID");
             let rows = query(sql::ACTIVITY, params![id, max_chars as i64], DETAIL_READ).await?;
             let row = rows
                 .first()

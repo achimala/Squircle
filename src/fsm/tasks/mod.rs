@@ -121,7 +121,7 @@ pub enum BuildPhase {
 #[derive(Clone, Debug)]
 pub struct WorkerSignal {
     pub thread: String,
-    /// T3's `latestTurn.turnId`: a new turn is new work even when the state reads the same.
+    /// T3's `latestRunId`: a new run is new work even when the state reads the same.
     pub turn: Option<String>,
     pub phase: WorkerPhase,
 }

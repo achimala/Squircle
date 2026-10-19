@@ -199,21 +199,17 @@ impl Agents {
     /// what the agent needs, with its identity; `line` is what the
     /// conversation shows for it.
     pub(super) fn compact_command(&self, thread: &str, line: &str, tokens: u64) -> Result<Command> {
-        let row = self
-            .thread(thread)
+        self.thread(thread)
             .context("The app agent's thread is gone")?;
-        let mode = thread_mode(&row)?;
         let text = "/compact Keep: the user's open tasks and where each stands, decisions and preferences they stated, \
             workers still running or waiting and their branches, and the last few exchanges. Drop tool output and finished detail.";
         let record = Note::Upkeep.labeled(line, json!({"action": "compact", "tokens": tokens}));
         Ok(Command::new(
             &identity(),
-            json!({
-                "type": "thread.turn.start", "threadId": thread,
-                "message": Note::with_record(&uuid::Uuid::new_v4().to_string(), text, record),
-                "runtimeMode": mode,
-                "interactionMode": row["interactionMode"].as_str().unwrap_or("default"),
-            }),
+            deliver(
+                thread,
+                Note::with_record(&uuid::Uuid::new_v4().to_string(), text, record),
+            ),
         ))
     }
 }

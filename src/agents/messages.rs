@@ -28,8 +28,7 @@ impl Agents {
         note: Option<(Note, Value)>,
     ) -> Result<()> {
         let client = self.ready().await?;
-        let thread = self.wait_thread(thread_id).await?;
-        let mode = thread_mode(&thread)?.to_string();
+        self.wait_thread(thread_id).await?;
         let purpose = format!(
             "send {thread_id} {}\n{text}",
             note.as_ref().map_or("user", |(note, _)| note.kind())
@@ -37,25 +36,11 @@ impl Agents {
         let id = uuid::Uuid::new_v4().to_string();
         let message = match note {
             Some((note, payload)) => note.message(&id, text, payload),
-            None => json!({"messageId": id, "role": "user", "text": text, "attachments": []}),
+            None => json!({"messageId": id, "text": text, "attachments": []}),
         };
-        let (thread_id, interaction) = (
-            thread_id.to_string(),
-            thread["interactionMode"]
-                .as_str()
-                .unwrap_or("default")
-                .to_string(),
-        );
+        let thread_id = thread_id.to_string();
         self.dispatch_intent(&*client, purpose, move |identity| {
-            Command::new(
-                identity,
-                json!({
-                    "type": "thread.turn.start", "threadId": thread_id,
-                    "message": message,
-                    "runtimeMode": mode,
-                    "interactionMode": interaction,
-                }),
-            )
+            Command::new(identity, deliver(&thread_id, message))
         })
         .await?;
         Ok(())
@@ -99,56 +84,42 @@ impl Agents {
         }
     }
 
+    /// A thread's projection (protocol 2: its `thread`, `runs`,
+    /// `runtimeRequests`, `messages`, `turnItems`, `providerSessions`, …).
+    /// T3 bounds it to the recent history, which is all this service reads.
     pub(super) async fn thread_detail(&self, client: &dyn Peer, id: &str) -> Result<Value> {
-        let snapshot = client
-            .snapshot("orchestration.subscribeThread", json!({"threadId": id}))
-            .await?;
-        let thread = &snapshot["snapshot"];
-        Ok(if thread["thread"].is_object() {
-            thread["thread"].clone()
-        } else {
-            thread.clone()
-        })
+        client
+            .call("orchestration.getThreadProjection", json!({"threadId": id}))
+            .await
     }
 
-    /// A pending question's request ID and question IDs, if the thread is waiting on one.
-    pub(super) fn pending_question(thread: &Value) -> Option<(String, Vec<Value>)> {
-        let activities = thread["activities"].as_array()?;
-        let resolved: Vec<&str> = activities
-            .iter()
-            .filter(|a| {
-                matches!(
-                    a["kind"].as_str(),
-                    Some("user-input.resolved" | "user-input.answer-submitted")
-                )
-            })
-            .filter_map(|a| a["payload"]["requestId"].as_str())
-            .collect();
-        activities
+    /// A pending question's request ID and questions, if the thread is
+    /// waiting on one: a pending `user_input` runtime request, whose
+    /// questions are on its `user_input_request` turn item.
+    pub(super) fn pending_question(projection: &Value) -> Option<(String, Vec<Value>)> {
+        let request = projection["runtimeRequests"]
+            .as_array()?
             .iter()
             .rev()
-            .find(|a| {
-                a["kind"] == "user-input.requested"
-                    && a["payload"]["requestId"]
-                        .as_str()
-                        .is_some_and(|r| !resolved.contains(&r))
-            })
-            .map(|a| {
-                (
-                    a["payload"]["requestId"].as_str().unwrap().to_string(),
-                    a["payload"]["questions"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default(),
-                )
-            })
+            .find(|r| r["status"] == "pending" && r["kind"] == "user_input")?["id"]
+            .as_str()?;
+        let questions = projection["turnItems"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev()
+            .find(|i| i["type"] == "user_input_request" && i["requestId"] == request)
+            .and_then(|i| i["questions"].as_array().cloned())
+            .unwrap_or_default();
+        Some((request.to_string(), questions))
     }
 
     pub async fn read(&self, id: &str) -> Result<Value> {
         let client = self.ready().await?;
-        let thread = self.thread_detail(&*client, id).await?;
+        let detail = self.thread_detail(&*client, id).await?;
+        let thread = &detail["thread"];
         let worker = self.registry().workers.get(id).cloned();
-        let last = thread["messages"]
+        let last = detail["messages"]
             .as_array()
             .into_iter()
             .flatten()
@@ -169,7 +140,7 @@ impl Agents {
                 .map(|s| json!(s.lines().count()))
                 .unwrap_or(Value::Null);
         }
-        let question = Self::pending_question(&thread).map(|(request, questions)| json!({"request_id": request,
+        let question = Self::pending_question(&detail).map(|(request, questions)| json!({"request_id": request,
             "questions": questions.iter().map(|q| json!({"question": q["question"], "options": q["options"].as_array().map(|o| o.iter().map(|o| o["label"].clone()).collect::<Vec<_>>())})).collect::<Vec<_>>()}));
         let shell = self.thread(id).unwrap_or(Value::Null);
         Ok(json!({
@@ -182,8 +153,8 @@ impl Agents {
     /// Answers every question in the thread's pending request with `text`.
     pub async fn answer(&self, id: &str, text: &str) -> Result<()> {
         let client = self.ready().await?;
-        let thread = self.thread_detail(&*client, id).await?;
-        let (request, questions) = Self::pending_question(&thread).with_context(|| match pending_request(&thread) {
+        let detail = self.thread_detail(&*client, id).await?;
+        let (request, questions) = Self::pending_question(&detail).with_context(|| match pending_request(&detail) {
             Some(_) => "That thread is waiting on an approval; the user approves or declines it on the phone",
             None => "That thread is not waiting on a question",
         })?;
@@ -199,7 +170,7 @@ impl Agents {
         let purpose = format!("answer {id} {request}\n{text}");
         let id = id.to_string();
         self.dispatch_intent(&*client, purpose, move |identity| Command::new(identity,
-            json!({"type": "thread.user-input.respond", "threadId": id, "requestId": request, "answers": answers}))).await?;
+            json!({"type": "runtime-request.respond", "threadId": id, "requestId": request, "answers": answers}))).await?;
         Ok(())
     }
 

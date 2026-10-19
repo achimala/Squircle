@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// An orchestration command's identity, fixed when its intent is recorded
-/// and sent unchanged on every attempt. T3 (0.0.45) keeps a durable receipt
+/// and sent unchanged on every attempt. T3 keeps a durable receipt
 /// per command ID in its own database: an accepted ID sent again answers
 /// with its original sequence and does nothing; a rejected one is rejected
 /// again. So sending the same identity again is how an unknown outcome is
@@ -26,6 +26,11 @@ pub struct Identity {
     pub id: CommandID,
     pub created_at: String,
 }
+
+/// Marks a command as a T3 thread launch (`orchestration.launchThread`:
+/// create a thread, prepare its workspace and start its first run), which is
+/// not one of T3's dispatched commands. T3 ignores the field.
+pub const LAUNCH: &str = "squircle.thread-launch";
 
 /// A command ready to send: its body carries its identity.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -37,6 +42,16 @@ impl Command {
         body["commandId"] = json!(identity.id);
         body["createdAt"] = json!(identity.created_at);
         Self(body)
+    }
+
+    /// The T3 method that carries it: `orchestration.launchThread` for a
+    /// launch, else `orchestration.dispatchCommand`.
+    pub fn method(&self) -> &'static str {
+        if self.0["type"] == LAUNCH {
+            "orchestration.launchThread"
+        } else {
+            "orchestration.dispatchCommand"
+        }
     }
 
     /// The command ID, if the body has one (a stored command always does).

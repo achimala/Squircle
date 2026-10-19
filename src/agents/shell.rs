@@ -63,30 +63,15 @@ impl<T> Observed<T> {
     }
 }
 
-/// The newest unanswered question or approval request in a thread's detail.
-pub(super) fn pending_request(thread: &Value) -> Option<String> {
-    let activities = thread["activities"].as_array()?;
-    let resolved: Vec<&str> = activities
-        .iter()
-        .filter(|a| {
-            matches!(
-                a["kind"].as_str(),
-                Some("user-input.resolved" | "user-input.answer-submitted" | "approval.resolved")
-            )
-        })
-        .filter_map(|a| a["payload"]["requestId"].as_str())
-        .collect();
-    activities
+/// The newest unanswered question or approval request in a thread's
+/// projection: its pending runtime requests.
+pub(super) fn pending_request(projection: &Value) -> Option<String> {
+    projection["runtimeRequests"]
+        .as_array()?
         .iter()
         .rev()
-        .filter(|a| {
-            matches!(
-                a["kind"].as_str(),
-                Some("user-input.requested" | "approval.requested")
-            )
-        })
-        .filter_map(|a| a["payload"]["requestId"].as_str())
-        .find(|r| !resolved.contains(r))
+        .find(|r| r["status"] == "pending")
+        .and_then(|r| r["id"].as_str())
         .map(str::to_string)
 }
 

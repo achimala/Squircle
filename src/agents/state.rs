@@ -89,47 +89,57 @@ impl State {
         Arc::make_mut(&mut self.shell)
     }
 
+    /// Applies one item of T3's (protocol 2) shell subscription. The active
+    /// shell holds every thread that is neither archived nor deleted: an
+    /// archived thread leaves it (`thread.removed`), so to this service it is
+    /// gone. A snapshot that names `resolvedRepositoryIdentityRoots` is only
+    /// a refresh of those projects' metadata, with no threads.
     pub(super) fn consume_shell(&mut self, item: &Value) {
         let shell = self.shell_mut();
+        let keyed = |list: &Value| -> HashMap<String, Arc<Value>> {
+            list.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| Some((v["id"].as_str()?.to_string(), Arc::new(v.clone()))))
+                .collect()
+        };
         match item["kind"].as_str() {
+            Some("snapshot") if item.get("resolvedRepositoryIdentityRoots").is_some() => {
+                shell.projects.extend(keyed(&item["snapshot"]["projects"]));
+            }
             Some("snapshot") => {
                 let snapshot = &item["snapshot"];
-                shell.threads = snapshot["threads"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|t| Some((t["id"].as_str()?.to_string(), Arc::new(t.clone()))))
-                    .collect();
-                shell.projects = snapshot["projects"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|p| Some((p["id"].as_str()?.to_string(), Arc::new(p.clone()))))
-                    .collect();
+                shell.threads = keyed(&snapshot["threads"]);
+                shell.projects = keyed(&snapshot["projects"]);
                 shell.link = Link::Current {
                     epoch: shell.link.epoch(),
                 };
             }
-            Some("thread-upserted") => {
+            Some("thread.updated") if item["location"] == "archive" => {
+                if let Some(id) = item["thread"]["id"].as_str() {
+                    shell.threads.remove(id);
+                }
+            }
+            Some("thread.updated") => {
                 if let Some(id) = item["thread"]["id"].as_str() {
                     shell
                         .threads
                         .insert(id.to_string(), Arc::new(item["thread"].clone()));
                 }
             }
-            Some("project-upserted") => {
+            Some("project.updated") => {
                 if let Some(id) = item["project"]["id"].as_str() {
                     shell
                         .projects
                         .insert(id.to_string(), Arc::new(item["project"].clone()));
                 }
             }
-            Some("thread-removed") => {
+            Some("thread.removed") if item["location"] != "archive" => {
                 if let Some(id) = item["threadId"].as_str() {
                     shell.threads.remove(id);
                 }
             }
-            Some("project-removed") => {
+            Some("project.removed") => {
                 if let Some(id) = item["projectId"].as_str() {
                     shell.projects.remove(id);
                 }

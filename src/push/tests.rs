@@ -335,7 +335,7 @@ fn app(agent: Value) -> Vec<AppView> {
 }
 
 fn working(turn: &str) -> Value {
-    json!({"latestTurn": {"turnId": turn, "state": "running"}})
+    json!({"latestRunId": turn, "status": "running"})
 }
 
 async fn phone(push: &Push) {
@@ -411,10 +411,8 @@ async fn transient_failures_retry_and_an_end_keeps_its_token_until_accepted() {
         .lock()
         .unwrap()
         .push((PushType::LiveActivity, Outcome::Retry("HTTP 500".into())));
-    push.apps_changed(app(
-        json!({"latestTurn": {"turnId": "t1", "state": "completed"}}),
-    ))
-    .await;
+    push.apps_changed(app(json!({"latestRunId": "t1", "status": "completed"})))
+        .await;
     tokio::time::sleep(Duration::from_millis(60)).await;
     assert_eq!(events(&transport), ["update", "end"]);
     assert_eq!(

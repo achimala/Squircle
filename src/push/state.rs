@@ -112,7 +112,7 @@ impl State {
                 .iter()
                 .map(|(id, title, row)| (id, Some(title), row));
             for (id, title, row) in agent.chain(workers) {
-                let turn = row["latestTurn"]["turnId"].as_str().map(str::to_string);
+                let turn = row["latestRunId"].as_str().map(str::to_string);
                 let now = phase(row);
                 if !first && let Some(change) = change(seen.get(id), turn.clone(), now) {
                     changes.push((

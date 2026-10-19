@@ -1,7 +1,8 @@
 //! The service's own connection to the user's T3 server: a paired session
 //! (orchestration read/operate, never the phone's) and the Effect RPC JSON
-//! framing T3 0.0.45 speaks over its `/ws` socket, the same protocol as the
-//! phone's `T3Gateway`.
+//! framing T3 speaks over its `/ws` socket. Since T3 0.1.0 the socket only
+//! opens for a client that declares orchestration protocol 2
+//! (`?orchestrationProtocol=2`); anything else gets HTTP 426.
 
 use crate::fsm::coordinator::{Command, Dispatched};
 use crate::store::{atomic_json, read_json};
@@ -158,6 +159,9 @@ const TIMING: Timing = Timing {
     silence: Duration::from_secs(45),
     write: Duration::from_secs(10),
 };
+/// The orchestration protocol this client speaks (T3 0.1.0's "V2": runs,
+/// runtime requests and turn items instead of 0.0.45's turns and activities).
+pub const ORCHESTRATION_PROTOCOL: &str = "2";
 const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Frames waiting for the socket. A full queue means the writer is stuck, so
 /// the connection is closed rather than allowed to grow without bound.
@@ -260,7 +264,9 @@ impl T3 {
         ws.set_scheme(if ws.scheme() == "https" { "wss" } else { "ws" })
             .ok();
         ws.set_path("/ws");
-        ws.query_pairs_mut().append_pair("wsTicket", ticket);
+        ws.query_pairs_mut()
+            .append_pair("wsTicket", ticket)
+            .append_pair("orchestrationProtocol", ORCHESTRATION_PROTOCOL);
         let (socket, _) =
             tokio::time::timeout(OPEN_TIMEOUT, tokio_tungstenite::connect_async(ws.as_str()))
                 .await
@@ -375,7 +381,7 @@ impl T3 {
             return Dispatched::NotSent("A T3 command needs its commandId and createdAt".into());
         }
         match self
-            .exchange("orchestration.dispatchCommand", command.body().clone())
+            .exchange(command.method(), command.body().clone())
             .await
         {
             Reply::Answered(Ok(result)) if result["status"] == "rejected" => {

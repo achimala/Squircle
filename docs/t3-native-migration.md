@@ -2565,3 +2565,64 @@ false), so actually being interrupted can only be checked on the phone.
 Simulated taps on AVKit's mute button changed nothing, also in a bare
 test app, so the button itself is untested; the code follows the player's
 `isMuted`, which that button is expected to set (unconfirmed).
+
+## 2026-10-19 T3 0.1.0: orchestration protocol 2
+
+T3 updated itself to 0.1.0 and its `/ws` socket answered Squircle's service
+with HTTP 426 `orchestration_protocol_incompatible`. Read from the installed
+app's bundled server (not run, not modified):
+
+- **Handshake.** A client declares the protocol with the query parameter
+  `orchestrationProtocol=2` on `/ws` (HTTP calls use the header
+  `x-t3-orchestration-protocol: 2`). The ticket (`POST
+  /api/auth/websocket-ticket`), pairing (`/oauth/token`) and the Effect RPC
+  framing are unchanged.
+- **Shell** (`orchestration.subscribeShell`): items are `snapshot`
+  (`threads`, `archivedThreads` (empty: archived threads have their own
+  `subscribeArchivedShell`), `projects`), `thread.updated` / `thread.removed`
+  (with `location`), `project.updated` / `project.removed` and
+  `synchronized`. A snapshot with `resolvedRepositoryIdentityRoots` is only a
+  metadata refresh of those projects and carries no threads. An archived
+  thread leaves the active shell. A thread row has `status` (`idle` or its
+  latest run's status: preparing, queued, starting, running, waiting,
+  completed, interrupted, failed, cancelled, rolled_back), `latestRunId`,
+  `activeRunId` and `pendingRuntimeRequest`; no session, `latestTurn` or
+  pending flags.
+- **Thread detail**: `orchestration.getThreadProjection {threadId}` returns
+  the projection (`thread`, `runs`, `messages`, `runtimeRequests`,
+  `turnItems`, `providerSessions`, …), bounded to recent history. Questions
+  are pending `user_input` runtime requests; their questions are on the
+  `user_input_request` turn item.
+- **Commands** (`orchestration.dispatchCommand`, still idempotent by
+  `commandId` with receipts; extra keys such as `createdAt` are ignored):
+  `thread.turn.start` became `message.dispatch` (`messageId`, `text`,
+  `attachments`, `context`, `createdBy`, `creationSource`, `dispatchMode`;
+  Squircle sends `start_immediately` with `deliveryIntent: auto`, which T3
+  resolves to start, steer or queue as its own clients do);
+  `thread.meta.update` → `thread.metadata.update`;
+  `thread.user-input.respond` → `runtime-request.respond`; `thread.create`
+  needs `createdBy` and `creationSource`. There is no `thread.session.stop`:
+  Squircle interrupts a running run (`run.interrupt`) or detaches the
+  thread's provider session (`provider-session.detach`); `thread.archive`
+  itself detaches every session. A worker starts with
+  `orchestration.launchThread` (thread, worktree with setup, first run in one
+  call, idempotent by `commandId`), replacing the turn-start bootstrap. Every
+  dispatch failure is a typed `OrchestrationV2DispatchCommandError`; a payload
+  that does not decode is a defect (`Die`).
+- **State**: T3 writes `~/.t3/userdata/statev2.sqlite`; `state.sqlite` stopped
+  at the migration. The new file keeps the 0.0.45 projection tables as they
+  were then (tool activities were not imported; messages were, under their
+  IDs). Current data is in `orchestration_v2_projection_*`. Tool calls are
+  turn items (`command_execution`, `file_change`, `dynamic_tool` with
+  `toolName`, `input`, `output`; image bytes stay in a dynamic tool's output
+  blocks). Context use is each provider turn's `tokenUsage`. Projects are
+  still `projection_projects`.
+- **Settings**: `providers` left `server.getSettings`; the built-in Claude is
+  the `claudeAgent` provider instance. `squircle agent setup` now changes only
+  its own instance with `providerInstanceMutation`, which T3 grants to a
+  session with `providers:manage` (Squircle's pairing asks for orchestration
+  read/operate only).
+
+The iPhone app's `T3Gateway` and thread reducer still speak 0.0.45 and need
+the same port.
+

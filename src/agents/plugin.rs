@@ -30,19 +30,18 @@ pub async fn setup(root: &Path, server: &str, remove: bool) -> Result<Value> {
         .context("Squircle data directory not found; run squircle init")?;
     let client = T3::connect(T3Config::load(root)?).await?;
     let settings = client.call("server.getSettings", json!({})).await?;
-    let mut instances = settings["providerInstances"]
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let instances = &settings["providerInstances"];
     let plugin = root.join("plugin").join("squircle");
     if remove {
-        let removed = instances.remove(INSTANCE).is_some();
-        client
-            .call(
-                "server.updateSettings",
-                json!({"patch": {"providerInstances": instances}}),
-            )
-            .await?;
+        let removed = instances.get(INSTANCE).is_some();
+        if removed {
+            client
+                .call(
+                    "server.updateSettings",
+                    json!({"patch": {}, "providerInstanceMutation": {"operation": "remove", "instanceId": INSTANCE}}),
+                )
+                .await?;
+        }
         return Ok(json!({"removed_instance": removed, "plugin_left_at": plugin}));
     }
     let cli = cli_invocation(root, server);
@@ -63,23 +62,30 @@ pub async fn setup(root: &Path, server: &str, remove: bool) -> Result<Value> {
                 .replace("{{VERSION}}", env!("CARGO_PKG_VERSION")),
         )?;
     }
-    let claude = &settings["providers"]["claudeAgent"];
+    // The built-in Claude's binary and home: T3 0.1.0 keeps them as the
+    // `claudeAgent` provider instance, older T3 under `providers`.
+    let claude = [
+        &instances["claudeAgent"]["config"],
+        &settings["providers"]["claudeAgent"],
+        &instances[INSTANCE]["config"],
+    ];
     let mut config = serde_json::Map::new();
     for key in ["binaryPath", "homePath"] {
-        if let Some(value) = claude[key].as_str().filter(|v| !v.is_empty()) {
+        if let Some(value) = claude
+            .iter()
+            .find_map(|c| c[key].as_str().filter(|v| !v.is_empty()))
+        {
             config.insert(key.into(), json!(value));
         }
     }
     let launch = format!("--plugin-dir {} --agent squircle:app-agent", quote(&plugin));
     config.insert("launchArgs".into(), json!(launch));
-    instances.insert(
-        INSTANCE.into(),
-        json!({"driver": "claudeAgent", "displayName": "Squircle agent", "config": config}),
-    );
+    let instance =
+        json!({"driver": "claudeAgent", "displayName": "Squircle agent", "config": config});
     client
         .call(
             "server.updateSettings",
-            json!({"patch": {"providerInstances": instances}}),
+            json!({"patch": {}, "providerInstanceMutation": {"operation": "upsert", "instanceId": INSTANCE, "instance": instance}}),
         )
         .await?;
     Ok(
