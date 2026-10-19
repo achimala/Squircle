@@ -225,6 +225,27 @@ impl Agents {
             .and_then(|t| t["projectId"].as_str().map(str::to_string))
     }
 
+    /// The app agent thread of `thread`'s project, if it has one.
+    pub fn app_agent_of(&self, thread: &str) -> Option<String> {
+        let project = self.project_of(thread)?;
+        self.registry()
+            .agents
+            .values()
+            .find(|a| a.project_id == project)
+            .map(|a| a.thread_id.clone())
+    }
+
+    /// A notification straight to the phone, for news no agent is there to tell.
+    pub fn alert(&self, app: &str, line: &str) {
+        if let Some(push) = self.push.get() {
+            push.notify(crate::push::Note {
+                app: app.into(),
+                line: line.into(),
+                target: crate::push::Target::default(),
+            });
+        }
+    }
+
     /// An app agent's or worker's thread (not one the user started in T3).
     pub fn is_squircle_thread(&self, id: &str) -> bool {
         let registry = self.registry();

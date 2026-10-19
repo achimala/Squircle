@@ -12,7 +12,7 @@ pub(crate) const SIMULATOR_COMMANDS: &str = "select thread_id as thread, created
              case when json_type(payload_json,'$.data.input.command')='text' then json_extract(payload_json,'$.data.input.command') end, '') as command,
     coalesce(case when json_type(payload_json,'$.data.rawOutput.content')='text' then json_extract(payload_json,'$.data.rawOutput.content') end, '') as output
 from projection_thread_activities
-where created_at > ?1 and (payload_json like '%simctl %' or payload_json like '%xcodebuild%')
+where created_at > ?1 and (payload_json like '%simctl %' or payload_json like '%xcodebuild%' or payload_json like '%agent-device%')
 order by created_at limit 5000";
 
 pub(crate) const STEPS: &str = "select json_extract(payload_json,'$.toolCallId') as id,

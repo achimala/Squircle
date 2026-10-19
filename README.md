@@ -28,7 +28,8 @@ signed builds it makes, over cellular if your Mac is reachable.
 - **Notifications and a Live Activity**, sent from the Mac with your own APNs key.
 
 Not done: a pairing screen on the phone (credentials are built into your
-personal build), a packaged login service for the Mac, LLDB or remote launch.
+personal build), LLDB or remote launch. `squircle service install` runs the
+service as a launchd user agent so it survives reboots.
 The full dated record is in [history](docs/history.md).
 
 ## Requirements

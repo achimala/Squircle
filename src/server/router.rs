@@ -44,6 +44,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sims/stop", post(stop_sim))
         .route("/v1/sims/devices", get(sim_devices))
         .route("/v1/sims/cleanup", post(cleanup_sims))
+        .route("/v1/sims/prune", post(prune_sims))
+        .route("/v1/sims/keep", get(sim_keep).post(change_sim_keep))
         .route("/v1/agents", get(list_agents).post(ensure_agent))
         .route("/v1/agents/context", get(agent_context))
         .route("/v1/t3/providers", get(t3_providers))

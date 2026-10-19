@@ -1,5 +1,13 @@
-//! `squircle service restart|stop`: controls the `squircle serve` running for
-//! a data directory, found through its lock (`service.lock` holds its PID).
+//! `squircle service install|start|restart|stop|uninstall`: controls the
+//! `squircle serve` running for a data directory, found through its lock
+//! (`service.lock` holds its PID).
+//!
+//! Installed, the service is a launchd user agent (`dev.squircle.service`,
+//! RunAtLoad, kept alive unless it stopped cleanly), so it comes back after a
+//! reboot or a crash. Install copies the running service's command line and
+//! environment (or builds one for this binary) into the plist, hands the
+//! running service's sessions over to launchd's, and from then on restart is
+//! launchd's `kickstart -k` (still SIGTERM, still a handover).
 //!
 //! A restart sends SIGTERM, on which the service hands its simulator sessions
 //! over instead of ending them, then re-runs the service's own command line,
@@ -46,6 +54,15 @@ pub fn holder(root: &Path) -> Result<Option<u32>> {
 
 /// Restarts the running service; returns once the new one answers.
 pub async fn restart(root: &Path, server: &str) -> Result<Value> {
+    if job().await.is_some() {
+        let old = holder(root)?;
+        launchctl(&["kickstart", "-k", &target()]).await?;
+        let pid = launched(root, server, old).await?;
+        return Ok(
+            json!({"previous_pid": old, "pid": pid, "launchd": LABEL, "log": root.join("serve.log"),
+                         "next": "Simulator sessions were handed over; squircle sim status shows them."}),
+        );
+    }
     let old = holder(root)?.context(
         "No Squircle service is running for this data directory; start one with squircle serve",
     )?;
@@ -112,12 +129,252 @@ pub async fn restart(root: &Path, server: &str) -> Result<Value> {
     )
 }
 
-/// Stops the running service, ending its simulator sessions.
+/// Stops the running service, ending its simulator sessions. Installed, it
+/// stays stopped (a clean exit) until `service start` or the next login.
 pub async fn stop(root: &Path) -> Result<Value> {
     let pid = holder(root)?.context("No Squircle service is running for this data directory")?;
     signal(pid, libc::SIGINT)?;
     exited(pid).await;
-    Ok(json!({"stopped_pid": pid}))
+    Ok(json!({"stopped_pid": pid, "launchd": job().await.is_some().then_some(LABEL)}))
+}
+
+// MARK: launchd
+
+pub const LABEL: &str = "dev.squircle.service";
+
+/// Environment the service needs, copied into the plist; launchd gives a
+/// bare one otherwise (no Homebrew or user tools on PATH).
+fn wanted(key: &std::ffi::OsStr) -> bool {
+    let key = key.to_string_lossy();
+    [
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "DEVELOPER_DIR",
+        "RUST_LOG",
+        "RUST_BACKTRACE",
+    ]
+    .contains(&key.as_ref())
+        || key.starts_with("LC_")
+        || key.starts_with("SQUIRCLE_")
+}
+
+fn plist_path() -> Result<PathBuf> {
+    Ok(dirs::home_dir()
+        .context("No home directory")?
+        .join("Library/LaunchAgents")
+        .join(format!("{LABEL}.plist")))
+}
+
+fn target() -> String {
+    format!("gui/{}/{LABEL}", unsafe { libc::getuid() })
+}
+
+async fn launchctl(args: &[&str]) -> Result<String> {
+    let output = tokio::process::Command::new("/bin/launchctl")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .context("Cannot run launchctl")?;
+    ensure!(
+        output.status.success(),
+        "launchctl {} failed: {}{}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr).trim(),
+        String::from_utf8_lossy(&output.stdout).trim()
+    );
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// launchd's job, if loaded: its PID while running, and its last exit status.
+struct Job {
+    pid: Option<u32>,
+    last_exit: Option<i64>,
+}
+
+async fn job() -> Option<Job> {
+    let printed = launchctl(&["print", &target()]).await.ok()?;
+    let field = |name: &str| {
+        printed
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(name)?.trim().parse::<i64>().ok())
+    };
+    Some(Job {
+        pid: field("pid = ").map(|p| p as u32),
+        last_exit: field("last exit code = "),
+    })
+}
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The user agent's plist for `invocation`, logging to `log`.
+pub fn plist(invocation: &Invocation, log: &Path) -> String {
+    let string = |s: &std::ffi::OsStr| format!("<string>{}</string>", escape(&s.to_string_lossy()));
+    let args: Vec<String> = invocation.argv.iter().map(|a| string(a)).collect();
+    let env: Vec<String> = invocation
+        .env
+        .iter()
+        .map(|(k, v)| format!("<key>{}</key>{}", escape(&k.to_string_lossy()), string(v)))
+        .collect();
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+<key>Label</key><string>{LABEL}</string>
+<key>ProgramArguments</key><array>{}</array>
+<key>EnvironmentVariables</key><dict>{}</dict>
+<key>WorkingDirectory</key>{}
+<key>StandardOutPath</key>{}
+<key>StandardErrorPath</key>{}
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>ThrottleInterval</key><integer>10</integer>
+</dict>
+</plist>
+"#,
+        args.join(""),
+        env.join(""),
+        string(invocation.cwd.as_os_str()),
+        string(log.as_os_str()),
+        string(log.as_os_str()),
+    )
+}
+
+/// Waits until a service other than `old` holds the lock and answers;
+/// fails with the log's tail if launchd's job exits instead.
+async fn launched(root: &Path, server: &str, old: Option<u32>) -> Result<u32> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let health = format!("{}/health", server.trim_end_matches('/'));
+    loop {
+        if let Some(pid) = holder(root).ok().flatten().filter(|p| Some(*p) != old)
+            && client
+                .get(&health)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+        {
+            return Ok(pid);
+        }
+        if let Some(job) = job().await
+            && job.pid.is_none()
+            && job.last_exit.is_some_and(|code| code != 0)
+            && holder(root).ok().flatten().is_none_or(|p| Some(p) == old)
+        {
+            let log = std::fs::read_to_string(root.join("serve.log")).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(15).collect();
+            bail!(
+                "launchd's service exited (status {}); simulator sessions stay in the ledger. Log:\n{}",
+                job.last_exit.unwrap_or_default(),
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Installs the service as a launchd user agent and starts it there,
+/// handing the running service's simulator sessions over. `serve_args`
+/// replace the running service's own (`--listen`, `--public-url`).
+pub async fn install(root: &Path, server: &str, serve_args: Vec<String>) -> Result<Value> {
+    let root = std::path::absolute(root)?;
+    let running = holder(&root)?;
+    let mut invocation = match running {
+        Some(pid) if serve_args.is_empty() => {
+            let mut invocation = invocation(pid)?;
+            ensure!(
+                invocation.argv.iter().any(|a| a == "serve"),
+                "Process {pid} holds the lock but is not squircle serve"
+            );
+            let program = invocation.cwd.join(&invocation.argv[0]);
+            invocation.argv[0] = program.canonicalize().unwrap_or(program).into();
+            invocation
+        }
+        _ => {
+            let exe = std::env::current_exe()?.canonicalize()?;
+            let mut argv: Vec<OsString> = vec![
+                exe.into(),
+                "--data-dir".into(),
+                root.clone().into(),
+                "serve".into(),
+            ];
+            argv.extend(serve_args.into_iter().map(OsString::from));
+            Invocation {
+                argv,
+                env: std::env::vars_os().collect(),
+                cwd: std::env::current_dir()?,
+            }
+        }
+    };
+    invocation.env.retain(|(k, _)| wanted(k));
+    let log = root.join("serve.log");
+    let path = plist_path()?;
+    std::fs::create_dir_all(path.parent().context("No LaunchAgents folder")?)?;
+    let draft = path.with_extension("plist.new");
+    std::fs::write(&draft, plist(&invocation, &log))?;
+    std::fs::rename(&draft, &path)?;
+
+    // One service at a time: the old one hands its sessions over first.
+    if job().await.is_some() {
+        launchctl(&["bootout", &target()]).await?;
+    } else if let Some(pid) = running {
+        signal(pid, libc::SIGTERM)?;
+    }
+    if let Some(pid) = running {
+        exited(pid).await;
+    }
+    let domain = format!("gui/{}", unsafe { libc::getuid() });
+    launchctl(&["bootstrap", &domain, &path.to_string_lossy()]).await?;
+    let pid = launched(&root, server, running).await?;
+    Ok(
+        json!({"label": LABEL, "plist": path, "pid": pid, "previous_pid": running, "log": log,
+              "command": invocation.argv, "next": "launchd now starts the service at login and after a crash; squircle service restart|stop|start control it."}),
+    )
+}
+
+/// Starts the installed service (after `service stop`).
+pub async fn start(root: &Path, server: &str) -> Result<Value> {
+    ensure!(
+        job().await.is_some(),
+        "The service isn't installed with launchd; run squircle service install (or squircle serve)"
+    );
+    if let Some(pid) = holder(root)? {
+        return Ok(json!({"pid": pid, "already_running": true}));
+    }
+    launchctl(&["kickstart", &target()]).await?;
+    Ok(json!({"pid": launched(root, server, None).await?, "launchd": LABEL}))
+}
+
+/// Removes the launchd user agent, stopping the service it runs (ending its sessions).
+pub async fn uninstall(root: &Path) -> Result<Value> {
+    let path = plist_path()?;
+    let running = holder(root)?;
+    if job().await.is_some() {
+        // launchd's SIGTERM would hand over to a next run that won't come.
+        if let Some(pid) = running {
+            signal(pid, libc::SIGINT)?;
+            exited(pid).await;
+        }
+        launchctl(&["bootout", &target()]).await?;
+    }
+    let removed = match std::fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(e).context("Cannot remove the launchd plist"),
+    };
+    Ok(
+        json!({"label": LABEL, "plist_removed": removed, "stopped_pid": running,
+              "next": "Start the service yourself with squircle serve."}),
+    )
 }
 
 fn signal(pid: u32, signal: libc::c_int) -> Result<()> {

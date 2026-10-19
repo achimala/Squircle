@@ -68,6 +68,53 @@ pub(super) async fn cleanup_sims(
     )))
 }
 
+fn pool(state: &AppState) -> ApiResult<Arc<crate::simpool::Pool>> {
+    state.pool.clone().ok_or_else(|| {
+        sim_error(anyhow::anyhow!(
+            "The simulator pool is not running in this service"
+        ))
+    })
+}
+
+pub(super) async fn prune_sims(
+    State(state): State<AppState>,
+    payload: std::result::Result<Json<CleanupSims>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let request = body(payload)?;
+    let sims = sims(&state)?;
+    Ok(Json(success(
+        pool(&state)?
+            .prune(&sims.leases(), request.dry_run)
+            .await
+            .map_err(sim_error)?,
+    )))
+}
+
+pub(super) async fn sim_keep(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let keep = pool(&state)?.keep_list().await.map_err(sim_error)?;
+    Ok(Json(success(json!({"keep": keep}))))
+}
+
+#[derive(Deserialize)]
+pub(super) struct ChangeKeep {
+    #[serde(default)]
+    pub(super) add: Vec<String>,
+    #[serde(default)]
+    pub(super) remove: Vec<String>,
+}
+
+pub(super) async fn change_sim_keep(
+    State(state): State<AppState>,
+    payload: std::result::Result<Json<ChangeKeep>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let request = body(payload)?;
+    let keep = pool(&state)?
+        .keep(request.add, request.remove)
+        .await
+        .map_err(sim_error)?;
+    Ok(Json(success(json!({"keep": keep}))))
+}
+
 #[derive(Deserialize)]
 pub(super) struct StartSim {
     pub(super) thread_id: String,

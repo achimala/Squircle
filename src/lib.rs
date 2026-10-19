@@ -30,6 +30,7 @@ pub mod service;
 pub mod serving;
 pub mod simpool;
 pub mod sims;
+pub mod simwatch;
 pub mod store;
 pub mod symbolicate;
 pub mod t3;

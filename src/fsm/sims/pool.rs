@@ -16,6 +16,13 @@
 //! could show such a use, couldn't be read. A cleanup is saved as an intent
 //! before it runs, revalidated against a fresh snapshot right before, and
 //! its outcome is only what simctl or a later inventory shows.
+//!
+//! Two rules reach past proven ownership, because simulators otherwise pile
+//! up and hold the Mac (2026-10-19, owner-requested): a shut-down device
+//! nobody has used for `stale_after` (14 days) is deleted whoever created it,
+//! unless the owner keeps it (`squircle sim keep`); and one of ours that only
+//! a working Squircle thread's T3 device session keeps booted is shut down
+//! once nothing has used it for `hold_idle` (30 minutes).
 
 use super::Seen;
 use serde::{Deserialize, Serialize};
@@ -33,6 +40,13 @@ pub struct Policy {
     pub idle: f64,
     /// Seconds unused before a device an agent created is deleted.
     pub delete_after: f64,
+    /// Seconds unused before any shut-down device is deleted, whoever made
+    /// it (`SQUIRCLE_SIM_STALE_DAYS`, default 14; 0 turns it off).
+    pub stale_after: f64,
+    /// Seconds unused before one of ours that only a working Squircle
+    /// thread's T3 device session keeps booted is shut down
+    /// (`SQUIRCLE_SIM_HOLD_IDLE_MINUTES`, default 30).
+    pub hold_idle: f64,
 }
 
 /// One simulator device, as simctl lists it.
@@ -44,6 +58,27 @@ pub struct Device {
     pub state: String,
     /// When CoreSimulator last wrote its device.plist (boot and shutdown do); 0 if unknown.
     pub changed_at: f64,
+    /// CoreSimulator's own `lastUsedAt` (set when it boots); 0 if unknown.
+    pub last_booted: f64,
+    /// Its data and logs on disk, as simctl reports them.
+    pub bytes: u64,
+}
+
+impl Device {
+    /// When anything last used it, by every signal there is: CoreSimulator's
+    /// last boot, its device.plist's last write (a boot, shutdown or rename),
+    /// and what Squircle saw (sessions, agents' commands). 0 if none is known.
+    pub fn last_use(&self, known: Option<&Provenance>) -> f64 {
+        self.last_booted
+            .max(self.changed_at)
+            .max(known.map_or(0.0, |k| k.last_used))
+    }
+
+    /// The owner keeps it: its UDID or exact name is on the keep list.
+    pub fn kept(&self, keep: &[String]) -> bool {
+        keep.iter()
+            .any(|k| k.eq_ignore_ascii_case(&self.udid) || *k == self.name)
+    }
 }
 
 /// A simulator a session reserves.
@@ -219,6 +254,11 @@ pub struct Facts<'a> {
     pub policy: Policy,
     /// `sim cleanup` and a lease ending: no idle wait.
     pub now_please: bool,
+    /// Device names and UDIDs the owner keeps (`squircle sim keep`): never deleted.
+    pub keep: &'a [String],
+    /// When each simulator was first seen kept booted only by a working
+    /// Squircle thread's T3 device session.
+    pub held_since: &'a HashMap<String, f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -237,6 +277,17 @@ pub struct Row {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<Action>,
     pub why: String,
+    /// Its data and logs on disk.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub bytes: u64,
+    /// Booted, ours, and kept only by a working Squircle thread's T3 device
+    /// session: the hold's idle clock runs.
+    #[serde(skip)]
+    pub hold: bool,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// The policy: one row per booted simulator, plus devices to delete.
@@ -255,6 +306,8 @@ pub fn plan(facts: &Facts) -> Vec<Row> {
             free,
             action,
             why,
+            bytes: device.bytes,
+            hold: false,
         };
         let lease = facts
             .leases
@@ -262,14 +315,20 @@ pub fn plan(facts: &Facts) -> Vec<Row> {
             .find(|l| l.device_id.eq_ignore_ascii_case(&device.udid));
         // A T3 device session protects while its thread may be working, and
         // always while the thread is the user's own (not one Squircle started).
-        let session = facts
+        let holders: Vec<(&String, ThreadInfo)> = facts
             .t3_sessions
             .iter()
             .filter(|(_, d)| d.eq_ignore_ascii_case(&device.udid))
-            .find(|(thread, _)| {
-                let info = (facts.thread)(thread);
-                info.seen.protects() || (info.seen != Seen::Gone && !info.squircle)
-            });
+            .map(|(thread, _)| (thread, (facts.thread)(thread)))
+            .filter(|(_, info)| info.seen.protects() || (info.seen != Seen::Gone && !info.squircle))
+            .collect();
+        let session = holders.first().map(|(thread, _)| *thread);
+        // Every hold is a Squircle thread's turn that is running: one waiting
+        // on the user, of unknown state or the user's own keeps protecting.
+        let working_hold = !holders.is_empty()
+            && holders
+                .iter()
+                .all(|(_, info)| info.squircle && matches!(info.seen, Seen::Busy { .. }));
         let recent_touch = known
             .touched_by
             .as_deref()
@@ -284,25 +343,38 @@ pub fn plan(facts: &Facts) -> Vec<Row> {
         .find(|t| (facts.thread)(t).seen.protects());
 
         if device.state != "Booted" {
-            let unused = facts.now - known.last_used.max(device.changed_at);
+            let last_use = device.last_use(Some(&known));
+            let unused = facts.now - last_use;
             let deletable = device.state == "Shutdown"
-                && known.created_by.is_some()
                 && lease.is_none()
                 && facts.activity_complete
                 && !facts.reserved.contains(&device.udid)
+                && !device.kept(facts.keep)
                 && !facts
                     .t3_sessions
                     .iter()
                     .any(|(_, d)| d.eq_ignore_ascii_case(&device.udid))
-                && toucher.is_none()
-                && unused >= facts.policy.delete_after;
-            if deletable {
+                && toucher.is_none();
+            if deletable && known.created_by.is_some() && unused >= facts.policy.delete_after {
                 rows.push(row(
                     "agent (idle)",
                     known.created_by.as_deref(),
                     false,
                     Some(Action::Delete),
                     format!("an agent created it; unused for {}", span(unused)),
+                ));
+            } else if deletable
+                && facts.policy.stale_after > 0.0
+                // Without any sign of its last use its age is unknown: kept.
+                && last_use > 0.0
+                && unused >= facts.policy.stale_after
+            {
+                rows.push(row(
+                    "stale",
+                    None,
+                    false,
+                    Some(Action::Delete),
+                    format!("shut down and unused for {}", span(unused)),
                 ));
             }
             continue;
@@ -323,14 +395,33 @@ pub fn plan(facts: &Facts) -> Vec<Row> {
                 None,
                 "the preview capture's simulator".into(),
             )
-        } else if let Some((thread, _)) = session {
-            row(
-                "t3 session",
-                Some(thread),
-                false,
-                None,
-                "open in T3's device tools".into(),
-            )
+        } else if let Some(thread) = session {
+            let held = working_hold && ours && facts.activity_complete;
+            let since = facts
+                .held_since
+                .get(&device.udid)
+                .copied()
+                .unwrap_or(facts.now)
+                .max(device.last_use(Some(&known)));
+            let unused = facts.now - since;
+            let due = held && unused >= facts.policy.hold_idle;
+            Row {
+                hold: held,
+                ..row(
+                    "t3 session",
+                    Some(thread),
+                    false,
+                    due.then_some(Action::Shutdown),
+                    if due {
+                        format!(
+                            "only a working thread's T3 device session keeps it, unused for {}",
+                            span(unused)
+                        )
+                    } else {
+                        "open in T3's device tools".into()
+                    },
+                )
+            }
         } else if !ours {
             row(
                 "unowned",
@@ -418,6 +509,8 @@ mod tests {
         max_leases: 3,
         idle: 600.0,
         delete_after: 24.0 * HOUR,
+        stale_after: 14.0 * 24.0 * 3600.0,
+        hold_idle: 1800.0,
     };
 
     fn device(udid: &str, state: &str) -> Device {
@@ -426,6 +519,8 @@ mod tests {
             name: format!("sim {udid}"),
             state: state.into(),
             changed_at: 0.0,
+            last_booted: 0.0,
+            bytes: 0,
         }
     }
 
@@ -542,6 +637,7 @@ mod tests {
             ("gone".to_string(), "IDLE".to_string()),
         ];
         let reserved = ["PREVIEW".to_string()];
+        let no_holds = HashMap::new();
         let facts = |now_please, activity_complete| Facts {
             now,
             devices: &devices,
@@ -554,6 +650,8 @@ mod tests {
             reserved: &reserved,
             policy: POLICY,
             now_please,
+            keep: &[],
+            held_since: &no_holds,
         };
         let summary = |rows: Vec<Row>| {
             rows.into_iter()
@@ -590,7 +688,7 @@ mod tests {
     }
 
     /// A user's or unknown device is never acted on whatever else is
-    /// true of it, and an unknown thread state on a T3 session protects
+    /// true of it (within the stale age), and an unknown thread state on a T3 session protects
     /// even an owned one. Generated over every combination of the facts.
     #[test]
     fn unproven_devices_are_never_destroyed() {
@@ -636,6 +734,8 @@ mod tests {
                                 name: "d".into(),
                                 state: state.into(),
                                 changed_at: 0.0,
+                                last_booted: 0.0,
+                                bytes: 0,
                             }];
                             let known: HashMap<String, Provenance> =
                                 [("D".to_string(), provenance.clone())].into();
@@ -657,6 +757,8 @@ mod tests {
                                 reserved: &[],
                                 policy: POLICY,
                                 now_please: true,
+                                keep: &[],
+                                held_since: &HashMap::new(),
                             });
                             let acted = rows.iter().any(|r| r.action.is_some());
                             if !owned {
@@ -723,6 +825,8 @@ mod tests {
                 name: "a".into(),
                 state: "Shutdown".into(),
                 changed_at: 6.0,
+                last_booted: 0.0,
+                bytes: 0,
             },
             device("C", "Booted"),
         ];
@@ -753,8 +857,197 @@ mod tests {
             free: false,
             action: None,
             why: String::new(),
+            bytes: 0,
+            hold: false,
         };
         assert!(!revalidate(Action::Shutdown, Some(&kept)));
+    }
+
+    /// Any shut-down device unused past the stale age goes, whoever made
+    /// it, by its latest sign of use; never a kept, leased, previewed,
+    /// T3-open or recently touched one, one of unknown age, or while the
+    /// activity log can't be read.
+    #[test]
+    fn stale_devices_go_unless_kept_or_in_use() {
+        const DAY: f64 = 24.0 * HOUR;
+        let now = 100.0 * DAY;
+        let old = |udid: &str, name: &str| Device {
+            udid: udid.into(),
+            name: name.into(),
+            state: "Shutdown".into(),
+            changed_at: now - 20.0 * DAY,
+            last_booted: now - 30.0 * DAY,
+            bytes: 2_000_000_000,
+        };
+        let devices = [
+            old("OLD", "Old"),
+            old("KEPTID", "Mine"),
+            old("KEPTNAME", "iPhone 18 Pro"),
+            // The plist was written recently (a shutdown 2 days ago).
+            Device {
+                changed_at: now - 2.0 * DAY,
+                ..old("PLIST", "Plist")
+            },
+            // CoreSimulator booted it recently.
+            Device {
+                last_booted: now - DAY,
+                ..old("BOOTED", "Recently booted")
+            },
+            // Squircle saw a session use it recently.
+            old("LEASEDBEFORE", "Leased before"),
+            old("LEASED", "Leased"),
+            old("PREVIEW", "Preview"),
+            old("PANEL", "Panel"),
+            old("TOUCHED", "Touched"),
+            Device {
+                changed_at: 0.0,
+                last_booted: 0.0,
+                ..old("AGELESS", "Ageless")
+            },
+            Device {
+                state: "Booted".into(),
+                ..old("UP", "Up")
+            },
+            Device {
+                state: "Shutting Down".into(),
+                ..old("DOWN", "Going down")
+            },
+        ];
+        let known: HashMap<String, Provenance> = [
+            (
+                "LEASEDBEFORE".to_string(),
+                Provenance {
+                    leased: true,
+                    last_used: now - 3.0 * DAY,
+                    ..Provenance::default()
+                },
+            ),
+            (
+                "TOUCHED".to_string(),
+                Provenance {
+                    touched_by: Some("worker".into()),
+                    touched_at: now - 60.0,
+                    last_used: now - 60.0,
+                    ..Provenance::default()
+                },
+            ),
+        ]
+        .into();
+        let thread = |id: &str| match id {
+            "worker" => info(Seen::Busy { turn: None }, true),
+            _ => info(Seen::Gone, true),
+        };
+        let leases = [Lease {
+            device_id: "LEASED".into(),
+            thread_id: "worker".into(),
+        }];
+        let sessions = [("gone".to_string(), "PANEL".to_string())];
+        let keep = ["keptid".to_string(), "iPhone 18 Pro".to_string()];
+        let reserved = ["PREVIEW".to_string()];
+        let plan_with = |activity_complete| {
+            plan(&Facts {
+                now,
+                devices: &devices,
+                leases: &leases,
+                t3_sessions: &sessions,
+                known: &known,
+                thread: &thread,
+                activity_complete,
+                idle_since: &HashMap::new(),
+                reserved: &reserved,
+                policy: POLICY,
+                now_please: true,
+                keep: &keep,
+                held_since: &HashMap::new(),
+            })
+        };
+        let deleted: Vec<(String, &str)> = plan_with(true)
+            .into_iter()
+            .filter(|r| r.action == Some(Action::Delete))
+            .map(|r| (r.udid, r.owner))
+            .collect();
+        assert_eq!(deleted, [("OLD".to_string(), "stale")]);
+        assert!(
+            plan_with(false).iter().all(|r| r.action.is_none()),
+            "deleted without the activity log"
+        );
+    }
+
+    /// One of ours kept booted only by a working Squircle thread's T3
+    /// device session is shut down once unused for the hold's idle time,
+    /// counted from the later of the hold's first sighting and its last
+    /// use; a user's, waiting or unknown hold, or one not ours, keeps it.
+    #[test]
+    fn idle_working_holds_end() {
+        let now = 100.0 * HOUR;
+        let ids = [
+            "IDLE", "USED", "NEW", "USERS", "WAITING", "MIXED", "NOTOURS",
+        ];
+        let devices: Vec<Device> = ids.iter().map(|id| device(id, "Booted")).collect();
+        let mut known: HashMap<String, Provenance> = ids
+            .iter()
+            .filter(|id| **id != "NOTOURS")
+            .map(|id| (id.to_string(), booted_by_session(1.0)))
+            .collect();
+        known
+            .get_mut("USED")
+            .unwrap()
+            .note_touch("worker", now - 600.0);
+        let thread = |id: &str| match id {
+            "worker" => info(Seen::Busy { turn: None }, true),
+            "asking" => info(Seen::Waiting { turn: None }, true),
+            "user" => info(Seen::Busy { turn: None }, false),
+            _ => info(Seen::Gone, true),
+        };
+        let sessions: Vec<(String, String)> = [
+            ("worker", "IDLE"),
+            ("worker", "USED"),
+            ("worker", "NEW"),
+            ("user", "USERS"),
+            ("asking", "WAITING"),
+            ("worker", "MIXED"),
+            ("user", "MIXED"),
+            ("worker", "NOTOURS"),
+        ]
+        .iter()
+        .map(|(t, d)| (t.to_string(), d.to_string()))
+        .collect();
+        let held_since: HashMap<String, f64> = ids
+            .iter()
+            .filter(|id| **id != "NEW")
+            .map(|id| (id.to_string(), now - 2.0 * HOUR))
+            .collect();
+        let rows = plan(&Facts {
+            now,
+            devices: &devices,
+            leases: &[],
+            t3_sessions: &sessions,
+            known: &known,
+            thread: &thread,
+            activity_complete: true,
+            idle_since: &HashMap::new(),
+            reserved: &[],
+            policy: POLICY,
+            now_please: true,
+            keep: &[],
+            held_since: &held_since,
+        });
+        let summary: Vec<(&str, bool, bool)> = rows
+            .iter()
+            .map(|r| (r.udid.as_str(), r.hold, r.action == Some(Action::Shutdown)))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("IDLE", true, true),
+                ("USED", true, false),
+                ("NEW", true, false),
+                ("USERS", false, false),
+                ("WAITING", false, false),
+                ("MIXED", false, false),
+                ("NOTOURS", false, false),
+            ]
+        );
     }
 
     /// Earlier pool files: a lease or a touch is no longer ownership; a

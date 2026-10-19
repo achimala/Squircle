@@ -64,6 +64,14 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     background.push(tokio::spawn(push.clone().run()));
     background.push(tokio::spawn(sims.clone().run()));
     background.push(tokio::spawn(pool.clone().run(sims.clone())));
+    background.push(tokio::spawn(
+        crate::simwatch::Watch {
+            pool: pool.clone(),
+            sims: sims.clone(),
+            agents: agents.clone(),
+        }
+        .run(),
+    ));
     // SIGTERM is a restart (`squircle service restart`, or a supervisor
     // replacing the binary): simulator sessions are handed to the next run.
     // SIGINT (Ctrl-C, `squircle service stop`) is a real stop that ends them.
