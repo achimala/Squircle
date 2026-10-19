@@ -1,7 +1,7 @@
 use super::*;
 
 pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>) -> Result<()> {
-    let store = Store::open(root)?;
+    let mut store = Store::open(root)?;
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -18,10 +18,20 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     }
     lock.set_len(0)?;
     (&lock).write_all(std::process::id().to_string().as_bytes())?;
-    let public_url = public_url
-        .as_deref()
-        .map(artifact::validate_public_url)
-        .transpose()?;
+    // Given once, the public URL is kept for every later start.
+    let public_url = match public_url {
+        Some(url) => {
+            let url = artifact::validate_public_url(&url)?;
+            store.set_public_url(url.clone())?;
+            Some(url)
+        }
+        None => store
+            .settings
+            .public_url
+            .as_deref()
+            .map(artifact::validate_public_url)
+            .transpose()?,
+    };
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let tasks = Arc::new(Tasks::open(&store.root)?);
     let agents = Agents::open(

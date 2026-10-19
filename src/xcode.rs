@@ -225,6 +225,38 @@ pub async fn build(
     }
 }
 
+/// What a finished build leaves that nothing reads again: an archive job's
+/// DerivedData (its app and dSYMs are in the archive, the IPA in the export)
+/// and each preview rebuild's. A simulator job keeps its own: its app and
+/// dSYM live there.
+pub fn spent(job_dir: &Path, mode: Option<&BuildMode>) -> Vec<PathBuf> {
+    let mut spent = Vec::new();
+    if matches!(mode, Some(BuildMode::Archive)) {
+        spent.push(job_dir.join("DerivedData"));
+    }
+    if let Ok(rebuilds) = fs::read_dir(job_dir.join("preview-builds")) {
+        for rebuild in rebuilds.flatten() {
+            if let Ok(inner) = fs::read_dir(rebuild.path()) {
+                spent.extend(inner.flatten().map(|d| d.path().join("DerivedData")));
+            }
+        }
+    }
+    spent.retain(|p| p.is_dir());
+    spent
+}
+
+/// Deletes `spent(job_dir, mode)`, logging what it can't.
+pub async fn shed(job_dir: PathBuf, mode: Option<BuildMode>) {
+    let _ = tokio::task::spawn_blocking(move || {
+        for dir in spent(&job_dir, mode.as_ref()) {
+            if let Err(error) = fs::remove_dir_all(&dir) {
+                eprintln!("Cannot delete {}: {error}", dir.display());
+            }
+        }
+    })
+    .await;
+}
+
 fn validate_request(request: &BuildRequest) -> Result<()> {
     project_flag(&request.project)?;
     ensure!(!request.scheme.trim().is_empty(), "scheme cannot be empty");

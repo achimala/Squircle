@@ -346,14 +346,25 @@ async fn encode_and_replace(tools: &Tools, path: &Path, temporary: &Path) -> Res
 #[derive(Debug, Serialize)]
 pub struct Orphan {
     pub session: String,
+    /// `threads` or `tasks`, and the thread's or task's ID.
+    pub owner: &'static str,
     pub thread: String,
     /// The movie to keep: simctl's original, else avconvert's copy.
     pub file: Option<PathBuf>,
     pub bytes: u64,
+    /// Its poster frames, which recovery files with it.
+    pub posters: Vec<PathBuf>,
     /// Everything else of the session's: avconvert's partial segments and
-    /// copies, empty files. Deleted with --orphans.
+    /// copies, logs, empty files. Deleted with --orphans.
     pub debris: Vec<PathBuf>,
     pub debris_bytes: u64,
+}
+
+impl Orphan {
+    /// Every file of it.
+    pub fn files(&self) -> impl Iterator<Item = &PathBuf> {
+        self.file.iter().chain(&self.posters).chain(&self.debris)
+    }
 }
 
 /// What a migration covers.
@@ -409,9 +420,6 @@ fn running_sessions() -> String {
 
 pub async fn plan(tools: &Tools, root: &Path) -> Result<Plan> {
     let mut plan = Plan::default();
-    let ledger = settled_sessions(root);
-    let processes = running_sessions();
-    let mut hidden: std::collections::BTreeMap<(String, String), Vec<PathBuf>> = Default::default();
     for owners in ["threads", "tasks"] {
         let Ok(entries) = std::fs::read_dir(root.join(owners)) else {
             continue;
@@ -428,36 +436,65 @@ pub async fn plan(tools: &Tools, root: &Path) -> Result<Plan> {
                 let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
-                if !file.is_file() || !is_video(name) {
+                if file.is_file()
+                    && is_video(name)
+                    && !name.starts_with('.')
+                    && file.with_extension("json").is_file()
+                {
+                    let probe = probe(tools, &file).await;
+                    plan.filed.push((file, probe));
+                }
+            }
+        }
+    }
+    (plan.orphans, plan.live) = orphans(root);
+    Ok(plan)
+}
+
+/// Hidden files of recording sessions that are over, grouped by session
+/// (`.SESSION.recording.*` in threads' and tasks' media), and those of
+/// sessions still recording (or not provably over), which nothing touches.
+/// A file `media shrink` is working on (`.ID.mp4.shrinking`,
+/// `.ID.mp4.light.mp4`) belongs to no session.
+pub fn orphans(root: &Path) -> (Vec<Orphan>, Vec<PathBuf>) {
+    let ledger = settled_sessions(root);
+    let processes = running_sessions();
+    let mut hidden: std::collections::BTreeMap<(&'static str, String, String), Vec<PathBuf>> =
+        Default::default();
+    for owners in ["threads", "tasks"] {
+        let Ok(entries) = std::fs::read_dir(root.join(owners)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let owner = entry.file_name().to_string_lossy().into_owned();
+            let Ok(files) = std::fs::read_dir(entry.path().join("media")) else {
+                continue;
+            };
+            for file in files.flatten().map(|e| e.path()) {
+                let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if name.ends_with(".shrinking") || name.ends_with(".light.mp4") || !file.is_file() {
                     continue;
                 }
-                if !name.starts_with('.') {
-                    if file.with_extension("json").is_file() {
-                        let probe = probe(tools, &file).await;
-                        plan.filed.push((file, probe));
-                    }
-                } else if let (Some(session), "threads") = (session_of(name), owners) {
-                    let thread = dir
-                        .parent()
-                        .and_then(|t| t.file_name())
-                        .and_then(|t| t.to_str())
-                        .unwrap_or_default()
-                        .to_string();
+                if let Some(session) = session_of(name) {
                     hidden
-                        .entry((thread, session.to_string()))
+                        .entry((owners, owner.clone(), session.to_string()))
                         .or_default()
                         .push(file);
                 }
             }
         }
     }
-    for ((thread, session), files) in hidden {
+    let (mut orphans, mut live) = (Vec::new(), Vec::new());
+    for ((owners, thread, session), mut files) in hidden {
+        files.sort();
         let settled = match ledger.get(&session) {
             Some(s) => matches!(s["state"].as_str(), Some("finished" | "failed")),
             None => true,
         };
         if !settled || processes.contains(&session) {
-            plan.live.extend(files);
+            live.extend(files);
             continue;
         }
         let size = |p: &PathBuf| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
@@ -468,21 +505,50 @@ pub async fn plan(tools: &Tools, root: &Path) -> Result<Plan> {
                 .cloned()
         };
         let file = named(".recording.mp4").or_else(|| named(".recording.compact.mp4"));
-        let debris: Vec<PathBuf> = files
-            .iter()
-            .filter(|f| Some(*f) != file.as_ref())
-            .cloned()
-            .collect();
-        plan.orphans.push(Orphan {
+        let (posters, debris): (Vec<PathBuf>, Vec<PathBuf>) = files
+            .into_iter()
+            .filter(|f| Some(f) != file.as_ref())
+            .partition(|f| f.to_str().is_some_and(|n| n.contains(".recording.poster.")));
+        orphans.push(Orphan {
             bytes: file.as_ref().map(size).unwrap_or(0),
             debris_bytes: debris.iter().map(size).sum(),
             session,
+            owner: owners,
             thread,
             file,
+            posters,
             debris,
         });
     }
-    Ok(plan)
+    (orphans, live)
+}
+
+/// `media shrink --orphans=delete`: deletes every file of every orphan
+/// (recordings, posters, avconvert's leftovers, logs); encodes nothing.
+pub fn delete_orphans(root: &Path, dry_run: bool) -> Value {
+    let (orphans, live) = orphans(root);
+    let (mut files, mut bytes, mut failed) = (Vec::new(), 0u64, Vec::new());
+    for orphan in &orphans {
+        for file in orphan.files() {
+            let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            bytes += size;
+            if !dry_run && let Err(error) = std::fs::remove_file(file) {
+                failed.push(serde_json::json!({"file": file, "error": error.to_string()}));
+            }
+            files
+                .push(serde_json::json!({"file": file, "mb": (size as f64 / 1e4).round() / 100.0}));
+        }
+    }
+    serde_json::json!({
+        "dry_run": dry_run,
+        "sessions": orphans.len(),
+        "recordings": orphans.iter().filter(|o| o.file.is_some()).count(),
+        "files": files.len(),
+        "gb": (bytes as f64 / 1e7).round() / 100.0,
+        "failed": failed,
+        "deleted": files,
+        "live_untouched": live,
+    })
 }
 
 /// The plan as numbers: what a run would do and roughly save.
@@ -528,7 +594,7 @@ pub fn summary(plan: &Plan) -> Value {
             "recordings_gb": gb(orphan_bytes),
             "debris_files": plan.orphans.iter().map(|o| o.debris.len()).sum::<usize>(),
             "debris_gb": gb(debris_bytes),
-            "next": "With --orphans: each recording is made light and filed into its thread (dated where its session began); the debris is deleted.",
+            "next": "With --orphans: each recording is made light and filed into its thread (dated where its session began); the debris is deleted. With --orphans=delete: all of it is deleted.",
         },
         "live_untouched": plan.live,
     })
@@ -584,7 +650,7 @@ pub async fn migrate(
     let mut recovered = Vec::new();
     if orphans {
         let ledger = settled_sessions(root);
-        for orphan in plan.orphans {
+        for orphan in plan.orphans.into_iter().filter(|o| o.owner == "threads") {
             for file in &orphan.debris {
                 let _ = std::fs::remove_file(file);
             }

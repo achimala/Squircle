@@ -479,6 +479,9 @@ pub struct Settings {
     pub schema_version: u32,
     pub control_token: String,
     pub diagnostic_token: String,
+    /// serve's last --public-url, used by starts without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

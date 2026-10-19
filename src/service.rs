@@ -4,10 +4,23 @@
 //!
 //! Installed, the service is a launchd user agent (`dev.squircle.service`,
 //! RunAtLoad, kept alive unless it stopped cleanly), so it comes back after a
-//! reboot or a crash. Install copies the running service's command line and
-//! environment (or builds one for this binary) into the plist, hands the
+//! reboot or a crash. Install copies the running service's serve arguments
+//! and environment (or builds them for this binary) into the plist, hands the
 //! running service's sessions over to launchd's, and from then on restart is
 //! launchd's `kickstart -k` (still SIGTERM, still a handover).
+//!
+//! macOS's privacy protection (TCC) keeps background jobs out of ~/Documents,
+//! ~/Desktop and the like unless their program has Full Disk Access; launchd
+//! itself can't even open a log there for the job (it fails the spawn with
+//! EX_CONFIG). So launchd runs a copy of the binary from the service's own
+//! folder (`~/Library/Application Support/dev.squircle.service`), signed with
+//! the Mac's Apple Development identity under the fixed identifier
+//! `dev.squircle.service`: TCC keys a grant on that signature, so one grant
+//! survives rebuilds. launchd opens nothing in the data directory (the
+//! service opens its own log, `serve --log`), and every install, restart and
+//! start first runs the copy once as a launchd job (`service check`): if it
+//! can't read the data directory the command says what to grant and leaves
+//! the running service alone.
 //!
 //! A restart sends SIGTERM, on which the service hands its simulator sessions
 //! over instead of ending them, then re-runs the service's own command line,
@@ -55,11 +68,18 @@ pub fn holder(root: &Path) -> Result<Option<u32>> {
 /// Restarts the running service; returns once the new one answers.
 pub async fn restart(root: &Path, server: &str) -> Result<Value> {
     if job().await.is_some() {
-        let old = holder(root)?;
+        let root = std::path::absolute(root)?;
+        let old = holder(&root)?;
+        // A binary rebuilt at the source path takes over, as without launchd.
+        let record = Record::load()?.context(
+            "launchd's service was installed by an older squircle; run squircle service install",
+        )?;
+        let record = refresh(&record.source, record.identity.as_deref()).await?;
+        check(&root, &record).await?;
         launchctl(&["kickstart", "-k", &target()]).await?;
-        let pid = launched(root, server, old).await?;
+        let pid = launched(&root, server, old).await?;
         return Ok(
-            json!({"previous_pid": old, "pid": pid, "launchd": LABEL, "log": root.join("serve.log"),
+            json!({"previous_pid": old, "pid": pid, "launchd": label(), "program": program(), "source": record.source, "log": root.join("serve.log"),
                          "next": "Simulator sessions were handed over; squircle sim status shows them."}),
         );
     }
@@ -135,12 +155,21 @@ pub async fn stop(root: &Path) -> Result<Value> {
     let pid = holder(root)?.context("No Squircle service is running for this data directory")?;
     signal(pid, libc::SIGINT)?;
     exited(pid).await;
-    Ok(json!({"stopped_pid": pid, "launchd": job().await.is_some().then_some(LABEL)}))
+    Ok(json!({"stopped_pid": pid, "launchd": job().await.map(|_| label())}))
 }
 
 // MARK: launchd
 
 pub const LABEL: &str = "dev.squircle.service";
+
+/// launchd's label: `SQUIRCLE_SERVICE_LABEL` installs a second service (for
+/// another data directory) beside the usual one.
+pub fn label() -> String {
+    std::env::var("SQUIRCLE_SERVICE_LABEL")
+        .ok()
+        .filter(|l| !l.is_empty())
+        .unwrap_or_else(|| LABEL.into())
+}
 
 /// Environment the service needs, copied into the plist; launchd gives a
 /// bare one otherwise (no Homebrew or user tools on PATH).
@@ -158,18 +187,35 @@ fn wanted(key: &std::ffi::OsStr) -> bool {
     ]
     .contains(&key.as_ref())
         || key.starts_with("LC_")
-        || key.starts_with("SQUIRCLE_")
+        || (key.starts_with("SQUIRCLE_") && key != "SQUIRCLE_DATA_DIR")
 }
 
 fn plist_path() -> Result<PathBuf> {
     Ok(dirs::home_dir()
         .context("No home directory")?
         .join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist")))
+        .join(format!("{}.plist", label())))
+}
+
+/// The service's own folder, outside anything TCC protects: the signed
+/// binary launchd runs, its working directory and launchd's own log.
+fn folder() -> Result<PathBuf> {
+    Ok(dirs::data_dir()
+        .context("No Application Support folder")?
+        .join(label()))
+}
+
+/// The binary launchd runs.
+fn program() -> PathBuf {
+    folder().unwrap_or_default().join("squircle")
+}
+
+fn domain() -> String {
+    format!("gui/{}", unsafe { libc::getuid() })
 }
 
 fn target() -> String {
-    format!("gui/{}/{LABEL}", unsafe { libc::getuid() })
+    format!("{}/{}", domain(), label())
 }
 
 async fn launchctl(args: &[&str]) -> Result<String> {
@@ -190,22 +236,37 @@ async fn launchctl(args: &[&str]) -> Result<String> {
 }
 
 /// launchd's job, if loaded: its PID while running, and its last exit status.
+#[derive(Debug, PartialEq)]
 struct Job {
     pid: Option<u32>,
     last_exit: Option<i64>,
 }
 
 async fn job() -> Option<Job> {
-    let printed = launchctl(&["print", &target()]).await.ok()?;
+    job_named(&target()).await
+}
+
+async fn job_named(target: &str) -> Option<Job> {
+    Some(parse_job(&launchctl(&["print", target]).await.ok()?))
+}
+
+/// `launchctl print`'s fields: `pid = 123`, `last exit code = 78: EX_CONFIG`
+/// (or `(never exited)`).
+fn parse_job(printed: &str) -> Job {
     let field = |name: &str| {
-        printed
-            .lines()
-            .find_map(|l| l.trim().strip_prefix(name)?.trim().parse::<i64>().ok())
+        printed.lines().find_map(|l| {
+            let value = l.trim().strip_prefix(name)?.trim();
+            let digits = value
+                .char_indices()
+                .take_while(|(i, c)| c.is_ascii_digit() || (*i == 0 && *c == '-'))
+                .count();
+            value[..digits].parse::<i64>().ok()
+        })
     };
-    Some(Job {
+    Job {
         pid: field("pid = ").map(|p| p as u32),
         last_exit: field("last exit code = "),
-    })
+    }
 }
 
 fn escape(text: &str) -> String {
@@ -214,8 +275,11 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// The user agent's plist for `invocation`, logging to `log`.
-pub fn plist(invocation: &Invocation, log: &Path) -> String {
+/// A user agent's plist running `invocation`, with launchd's own output
+/// (anything before the program opens its log) going to `log`. `keep_alive`:
+/// started at load and brought back unless it exited cleanly; otherwise it
+/// runs once.
+pub fn plist(label: &str, invocation: &Invocation, log: &Path, keep_alive: bool) -> String {
     let string = |s: &std::ffi::OsStr| format!("<string>{}</string>", escape(&s.to_string_lossy()));
     let args: Vec<String> = invocation.argv.iter().map(|a| string(a)).collect();
     let env: Vec<String> = invocation
@@ -223,28 +287,219 @@ pub fn plist(invocation: &Invocation, log: &Path) -> String {
         .iter()
         .map(|(k, v)| format!("<key>{}</key>{}", escape(&k.to_string_lossy()), string(v)))
         .collect();
+    let keep = if keep_alive {
+        "<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>10</integer>\n"
+    } else {
+        ""
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-<key>Label</key><string>{LABEL}</string>
+<key>Label</key>{}
 <key>ProgramArguments</key><array>{}</array>
 <key>EnvironmentVariables</key><dict>{}</dict>
 <key>WorkingDirectory</key>{}
 <key>StandardOutPath</key>{}
 <key>StandardErrorPath</key>{}
 <key>RunAtLoad</key><true/>
-<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-<key>ThrottleInterval</key><integer>10</integer>
-</dict>
+{keep}</dict>
 </plist>
 "#,
+        string(label.as_ref()),
         args.join(""),
         env.join(""),
         string(invocation.cwd.as_os_str()),
         string(log.as_os_str()),
         string(log.as_os_str()),
+    )
+}
+
+/// What install chose, kept beside the binary so restart can refresh it:
+/// the binary it copies and the identity it signs with.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Record {
+    source: PathBuf,
+    /// The signing identity's SHA-1; none when the Mac has none (ad hoc).
+    identity: Option<String>,
+    identity_name: Option<String>,
+}
+
+impl Record {
+    fn path() -> Result<PathBuf> {
+        Ok(folder()?.join("service.json"))
+    }
+
+    fn load() -> Result<Option<Self>> {
+        match std::fs::read(Self::path()?) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).context("Cannot read the service record"),
+        }
+    }
+}
+
+/// Valid code-signing identities, in `security`'s order: (SHA-1, name).
+async fn identities() -> Vec<(String, String)> {
+    let Ok(output) = tokio::process::Command::new("/usr/bin/security")
+        .args(["find-identity", "-v", "-p", "codesigning"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    parse_identities(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_identities(listed: &str) -> Vec<(String, String)> {
+    listed
+        .lines()
+        .filter_map(|l| {
+            let (_, rest) = l.trim().split_once(") ")?;
+            let (hash, name) = rest.split_once(' ')?;
+            let name = name.trim().strip_prefix('"')?.strip_suffix('"')?;
+            (hash.len() == 40).then(|| (hash.to_string(), name.to_string()))
+        })
+        .collect()
+}
+
+/// Copies `source` into the service's folder and signs it, keeping the
+/// identity used before (a grant names it) unless it's gone.
+async fn refresh(source: &Path, identity: Option<&str>) -> Result<Record> {
+    let folder = folder()?;
+    std::fs::create_dir_all(&folder)?;
+    let available = identities().await;
+    let chosen = identity
+        .and_then(|id| available.iter().find(|(hash, _)| hash == id))
+        .or_else(|| {
+            ["Apple Development:", "Developer ID Application:"]
+                .iter()
+                .find_map(|kind| available.iter().find(|(_, name)| name.starts_with(kind)))
+        })
+        .cloned();
+    let draft = folder.join("squircle.new");
+    let _ = std::fs::remove_file(&draft);
+    std::fs::copy(source, &draft)
+        .with_context(|| format!("Cannot copy {} into the service's folder", source.display()))?;
+    let output = tokio::process::Command::new("/usr/bin/codesign")
+        .args([
+            "--force",
+            "--timestamp=none",
+            "--identifier",
+            LABEL,
+            "--sign",
+        ])
+        .arg(chosen.as_ref().map_or("-", |(hash, _)| hash.as_str()))
+        .arg(&draft)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .context("Cannot run codesign")?;
+    ensure!(
+        output.status.success(),
+        "codesign failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    std::fs::rename(&draft, program())?;
+    let record = Record {
+        source: source.to_path_buf(),
+        identity: chosen.as_ref().map(|(hash, _)| hash.clone()),
+        identity_name: chosen.map(|(_, name)| name),
+    };
+    std::fs::write(Record::path()?, serde_json::to_vec_pretty(&record)?)?;
+    Ok(record)
+}
+
+/// `service check`: what a launchd job of this binary must be able to do in
+/// the data directory. Run as one (see `check`), it fails where TCC keeps
+/// background jobs out.
+pub fn check_access(root: &Path) -> Result<Value> {
+    std::fs::read_dir(root)
+        .with_context(|| format!("Cannot list {}", root.display()))?
+        .next();
+    File::open(root.join("config.json"))
+        .with_context(|| format!("Cannot read {}", root.join("config.json").display()))?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("serve.log"))
+        .with_context(|| format!("Cannot open {}", root.join("serve.log").display()))?;
+    Ok(json!({"data_dir": root, "readable": true}))
+}
+
+/// Runs the installed binary once as a launchd job, `service check` against
+/// `root`, before anything stops the running service.
+async fn check(root: &Path, record: &Record) -> Result<()> {
+    let folder = folder()?;
+    let label = format!("{}.check", label());
+    let target = format!("{}/{label}", domain());
+    let log = folder.join("check.log");
+    let _ = std::fs::remove_file(&log);
+    let invocation = Invocation {
+        argv: vec![
+            program().into(),
+            "--data-dir".into(),
+            root.into(),
+            "service".into(),
+            "check".into(),
+        ],
+        env: std::env::vars_os().filter(|(k, _)| wanted(k)).collect(),
+        cwd: folder.clone(),
+    };
+    let path = folder.join(format!("{label}.plist"));
+    std::fs::write(&path, plist(&label, &invocation, &log, false))?;
+    if job_named(&target).await.is_some() {
+        launchctl(&["bootout", &target]).await?;
+    }
+    launchctl(&["bootstrap", &domain(), &path.to_string_lossy()]).await?;
+    // It runs once, at load; launchd reports its exit (78 if it couldn't
+    // spawn). It blocks while macOS asks the user about the folder.
+    let began = std::time::Instant::now();
+    let mut told = false;
+    let code = loop {
+        match job_named(&target).await {
+            Some(Job {
+                pid: None,
+                last_exit: Some(code),
+            }) => break code,
+            None => bail!("launchd dropped the check job"),
+            _ => {}
+        }
+        if !told && began.elapsed() > Duration::from_secs(2) {
+            told = true;
+            eprintln!(
+                "Waiting for macOS: if the Mac asks whether \"squircle\" may access a folder, click Allow (it lasts across rebuilds). Or grant Full Disk Access to {} in System Settings → Privacy & Security.",
+                program().display()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    launchctl(&["bootout", &target]).await?;
+    let _ = std::fs::remove_file(&path);
+    if code == 0 {
+        return Ok(());
+    }
+    let said = std::fs::read_to_string(&log).unwrap_or_default();
+    let denied = said.contains("Operation not permitted") || code == 78;
+    let signed = match &record.identity_name {
+        Some(name) => format!(
+            "It is signed as {LABEL} by \"{name}\", so the grant lasts across rebuilds and reinstalls."
+        ),
+        None => "No signing identity was found, so it is signed ad hoc and every rebuild needs the grant again; with an Apple Development certificate in the login keychain it wouldn't.".into(),
+    };
+    if denied {
+        bail!(
+            "launchd's service can't open the data directory {}: macOS keeps background services out of Documents, Desktop, Downloads and iCloud Drive unless they're allowed (its prompt was declined or never answered).\nGrant it once: System Settings → Privacy & Security → Full Disk Access → + → press ⌘⇧G, paste {} → Open, and leave it switched on. {signed}\nThen run this command again. The running service was left as it was.\n{}",
+            root.display(),
+            program().display(),
+            said.trim()
+        );
+    }
+    bail!(
+        "The installed binary failed its launchd check (exit {code}); the running service was left as it was.\n{}",
+        said.trim()
     )
 }
 
@@ -270,7 +525,8 @@ async fn launched(root: &Path, server: &str, old: Option<u32>) -> Result<u32> {
             && job.last_exit.is_some_and(|code| code != 0)
             && holder(root).ok().flatten().is_none_or(|p| Some(p) == old)
         {
-            let log = std::fs::read_to_string(root.join("serve.log")).unwrap_or_default();
+            let mut log = std::fs::read_to_string(root.join("serve.log")).unwrap_or_default();
+            log += &std::fs::read_to_string(folder()?.join("launchd.log")).unwrap_or_default();
             let tail: Vec<&str> = log.lines().rev().take(15).collect();
             bail!(
                 "launchd's service exited (status {}); simulator sessions stay in the ledger. Log:\n{}",
@@ -282,45 +538,89 @@ async fn launched(root: &Path, server: &str, old: Option<u32>) -> Result<u32> {
     }
 }
 
+/// serve's own arguments from a command line (what follows `serve`), minus
+/// the data directory and log the plist sets itself.
+fn serve_args(argv: &[OsString]) -> Vec<OsString> {
+    let mut rest = argv
+        .iter()
+        .skip_while(|a| *a != "serve")
+        .skip(1)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter();
+    let mut kept = Vec::new();
+    while let Some(arg) = rest.next() {
+        let text = arg.to_string_lossy();
+        if text == "--data-dir" || text == "--log" {
+            rest.next();
+        } else if !(text.starts_with("--data-dir=") || text.starts_with("--log=")) {
+            kept.push(arg);
+        }
+    }
+    kept
+}
+
 /// Installs the service as a launchd user agent and starts it there,
 /// handing the running service's simulator sessions over. `serve_args`
 /// replace the running service's own (`--listen`, `--public-url`).
-pub async fn install(root: &Path, server: &str, serve_args: Vec<String>) -> Result<Value> {
+pub async fn install(root: &Path, server: &str, args: Vec<String>) -> Result<Value> {
     let root = std::path::absolute(root)?;
     let running = holder(&root)?;
-    let mut invocation = match running {
-        Some(pid) if serve_args.is_empty() => {
-            let mut invocation = invocation(pid)?;
+    let previous = Record::load()?;
+    let (source, env, mut serve) = match running {
+        Some(pid) => {
+            let invocation = invocation(pid)?;
             ensure!(
                 invocation.argv.iter().any(|a| a == "serve"),
                 "Process {pid} holds the lock but is not squircle serve"
             );
             let program = invocation.cwd.join(&invocation.argv[0]);
-            invocation.argv[0] = program.canonicalize().unwrap_or(program).into();
-            invocation
+            let program = program.canonicalize().unwrap_or(program);
+            // launchd's copy came from the binary it was installed from.
+            let source = match &previous {
+                Some(record) if program == self::program() => record.source.clone(),
+                _ => program,
+            };
+            (source, invocation.env, serve_args(&invocation.argv))
         }
-        _ => {
-            let exe = std::env::current_exe()?.canonicalize()?;
-            let mut argv: Vec<OsString> = vec![
-                exe.into(),
-                "--data-dir".into(),
-                root.clone().into(),
-                "serve".into(),
-            ];
-            argv.extend(serve_args.into_iter().map(OsString::from));
-            Invocation {
-                argv,
-                env: std::env::vars_os().collect(),
-                cwd: std::env::current_dir()?,
-            }
-        }
+        None => (
+            std::env::current_exe()?.canonicalize()?,
+            std::env::vars_os().collect(),
+            Vec::new(),
+        ),
     };
-    invocation.env.retain(|(k, _)| wanted(k));
+    if !args.is_empty() {
+        serve = args.into_iter().map(OsString::from).collect();
+    }
+    let record = refresh(
+        &source,
+        previous.as_ref().and_then(|r| r.identity.as_deref()),
+    )
+    .await?;
+    check(&root, &record).await?;
+
     let log = root.join("serve.log");
+    let mut argv: Vec<OsString> = vec![
+        program().into(),
+        "--data-dir".into(),
+        root.clone().into(),
+        "serve".into(),
+        "--log".into(),
+        log.clone().into(),
+    ];
+    argv.extend(serve);
+    let invocation = Invocation {
+        argv,
+        env: env.into_iter().filter(|(k, _)| wanted(k)).collect(),
+        cwd: folder()?,
+    };
     let path = plist_path()?;
     std::fs::create_dir_all(path.parent().context("No LaunchAgents folder")?)?;
     let draft = path.with_extension("plist.new");
-    std::fs::write(&draft, plist(&invocation, &log))?;
+    std::fs::write(
+        &draft,
+        plist(&label(), &invocation, &folder()?.join("launchd.log"), true),
+    )?;
     std::fs::rename(&draft, &path)?;
 
     // One service at a time: the old one hands its sessions over first.
@@ -332,12 +632,12 @@ pub async fn install(root: &Path, server: &str, serve_args: Vec<String>) -> Resu
     if let Some(pid) = running {
         exited(pid).await;
     }
-    let domain = format!("gui/{}", unsafe { libc::getuid() });
-    launchctl(&["bootstrap", &domain, &path.to_string_lossy()]).await?;
+    launchctl(&["bootstrap", &domain(), &path.to_string_lossy()]).await?;
     let pid = launched(&root, server, running).await?;
     Ok(
-        json!({"label": LABEL, "plist": path, "pid": pid, "previous_pid": running, "log": log,
-              "command": invocation.argv, "next": "launchd now starts the service at login and after a crash; squircle service restart|stop|start control it."}),
+        json!({"label": label(), "plist": path, "pid": pid, "previous_pid": running, "log": log,
+              "program": program(), "source": record.source, "signed_by": record.identity_name,
+              "command": invocation.argv.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>(), "next": "launchd now starts the service at login and after a crash; squircle service restart copies a rebuilt binary from the source path and hands over; restart|stop|start control it."}),
     )
 }
 
@@ -347,14 +647,19 @@ pub async fn start(root: &Path, server: &str) -> Result<Value> {
         job().await.is_some(),
         "The service isn't installed with launchd; run squircle service install (or squircle serve)"
     );
-    if let Some(pid) = holder(root)? {
+    let root = std::path::absolute(root)?;
+    if let Some(pid) = holder(&root)? {
         return Ok(json!({"pid": pid, "already_running": true}));
     }
+    if let Some(record) = Record::load()? {
+        check(&root, &record).await?;
+    }
     launchctl(&["kickstart", &target()]).await?;
-    Ok(json!({"pid": launched(root, server, None).await?, "launchd": LABEL}))
+    Ok(json!({"pid": launched(&root, server, None).await?, "launchd": label()}))
 }
 
-/// Removes the launchd user agent, stopping the service it runs (ending its sessions).
+/// Removes the launchd user agent, stopping the service it runs (ending its
+/// sessions), and the service's folder.
 pub async fn uninstall(root: &Path) -> Result<Value> {
     let path = plist_path()?;
     let running = holder(root)?;
@@ -371,10 +676,33 @@ pub async fn uninstall(root: &Path) -> Result<Value> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(e).context("Cannot remove the launchd plist"),
     };
+    let folder = folder()?;
+    if folder.is_dir() {
+        std::fs::remove_dir_all(&folder)?;
+    }
     Ok(
-        json!({"label": LABEL, "plist_removed": removed, "stopped_pid": running,
-              "next": "Start the service yourself with squircle serve."}),
+        json!({"label": label(), "plist_removed": removed, "stopped_pid": running,
+              "next": format!("Start the service yourself with squircle serve. Its Full Disk Access entry ({}) can be removed in System Settings.", program().display())}),
     )
+}
+
+/// Sends this process's stdout and stderr to the end of `path`.
+pub fn log_to(path: &Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("Cannot open the service log {}", path.display()))?;
+    for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        ensure!(
+            unsafe { libc::dup2(file.as_raw_fd(), fd) } == fd,
+            "Cannot redirect output to {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(())
 }
 
 fn signal(pid: u32, signal: libc::c_int) -> Result<()> {
@@ -500,6 +828,57 @@ mod tests {
         let (argv, env) = parse_procargs(&raw).unwrap();
         assert_eq!(argv, ["./squircle", "serve", ""]);
         assert_eq!(env, [("A".into(), "1=2".into()), ("B".into(), "".into())]);
+    }
+
+    /// launchd prints the exit with its name, or `(never exited)`.
+    #[test]
+    fn reads_launchd_exit_codes() {
+        let failed = "\tstate = not running\n\tlast exit code = 78: EX_CONFIG\n";
+        assert_eq!(
+            parse_job(failed),
+            Job {
+                pid: None,
+                last_exit: Some(78)
+            }
+        );
+        let running = "\tpid = 396\n\tlast exit code = (never exited)\n";
+        assert_eq!(
+            parse_job(running),
+            Job {
+                pid: Some(396),
+                last_exit: None
+            }
+        );
+    }
+
+    /// The running service's serve arguments carry over; the data directory
+    /// and log are the plist's own.
+    #[test]
+    fn keeps_only_serve_arguments() {
+        let argv: Vec<OsString> = [
+            "./squircle",
+            "--data-dir",
+            ".squircle",
+            "serve",
+            "--log",
+            "x.log",
+            "--public-url",
+            "https://mac.test",
+            "--data-dir=y",
+            "--listen",
+            "127.0.0.1:1",
+        ]
+        .map(OsString::from)
+        .into();
+        assert_eq!(
+            serve_args(&argv),
+            [
+                "--public-url",
+                "https://mac.test",
+                "--listen",
+                "127.0.0.1:1"
+            ]
+        );
     }
 
     /// This test process reads back as itself.

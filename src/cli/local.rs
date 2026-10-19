@@ -26,7 +26,7 @@ pub(super) enum DiagnosticCommand {
 pub(super) enum ServiceCommand {
     /// Run the service as a launchd user agent: started at login, restarted after a crash.
     #[command(
-        after_help = "Writes ~/Library/LaunchAgents/dev.squircle.service.plist (RunAtLoad; KeepAlive unless it stopped cleanly) and loads it. If a service runs for this data directory, its command line and environment (PATH, HOME, LANG, DEVELOPER_DIR, SQUIRCLE_*) go into the plist and it hands its simulator sessions over to launchd's; otherwise this binary is used with --data-dir and serve. Pass --listen or --public-url to change serve's arguments. Run again after moving the binary. The log stays in DATA_DIR/serve.log."
+        after_help = "Writes ~/Library/LaunchAgents/dev.squircle.service.plist (RunAtLoad; KeepAlive unless it stopped cleanly) and loads it. If a service runs for this data directory, its binary, serve arguments and environment (PATH, HOME, LANG, DEVELOPER_DIR, SQUIRCLE_*) are used and it hands its simulator sessions over to launchd's; otherwise this binary. launchd runs a signed copy from ~/Library/Application Support/dev.squircle.service (identifier dev.squircle.service, the Mac's Apple Development identity), which restart refreshes from the source binary. Pass --listen or --public-url to change serve's arguments. The log stays in DATA_DIR/serve.log.\nmacOS keeps background services out of Documents, Desktop, Downloads and iCloud Drive: with the data directory there, the copy needs Full Disk Access, granted once in System Settings (the signature keeps it across rebuilds). Install, restart and start try the copy under launchd first and, if it can't read the data directory, say what to grant and leave the running service alone."
     )]
     Install {
         #[arg(long, help = "serve --listen for the installed service")]
@@ -42,6 +42,9 @@ pub(super) enum ServiceCommand {
     Stop,
     /// Remove the launchd user agent, stopping the service it runs.
     Uninstall,
+    /// Check this binary can read the data directory (install runs it under launchd).
+    #[command(hide = true)]
+    Check,
 }
 
 pub(super) async fn service(cli: &Cli, command: &ServiceCommand) -> Result<Option<Value>> {
@@ -66,6 +69,7 @@ pub(super) async fn service(cli: &Cli, command: &ServiceCommand) -> Result<Optio
             ServiceCommand::Restart => squircle::service::restart(&root, &cli.server).await?,
             ServiceCommand::Stop => squircle::service::stop(&root).await?,
             ServiceCommand::Uninstall => squircle::service::uninstall(&root).await?,
+            ServiceCommand::Check => squircle::service::check_access(&std::path::absolute(&root)?)?,
         })
     };
     Ok(Some(data))

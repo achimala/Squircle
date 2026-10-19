@@ -25,7 +25,7 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | Command | Result |
 | --- | --- |
 | `init`, `serve` | Private state/credentials; foreground HTTP service |
-| `service install`, `service start`, `service uninstall` | Install writes and loads a launchd user agent (`dev.squircle.service`, RunAtLoad, KeepAlive unless it exited cleanly) from the running service's command line and environment, handing its sessions over; restart then uses `launchctl kickstart -k`, and a stop stays stopped until `service start` |
+| `service install`, `service start`, `service uninstall` | Install writes and loads a launchd user agent (`dev.squircle.service`, RunAtLoad, KeepAlive unless it exited cleanly) from the running service's serve arguments and environment, handing its sessions over. launchd runs a signed copy from `~/Library/Application Support/dev.squircle.service` (one TCC grant survives rebuilds); each install, restart and start first checks the copy can read the data directory under launchd and otherwise says what to grant. Restart re-copies the source binary, then `launchctl kickstart -k`; a stop stays stopped until `service start` |
 | `service restart`, `service stop` | Restart hands simulator sessions over to a new process running the same command line (recorders keep going, T3 device sessions stay open), builds nothing and returns once it answers; stop ends them. SIGTERM to `serve` is the handover, SIGINT a stop |
 | `auth show --scope diagnostics` | Explicitly reveal the phone upload credential |
 | `build start` | Durable job ID; archive/export or unsigned simulator mode. Non-App-Store device exports get the debug overlay injected unless `--no-overlay` |

@@ -122,7 +122,14 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 json!({"data_dir":store.root,"credentials_file":store.root.join("config.json"),"next":"squircle serve"}),
             )
         }
-        Commands::Serve { listen, public_url } => {
+        Commands::Serve {
+            listen,
+            public_url,
+            log,
+        } => {
+            if let Some(log) = log {
+                squircle::service::log_to(log)?;
+            }
             squircle::server::serve(root(cli)?, *listen, public_url.clone()).await?;
             return Ok(None);
         }
