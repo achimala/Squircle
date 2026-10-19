@@ -2623,6 +2623,23 @@ app's bundled server (not run, not modified):
   session with `providers:manage` (Squircle's pairing asks for orchestration
   read/operate only).
 
-The iPhone app's `T3Gateway` and thread reducer still speak 0.0.45 and need
-the same port.
+**The iPhone app (and the debug overlay, which shares its sources)** speaks
+protocol 2 too: the socket declares `orchestrationProtocol=2` (HTTP calls send
+the header); Home reads the shell rows' `status` and `pendingRuntimeRequest`
+and keeps threads through a metadata-only snapshot; a conversation follows
+`orchestration.subscribeThread`, whose snapshot is a projection and whose
+events each carry one whole run, message, turn item, runtime request or
+checkpoint to put in place by ID (a `checkpoint.rollback-requested` asks for
+a fresh snapshot). Steps come from turn items, questions and approvals from
+pending runtime requests of the active run, changes from checkpoints (diffs
+counted by `appRunOrdinal`). Messages are `message.dispatch` (`deliveryIntent:
+auto`, `creationSource: mobile`), with pictures first handed to
+`assets.persistChatAttachments` (deterministic IDs, so safe before every
+resend); stop is `run.interrupt`; answers are `runtime-request.respond`. Phone
+caches from 0.0.45 are deleted unread. Verified 2026-10-19 against the live T3
+0.1.0 in a simulator: Home listed the apps, an agent conversation opened, a
+sent message showed the live line and stop button, then the reply. T3's
+`agent-device` wrapper in `~/.t3/userdata/device/bin` still points at the
+removed "T3 Code (Alpha)" app and its daemon config is stale, so that run was
+driven with launch hooks rather than taps.
 

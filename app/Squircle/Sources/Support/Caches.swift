@@ -109,12 +109,18 @@ actor DiskCache {
     let root: URL?
     private var written: [String: UInt64] = [:]
     init(root: URL? = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first) { self.root = root }
-    private var homeURL: URL? { root?.appendingPathComponent("squircle-home.json") }
+    /// Copies from T3's protocol 2 (T3 0.1.0). Ones from before it hold
+    /// 0.0.45's threads and sequences, and are deleted unread.
+    private var homeURL: URL? { root?.appendingPathComponent("squircle-home-v2.json") }
+    private var legacy: [URL] { ["squircle-home.json", "squircle-threads"].compactMap { root?.appendingPathComponent($0) } }
     private func threadURL(_ id: String) -> URL? {
         guard !id.isEmpty, !id.contains("/"), !id.hasPrefix(".") else { return nil }
-        return root?.appendingPathComponent("squircle-threads", isDirectory: true).appendingPathComponent(id + ".json")
+        return root?.appendingPathComponent("squircle-threads-v2", isDirectory: true).appendingPathComponent(id + ".json")
     }
-    func loadHome() -> Home? { read(homeURL) }
+    func loadHome() -> Home? {
+        for url in legacy { try? FileManager.default.removeItem(at: url) }
+        return read(homeURL)
+    }
     func saveHome(_ home: Home, generation: UInt64) { write(home, to: homeURL, generation: generation) }
     /// A copy on disk is never live: T3 confirms or replaces it.
     func loadThread(_ id: String) -> T3ThreadState? { (read(threadURL(id)) as T3ThreadState?)?.restored }

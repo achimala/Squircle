@@ -1,10 +1,14 @@
 import Foundation
 
-/// Server sequence numbers prevent replayed chunks from duplicating messages.
+/// One T3 thread as T3's orchestration protocol 2 shows it: a snapshot's
+/// projection, kept current by events that each carry one whole entity
+/// (a run, message, turn item, runtime request or checkpoint) to put in
+/// place of the one with its ID. Server sequence numbers keep replayed
+/// events from applying twice.
 struct T3ThreadState: Codable {
     /// Where this state came from, and how far into T3's events it is.
     enum Provenance: Codable, Equatable {
-        /// Nothing yet, or history T3 rewrote (a revert): only a snapshot
+        /// Nothing yet, or history T3 rewrote (a rollback): only a snapshot
         /// shows it right.
         case none
         /// A copy kept on the phone: the next live snapshot replaces it
@@ -15,7 +19,9 @@ struct T3ThreadState: Codable {
         case live(sequence: Int)
     }
     private(set) var provenance = Provenance.none
-    private(set) var thread: JSONValue = .null
+    /// The parts of T3's projection the phone reads (`kept`).
+    private(set) var projection: JSONValue = .null
+    var thread: JSONValue { projection["thread"] }
     /// Inputs and screenshot counts from the Mac, keyed by tool call.
     var details: [String: JSONValue] = [:]
     /// Newest step detail fetched, so later fetches ask only for what's new.
@@ -36,73 +42,72 @@ struct T3ThreadState: Codable {
         if case .live(let s) = provenance { copy.provenance = .cached(sequence: s) }
         return copy
     }
-    var activityCount: Int { thread["activities"].array.count }
+    /// Grows as the agent works; the Mac's step details follow it.
+    var itemCount: Int { projection["turnItems"].array.count }
+
+    /// The projection's lists the phone keeps, by the event that carries
+    /// one of their entities.
+    private static let lists: [String: String] = [
+        "run.created": "runs", "run.updated": "runs", "message.updated": "messages", "turn-item.updated": "turnItems",
+        "runtime-request.updated": "runtimeRequests", "checkpoint.captured": "checkpoints",
+    ]
+    private static func kept(_ projection: JSONValue) -> JSONValue {
+        var kept: [String: JSONValue] = ["thread": projection["thread"]]
+        for list in Set(lists.values) { kept[list] = .array(projection[list].array) }
+        return .object(kept)
+    }
+    /// Turn items kept past a long run: the newest, and those of requests
+    /// still open (the Mac's details rebuild older tool calls).
+    private static let itemsKept = 1000
+
     mutating func consume(_ item: JSONValue) {
-        if item["kind"].string == "snapshot" {
-            let snapshot = item["snapshot"]
-            guard let seq = snapshot["snapshotSequence"].int, seq >= sequence || !isLive else { return }
-            provenance = .live(sequence: seq); thread = snapshot["thread"]; return
-        }
-        guard item["kind"].string == "event" else { return }
-        let event = item["event"]
-        guard let seq = event["sequence"].int, seq > sequence, provenance != .none else { return }
-        provenance = .live(sequence: seq)
-        let p = event["payload"]; var t = thread.object
-        switch event["type"].string {
-        case "thread.message-sent":
-            var m = p.object; m["id"] = p["messageId"]
-            var rows = t["messages"]?.array ?? []
-            if let i = rows.firstIndex(where: { $0["id"] == p["messageId"] }) {
-                let old = rows[i]; let delta = p["text"].string ?? ""
-                m["text"] = .string(p["streaming"].bool ? (old["text"].string ?? "") + delta : delta.isEmpty ? old["text"].string ?? "" : delta)
-                m["createdAt"] = old["createdAt"]
-                rows[i] = .object(m)
-            }
-            else { rows.append(.object(m)) }
-            t["messages"] = .array(rows)
-        case "thread.session-set": t["session"] = p["session"]
-        case "thread.activity-appended":
-            var rows = t["activities"]?.array ?? []
-            if !rows.contains(where: { $0["id"] == p["activity"]["id"] }) { rows.append(p["activity"]) }
-            // The newest 500, like T3's snapshot, and still-open requests
-            // (a resolved one's request must go with its resolution).
-            if rows.count > 600 {
-                let cut = rows.count - 500, open = Self.openRequestIDs(rows)
-                rows = rows.enumerated().filter { $0.offset >= cut || $0.element["payload"]["requestId"].string.map(open.contains) == true && Self.isRequest($0.element) }.map(\.element)
-            }
-            t["activities"] = .array(rows)
-        case "thread.turn-diff-completed":
-            var rows = (t["checkpoints"]?.array ?? [])
-            let existing = rows.first { $0["turnId"] == p["turnId"] }
-            if existing.map({ $0["status"].string != "missing" }) == true, p["status"].string == "missing" { break }
-            rows.removeAll { $0["turnId"] == p["turnId"] }
-            var checkpoint = p.object; checkpoint["threadId"] = nil
-            rows.append(.object(checkpoint))
-            t["checkpoints"] = .array(rows.sorted { ($0["checkpointTurnCount"].int ?? 0) < ($1["checkpointTurnCount"].int ?? 0) })
-        case "thread.reverted":
-            // History was rewritten; only a snapshot shows it right.
-            provenance = .none; return
-        case "thread.meta-updated": for (key,value) in p.object where key != "threadId" { t[key] = value }
-        case "thread.runtime-mode-set": t["runtimeMode"] = p["runtimeMode"]
-        case "thread.interaction-mode-set": t["interactionMode"] = p["interactionMode"]
-        case "thread.turn-start-requested":
-            var session = t["session"]?.object ?? [:]; session["status"] = .string("running"); t["session"] = .object(session)
+        switch item["kind"].string {
+        case "snapshot":
+            guard let seq = item["snapshotSequence"].int, seq >= sequence || !isLive else { return }
+            provenance = .live(sequence: seq); projection = Self.kept(item["projection"])
+        case "event":
+            guard let seq = item["sequence"].int, seq > sequence, provenance != .none else { return }
+            provenance = .live(sequence: seq)
+            let event = item["event"], type = event["type"].string ?? "", entity = event["payload"]
+            var p = projection.object
+            if type == "checkpoint.rollback-requested" {
+                // History was rewritten; only a snapshot shows it right.
+                provenance = .none; return
+            } else if let list = Self.lists[type], let id = entity["id"].string {
+                var rows = p[list]?.array ?? []
+                if let i = rows.lastIndex(where: { $0["id"].string == id }) { rows[i] = entity } else { rows.append(entity) }
+                if list == "turnItems", rows.count > Self.itemsKept + 200 {
+                    let cut = rows.count - Self.itemsKept, open = Set(openRequests.map(\.id))
+                    rows = rows.enumerated().filter { $0.offset >= cut || $0.element["requestId"].string.map(open.contains) == true }.map(\.element)
+                }
+                p[list] = .array(rows)
+            } else if type.hasPrefix("thread."), type != "thread.pull-request-link-updated" {
+                // Every other thread event carries the whole thread.
+                p["thread"] = entity
+            } else { return }
+            projection = .object(p)
         default: break
         }
-        thread = .object(t)
     }
-    var isRunning: Bool { ["running","starting"].contains(thread["session"]["status"].string ?? "") }
-    /// Conversation in time order. A tool call's started/updated/completed
-    /// activities are one step; bookkeeping activities are not conversation.
+
+    /// Statuses of a run in progress: T3 is getting it going, running it,
+    /// or it waits on the user.
+    static let activeRunStatuses: Set<String> = ["preparing", "starting", "running", "waiting"]
+    /// The run in progress, if any.
+    var activeRunID: String? {
+        projection["runs"].array.last { Self.activeRunStatuses.contains($0["status"].string ?? "") }?["id"].string
+    }
+    var isRunning: Bool { activeRunID != nil }
+
+    /// Conversation in time order: messages, the agent's thinking, and one
+    /// step per tool call.
     var messages: [ChatMessage] {
         // A row without an ID is named by its place, so it keeps one identity on every pass.
-        var rows: [(String, ChatMessage)] = thread["messages"].array.enumerated().compactMap { index, m in
+        var rows: [(String, ChatMessage)] = projection["messages"].array.enumerated().compactMap { index, m in
+            guard m["role"].string != "system" else { return nil }
             let id = m["id"].string ?? "message-\(index)"
-            let reasoning = m["role"].string == "system" && id.hasPrefix("reasoning:")
-            guard reasoning || m["role"].string != "system" else { return nil }
-            var message = ChatMessage(id: id, role: reasoning ? "thinking" : m["role"].string ?? "assistant",
-                content: Self.spoken(m["text"].string ?? ""), isStreaming: m["streaming"].bool, createdAt: m["createdAt"].string ?? "",
-                turnID: m["turnId"].string)
+            var message = ChatMessage(id: id, role: m["role"].string ?? "assistant", content: Self.spoken(m["text"].string ?? ""),
+                                      isStreaming: m["streaming"].bool, createdAt: m["createdAt"].string ?? "", turnID: m["runId"].string)
             message.attachments = m["attachments"].array.compactMap { $0["type"].string == "image" ? $0["id"].string : nil }
             if message.role == "user" { message.captures = SentCapture.parse(m["text"].string ?? "") }
             switch ServiceNote(m) {
@@ -123,64 +128,41 @@ struct T3ThreadState: Codable {
             return (m["createdAt"].string ?? "", message)
         }
         let running = isRunning
-        var steps: [String: Int] = [:]
-        // T3 sends only a thread's newest activities; the Mac's details
-        // rebuild the tool calls before them.
-        let sent = Set(thread["activities"].array.compactMap { $0["payload"]["toolCallId"].string })
-        let rebuilt: [JSONValue] = details.compactMap { key, extra in
+        let items = projection["turnItems"].array
+        // T3 sends a bounded history; the Mac's details rebuild the tool
+        // calls before it.
+        let sent = Set(items.compactMap(ToolCall.key))
+        let rebuilt: [(String, ChatMessage)] = details.compactMap { key, extra in
             guard !sent.contains(key), let at = extra["started_at"].string, extra["input"] != .null else { return nil }
+            let call = ToolCall(tool: extra["tool"].string ?? "", input: extra["input"], result: extra["result"].string)
+            let described = AgentStep.describe(call)
+            guard !described.hidden else { return nil }
             let finished = extra["finished"].string
-            return ["id": .string(key), "kind": finished == nil ? "tool.updated" : "tool.completed", "createdAt": .string(at),
-                    "tone": finished == "failed" ? "error" : "tool", "turnId": .string(extra["turn_id"].string ?? ""),
-                    "payload": ["toolCallId": .string(key), "status": .string(finished ?? "inProgress"),
-                                "data": ["toolName": .string(extra["tool"].string ?? "")]]]
-        }.sorted { ($0["createdAt"].string ?? "") < ($1["createdAt"].string ?? "") }
-        for (index, a) in (rebuilt + thread["activities"].array).enumerated() {
-            let kind = a["kind"].string ?? "", p = a["payload"]
-            if ["approval.", "user-input.", "context-window.", "runtime.warning", "checkpoint.captured"].contains(where: kind.hasPrefix) { continue }
-            // A background task already appears as the tool call that started it.
-            if kind.hasPrefix("task."), p["toolUseId"].string != nil { continue }
-            let key = p["toolCallId"].string ?? p["taskId"].string ?? a["id"].string ?? "activity-\(index)"
-            let output = [p["data"]["item"]["aggregatedOutput"].string, p["data"]["output"].string,
-                          p["data"]["rawOutput"]["content"].string].compactMap { $0 }.first
-            let detail = [p["data"]["command"].string ?? p["data"]["item"]["command"].string ?? p["detail"].string, output]
-                .compactMap { $0 }.joined(separator: "\n\n")
-            let extra = details[key]
-            let described = AgentStep.describe(extra.map { Self.enrich(a, with: $0) } ?? a)
-            if described.hidden { continue }
-            let finished = kind.hasSuffix(".completed") || kind.hasSuffix(".failed") || p["status"].string == "completed"
-            let images = extra?["images"].int ?? 0
-            var step = ChatMessage(id: key, role: "tool", content: described.title, isStreaming: running && !finished,
-                                   detail: detail.isEmpty ? p.formatted : detail, activity: kind,
-                                   failed: a["tone"].string == "error" || p["status"].string == "failed", symbol: described.symbol,
-                                   createdAt: a["createdAt"].string ?? "", step: described, imageCount: images)
-            if let index = steps[key] {
-                // Updates may arrive after completion; a finished step stays finished.
-                if !rows[index].1.isStreaming { step.isStreaming = false; step.activity = rows[index].1.activity }
-                if step.detail.count < rows[index].1.detail.count { step.detail = rows[index].1.detail }
-                step.createdAt = rows[index].1.createdAt
-                step.imageCount = max(step.imageCount, rows[index].1.imageCount)
-                // Some events carry the tool's full input and others only a
-                // raw command; keep whichever describes the step best.
-                if let earlier = rows[index].1.step, let current = step.step, earlier.richness > current.richness {
-                    step.step = earlier; step.content = earlier.title; step.symbol = earlier.symbol
-                }
-                rows[index].1 = step
-            } else {
-                steps[key] = rows.count
-                rows.append((a["createdAt"].string ?? "", step))
+            return (at, ChatMessage(id: key, role: "tool", content: described.title, isStreaming: running && finished == nil,
+                                    detail: extra["input"].formatted, failed: finished == "failed", symbol: described.symbol,
+                                    createdAt: at, step: described, imageCount: extra["images"].int ?? 0, turnID: extra["turn_id"].string))
+        }
+        rows += rebuilt
+        for item in items {
+            let at = item["startedAt"].string ?? item["updatedAt"].string ?? ""
+            let streaming = running && !ToolCall.finished.contains(item["status"].string ?? "")
+            if item["type"].string == "reasoning" {
+                guard let text = item["text"].string, !text.isEmpty, let id = item["id"].string else { continue }
+                rows.append((at, ChatMessage(id: id, role: "thinking", content: text, isStreaming: item["streaming"].bool && running,
+                                             createdAt: at, turnID: item["runId"].string)))
+                continue
             }
+            guard let key = ToolCall.key(item), var call = ToolCall(item) else { continue }
+            let extra = details[key]
+            if call.input == .null, let input = extra?["input"], input != .null { call.input = input }
+            call.result = call.result ?? extra?["result"].string
+            let described = AgentStep.describe(call)
+            if described.hidden { continue }
+            rows.append((at, ChatMessage(id: key, role: "tool", content: described.title, isStreaming: streaming, detail: call.detail,
+                                         failed: call.failed, symbol: described.symbol, createdAt: at, step: described,
+                                         imageCount: extra?["images"].int ?? 0, turnID: item["runId"].string)))
         }
         return rows.sorted { $0.0 < $1.0 }.map(\.1)
-    }
-    /// Puts the Mac's copy of a tool call's input back into its activity.
-    static func enrich(_ activity: JSONValue, with extra: JSONValue) -> JSONValue {
-        var a = activity.object, payload = activity["payload"].object, data = activity["payload"]["data"].object
-        if extra["input"] != .null { data["input"] = extra["input"] }
-        if let tool = extra["tool"].string, data["toolName"] == nil || data["toolName"] == .string("") { data["toolName"] = .string(tool) }
-        if let result = extra["result"].string { data["squircleResult"] = .string(result) }
-        payload["data"] = .object(data); a["payload"] = .object(payload)
-        return .object(a)
     }
     /// Where Squircle's instructions to a worker start, after its task.
     static let workerMarker = "\n\n---\nYou are a worker for this app's agent"
@@ -196,53 +178,114 @@ struct T3ThreadState: Codable {
         guard let end else { return text }
         return String(text[..<end])
     }
-    /// Each finished turn's changed files, from its ready checkpoint.
+    /// Each finished run's changed files, from its ready checkpoint. T3
+    /// counts turns for diffs by the run's ordinal in the thread.
     var changes: [TurnChanges] {
-        thread["checkpoints"].array.compactMap { c in
-            guard c["status"].string == "ready", let turn = c["turnId"].string, let count = c["checkpointTurnCount"].int else { return nil }
+        projection["checkpoints"].array.compactMap { c in
+            guard c["status"].string == "ready", let run = c["runId"].string, let count = c["appRunOrdinal"].int else { return nil }
             let files = c["files"].array.compactMap { f -> TurnChanges.File? in
                 guard let path = f["path"].string else { return nil }
                 return TurnChanges.File(path: path, kind: f["kind"].string ?? "modified",
                                         additions: f["additions"].int ?? 0, deletions: f["deletions"].int ?? 0)
             }
             guard !files.isEmpty else { return nil }
-            return TurnChanges(turnID: turn, count: count, assistantMessageID: c["assistantMessageId"].string, files: files)
-        }
+            return TurnChanges(turnID: run, count: count, assistantMessageID: nil, files: files)
+        }.sorted { $0.count < $1.count }
     }
     /// Whether T3 has the user message with this ID.
-    func hasMessage(_ id: String) -> Bool { thread["messages"].array.contains { $0["id"].string == id || $0["messageId"].string == id } }
-    /// Questions and approvals T3 has open for the turn now running. An
-    /// AskUserQuestion or approval blocks its turn, so one from an earlier
-    /// turn, or left open by a session that stopped without resolving it,
-    /// can never be answered and never shows.
-    var pendingRequests: [JSONValue] {
-        guard isRunning else { return [] }
-        let activities = thread["activities"].array, open = Self.openRequestIDs(activities)
-        let turn = thread["session"]["activeTurnId"].string
-        return activities.filter {
-            guard Self.isRequest($0), let id = $0["payload"]["requestId"].string, open.contains(id) else { return false }
-            return $0["turnId"].string.map { $0 == turn } ?? true
+    func hasMessage(_ id: String) -> Bool { projection["messages"].array.contains { $0["id"].string == id } }
+
+    /// Requests T3 has open that the user can answer now: pending, answered
+    /// on the live provider session, in the run going now. A question or
+    /// approval blocks its run, so one from another run can never be
+    /// answered and never shows.
+    var pendingRequests: [PendingRequest] {
+        guard let run = activeRunID else { return [] }
+        return openRequests.filter { $0.runID.map { $0 == run } ?? true }
+    }
+    /// Pending runtime requests with the turn item that says what they ask.
+    private var openRequests: [PendingRequest] {
+        let items = projection["turnItems"].array
+        return projection["runtimeRequests"].array.compactMap { request in
+            guard request["status"].string == "pending", request["responseCapability"]["type"].string != "not_resumable",
+                  let id = request["id"].string,
+                  let item = items.last(where: { $0["requestId"].string == id && ["user_input_request", "approval_request"].contains($0["type"].string ?? "") })
+            else { return nil }
+            return PendingRequest(id: id, item: item)
         }
     }
-    static func isRequest(_ a: JSONValue) -> Bool { ["approval.requested", "user-input.requested"].contains(a["kind"].string ?? "") }
-    /// T3's own rule: a request opens with its `.requested` activity and
-    /// closes with `.resolved`, or with a failed response T3 reports as
-    /// stale or unknown (the provider no longer has it).
-    static func openRequestIDs(_ activities: [JSONValue]) -> Set<String> {
-        var open = Set<String>()
-        let ordered = activities.sorted { ($0["createdAt"].string ?? "", $0["id"].string ?? "") < ($1["createdAt"].string ?? "", $1["id"].string ?? "") }
-        for a in ordered {
-            guard let id = a["payload"]["requestId"].string else { continue }
-            switch a["kind"].string ?? "" {
-            case "approval.requested", "user-input.requested": open.insert(id)
-            case "approval.resolved", "user-input.resolved", "user-input.answer-submitted": open.remove(id)
-            case "provider.approval.respond.failed", "provider.user-input.respond.failed":
-                let detail = (a["payload"]["detail"].string ?? "").lowercased()
-                if detail.contains("stale pending") || detail.contains("unknown pending") { open.remove(id) }
-            default: break
-            }
+}
+
+/// A question or approval T3 is waiting on, as its turn item tells it.
+struct PendingRequest: Equatable {
+    /// T3's runtime request ID, which an answer names.
+    let id: String
+    let item: JSONValue
+    var isQuestion: Bool { item["type"].string == "user_input_request" }
+    var runID: String? { item["runId"].string }
+    var questions: [JSONValue] { item["questions"].array }
+    /// What an approval asks.
+    var title: String { item["title"].string ?? "The agent needs your response" }
+    var prompt: String { item["prompt"].string ?? "" }
+    /// The choices an approval offers (`decision`, `label`, `warning`).
+    var options: [JSONValue] { item["options"].array }
+}
+
+/// One tool call: the tool and its input, said the way Claude names them,
+/// from a protocol 2 turn item or the Mac's copy of one.
+struct ToolCall {
+    var tool: String
+    var input: JSONValue
+    /// A Squircle command's output, which names what it made.
+    var result: String?
+    var title: String?
+    var detail = ""
+    var failed = false
+
+    static let finished: Set<String> = ["completed", "failed", "cancelled", "interrupted"]
+
+    init(tool: String, input: JSONValue, result: String? = nil, title: String? = nil) {
+        self.tool = tool; self.input = input; self.result = result; self.title = title
+    }
+
+    /// The key the Mac files a call's details under: the provider's call ID
+    /// (Claude's `toolu_…`), else T3's item ID.
+    static func key(_ item: JSONValue) -> String? { item["nativeItemRef"]["nativeId"].string ?? item["id"].string }
+
+    /// Nil for an item that isn't a tool call, and for T3's own workspace
+    /// preparation.
+    init?(_ item: JSONValue) {
+        let output = item["output"].string
+        switch item["type"].string {
+        case "dynamic_tool":
+            self.init(tool: item["toolName"].string ?? "", input: item["input"])
+            detail = output ?? (item["input"] == .null ? "" : item["input"].formatted)
+        case "command_execution":
+            guard item["nativeItemRef"] != .null else { return nil }
+            let command = item["input"].string ?? ""
+            self.init(tool: "Bash", input: ["command": .string(command)], result: output)
+            detail = [command, output].compactMap { $0 }.joined(separator: "\n\n")
+            failed = item["outputIndicatesFailure"].bool || (item["exitCode"].int ?? 0) != 0
+        case "file_change":
+            self.init(tool: "Edit", input: ["file_path": item["fileName"], "old_string": item["oldStr"], "new_string": item["newStr"]])
+            detail = item["diffStr"].string ?? ""
+        case "file_search":
+            self.init(tool: "Grep", input: ["pattern": item["pattern"]])
+        case "web_search":
+            self.init(tool: "WebSearch", input: ["query": item["patterns"].array.first ?? .null])
+        case "subagent":
+            self.init(tool: "Agent", input: ["description": .string(item["title"].string ?? item["prompt"].string ?? "")])
+            detail = item["result"].string ?? item["progress"].string ?? ""
+        case "todo_list":
+            self.init(tool: "TodoWrite", input: .null)
+        case "error":
+            self.init(tool: "", input: .null, title: item["failure"]["message"].string ?? "Something went wrong")
+            failed = true
+        default: return nil
         }
-        return open
+        if item["status"].string == "failed" { failed = true }
+        if title == nil { title = item["title"].string }
+        if detail.isEmpty { detail = item.formatted }
     }
 }
 
