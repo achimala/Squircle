@@ -288,6 +288,8 @@ pub trait Simctl: Send + Sync {
     fn devices(&self) -> Pending<'_, Result<Vec<Device>>>;
     fn shutdown<'a>(&'a self, udid: &'a str) -> Pending<'a, Result<()>>;
     fn delete<'a>(&'a self, udid: &'a str) -> Pending<'a, Result<()>>;
+    /// Creates and boots a simulator of the default model; returns its UDID and name.
+    fn create(&self) -> Pending<'_, Result<(String, String)>>;
     /// Each simulator's processes' summed CPU (%), by UDID.
     fn cpu(&self) -> HashMap<String, f64>;
 }
@@ -508,6 +510,21 @@ impl Pool {
         if let Err(error) = saved {
             eprintln!("{error:#}");
         }
+    }
+
+    /// A fresh simulator for `thread`, for a start that found none free:
+    /// saved as created by it, so it is Squircle's (shut down when idle,
+    /// deleted once unused for a day).
+    pub async fn create(&self, thread: &str) -> Result<(String, String)> {
+        let (udid, name) = self.simctl.create().await?;
+        let (created, by) = (udid.clone(), thread.to_string());
+        self.change(move |saved| {
+            let entry = saved.known.entry(created).or_default();
+            entry.created_by = Some(by);
+            entry.last_used = now();
+        })
+        .await?;
+        Ok((udid, name))
     }
 
     /// The facts as they are now, with T3's sessions: without them nothing
@@ -887,6 +904,65 @@ pub fn gigabytes(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
+/// The model a created simulator gets, from `simctl list runtimes -j`:
+/// the newest numbered iPhone Pro (not Max) on the newest available iOS
+/// runtime that has one, else that runtime's first iPhone. Returns its
+/// device type and runtime identifiers and its name.
+pub fn default_model(runtimes: &Value) -> Option<(String, String, String)> {
+    let version = |r: &Value| -> Vec<u64> {
+        r["version"]
+            .as_str()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    let mut ios: Vec<&Value> = runtimes["runtimes"]
+        .as_array()?
+        .iter()
+        .filter(|r| r["platform"] == "iOS" && r["isAvailable"] == true)
+        .collect();
+    ios.sort_by_key(|r| std::cmp::Reverse(version(r)));
+    let types = |r: &&Value| -> Vec<(String, String)> {
+        r["supportedDeviceTypes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["productFamily"] == "iPhone")
+            .filter_map(|t| Some((t["identifier"].as_str()?.into(), t["name"].as_str()?.into())))
+            .collect()
+    };
+    let generation = |name: &str| -> Option<u64> {
+        name.strip_prefix("iPhone ")?
+            .strip_suffix(" Pro")?
+            .parse()
+            .ok()
+    };
+    let pick = |r: &&Value, best: bool| {
+        let types = types(r);
+        let chosen = if best {
+            types
+                .into_iter()
+                .filter_map(|t| Some((generation(&t.1)?, t)))
+                .max_by_key(|(n, _)| *n)
+                .map(|(_, t)| t)
+        } else {
+            types.into_iter().next()
+        };
+        chosen.map(|(kind, name)| {
+            (
+                kind,
+                r["identifier"].as_str().unwrap_or("").to_string(),
+                name,
+            )
+        })
+    };
+    ios.iter()
+        .find_map(|r| pick(r, true))
+        .or_else(|| ios.iter().find_map(|r| pick(r, false)))
+        .filter(|(_, runtime, _)| !runtime.is_empty())
+}
+
 /// The real simctl and ps.
 pub struct Xcrun;
 
@@ -963,6 +1039,29 @@ impl Simctl for Xcrun {
 
     fn delete<'a>(&'a self, udid: &'a str) -> Pending<'a, Result<()>> {
         Box::pin(async move { simctl(&["delete", udid]).await.map(|_| ()) })
+    }
+
+    fn create(&self) -> Pending<'_, Result<(String, String)>> {
+        Box::pin(async {
+            let runtimes: Value =
+                serde_json::from_slice(&simctl(&["list", "runtimes", "-j"]).await?)
+                    .context("simctl list runtimes output")?;
+            let (kind, runtime, model) = default_model(&runtimes)
+                .context("No iOS simulator runtime with an iPhone is installed; add one in Xcode's Components settings")?;
+            let taken: Vec<String> = self.devices().await?.into_iter().map(|d| d.name).collect();
+            let base = format!("Squircle {model}");
+            let name = std::iter::once(base.clone())
+                .chain((2..).map(|n| format!("{base} {n}")))
+                .find(|n| !taken.contains(n))
+                .unwrap_or(base);
+            let out = simctl(&["create", &name, &kind, &runtime]).await?;
+            let udid = uuids(&String::from_utf8_lossy(&out))
+                .pop()
+                .context("simctl create printed no UDID")?;
+            // T3's device hub lists only simulators that have booted once.
+            simctl(&["boot", &udid]).await?;
+            Ok((udid, name))
+        })
     }
 
     fn cpu(&self) -> HashMap<String, f64> {
@@ -1131,6 +1230,36 @@ mod tests {
         );
     }
 
+    /// A created simulator: the newest iPhone Pro on the newest iOS that
+    /// has one (a newer runtime with only an odd model is passed over).
+    #[test]
+    fn created_simulators_default_model() {
+        let iphone = |n: &str| json!({"name": n, "identifier": format!("type.{n}"), "productFamily": "iPhone"});
+        let runtimes = json!({"runtimes": [
+            {"identifier": "ios-26-4", "version": "26.4", "platform": "iOS", "isAvailable": true,
+             "supportedDeviceTypes": [iphone("iPhone 17 Pro")]},
+            {"identifier": "ios-27-0", "version": "27.0", "platform": "iOS", "isAvailable": true,
+             "supportedDeviceTypes": [iphone("iPhone 17 Pro"), iphone("iPhone 18 Pro Max"), iphone("iPhone 18 Pro"), iphone("iPhone Air")]},
+            {"identifier": "ios-27-1", "version": "27.1", "platform": "iOS", "isAvailable": true,
+             "supportedDeviceTypes": [iphone("iPhone Duo")]},
+            {"identifier": "ios-28-0", "version": "28.0", "platform": "iOS", "isAvailable": false,
+             "supportedDeviceTypes": [iphone("iPhone 19 Pro")]},
+            {"identifier": "watch", "version": "30.0", "platform": "watchOS", "isAvailable": true,
+             "supportedDeviceTypes": [iphone("iPhone 20 Pro")]}]});
+        assert_eq!(
+            default_model(&runtimes),
+            Some((
+                "type.iPhone 18 Pro".into(),
+                "ios-27-0".into(),
+                "iPhone 18 Pro".into()
+            ))
+        );
+        let odd = json!({"runtimes": [{"identifier": "ios-27-1", "version": "27.1", "platform": "iOS",
+            "isAvailable": true, "supportedDeviceTypes": [iphone("iPhone Duo")]}]});
+        assert_eq!(default_model(&odd).unwrap().2, "iPhone Duo");
+        assert_eq!(default_model(&json!({"runtimes": []})), None);
+    }
+
     #[derive(Default)]
     struct Fake {
         devices: Mutex<Vec<Device>>,
@@ -1161,6 +1290,9 @@ mod tests {
         fn delete<'a>(&'a self, udid: &'a str) -> Pending<'a, Result<()>> {
             self.calls.lock().unwrap().push(format!("delete {udid}"));
             Box::pin(async { Ok(()) })
+        }
+        fn create(&self) -> Pending<'_, Result<(String, String)>> {
+            Box::pin(async { Err(anyhow!("not in these tests")) })
         }
         fn cpu(&self) -> HashMap<String, f64> {
             HashMap::new()

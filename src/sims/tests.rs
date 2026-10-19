@@ -112,6 +112,9 @@ impl Host for Fake {
             .cloned()
             .unwrap_or_else(|| self.seen.lock().unwrap().clone().unwrap_or(busy("t0")))
     }
+    fn create<'a>(&'a self, _: &'a str) -> Pending<'a, Result<String>> {
+        Box::pin(async { Err(anyhow::anyhow!("no simulators are created in these tests")) })
+    }
     fn cli(&self) -> String {
         "squircle".into()
     }
