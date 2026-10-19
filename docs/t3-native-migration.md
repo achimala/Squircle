@@ -1562,12 +1562,13 @@ the phone; optimize what the simulator can measure.
 `POST /v1/sims`, `POST /v1/sims/stop`, `GET /v1/sims`, `GET /v1/sims/devices`;
 `src/sims.rs`). Start opens the simulator for the thread with T3's own
 `device.open` (so T3 and the phone stream it), waits for boot, and records
-with `xcrun simctl io UDID recordVideo --codec=h264`. It returns the
+with `xcrun simctl io UDID recordVideo --codec=h264` (HEVC since 2026-10-19). It returns the
 agent-device command; the `--config`/`--session` values are derived exactly as
 T3 0.0.45 does (sha256 prefixes of the host and of `[thread,host,device]`,
 checked against a real `device_open` result). Stop, the thread's turn not
 working for 8 s, a dead recorder or 30 minutes end the session: SIGINT to
-simctl, `avconvert --preset Preset1280x720` (raw simctl output is about 6 Mbit/s,
+simctl, then (superseded 2026-10-19, see [light recordings](#2026-10-19-light-recordings))
+`avconvert --preset Preset1280x720` (raw simctl output is about 6 Mbit/s,
 17 MB for 23 s; after conversion, 9- and 12-minute sessions were 5.1 and
 1.1 MB, still 1206×2622), then
 the file joins the thread's media with a `simulator` record (session, device,
@@ -2565,3 +2566,61 @@ false), so actually being interrupted can only be checked on the phone.
 Simulated taps on AVKit's mute button changed nothing, also in a bare
 test app, so the button itself is untested; the code follows the player's
 `isMuted`, which that button is expected to set (unconfirmed).
+
+## 2026-10-19 light recordings
+
+**Why.** Recordings had grown to 49 GB. simctl's `--codec=h264` encodes at a
+high fixed bitrate (7–20 Mbit/s at 1206×2622; one 30-minute session was
+4.4 GB). `avconvert` (180 s limit) was killed on long sessions, leaving its
+segments behind, and anything over the 512 MB media cap failed to file at all
+(13 sessions, `Media must be between 1 byte and 512 MB`): ~20 GB of recordings
+the phone never showed, plus 3.4 GB of avconvert segments. simctl records
+only when the screen changes (an idle screen: 3 frames in 22 s, 177 KB), so
+size tracks animation, not session length.
+
+**Now.** simctl records HEVC (its default). The session files the recording
+as soon as it stops (no size cap on Squircle's own recordings), then the
+service re-encodes it in the background and replaces it under the same name
+(`src/recordings.rs`): ffmpeg `hevc_videotoolbox -q:v 55 -g 300`, full
+resolution, `-fps_mode passthrough -enc_time_base demux` (every frame at its
+own timestamp; frame rate is never touched), `hvc1`, `+faststart`, comment
+`squircle-light-1`. The swap happens only after the new file decodes with
+exactly the frames the source shows and the same duration (±0.5 s or 1%) and
+is at least 10% smaller. A claim file with a non-blocking OS lock keeps the
+service and a migration off the same file. Needs Homebrew's ffmpeg
+(`SQUIRCLE_FFMPEG` overrides); without it, recordings stay as simctl wrote
+them. `squircle media shrink [--dry-run] [--orphans] [--limit N]` migrates
+existing media; `--orphans` also makes the unfiled ones light, files them into
+their threads, and deletes the debris. It never touches recordings of a
+session that is not settled in `sims.json`, or that a running process names.
+
+**Measured** (same clips, M-series Mac, ffmpeg 8.1.2). Clip A: 92 s of
+constant animation, simctl H.264 1206×2622, 6095 frames. Clip B: 299 s of
+mostly still UI, 5815 frames.
+
+| Encoding | A size | A MB/min | B size | B MB/min | Frames | SSIM Y vs source (A / B) |
+|---|---|---|---|---|---|---|
+| simctl H.264 (source) | 258 MB | 168 | 289 MB | 58 | all | 1 |
+| avconvert 1280×720 (old) | 88 MB | 57 | 121 MB | 24 | all | not measured |
+| avconvert HEVC highest quality | 187 MB | 122 | | | all | not measured |
+| VT HEVC q40 | 13.3 MB | 8.7 | 4.4 MB | 0.9 | all | 0.980 / 0.972 |
+| VT HEVC q50 | 19.6 MB | 12.7 | 5.2 MB | 1.0 | all | 0.988 / 0.977 |
+| **VT HEVC q55 (chosen)** | 25.0 MB | 16.3 | 6.5 MB | 1.3 | all | 0.993 / 0.980 |
+| VT HEVC q60 | 29.6 MB | 19.3 | 7.8 MB | 1.6 | all | 0.994 / 0.982 |
+| x265 crf 28 fast | 23.2 MB | 15.1 | 6.2 MB | 1.2 | all | 0.992 / 0.988 |
+| VT HEVC q50, half resolution | 6.4 MB | 4.2 | 2.0 MB | 0.4 | all | 0.949 / 0.966 (upscaled) |
+
+Half resolution visibly softens small text, so it is not used. x265 is no
+better than VideoToolbox at equal size and twice as slow. GOP 120 versus 600
+changes size by about 10%. VideoToolbox encodes 1206×2622 at about 170
+frames/s. simctl's own HEVC was not measured on the same animated content (a
+second recorder can't run on a simulator, and the session service was down);
+two earlier simctl HEVC clips ran at 5.6 and 10.8 Mbit/s, so simctl HEVC alone
+would save roughly 2×, not the 10–40× of the constant-quality pass. On copies
+of real media: a 588×1280 avconvert file went from 41 MB to 2.5 MB, a simctl
+HEVC clip from 10.2 to 2.2 MB, an orphaned 12-minute raw from 639 to 34 MB;
+frame counts identical, AVFoundation plays all three. Dry run on the real data:
+335 filed videos (27.5 GB) to shrink, about 2.3 GB after (estimate), about
+4.7 h; 76 under 2 MB skipped; 19 orphaned recordings (20 GB) and 33 debris
+files (3.4 GB).
+

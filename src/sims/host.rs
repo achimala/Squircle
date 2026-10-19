@@ -40,8 +40,8 @@ pub trait Host: Send + Sync {
     fn boot<'a>(&'a self, device: &'a str) -> Pending<'a, Result<()>>;
     /// Starts recording the device's screen into `path`.
     fn record(&self, device: &str, path: &Path, log: std::fs::File) -> Result<Child>;
-    /// A smaller copy of the recording, having removed the original.
-    fn compact<'a>(&'a self, raw: &'a Path) -> Pending<'a, Option<PathBuf>>;
+    /// Makes a filed recording light in place.
+    fn shrink<'a>(&'a self, file: &'a Path) -> Pending<'a, ()>;
     /// Booted simulators of Squircle's that nothing holds (`leases` do).
     fn free<'a>(&'a self, leases: &'a [Lease]) -> Pending<'a, Vec<String>>;
     /// `thread`'s session on `device` no longer uses it: the pool shuts it
@@ -116,7 +116,7 @@ impl Host for AgentsHost {
                 "io",
                 device,
                 "recordVideo",
-                "--codec=h264",
+                "--codec=hevc",
                 "--force",
             ])
             .arg(path)
@@ -132,8 +132,8 @@ impl Host for AgentsHost {
             .context("Cannot start simctl recordVideo")
     }
 
-    fn compact<'a>(&'a self, raw: &'a Path) -> Pending<'a, Option<PathBuf>> {
-        Box::pin(compact(raw))
+    fn shrink<'a>(&'a self, file: &'a Path) -> Pending<'a, ()> {
+        Box::pin(shrink(file))
     }
 
     fn free<'a>(&'a self, leases: &'a [Lease]) -> Pending<'a, Vec<String>> {

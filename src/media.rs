@@ -135,7 +135,10 @@ fn store_in(
     let size = fs::metadata(file)
         .with_context(|| format!("Reading {}", file.display()))?
         .len();
-    if size == 0 || size > MAX_BYTES {
+    // The cap is for what agents publish. A recording is Squircle's own and
+    // is filed whatever its size (over 512 MB, sessions used to lose theirs);
+    // it is made light afterwards (`recordings`).
+    if size == 0 || (!take && size > MAX_BYTES) {
         bail!("Media must be between 1 byte and 512 MB");
     }
     crate::store::private_dir(&dir)?;
@@ -174,6 +177,22 @@ fn store_in(
     let bytes = serde_json::to_vec_pretty(&media)?;
     crate::store::write_private(&record, true, |out| Ok(out.write_all(&bytes)?))?;
     Ok(media)
+}
+
+/// A media file was replaced in place by a smaller one: its record says so.
+/// Files without a record beside them (not yet filed) are left as they are.
+pub fn resized(file: &Path, bytes: u64) {
+    let record = file.with_extension("json");
+    let Ok(mut media) = fs::read(&record)
+        .map_err(anyhow::Error::from)
+        .and_then(|b| Ok(serde_json::from_slice::<Media>(&b)?))
+    else {
+        return;
+    };
+    media.bytes = bytes;
+    if let Ok(bytes) = serde_json::to_vec_pretty(&media) {
+        let _ = crate::store::write_private(&record, true, |out| Ok(out.write_all(&bytes)?));
+    }
 }
 
 pub fn list(root: &Path, thread: &str) -> Result<Vec<Media>> {

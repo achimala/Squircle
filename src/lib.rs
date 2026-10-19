@@ -25,6 +25,7 @@ pub mod preview;
 mod process;
 pub mod projects;
 pub mod push;
+pub mod recordings;
 pub mod server;
 pub mod service;
 pub mod serving;
