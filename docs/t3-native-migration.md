@@ -2054,6 +2054,26 @@ booted and not free):** `sim start` created and booted "Squircle iPhone 18
 Pro" and recorded it in 19 s; `sim stop` filed the recording and shut it
 down; the three others stayed booted.
 
+**2026-10-20 (user-requested).** On the iOS 27.0 runtime the Apple
+Intelligence and Siri daemons crash-loop and pin cores (load ~190 with 5
+simulators, ~30 without them), and turning them off inside a simulator
+doesn't survive its next boot. Every session therefore runs `launchctl
+disable` and `bootout` (`system/LABEL`, via `simctl spawn`) for the 13
+labels in `src/sims/host.rs` once its simulator has booted, before
+recording; a label a runtime lacks is no matter. SimRenderServer crashed
+in its recording-finish path (`MDItemCreate` on a null path) after
+recorders were SIGKILLed when their 20 s/5 s grace ran out. Now every end
+(stop, turn end, time limit, recovery, service stop, failed or cancelled
+start) sends one SIGINT and waits for simctl to finish the movie, with no
+time limit and no SIGKILL, before T3 closes the device or the pool shuts
+the simulator down; a stop resumed after a restart only waits (its
+recorder was already interrupted). A restart still hands recorders over
+untouched. **Verified (this Mac, separate data dir on :8797):** a fresh
+boot of an iOS 27.0 simulator had none of the 13 running after `sim
+start`, all disabled; `sim stop` and `service stop` each filed a valid
+HEVC movie (39.7 s, 12.2 s) and shut the simulator down after the
+recorder exited, with no new SimRenderServer crash report.
+
 ## 2026-10-14 simulator deck
 
 User, after trying several simulators on the phone: "we need to stack em

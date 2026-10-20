@@ -131,14 +131,29 @@ impl State {
     /// partial movie goes, and the session ends owing the close and release
     /// of whatever it may have acquired. Nothing if the start committed (or
     /// never reserved anything).
-    pub(super) fn abandon_start(&mut self, root: &Path, id: &str, error: String) {
+    /// `recorder`: the start's own, already interrupted; it finishes its
+    /// movie before the cleanup lets the simulator go (`Sims::reap`).
+    pub(super) fn abandon_start(
+        &mut self,
+        root: &Path,
+        id: &str,
+        error: String,
+        recorder: Option<Child>,
+    ) {
+        if let Some(child) = recorder {
+            self.recorders
+                .insert(id.to_string(), Recorder::Owned(child));
+        }
         if !self.starts.remove(id) {
             return;
         }
         let Some(thread) = self.ledger().session(id).map(|s| s.thread_id.clone()) else {
             return;
         };
-        if let Ok(path) = media::recording_path(root, &thread, id) {
+        // An interrupted recorder still writes it; the cleanup deletes it once done.
+        if !self.recorders.contains_key(id)
+            && let Ok(path) = media::recording_path(root, &thread, id)
+        {
             let _ = std::fs::remove_file(path.with_extension("log"));
             let _ = std::fs::remove_file(path);
         }

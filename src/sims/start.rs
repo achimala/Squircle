@@ -282,6 +282,7 @@ impl Sims {
             .await
             .with_context(|| format!("{name} did not finish booting"))?;
         self.step(&session.id, Event::Booted { at: now() }).await?;
+        self.host.quiet(&session.device_id).await;
 
         let path = media::recording_path(&self.root, &session.thread_id, &session.id)?;
         let log = std::fs::File::create(path.with_extension("log"))?;
@@ -319,9 +320,12 @@ impl Sims {
                     s.step(&id, Event::Recording).map(drop)
                 };
                 if let Err(error) = recording {
-                    // The partial movie is useless; tokio reaps the killed child.
-                    if let Some(child) = &mut child {
-                        let _ = child.start_kill();
+                    // Finishes its (useless) movie before the cleanup lets the simulator go.
+                    if let Some(child) = child.take() {
+                        if let Some(pid) = child.id() {
+                            interrupt(pid);
+                        }
+                        s.recorders.insert(id.clone(), Recorder::Owned(child));
                     }
                     return Err(error);
                 }
@@ -593,7 +597,7 @@ pub(super) enum Started {
 }
 
 /// Owns a starting session's provisional resources: unless the start
-/// commits, dropping it (an error or a cancelled request) kills the
+/// commits, dropping it (an error or a cancelled request) interrupts the
 /// recorder and tells the owner to end the session, which then owes the
 /// close and release of whatever it may have acquired.
 pub(super) struct Startup {
@@ -606,15 +610,18 @@ pub(super) struct Startup {
 
 impl Drop for Startup {
     fn drop(&mut self) {
-        if let Some(child) = &mut self.child {
-            // The partial movie is useless; tokio reaps the killed child.
-            let _ = child.start_kill();
+        // Interrupted, not killed: the owner keeps it until it has finished
+        // its movie, and the cleanup waits for that.
+        let child = self.child.take();
+        if let Some(pid) = child.as_ref().and_then(|c| c.id()) {
+            interrupt(pid);
         }
         let (root, id) = (self.root.clone(), self.id.clone());
         let error = self
             .error
             .take()
             .unwrap_or_else(|| "The start was cancelled".into());
-        self.owner.tell(move |s| s.abandon_start(&root, &id, error));
+        self.owner
+            .tell(move |s| s.abandon_start(&root, &id, error, child));
     }
 }

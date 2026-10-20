@@ -154,10 +154,7 @@ impl Sims {
             let Some(_finish) = self.claim(id, Work::Finish).await else {
                 return;
             };
-            match self
-                .halt(id, "service stopped", SHUTDOWN_GRACE, false)
-                .await
-            {
+            match self.halt(id, "service stopped", false).await {
                 Ok(Some(_)) => {
                     self.cleanup(id, true).await;
                     let _ = self.file(id, false).await;

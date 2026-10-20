@@ -79,12 +79,6 @@ pub use maintenance::*;
 
 const KEEP: usize = 200;
 
-/// How long simctl gets to write the movie's index after SIGINT.
-const RECORDER_GRACE: Duration = Duration::from_secs(20);
-
-/// The same while the service shuts down (its supervisor won't wait long).
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
-
 /// The ledger's format: 2 adds cleanup receipts, boot evidence and grant wakes.
 const SCHEMA: u32 = 2;
 
