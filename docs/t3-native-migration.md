@@ -2031,6 +2031,21 @@ SimRenderServer crash-looped, then hung, so every `simctl launch` hung.
   handover from a hand-started service, `kill -9` back in 10 s, restart,
   stop stays stopped, start, uninstall; a signed copy reading ~/Documents
   raised macOS's consent prompt (not answered in the test).
+- *TCC check, 2026-10-20.* After a reboot the pre-copy install's job (binary
+  and log in ~/Documents) sat loaded, failing with EX_CONFIG every 10 s,
+  while the service ran by hand. Install booted that job out but only
+  signalled the hand-started service when no job was loaded, so it would
+  have waited forever for it to exit; restart would have kickstarted the
+  dead job. Both now treat a holder that isn't the job's own PID as
+  hand-started (verified on a scratch label: stale job + hand service →
+  install, restart, uninstall). The check under launchd, run by hand as a
+  scratch job with the copy's output in its folder: no prompt, Allow,
+  Don't Allow (EPERM) and FDA-only folders all exit 0 or 2 with their output
+  in the log; a prompt left unanswered times out after ~27–37 min with
+  `Interrupted system call` (EINTR), now reported as "grant access". The
+  owner's one failing run (exit 101, a panic, 1.9 s, 12 ms after a click on
+  the prompt, nothing written to check.log) did not recur; the copy now has
+  the Documents grant and its check passes under launchd.
 - *Public URL.* `serve --public-url` is kept in `config.json`; starts
   without it use the last one, so install links survive a restart by hand.
 

@@ -67,7 +67,11 @@ pub fn holder(root: &Path) -> Result<Option<u32>> {
 
 /// Restarts the running service; returns once the new one answers.
 pub async fn restart(root: &Path, server: &str) -> Result<Value> {
-    if job().await.is_some() {
+    let loaded = job().await;
+    let launchd_runs =
+        |old: Option<u32>| old.is_none() || loaded.as_ref().is_some_and(|job| job.pid == old);
+    // A service started by hand beside a loaded job restarts by hand.
+    if loaded.is_some() && launchd_runs(holder(root)?) {
         let root = std::path::absolute(root)?;
         let old = holder(&root)?;
         // A binary rebuilt at the source path takes over, as without launchd.
@@ -482,7 +486,10 @@ async fn check(root: &Path, record: &Record) -> Result<()> {
         return Ok(());
     }
     let said = std::fs::read_to_string(&log).unwrap_or_default();
-    let denied = said.contains("Operation not permitted") || code == 78;
+    // EPERM: declined, or Full Disk Access only; EINTR: macOS's prompt went
+    // unanswered until it timed out (about half an hour); 78: launchd itself
+    // was kept out.
+    let denied = said.contains("(os error 1)") || said.contains("(os error 4)") || code == 78;
     let signed = match &record.identity_name {
         Some(name) => format!(
             "It is signed as {LABEL} by \"{name}\", so the grant lasts across rebuilds and reinstalls."
@@ -497,9 +504,20 @@ async fn check(root: &Path, record: &Record) -> Result<()> {
             said.trim()
         );
     }
+    let said = match said.trim() {
+        "" => format!(
+            "It wrote nothing to {}{}; launchd's side: log show --last 10m --predicate 'eventMessage CONTAINS \"{label}\"'",
+            log.display(),
+            if code == 101 {
+                " (101 is a Rust panic)"
+            } else {
+                ""
+            }
+        ),
+        said => said.to_string(),
+    };
     bail!(
-        "The installed binary failed its launchd check (exit {code}); the running service was left as it was.\n{}",
-        said.trim()
+        "The installed binary failed its launchd check (exit {code}); the running service was left as it was.\n{said}"
     )
 }
 
@@ -624,12 +642,17 @@ pub async fn install(root: &Path, server: &str, args: Vec<String>) -> Result<Val
     std::fs::rename(&draft, &path)?;
 
     // One service at a time: the old one hands its sessions over first.
-    if job().await.is_some() {
+    // A loaded job needn't be the one running: after a reboot an older
+    // install's job can sit failing to spawn while a hand-started service
+    // holds the lock, and bootout only stops launchd's own process.
+    let loaded = job().await;
+    if loaded.is_some() {
         launchctl(&["bootout", &target()]).await?;
-    } else if let Some(pid) = running {
-        signal(pid, libc::SIGTERM)?;
     }
     if let Some(pid) = running {
+        if loaded.and_then(|job| job.pid) != Some(pid) {
+            signal(pid, libc::SIGTERM)?;
+        }
         exited(pid).await;
     }
     launchctl(&["bootstrap", &domain(), &path.to_string_lossy()]).await?;
