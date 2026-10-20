@@ -84,3 +84,24 @@ pub(super) fn is_recorder(recorder: RecorderID, session: &str) -> bool {
             .start
             .is_none_or(|start| process_start(recorder.pid) == Some(start))
 }
+
+/// Asks a recorder to finish: simctl writes the movie's index on SIGINT.
+pub(super) fn interrupt(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGINT) };
+}
+
+/// Waits for an interrupted recorder to finish writing, however long that
+/// takes. One cut off mid-write leaves SimRenderServer finishing a movie
+/// whose simulator, or file, is gone, which crashed it.
+pub(super) async fn finished(recorder: Recorder, session: &str) {
+    match recorder {
+        Recorder::Owned(mut child) => {
+            let _ = child.wait().await;
+        }
+        Recorder::Recovered(recorder) => {
+            while is_recorder(recorder, session) {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
+}

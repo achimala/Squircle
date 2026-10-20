@@ -67,6 +67,11 @@ pub trait Host: Send + Sync {
         Box::pin(async { None })
     }
 
+    /// Turns off the simulator's Apple Intelligence and Siri daemons.
+    fn quiet<'a>(&'a self, _device: &'a str) -> Pending<'a, ()> {
+        Box::pin(async {})
+    }
+
     /// Saves the device's screen as a small JPEG at `path`, best effort:
     /// the recording's poster, so the phone needn't download the movie to
     /// show it.
@@ -192,6 +197,10 @@ impl Host for AgentsHost {
         Box::pin(crate::simwatch::before_start(&self.1, leases))
     }
 
+    fn quiet<'a>(&'a self, device: &'a str) -> Pending<'a, ()> {
+        Box::pin(quiet(device))
+    }
+
     fn poster<'a>(&'a self, device: &'a str, path: &'a Path) -> Pending<'a, ()> {
         Box::pin(async move {
             let run = |program: &str, args: &[&std::ffi::OsStr]| {
@@ -299,4 +308,46 @@ pub(super) fn no_simulators(inventory: &Value) -> String {
     format!(
         "T3 lists no iOS simulators on this Mac (T3 device host {status}{detail}); check `xcrun simctl list devices` and T3's Device panel"
     )
+}
+
+/// Apple Intelligence and Siri daemons that crash-loop on the iOS 27.0
+/// simulator runtime, each pinning a core (five simulators held the Mac at
+/// a load of 190; about 30 without them).
+const NOISY: [&str; 13] = [
+    "com.apple.intelligenceplatformd",
+    "com.apple.intelligencetasksd",
+    "com.apple.intelligenceflowd",
+    "com.apple.intelligencecontextd",
+    "com.apple.callintelligenced",
+    "com.apple.fitnessintelligenced",
+    "com.apple.siri.context.service",
+    "com.apple.siri.acousticsignature",
+    "com.apple.siriactionsd",
+    "com.apple.siriknowledged",
+    "com.apple.siriinferenced",
+    "com.apple.sirittsd",
+    "com.apple.nanosystemsettingsd",
+];
+
+/// Disables and stops the `NOISY` daemons inside a booted simulator. Done
+/// for every session: a simulator forgets it when it boots again. A daemon
+/// a runtime doesn't have is no matter.
+async fn quiet(device: &str) {
+    let launchctl = |verb: &'static str, label: &str| {
+        Command::new("xcrun")
+            .args(["simctl", "spawn", device, "launchctl", verb])
+            .arg(format!("system/{label}"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    };
+    let ran = futures_util::future::join_all(NOISY.map(|label| async move {
+        launchctl("disable", label).await?;
+        launchctl("bootout", label).await.map(drop)
+    }))
+    .await;
+    if let Some(Err(error)) = ran.into_iter().find(|r| r.is_err()) {
+        eprintln!("Simulator {device}: Apple Intelligence and Siri not turned off: {error}");
+    }
 }

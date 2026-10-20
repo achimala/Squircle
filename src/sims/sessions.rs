@@ -43,7 +43,7 @@ impl Sims {
             .claim(id, Work::Finish)
             .await
             .context("The session is already being stopped")?;
-        self.halt(id, reason, RECORDER_GRACE, false)
+        self.halt(id, reason, false)
             .await?
             .context("The session is already being stopped")?;
         self.cleanup(id, false).await;
@@ -56,7 +56,7 @@ impl Sims {
         let Some(_finish) = self.claim(id, Work::Finish).await else {
             return;
         };
-        if let Err(error) = self.halt(id, reason, RECORDER_GRACE, true).await {
+        if let Err(error) = self.halt(id, reason, true).await {
             eprintln!("Simulator session {id} not stopped: {error:#}");
         }
         self.cleanup(id, false).await;
@@ -65,34 +65,42 @@ impl Sims {
         }
     }
 
-    /// Claims a session (saved), stops its recorder and saves that it
-    /// stopped: from then on its close, release and filing are owed. None if
-    /// it isn't this call's to stop.
+    /// Claims a session (saved), stops its recorder, waits for it to finish
+    /// the movie and saves that it stopped: from then on its close, release
+    /// and filing are owed. None if it isn't this call's to stop.
     pub(super) async fn halt(
         &self,
         id: &str,
         reason: &str,
-        grace: Duration,
         recovering: bool,
     ) -> Result<Option<Session>> {
         let (stopping, reason) = (id.to_string(), reason.to_string());
         let halted = self
             .owner
-            .ask(move |s| -> Result<Option<(Session, Option<Recorder>)>> {
-                let (disposition, _) = s.step(&stopping, Event::Stop { reason, recovering })?;
-                if disposition != Disposition::Applied {
-                    return Ok(None);
-                }
-                let session = s
-                    .ledger()
-                    .session(&stopping)
-                    .cloned()
-                    .context("No such simulator session")?;
-                s.clocks.remove(&stopping);
-                Ok(Some((session, s.recorders.remove(&stopping))))
-            })
+            .ask(
+                move |s| -> Result<Option<(Session, Option<Recorder>, bool)>> {
+                    // A stop a previous run left part-way already interrupted its
+                    // recorder (the stop is saved first); a second SIGINT could cut
+                    // the movie's finishing short.
+                    let interrupted = s
+                        .ledger()
+                        .session(&stopping)
+                        .is_some_and(|s| matches!(s.phase, Phase::Stopping { .. }));
+                    let (disposition, _) = s.step(&stopping, Event::Stop { reason, recovering })?;
+                    if disposition != Disposition::Applied {
+                        return Ok(None);
+                    }
+                    let session = s
+                        .ledger()
+                        .session(&stopping)
+                        .cloned()
+                        .context("No such simulator session")?;
+                    s.clocks.remove(&stopping);
+                    Ok(Some((session, s.recorders.remove(&stopping), interrupted)))
+                },
+            )
             .await?;
-        let Some((session, recorder)) = halted else {
+        let Some((session, recorder, interrupted)) = halted else {
             return Ok(None);
         };
         if let Ok(raw) = media::recording_path(&self.root, &session.thread_id, id) {
@@ -102,25 +110,18 @@ impl Sims {
         }
         let mut warning = None;
         match recorder {
-            Some(Recorder::Owned(mut child)) => {
-                if let Some(pid) = child.id() {
-                    // simctl writes the movie's index when interrupted.
-                    unsafe { libc::kill(pid as i32, libc::SIGINT) };
+            Some(Recorder::Owned(child)) => {
+                if let (false, Some(pid)) = (interrupted, child.id()) {
+                    interrupt(pid);
                 }
-                if tokio::time::timeout(grace, child.wait()).await.is_err() {
-                    let _ = child.kill().await;
-                }
+                finished(Recorder::Owned(child), id).await;
             }
             // Checked again just before the signal: the PID may have been reused since.
             Some(Recorder::Recovered(recorder)) if is_recorder(recorder, id) => {
-                unsafe { libc::kill(recorder.pid as i32, libc::SIGINT) };
-                let polls = (grace.as_millis() / 250).max(1);
-                for _ in 0..polls {
-                    if !is_recorder(recorder, id) {
-                        break;
-                    }
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                if !interrupted {
+                    interrupt(recorder.pid);
                 }
+                finished(Recorder::Recovered(recorder), id).await;
             }
             _ => {
                 if let Some(recorder) = session.recorder().filter(|r| alive(r.pid)) {
@@ -155,6 +156,7 @@ impl Sims {
         let Some(_close) = self.claim(id, Work::Close).await else {
             return;
         };
+        self.reap(id).await;
         let time = if force { f64::INFINITY } else { now() };
         let Some(session) = self
             .ledger()
@@ -196,6 +198,34 @@ impl Sims {
             .await
         {
             eprintln!("{error:#}");
+        }
+    }
+
+    /// Waits for the recorder a failed or cancelled start interrupted to
+    /// finish its movie, then deletes it (a partial recording is useless):
+    /// before T3 closes or the pool shuts the simulator down, which only
+    /// follow the close.
+    async fn reap(&self, id: &str) {
+        let reaping = id.to_string();
+        let left = self
+            .owner
+            .ask(move |s| {
+                let failed = s
+                    .ledger()
+                    .session(&reaping)
+                    .is_some_and(|s| matches!(s.phase, Phase::Failed { .. }));
+                failed.then(|| s.recorders.remove(&reaping)).flatten()
+            })
+            .await;
+        let Some(recorder) = left else {
+            return;
+        };
+        finished(recorder, id).await;
+        if let Some(session) = self.ledger().session(id)
+            && let Ok(raw) = media::recording_path(&self.root, &session.thread_id, id)
+        {
+            let _ = std::fs::remove_file(raw.with_extension("log"));
+            let _ = std::fs::remove_file(raw);
         }
     }
 
