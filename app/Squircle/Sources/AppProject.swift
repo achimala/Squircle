@@ -175,6 +175,24 @@ enum T3AppCatalog {
         }
     }
 
+    /// The T3 project whose workspace holds `path`: the deepest one.
+    static func owner(of path: String, projects: [JSONValue]) -> String? {
+        projects.filter {
+            let root = $0["workspaceRoot"].string ?? ""
+            return !root.isEmpty && (path == root || path.hasPrefix(root + "/"))
+        }.max { ($0["workspaceRoot"].string ?? "").count < ($1["workspaceRoot"].string ?? "").count }?["id"].string
+    }
+    /// An app's builds, newest first: those its agent or workers started,
+    /// and any of a checkout of its T3 project (a worktree's build names
+    /// its main checkout).
+    static func builds(_ builds: [AppBuild], of project: String, agent: String?, shell: JSONValue) -> [AppBuild] {
+        let projects = shell["projects"].array.filter { $0["deletedAt"] == .null }
+        return builds.filter { build in
+            (agent != nil && build.agentThread == agent?.lowercased())
+                || build.appProject.map { owner(of: $0, projects: projects) == project } ?? false
+        }.sorted { $0.date > $1.date }
+    }
+
     /// Only apps in Squircle's Mac catalog appear; a T3 project nobody
     /// imported is not a Squircle app. Newest thread activity first.
     static func projects(shell:JSONValue,metadata:[AppMetadata],builds:[AppBuild]) -> [AppProject] {
@@ -184,16 +202,11 @@ enum T3AppCatalog {
             guard let id = t["projectId"].string else { continue }
             active[id] = max(active[id] ?? .distantPast, t["updatedAt"].date)
         }
-        func owner(_ path:String) -> String? {
-            projects.filter {
-                let root = $0["workspaceRoot"].string ?? ""
-                return !root.isEmpty && (path == root || path.hasPrefix(root + "/"))
-            }.max { ($0["workspaceRoot"].string ?? "").count < ($1["workspaceRoot"].string ?? "").count }?["id"].string
-        }
+        func owner(_ path:String) -> String? { Self.owner(of: path, projects: projects) }
         return projects.compactMap { p -> AppProject? in
             let id = p["id"].string ?? ""
             guard let record = claimant(metadata.filter { owner($0.project) == id }, of: p) else { return nil }
-            let related = builds.filter { $0.request.map { owner($0.project) == id } ?? false }
+            let related = builds.filter { $0.appProject.map { owner($0) == id } ?? false }
             let request = record.buildRequest ?? related.filter { $0.request?.mode == "archive" }.sorted { $0.date > $1.date }.first?.request
             return AppProject(id:id,name:record.name,subtitle:"",
                 bundleID:record.bundleID,canBuild:request?.canSubmit ?? false,updatedAt:max(active[id] ?? .distantPast, p["updatedAt"].date),

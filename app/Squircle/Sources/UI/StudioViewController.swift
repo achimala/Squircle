@@ -632,7 +632,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         // A failed build names only itself: its request says whose it is.
         let owner = named ?? build.flatMap { build in
-            projects.first { $0.buildRequest != nil && $0.buildRequest?.key == build.request?.key }
+            projects.first { model.builds(for: $0).contains { $0.id == build.id } }
                 ?? build.bundleID.flatMap { bundle in projects.first { $0.bundleID == bundle } }
         }
         guard let owner else { return nil }

@@ -65,6 +65,10 @@ impl BuildState {
 
 /// Where a job's product comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Imported jobs are rare; the job owns its recipe inline like its phase."
+)]
 pub enum BuildOrigin {
     /// A validated project recipe and what was observed at submission.
     Project {
@@ -82,6 +86,9 @@ pub struct Provenance {
     pub revision: Option<String>,
     /// Working-tree status observed at submission; None means unavailable.
     pub dirty: Option<bool>,
+    /// The same project in its repository's main checkout, for a build of
+    /// a linked git worktree (T3's worktrees): the app it belongs to.
+    pub main_project: Option<PathBuf>,
 }
 
 /// A job's lifecycle. Each phase carries exactly what it has: only a
@@ -235,6 +242,22 @@ impl Job {
             BuildOrigin::Imported => None,
         }
     }
+    /// The project an app owns this build by: the main checkout's for a
+    /// build of a linked worktree, otherwise the one it built.
+    pub fn app_project(&self) -> Option<&std::path::Path> {
+        match &self.origin {
+            BuildOrigin::Project {
+                request,
+                provenance,
+            } => Some(
+                provenance
+                    .main_project
+                    .as_deref()
+                    .unwrap_or(&request.project),
+            ),
+            BuildOrigin::Imported => None,
+        }
+    }
     pub fn provenance(&self) -> Option<&Provenance> {
         match &self.origin {
             BuildOrigin::Project { provenance, .. } => Some(provenance),
@@ -298,6 +321,9 @@ struct JobRecord {
     /// Working-tree status observed at submission; None means unavailable.
     #[serde(default)]
     source_dirty: Option<bool>,
+    /// The project in the main checkout when built from a linked worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_main_project: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -326,6 +352,7 @@ impl TryFrom<JobRecord> for Job {
                 provenance: Provenance {
                     revision: r.source_revision,
                     dirty: r.source_dirty,
+                    main_project: r.source_main_project,
                 },
             },
             (IMPORTED_SOURCE, None) => BuildOrigin::Imported,
@@ -470,6 +497,7 @@ impl From<Job> for JobRecord {
             source: source.into(),
             source_revision: provenance.revision,
             source_dirty: provenance.dirty,
+            source_main_project: provenance.main_project,
         }
     }
 }

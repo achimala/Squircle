@@ -104,13 +104,13 @@ pub fn list(store: &Store) -> Result<Vec<AppRecord>> {
     Ok(apps)
 }
 
-/// The registered app a build belongs to: its project and scheme, or for an
-/// imported IPA its bundle.
+/// The registered app a build belongs to: its project (in the main checkout,
+/// for a worktree's build) and scheme, or for an imported IPA its bundle.
 pub fn owner_of<'a>(apps: &'a [AppRecord], job: &Job) -> Option<&'a AppRecord> {
-    match job.request() {
-        Some(request) => apps
+    match job.request().zip(job.app_project()) {
+        Some((request, project)) => apps
             .iter()
-            .find(|app| app.project == request.project && app.scheme == request.scheme),
+            .find(|app| app.project == project && app.scheme == request.scheme),
         None => {
             let bundle = &job.output()?.bundle_id;
             apps.iter()
@@ -175,6 +175,8 @@ pub fn register(store: &Store, registration: AppRegistration) -> Result<AppRecor
             ),
         "app project must be an .xcodeproj or .xcworkspace directory"
     );
+    // A worktree of an app's repository is that app, not a new one.
+    let project = crate::git::main_checkout(&project).unwrap_or(project);
     if let Some(mut app) = list(store)?
         .into_iter()
         .find(|app| app.project == project && app.scheme == scheme)
@@ -257,7 +259,7 @@ pub fn sync_build_preview(store: &Store, job: &Job) -> Result<AppRecord> {
             } else {
                 output.title.clone()
             },
-            project: request.project.clone(),
+            project: job.app_project().unwrap_or(&request.project).to_path_buf(),
             scheme: request.scheme.clone(),
             bundle_id: Some(output.bundle_id.clone()),
             summary: String::new(),
@@ -603,6 +605,7 @@ mod tests {
                 provenance: Provenance {
                     revision: Some("submitted-revision".into()),
                     dirty: Some(false),
+                    main_project: None,
                 },
                 request: BuildRequest {
                     project: registration.project.clone(),

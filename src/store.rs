@@ -1,7 +1,7 @@
 use crate::actor::{Owner, Published, Snapshot};
 use crate::model::{
-    BuildState, Diagnostic, DiagnosticKind, Job, JobPhase, PreviewState, SCHEMA_VERSION, Settings,
-    Ticket, now, token,
+    BuildOrigin, BuildState, Diagnostic, DiagnosticKind, Job, JobPhase, PreviewState,
+    SCHEMA_VERSION, Settings, Ticket, now, token,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Serialize, de::DeserializeOwned};
@@ -93,8 +93,18 @@ impl Store {
     pub fn load_job(&self, id: &str) -> Result<Job> {
         let directory = self.job_dir(id)?;
         check_dir(&directory)?;
-        let job: Job = read_json(&directory.join("job.json"))?;
+        let mut job: Job = read_json(&directory.join("job.json"))?;
         ensure!(job.id == id, "job record ID does not match its directory");
+        // Builds from before the main checkout was recorded, while their
+        // worktree is still there.
+        if let BuildOrigin::Project {
+            request,
+            provenance,
+        } = &mut job.origin
+            && provenance.main_project.is_none()
+        {
+            provenance.main_project = crate::git::main_checkout(&request.project);
+        }
         Ok(job)
     }
 

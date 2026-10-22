@@ -69,7 +69,11 @@ pub(super) async fn start_build(state: AppState, mut request: BuildRequest) -> A
         updated_at: now(),
         origin: BuildOrigin::Project {
             request: request.clone(),
-            provenance: Provenance { revision, dirty },
+            provenance: Provenance {
+                revision,
+                dirty,
+                main_project: crate::git::main_checkout(&request.project),
+            },
         },
         phase: JobPhase::Queued,
     };
