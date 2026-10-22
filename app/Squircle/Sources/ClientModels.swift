@@ -266,6 +266,10 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     let sourceDirty: Bool?
     /// The app agent whose agent, worker or task started it.
     let agentThread: String?
+    /// The project in the main checkout, for a build of a T3 worktree.
+    let mainProject: String?
+    /// The project whose app this build is, whichever checkout built it.
+    var appProject: String? { mainProject ?? request?.project }
 
     var needsPolling: Bool {
         status == "queued" || status == "running" || previewState == "pending" || previewState == "running"
@@ -274,7 +278,7 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, state, output, request, error
         case createdAt = "created_at", updatedAt = "updated_at", sourceRevision = "source_revision", sourceDirty = "source_dirty"
-        case agentThread = "agent_thread"
+        case agentThread = "agent_thread", mainProject = "source_main_project"
     }
     private struct Output: Decodable {
         let title: String?
@@ -307,6 +311,7 @@ struct AppBuild: Identifiable, Decodable, Equatable {
         sourceRevision = try values.decodeIfPresent(String.self, forKey: .sourceRevision)
         sourceDirty = try values.decodeIfPresent(Bool.self, forKey: .sourceDirty)
         agentThread = try values.decodeIfPresent(String.self, forKey: .agentThread)?.lowercased()
+        mainProject = try values.decodeIfPresent(String.self, forKey: .mainProject)
     }
 }
 

@@ -54,3 +54,63 @@ pub(crate) async fn run(
 pub(crate) async fn text(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&run(dir, args, LIMIT, MAX_OUTPUT).await?).into_owned())
 }
+
+/// `path` as it sits in its repository's main checkout, when it is inside a
+/// linked worktree (`git worktree add`, as T3 makes them) and exists there
+/// too. Read from the worktree's `.git` file and `commondir`, the way git
+/// finds them, without running git; None for a main checkout, a submodule, a
+/// bare repository's worktree or a path outside any repository.
+pub(crate) fn main_checkout(path: &Path) -> Option<std::path::PathBuf> {
+    let path = path.canonicalize().ok()?;
+    let top = path.ancestors().find(|dir| dir.join(".git").exists())?;
+    let link = std::fs::read_to_string(top.join(".git")).ok()?;
+    let gitdir = top.join(link.strip_prefix("gitdir:")?.trim());
+    let common = std::fs::read_to_string(gitdir.join("commondir")).ok()?;
+    let common = gitdir.join(common.trim()).canonicalize().ok()?;
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    let main = common.parent()?.join(path.strip_prefix(top).ok()?);
+    (main != path && main.exists()).then_some(main)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::main_checkout;
+    use std::process::Command;
+
+    #[test]
+    fn a_worktree_path_maps_to_the_main_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let main = root.join("main");
+        std::fs::create_dir_all(main.join("ios/App.xcodeproj")).unwrap();
+        std::fs::write(main.join("ios/App.xcodeproj/project.pbxproj"), "").unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("/usr/bin/git")
+                .arg("-C")
+                .arg(&main)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "{status:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+        let tree = root.join("worktrees/feature");
+        git(&["worktree", "add", "-q", tree.to_str().unwrap()]);
+        let project = tree.join("ios/App.xcodeproj");
+        assert_eq!(
+            main_checkout(&project),
+            Some(main.join("ios/App.xcodeproj"))
+        );
+        assert_eq!(main_checkout(&main.join("ios/App.xcodeproj")), None);
+        // Only in the branch: nothing in the main checkout to belong to.
+        std::fs::create_dir_all(tree.join("ios/New.xcodeproj")).unwrap();
+        assert_eq!(main_checkout(&tree.join("ios/New.xcodeproj")), None);
+    }
+}

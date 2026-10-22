@@ -226,6 +226,15 @@ catalog, thread?)` or `build(id, app?)`. A target it can't resolve yet
 waits for a fresh catalog; "not found" shows only when connected with a
 loaded catalog. DEBUG `SQUIRCLE_OPEN_TARGET` opens a payload as if tapped.
 
+**A worktree's build is its repository's app (2026-10-22).** A build of a
+linked git worktree (T3's worktrees) records the same project in the main
+checkout (`source_main_project`, read from the worktree's `.git` file and
+`commondir` at submission, and for older builds on load while the worktree
+exists). App registration and build ownership use that project, so a
+worktree no longer creates its own app record. The phone's Builds list for
+an app is every build its agent or workers started plus any build of a
+checkout inside its T3 project, newest first, whatever the scheme.
+
 **Push delivery (W4).** Per phone and app a `Link` has a `Stage`
 (`absent / starting / running{activity, acked}`) and a `Flight` (`idle /
 sending(generation) / waiting{until, failures}`): one send at a time, and a

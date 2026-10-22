@@ -606,7 +606,7 @@ final class SquircleModel {
             await refreshMetadata(fresh: true)
         } catch { self.error = error.localizedDescription }
     }
-    func builds(for project: AppProject) -> [AppBuild] { builds.filter { $0.request?.key == project.buildRequest?.key && $0.request != nil } }
+    func builds(for project: AppProject) -> [AppBuild] { T3AppCatalog.builds(builds, of: project.id, agent: agents[project.id], shell: shell) }
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
 
     // MARK: Opening conversations
