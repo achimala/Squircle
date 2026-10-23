@@ -28,6 +28,7 @@ impl Ledger {
             .map(|s| Reservation {
                 thread: s.thread_id.clone(),
                 device: s.device_id.to_ascii_uppercase(),
+                running: s.active(),
             })
             .collect()
     }
