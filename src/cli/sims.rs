@@ -71,7 +71,7 @@ pub(super) async fn run(cli: &Cli, command: &SimCommand) -> Result<Option<Value>
             post(
                 cli,
                 "/v1/sims",
-                json!({"thread_id":thread_id(thread)?,"device":device}),
+                json!({"thread_id":thread,"device":device}),
             )
             .await?
         }

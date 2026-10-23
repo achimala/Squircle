@@ -2819,3 +2819,14 @@ deviceId: T3's `device.open` is idempotent per thread and device, so this joins
 the session Squircle opened, and T3 returns its own current launcher and
 config. Prompts (plugin, workers, per-thread instructions) say so; agents still
 must not `device_open` any other simulator.
+
+**Verified 2026-10-23** against T3 0.1.0 (Beta): with Agent device access on
+(set through T3's `device.configure`), `device_open` on the simulator `sim
+start` returned rewrote the launcher to run the Beta app with agent-device
+0.21.25 and wrote a live host config; `agent-device open com.apple.Preferences`,
+`screenshot` and `snapshot -i` then worked, as did `device_screenshot`.
+agent-device needs an app `open` in its session before `screenshot` or
+`snapshot`. T3's delegated child threads have IDs like
+`thread:delegated-task:command%3A…`, not UUIDs; `sim start` now takes any T3
+thread ID that is one safe path component (letters, digits, `-_:%`, at most
+200).

@@ -40,8 +40,14 @@ pub struct SimulatorClip {
 
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
 
+/// A T3 thread ID safe as one path component: a UUID, or a delegated task's
+/// `thread:delegated-task:…` (colons and percent escapes). No `/` or `.`.
 pub fn valid_thread(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !id.is_empty()
+        && id.len() <= 200
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '%'))
 }
 
 fn directory(root: &Path, thread: &str) -> Result<PathBuf> {
@@ -251,6 +257,19 @@ pub fn get_in(dir: &Path, id: &str) -> Result<Media> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Thread IDs become a directory name: T3's delegated-task IDs pass,
+    /// anything that could leave the store doesn't.
+    #[test]
+    fn thread_ids_stay_one_path_component() {
+        assert!(valid_thread("c3e60882-f28f-4656-879d-99b3e2dcddbb"));
+        assert!(valid_thread(
+            "thread:delegated-task:command%3Amcp%3A905fabf1-5ccb-4435-a444-2ba6c234d315%3Adelegate-task%3Aagent-device-e2e-1"
+        ));
+        for bad in ["", "..", ".", "a/b", "../x", "a\\b", "a b", &"x".repeat(201)] {
+            assert!(!valid_thread(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn adds_lists_and_rejects_bad_input() {
