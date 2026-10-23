@@ -102,6 +102,8 @@ impl From<Grant> for GrantRecord {
 pub struct Reservation {
     pub thread: String,
     pub device: String,
+    /// The session is recording, not starting or being cleaned up.
+    pub running: bool,
 }
 
 /// The limit and what holds it now, as one snapshot of the same ledger.
@@ -228,8 +230,14 @@ fn ask(
     waiter: String,
 ) -> Reduction<Vec<Waiter>, Effect> {
     let mine = queue.iter().position(|w| w.thread_id == thread);
+    // A running session already holds its slot: starting again returns it
+    // (or moves it to another simulator), never a place in line.
+    let running = capacity
+        .reservations
+        .iter()
+        .any(|r| r.running && r.thread == thread);
     // A slot is held for it, or one is free and nobody waits ahead of it.
-    let granted = mine.is_some_and(|i| queue[i].grant.is_some());
+    let granted = running || mine.is_some_and(|i| queue[i].grant.is_some());
     let ahead = queue
         .iter()
         .take(mine.unwrap_or(queue.len()))
@@ -403,6 +411,7 @@ mod tests {
         Reservation {
             thread: thread.into(),
             device: device.into(),
+            running: true,
         }
     }
 
@@ -575,6 +584,29 @@ mod tests {
         let (queue, a) = ask_(queue, &free, "c", 5);
         assert_eq!(a, Answer::Queued { position: 1 });
         assert_eq!(ask_(queue, &free, "b", 6).1, Answer::Admitted);
+    }
+
+    /// A thread whose session runs is admitted again even with the line
+    /// full and others waiting, without joining it; one whose session is
+    /// still being cleaned up waits its turn like anyone else.
+    #[test]
+    fn a_running_session_starts_again_without_queueing() {
+        let mut sessions = vec![res("a", "SIM1"), res("x", "SIM2")];
+        let cap = Capacity {
+            limit: 2,
+            reservations: &sessions,
+        };
+        let (queue, a) = ask_(vec![], &cap, "b", 1);
+        assert_eq!(a, Answer::Queued { position: 1 });
+        let (queue, a) = ask_(queue, &cap, "a", 2);
+        assert_eq!(a, Answer::Admitted);
+        assert_eq!(queue.len(), 1);
+        sessions[0].running = false;
+        let cap = Capacity {
+            limit: 2,
+            reservations: &sessions,
+        };
+        assert_eq!(ask_(queue, &cap, "a", 3).1, Answer::Queued { position: 2 });
     }
 
     /// The woken turn is the one after the grant: a turn that ends before
