@@ -2795,3 +2795,27 @@ frame counts identical, AVFoundation plays all three. Dry run on the real data:
 4.7 h; 76 under 2 MB skipped; 19 orphaned recordings (20 GB) and 33 debris
 files (3.4 GB).
 
+
+## 2026-10-23 agent-device comes from T3's device_open
+
+**What was wrong.** `sim start` built the agent-device command itself: T3's
+launcher at `~/.t3/userdata/device/bin/agent-device` and a host config whose
+name it derived the way T3 0.0.45 does. Neither file is Squircle's. T3 0.1.0
+(`AgentDeviceShim.ts`, `AgentDeviceTarget.ts`) writes both only inside its
+`device_open` MCP tool: that call installs its pinned agent-device (0.21.25),
+starts the daemon, writes the host config with the daemon's port and token, and
+rewrites the launcher with the running app's path. Its WebSocket `device.open`,
+which Squircle uses, does none of this. Since the move to the Beta app no agent
+had called `device_open`, so the files left by the Alpha app (2026-10-14) still
+pointed at that removed app and at a daemon that was gone. T3 0.1.0 also gates
+the `device_*` tools and that preparation behind **Agent device access**
+(`enableAgentDeviceAccess`, default off, unset since the 0.1.0 migration), so
+`device_screenshot` was off too.
+
+**Change.** `sim start` no longer returns a command. It refuses while T3
+reports `agentAccessEnabled` false, saying where to turn it on, and returns the
+simulator's `device_open` arguments. The agent calls T3's `device_open` with that
+deviceId: T3's `device.open` is idempotent per thread and device, so this joins
+the session Squircle opened, and T3 returns its own current launcher and
+config. Prompts (plugin, workers, per-thread instructions) say so; agents still
+must not `device_open` any other simulator.

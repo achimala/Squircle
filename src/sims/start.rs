@@ -39,6 +39,9 @@ impl Sims {
             self.host.seen(thread) != Seen::Gone,
             "T3 has no thread {thread}"
         );
+        if let Some(why) = agent_access_off(&inventory) {
+            bail!("{why}");
+        }
         let simulators = local_simulators(&inventory);
         // T3's device support off: nothing to create one for.
         ensure!(
@@ -581,10 +584,10 @@ impl Sims {
         json!({
             "session": Served::from(session),
             "status": status,
-            "agent_device": agent_device(&session.thread_id, &session.host_id, &session.device_id),
-            "next": format!("Drive it with agent_device.command plus agent_device.target_args (or T3's device_screenshot to look). \
-                When you are done with the simulator, run {cli} sim stop --thread {}; the recording then appears in this turn \
-                and the simulator shuts down. If you forget, that happens when your turn ends. Don't boot or create simulators yourself.", session.thread_id),
+            "device_open": {"deviceId": session.device_id, "hostId": session.host_id},
+            "next": format!("Call T3's device_open with deviceId {} (it joins this session) and drive the simulator with the agent-device command and target args it returns; \
+                device_screenshot to look. When you are done with the simulator, run {cli} sim stop --thread {}; the recording then appears in this turn \
+                and the simulator shuts down. If you forget, that happens when your turn ends. Don't boot or create simulators yourself.", session.device_id, session.thread_id),
         })
     }
 }

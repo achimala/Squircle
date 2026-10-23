@@ -8,15 +8,6 @@ pub(super) enum Recorder {
     Recovered(RecorderID),
 }
 
-/// T3's 24-hex-digit key (sha256 prefix) for agent-device files.
-pub(super) fn key(value: &str) -> String {
-    Sha256::digest(value.as_bytes())
-        .iter()
-        .take(12)
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
 /// Makes a filed recording light in place (`crate::recordings`). A failure
 /// leaves it as simctl wrote it; `squircle media shrink` retries those.
 pub(super) async fn shrink(file: &Path) {
