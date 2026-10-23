@@ -43,7 +43,6 @@ use crate::simpool::{BootReceipt, Exclusion, Holds, Lease, Pool};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     convert::Infallible,

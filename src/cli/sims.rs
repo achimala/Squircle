@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Subcommand)]
 pub(super) enum SimCommand {
-    /// Open, boot and start recording a simulator for your thread; returns the agent-device command to drive it.
+    /// Open, boot and start recording a simulator for your thread; then T3's device_open on it gives the agent-device command to drive it.
     #[command(
         after_help = "Idempotent: starting again on the same simulator returns the running session. Without --device: the simulator this thread used last, else a booted one of Squircle's that nothing holds, else a shut-down one (never a simulator the user or another agent has booted). At most SQUIRCLE_MAX_SIMULATORS sessions (default 3) run at once; past that, start puts your thread in line (first come, first served) and returns status \"queued\" with your position: end your turn, and Squircle wakes your thread with a [simulator ready] message once one is held for you; run start again then. sim stop leaves the line. Stopping (or the turn ending) shuts the simulator down. Use this for every simulator: don't boot or create simulators with simctl or xcodebuild."
     )]

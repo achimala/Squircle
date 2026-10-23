@@ -6,28 +6,6 @@ use super::*;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 
-/// The session name must match T3's, or agent-device drives a session T3
-/// does not show (values from a real T3 0.0.45 device_open result).
-#[test]
-fn agent_device_session_matches_t3() {
-    let value = agent_device(
-        "f56d4de2-8173-425d-b251-84d841fd8d97",
-        "local",
-        "C800634B-1469-491D-9477-9BF9A883EEF7",
-    );
-    let args: Vec<&str> = value["target_args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(args.last(), Some(&"t3-b283255e0eea683562ba6ae8"));
-    assert!(
-        args.iter()
-            .any(|a| a.ends_with("/hosts/25bf8e1a2393f1108d37029b.json"))
-    );
-}
-
 const THREAD: &str = "f56d4de2-8173-425d-b251-84d841fd8d97";
 const B: &str = "0e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
 const C: &str = "1e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
@@ -89,7 +67,7 @@ impl Host for Fake {
         Box::pin(async move {
             ensure!(!fails, "disconnected");
             Ok(
-                json!({"devices": [{"id": "SIM1", "name": "iPhone", "platform": "ios", "hostId": "local", "booted": true},
+                json!({"agentAccessEnabled": true, "devices": [{"id": "SIM1", "name": "iPhone", "platform": "ios", "hostId": "local", "booted": true},
                                    {"id": "SIM2", "name": "iPad", "platform": "ios", "hostId": "local", "booted": false}]}),
             )
         })

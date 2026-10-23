@@ -248,32 +248,14 @@ impl Host for AgentsHost {
     }
 }
 
-/// The agent-device invocation T3's `device_open` tool gives agents for this
-/// thread and simulator (same config file and session name as T3 0.0.45).
-pub fn agent_device(thread: &str, host: &str, device: &str) -> Value {
-    let base = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".t3/userdata/device");
-    let config = base.join("hosts").join(format!("{}.json", key(host)));
-    let session = format!(
-        "t3-{}",
-        key(&serde_json::to_string(&[thread, host, device]).unwrap_or_default())
-    );
-    let args = vec![
-        "--platform".to_string(),
-        "ios".into(),
-        "--udid".into(),
-        device.into(),
-        "--config".into(),
-        config.display().to_string(),
-        "--session".into(),
-        session,
-    ];
-    json!({
-        "command": base.join("bin/agent-device"),
-        "target_args": args,
-        "config_exists": config.is_file(),
-    })
+/// Why agents can't drive T3's simulators: T3 withholds `device_open` and
+/// `device_screenshot`, and only `device_open` prepares the agent-device
+/// launcher and its host config.
+pub(super) fn agent_access_off(inventory: &Value) -> Option<&'static str> {
+    (inventory["agentAccessEnabled"] != true).then_some(
+        "T3's Agent device access is off, so agents can't drive or screenshot simulators; \
+        ask the user to turn it on in T3's Settings, Integrations, Agent device access",
+    )
 }
 
 /// T3's device state after it re-lists every host. Its `subscribeDeviceState`

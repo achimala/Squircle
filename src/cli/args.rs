@@ -133,7 +133,7 @@ pub(super) enum Commands {
     },
     /// Use an iOS simulator so the user can watch: start records it, stop files the recording in your turn.
     #[command(
-        after_help = "Start a session before you run, check or demo the app in a simulator:\n  squircle sim start --thread YOUR_T3_THREAD_ID [--device NAME_OR_UDID]\nIt opens the simulator for your thread, boots it, records its screen and returns the agent-device command to drive it. The user sees it live as a picture-in-picture on their phone and in your turn. When done: squircle sim stop --thread YOUR_T3_THREAD_ID; the recording appears in your turn. A session also stops when your turn ends."
+        after_help = "Start a session before you run, check or demo the app in a simulator:\n  squircle sim start --thread YOUR_T3_THREAD_ID [--device NAME_OR_UDID]\nIt opens the simulator for your thread, boots it, records its screen and names the simulator; call T3's device_open with that deviceId for the agent-device command to drive it. The user sees it live as a picture-in-picture on their phone and in your turn. When done: squircle sim stop --thread YOUR_T3_THREAD_ID; the recording appears in your turn. A session also stops when your turn ends."
     )]
     Sim {
         #[command(subcommand)]
