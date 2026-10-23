@@ -5,8 +5,8 @@ impl Sims {
 
     pub async fn start(self: &Arc<Self>, thread: &str, device: Option<&str>) -> Result<Value> {
         ensure!(
-            media::valid_thread(thread) && uuid::Uuid::parse_str(thread).is_ok(),
-            "Thread ID must be a T3 thread UUID"
+            media::valid_thread(thread),
+            "Thread ID must be a T3 thread ID"
         );
         loop {
             // Listening before looking, so a save in between isn't missed.
