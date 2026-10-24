@@ -378,7 +378,8 @@ looked at in a simulator or on the phone.
 
 `T3Gateway` speaks the verified Effect RPC JSON Request/Chunk/Ack/Exit protocol.
 HTTP and input/RPC WebSockets use a normal paired T3 session, scoped to
-orchestration read/operate. The RPC socket's upgrade carries the session's
+orchestration read/operate and filesystem read (T3 0.1.0 needs it to sign
+URLs for Mac files the agent's Markdown shows). The RPC socket's upgrade carries the session's
 bearer like any HTTPS request (T3 0.0.45 accepts it; no ticket round trip);
 the device helper socket still uses a short-lived ticket. HTTPS requests
 reject redirects. The personal build seeds the device Keychain from ignored
