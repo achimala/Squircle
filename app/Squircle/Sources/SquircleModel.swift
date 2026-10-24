@@ -596,7 +596,7 @@ final class SquircleModel {
         if let demoApps { projects = demoApps; return }
         #endif
         // An order you gave Home shows at once, until the Mac shows it.
-        let metadata = commands.appOrder.map { AppOrder.apply($0, to: appMetadata) } ?? appMetadata
+        let metadata = pendingOrder.map { AppOrder.apply($0, to: appMetadata) } ?? appMetadata
         projects = T3AppCatalog.projects(shell:shell,metadata:metadata,builds:builds)
             .filter { scopeBundleID == nil || $0.bundleID == scopeBundleID }
     }
@@ -611,9 +611,26 @@ final class SquircleModel {
         #endif
         guard client != nil else { return }
         let visible = ids.compactMap { id in projects.first { $0.id == id }?.metadataID }
-        let order = AppOrder.arranged(AppOrder.apply(commands.appOrder ?? [], to: appMetadata).map(\.id), showing: visible)
+        let order = AppOrder.arranged(AppOrder.apply(pendingOrder ?? [], to: appMetadata).map(\.id), showing: visible)
+        #if DEBUG
+        if rehearsedOrder != nil { rehearsedOrder = order; reconcileProjects(); return }
+        #endif
         startCommand(.appOrder(order), command: nil)
     }
+    /// The order Home shows over the Mac's: the one you gave it that the
+    /// Mac doesn't show yet.
+    private var pendingOrder: [String]? {
+        #if DEBUG
+        if let rehearsedOrder { return rehearsedOrder }
+        #endif
+        return commands.appOrder
+    }
+    #if DEBUG
+    /// `SQUIRCLE_STRESS=1` holds and drops apps at random: on a simulator
+    /// paired with the real Mac those drops arranged the user's Home. Its
+    /// order stays on the phone.
+    private var rehearsedOrder: [String]? = ProcessInfo.processInfo.environment["SQUIRCLE_STRESS"] == "1" ? [] : nil
+    #endif
     /// Bumped when Home's order is adopted from the Mac's reply, so a list
     /// read before it can't put the old order back.
     private var catalogGeneration = 0

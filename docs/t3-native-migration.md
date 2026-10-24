@@ -2876,6 +2876,16 @@ bottom edge the grid scrolls under it. Leaving Home drops it. VoiceOver gets
 Move earlier / Move later actions. `SQUIRCLE_DEMO_APPS=1` (DEBUG) shows
 made-up apps arranged only on the phone, for simulator checks.
 
+**Fix, 2026-10-24: Home reordering itself.** `SQUIRCLE_STRESS=1` holds and
+drops apps at random. Run on a simulator paired with the real Mac (the
+embedded personal connection), every random drop went to `PUT
+/v1/apps/order` and rearranged the user's Home on the phone too. Under
+`SQUIRCLE_STRESS=1` the model now keeps Home's order on the phone only
+(`SquircleModel.rehearsedOrder`); the drag and drop path is otherwise the
+same. Checked with a 40 s stress run on a paired simulator: `order.json`
+unchanged (same bytes and time). The order code itself held across
+relaunches and polls with the real catalog.
+
 **Verified 2026-10-24** on an iOS 27.0 simulator with `SQUIRCLE_DEMO_APPS=1`:
 long-press and drag moved Weather past Recipes and Budget up two places (the
 grid scrolled under the held app near the top edge); the accessibility order
