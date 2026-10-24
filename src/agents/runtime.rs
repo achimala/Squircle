@@ -113,7 +113,8 @@ impl Agents {
             if synced && started.elapsed() >= STABLE {
                 delay = 1;
             }
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+            // Nothing announces T3 listening again: retries are paced.
+            crate::clock::after(Duration::from_secs(delay)).await;
             delay = (delay * 2).min(30);
         }
     }

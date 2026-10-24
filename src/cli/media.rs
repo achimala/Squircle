@@ -102,7 +102,9 @@ pub(super) async fn media(cli: &Cli, command: &MediaCommand) -> Result<Option<Va
             } => {
                 use squircle::recordings;
                 if *orphans == Some(Orphans::Delete) {
-                    return Ok(Some(success(recordings::delete_orphans(&root, *dry_run))));
+                    return Ok(Some(success(
+                        recordings::delete_orphans(&root, *dry_run).await,
+                    )));
                 }
                 let tools = recordings::Tools::find()?;
                 let plan = recordings::plan(&tools, &root).await?;

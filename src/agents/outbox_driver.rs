@@ -25,7 +25,7 @@ impl Agents {
             if !scheduled {
                 return;
             }
-            tokio::time::sleep(delay).await;
+            crate::clock::after(delay).await;
             this.owner.ask(|s| s.flush_scheduled = false).await;
             match this.flush().await {
                 Ok(()) => {

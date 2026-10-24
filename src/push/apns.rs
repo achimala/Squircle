@@ -231,9 +231,12 @@ impl Apns {
 
     /// Other hosts, for a local fake (`http://` speaks HTTP/2 without TLS).
     pub fn with_hosts(config: &KeyConfig, sandbox: &str, production: &str) -> Result<Self> {
+        // A connection that died (sleep, a network change) is found by the
+        // kernel's keepalive probes and fails its requests; nothing waits
+        // on a request timer.
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(20));
+            .tcp_keepalive(Duration::from_secs(30));
         if sandbox.starts_with("http://") {
             builder = builder.http2_prior_knowledge();
         }

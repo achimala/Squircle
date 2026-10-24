@@ -322,7 +322,7 @@ impl Agents {
 
     pub(super) fn spawn_reset(self: Arc<Self>, project: String, delay: Duration) {
         tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
+            crate::clock::after(delay).await;
             let result = self.ops.run(project.clone(), self.perform(&project)).await;
             if let Err(error) = &result {
                 eprintln!("Agent reset failed: {error:#}");

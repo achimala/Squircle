@@ -291,7 +291,7 @@ pub trait Simctl: Send + Sync {
     /// Creates and boots a simulator of the default model; returns its UDID and name.
     fn create(&self) -> Pending<'_, Result<(String, String)>>;
     /// Each simulator's processes' summed CPU (%), by UDID.
-    fn cpu(&self) -> HashMap<String, f64>;
+    fn cpu(&self) -> Pending<'_, HashMap<String, f64>>;
 }
 
 /// T3, as far as the policy needs it. Tests use a fake.
@@ -845,7 +845,7 @@ impl Pool {
     /// Every booted simulator with its owner, for `sim status`.
     pub async fn status(&self, leases: &[Lease]) -> Result<Value> {
         let rows = self.refresh(leases, false).await?;
-        let cpu = self.simctl.cpu();
+        let cpu = self.simctl.cpu().await;
         let booted: Vec<Value> = rows
             .iter()
             .filter(|r| r.booted)
@@ -874,10 +874,12 @@ impl Pool {
         self.world.t3_sessions().await
     }
 
-    /// Applies the policy every minute until the service stops.
+    /// Applies the policy every minute until the service stops. simctl
+    /// tells nobody when a simulator boots, shuts down or is last used, so
+    /// the policy looks at its inventory at the cadence it promises.
     pub async fn run(self: Arc<Self>, sims: Arc<crate::sims::Sims>) {
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            crate::clock::after(Duration::from_secs(60)).await;
             match self.tick(&sims.leases()).await {
                 Ok(done) => {
                     for item in done {
@@ -1061,33 +1063,40 @@ impl Simctl for Xcrun {
         })
     }
 
-    fn cpu(&self) -> HashMap<String, f64> {
-        let mut cpu = HashMap::new();
-        let Ok(output) = std::process::Command::new("/bin/ps")
-            .args(["-axww", "-o", "pcpu=,command="])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-        else {
-            return cpu;
-        };
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let line = line.trim_start();
-            let Some((percent, command)) = line.split_once(' ') else {
-                continue;
-            };
-            let Some(after) = command.split("/CoreSimulator/Devices/").nth(1) else {
-                continue;
-            };
-            if let (Some(udid), Ok(percent)) = (
-                uuids(&after[..after.len().min(UUID_LEN)]).pop(),
-                percent.parse::<f64>(),
-            ) {
-                *cpu.entry(udid).or_default() += percent;
-            }
-        }
-        cpu
+    fn cpu(&self) -> Pending<'_, HashMap<String, f64>> {
+        Box::pin(cpu())
     }
+}
+
+/// Each simulator's processes' summed CPU (%), by UDID, from `ps`.
+async fn cpu() -> HashMap<String, f64> {
+    let mut cpu = HashMap::new();
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-axww", "-o", "pcpu=,command="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+    else {
+        return cpu;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let line = line.trim_start();
+        let Some((percent, command)) = line.split_once(' ') else {
+            continue;
+        };
+        let Some(after) = command.split("/CoreSimulator/Devices/").nth(1) else {
+            continue;
+        };
+        if let (Some(udid), Ok(percent)) = (
+            uuids(&after[..after.len().min(UUID_LEN)]).pop(),
+            percent.parse::<f64>(),
+        ) {
+            *cpu.entry(udid).or_default() += percent;
+        }
+    }
+    cpu
 }
 
 struct T3World(Arc<crate::agents::Agents>);
@@ -1291,8 +1300,8 @@ mod tests {
         fn create(&self) -> Pending<'_, Result<(String, String)>> {
             Box::pin(async { Err(anyhow!("not in these tests")) })
         }
-        fn cpu(&self) -> HashMap<String, f64> {
-            HashMap::new()
+        fn cpu(&self) -> Pending<'_, HashMap<String, f64>> {
+            Box::pin(async { HashMap::new() })
         }
     }
 

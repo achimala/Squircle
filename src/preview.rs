@@ -143,7 +143,8 @@ pub async fn capture(
     .await?;
     let pid = launch_pid(&launch, &output.bundle_id)?;
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(3)) => {},
+        // No event says an arbitrary app has drawn its first screen.
+        () = crate::clock::after(Duration::from_secs(3)) => {},
         _ = cancelled(cancel.clone()) => bail!("Preview cancelled"),
     }
     // A crashing launch must not silently publish a SpringBoard screenshot.

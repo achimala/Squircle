@@ -52,16 +52,16 @@ pub(super) fn process_start(pid: u32) -> Option<(u64, u64)> {
     (read == size).then_some((info.pbi_start_tvsec, info.pbi_start_tvusec))
 }
 
-/// The process's command line, if it is running.
+/// The process's command line, if it is running, from the kernel: read in
+/// owner letters, it must not wait on a `ps`.
 pub(super) fn command_line(pid: u32) -> Option<String> {
-    let output = std::process::Command::new("/bin/ps")
-        .args(["-ww", "-o", "command=", "-p", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let line = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (output.status.success() && !line.is_empty()).then_some(line)
+    let arguments = crate::service::arguments(pid).ok()?;
+    let line = arguments
+        .iter()
+        .map(|a| a.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!line.is_empty()).then_some(line)
 }
 
 /// Whether `recorder` is still this session's: its command line names the

@@ -472,7 +472,8 @@ async fn check(root: &Path, record: &Record) -> Result<()> {
                 program().display()
             );
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // launchd tells a job's state only to `launchctl print`.
+        crate::clock::after(Duration::from_millis(100)).await;
     };
     launchctl(&["bootout", &target]).await?;
     let _ = std::fs::remove_file(&path);
@@ -546,7 +547,8 @@ async fn launched(root: &Path, server: &str, old: Option<u32>) -> Result<u32> {
                 tail.into_iter().rev().collect::<Vec<_>>().join("\n")
             );
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // launchd tells a job's state only to `launchctl print`.
+        crate::clock::after(Duration::from_millis(200)).await;
     }
 }
 
@@ -761,6 +763,16 @@ async fn announced(log: &Path, from: u64) -> Result<()> {
 
 /// `pid`'s command line, environment and working directory.
 fn invocation(pid: u32) -> Result<Invocation> {
+    let (argv, env) = process_args(pid)?;
+    invocation_with(pid, argv, env)
+}
+
+/// `pid`'s arguments, read from the kernel (no `ps`, nothing waited for).
+pub(crate) fn arguments(pid: u32) -> Result<Vec<OsString>> {
+    Ok(process_args(pid)?.0)
+}
+
+fn process_args(pid: u32) -> Result<ProcessArgs> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size: libc::size_t = 0;
     let sized = unsafe {
@@ -795,8 +807,14 @@ fn invocation(pid: u32) -> Result<Invocation> {
         std::io::Error::last_os_error()
     );
     raw.truncate(size);
-    let (argv, env) = parse_procargs(&raw)?;
+    parse_procargs(&raw)
+}
 
+fn invocation_with(
+    pid: u32,
+    argv: Vec<OsString>,
+    env: Vec<(OsString, OsString)>,
+) -> Result<Invocation> {
     let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
     let length = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
     let got = unsafe {

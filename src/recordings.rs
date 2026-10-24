@@ -408,12 +408,14 @@ fn settled_sessions(root: &Path) -> std::collections::HashMap<String, Value> {
 
 /// Session IDs some running process names on its command line (a recorder
 /// still writing, an avconvert still converting).
-fn running_sessions() -> String {
-    std::process::Command::new("/bin/ps")
+async fn running_sessions() -> String {
+    tokio::process::Command::new("/bin/ps")
         .args(["-ww", "-A", "-o", "command="])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .output()
+        .await
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
 }
@@ -447,7 +449,7 @@ pub async fn plan(tools: &Tools, root: &Path) -> Result<Plan> {
             }
         }
     }
-    (plan.orphans, plan.live) = orphans(root);
+    (plan.orphans, plan.live) = orphans(root).await;
     Ok(plan)
 }
 
@@ -456,9 +458,9 @@ pub async fn plan(tools: &Tools, root: &Path) -> Result<Plan> {
 /// sessions still recording (or not provably over), which nothing touches.
 /// A file `media shrink` is working on (`.ID.mp4.shrinking`,
 /// `.ID.mp4.light.mp4`) belongs to no session.
-pub fn orphans(root: &Path) -> (Vec<Orphan>, Vec<PathBuf>) {
+pub async fn orphans(root: &Path) -> (Vec<Orphan>, Vec<PathBuf>) {
     let ledger = settled_sessions(root);
-    let processes = running_sessions();
+    let processes = running_sessions().await;
     let mut hidden: std::collections::BTreeMap<(&'static str, String, String), Vec<PathBuf>> =
         Default::default();
     for owners in ["threads", "tasks"] {
@@ -525,8 +527,8 @@ pub fn orphans(root: &Path) -> (Vec<Orphan>, Vec<PathBuf>) {
 
 /// `media shrink --orphans=delete`: deletes every file of every orphan
 /// (recordings, posters, avconvert's leftovers, logs); encodes nothing.
-pub fn delete_orphans(root: &Path, dry_run: bool) -> Value {
-    let (orphans, live) = orphans(root);
+pub async fn delete_orphans(root: &Path, dry_run: bool) -> Value {
+    let (orphans, live) = orphans(root).await;
     let (mut files, mut bytes, mut failed) = (Vec::new(), 0u64, Vec::new());
     for orphan in &orphans {
         for file in orphan.files() {
