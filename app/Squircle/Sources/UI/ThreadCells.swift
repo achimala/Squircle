@@ -139,8 +139,22 @@ final class HeaderCell: TimelineCell {
 /// edge; the answer fills the column; notes and thoughts are quieter.
 final class MessageCell: TimelineCell {
     enum Style { case user, answer, note, thought, update, action, agent }
-    /// Your words sit in lightly tinted glass.
-    let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
+    /// Your words sit in lightly tinted glass. Made only for your rows:
+    /// glass is costly to create and most rows never show it.
+    private(set) lazy var bubble: UIVisualEffectView = {
+        let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
+        bubble.translatesAutoresizingMaskIntoConstraints = false
+        contentView.insertSubview(bubble, at: 0)
+        NSLayoutConstraint.activate([
+            bubble.topAnchor.constraint(equalTo: text.topAnchor),
+            bubble.bottomAnchor.constraint(equalTo: text.bottomAnchor),
+            bubble.leadingAnchor.constraint(equalTo: text.leadingAnchor, constant: -15),
+            bubble.trailingAnchor.constraint(equalTo: text.trailingAnchor, constant: 15)
+        ])
+        hasBubble = true
+        return bubble
+    }()
+    private var hasBubble = false
     /// What an agent sent hangs off a thin rule, like a quotation.
     private let rule = UIView()
     let text = UITextView()
@@ -159,7 +173,7 @@ final class MessageCell: TimelineCell {
         text.linkTextAttributes = [.foregroundColor: Theme.accent]
         rule.backgroundColor = Theme.accent.withAlphaComponent(0.45)
         rule.layer.cornerRadius = 1
-        [bubble, rule, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
+        [rule, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         leading = text.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20)
         trailing = text.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
         minimumLeading = text.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 76)
@@ -168,10 +182,6 @@ final class MessageCell: TimelineCell {
             top,
             text.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
             trailing,
-            bubble.topAnchor.constraint(equalTo: text.topAnchor),
-            bubble.bottomAnchor.constraint(equalTo: text.bottomAnchor),
-            bubble.leadingAnchor.constraint(equalTo: text.leadingAnchor, constant: -15),
-            bubble.trailingAnchor.constraint(equalTo: text.trailingAnchor, constant: 15),
             rule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
             rule.widthAnchor.constraint(equalToConstant: 2),
             rule.topAnchor.constraint(equalTo: text.topAnchor, constant: 2),
@@ -206,7 +216,7 @@ final class MessageCell: TimelineCell {
         text.textContainer.lineBreakMode = folded ? .byTruncatingTail : .byWordWrapping
         // Selecting text matters for answers; quieter rows are tapped to unfold.
         text.isUserInteractionEnabled = style == .answer || style == .user
-        bubble.isHidden = !user
+        if user || hasBubble { bubble.isHidden = !user }
         rule.isHidden = style != .agent
         leading.isActive = !user
         leading.constant = style == .agent ? 34 : 20

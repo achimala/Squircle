@@ -536,15 +536,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Home's own controls coming the other way.
     func setTransitionProgress(_ progress: CGFloat) {
         let alpha = ((progress - 0.55) / 0.45).clamped()
-        back.alpha = alpha
-        tasks.alpha = alpha
-        more.alpha = alpha
-        builds.alpha = alpha
-        jump.alpha = jumpShown ? alpha : 0
+        for control in [back, tasks, more, builds] { control.update(\.alpha, to: alpha) }
+        jump.update(\.alpha, to: jumpShown ? alpha : 0)
         let shown = progress > 0.001
         if shown != onScreen {
             onScreen = shown
-            for case let cell as SimulatorCell in table.visibleCells { cell.showing = shown }
+            // `visibleCells` lays the table out first; only simulators need it.
+            if hasSimulators { for case let cell as SimulatorCell in table.visibleCells { cell.showing = shown } }
             setNeedsMediaPass()
         }
     }
@@ -566,6 +564,34 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         freshness = nil
         taskFreshness = nil
     }
+
+    /// Closed and off screen, kept to be shown again: it lets go of the
+    /// model and of the simulators it showed.
+    func park() {
+        deactivate()
+        view.endEditing(true)
+        if !reportedSimulators.isEmpty { host?.conversation(self, showsSimulators: []) }
+        reportedSimulators = []
+    }
+
+    /// Parked, it opens again as a new page would: at the bottom, its turns
+    /// folded, the field empty, what changed meanwhile already in place.
+    func resume() {
+        guard !tornDown, !active else { return }
+        expanded = []
+        composer.text = ""
+        pinToBottom = true
+        jumpShown = false
+        jump.alpha = 0
+        jump.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+        resuming = true
+        reactivate()
+        resuming = false
+        scrollToBottom()
+        renderSend()
+    }
+    /// `resume` is rendering: rows that changed while parked are not news.
+    private var resuming = false
 
     /// Puts `id` on screen at once from what was last seen of it, then
     /// follows it live.
@@ -702,13 +728,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                                                      simulators: model.threadSimulators, thread: currentSessionID))
         guard next != items else { return }
         let previous = itemsByID
-        let first = items.isEmpty
+        // The conversation's rows arriving where only its title showed (a
+        // thread not seen yet this session) are its first, not news: they
+        // appear at once, not as a stream of rows sliding in mid-push. Your
+        // own first message still flies in.
+        let first = resuming || (!items.contains { $0.id != "header" } && flyingID == nil)
         // A turn finishing folds its steps away; let the table animate that.
-        let folding = animated || (previous["live"] != nil && !next.contains { $0.id == "live" })
+        let folding = animated || (!resuming && previous["live"] != nil && !next.contains { $0.id == "live" })
         items = next
         itemsByID = [:]
         var ids: [String] = []
         for item in next where itemsByID[item.id] == nil { itemsByID[item.id] = item; ids.append(item.id) }
+        hasSimulators = false; hasLiveSimulator = false
+        for case .simulator(let use) in next { hasSimulators = true; hasLiveSimulator = hasLiveSimulator || use.live }
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
         snapshot.appendItems(ids)
@@ -724,6 +756,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 guard let self, pinToBottom, flyingID == nil else { return }
                 scrollToBottom(animated: true)
             }
+        } else if first, !resuming, pinToBottom, flyingID == nil {
+            // A whole conversation at once, shown from its end: loading it
+            // lays out the rows where the table is, so it goes to where the
+            // end will be first, and only the rows that show there are built.
+            let known = heights
+            let estimate = ids.reduce(0) { $0 + estimatedHeight(of: $1, known: known) }
+            table.contentOffset.y = max(-table.contentInset.top, estimate + table.contentInset.bottom - table.bounds.height)
+            UIView.performWithoutAnimation { dataSource.applySnapshotUsingReloadData(snapshot) }
         } else {
             UIView.performWithoutAnimation {
                 dataSource.apply(snapshot, animatingDifferences: false)
@@ -735,13 +775,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && view.window != nil) }
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
         updateSticky()
-        reportVisibleSimulators()
         setNeedsMediaPass()
         // Only the turn that was live pulses, when it folds into its own
         // summary; a quick reply with no steps must not light up an older one.
         let wasLive = liveTurn
         liveTurn = itemsByID["live"] == nil ? nil : messages.last(where: { $0.role == "user" })?.id ?? "start"
-        if previous["live"] != nil, liveTurn == nil, let turn = wasLive, itemsByID["summary:" + turn] != nil {
+        if !resuming, previous["live"] != nil, liveTurn == nil, let turn = wasLive, itemsByID["summary:" + turn] != nil {
             celebrate("summary:" + turn)
         }
     }
@@ -876,7 +915,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateSticky()
-        reportVisibleSimulators()
         setNeedsMediaPass()
         guard scrollView.isTracking || scrollView.isDecelerating else { return }
         let bottom = scrollView.contentSize.height + scrollView.contentInset.bottom - scrollView.bounds.height
@@ -1010,6 +1048,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }()
     private var mediaPassPending = false
     /// What's on screen changed: look again once, on the next frame.
+    /// Also says which live simulators show (`reportVisibleSimulators`):
+    /// once the table has settled, not at each offset it passes through.
     private func setNeedsMediaPass() {
         guard !mediaPassPending else { return }
         mediaPassPending = true
@@ -1024,6 +1064,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// each with its distance from the middle of what shows. Nothing while
     /// the conversation is out of sight.
     private func mediaPass() {
+        reportVisibleSimulators()
         guard onScreen, view.window != nil, table.bounds.height > 0 else { media.seen([:]); return }
         let top = table.contentOffset.y + table.contentInset.top
         let bottom = max(top, table.contentOffset.y + table.bounds.height - table.contentInset.bottom)
@@ -1032,6 +1073,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         var wants: [String: MediaQueue.Want] = [:]
         for path in table.indexPathsForRows(in: near) ?? [] {
             guard let id = dataSource.itemIdentifier(for: path), let item = itemsByID[id] else { continue }
+            // Only rows with media: a row's rect measures it, building its cell off screen.
+            switch item { case .gallery, .figure, .simulator: break; default: continue }
             let row = table.rectForRow(at: path)
             let distance = Double(abs(min(max(middle, row.minY), row.maxY) - middle))
             let visible = row.maxY > top && row.minY < bottom
@@ -1093,7 +1136,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// Live simulator blocks at least half on screen.
     private func reportVisibleSimulators() {
-        guard let host else { return }
+        // `visibleCells` lays the table out; without live simulators there is nothing to say.
+        guard let host, hasLiveSimulator || !reportedSimulators.isEmpty else { return }
         let visible = table.bounds.inset(by: table.contentInset)
         var ids = Set<String>()
         for cell in table.visibleCells {
@@ -1107,6 +1151,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
     }
     private var reportedSimulators = Set<String>()
+    /// Whether the rows include a simulator, and one that is live.
+    private var hasSimulators = false
+    private var hasLiveSimulator = false
 
     /// "Task from Squircle agent" over the task; a piece after one of its
     /// tables or pictures has no label.
@@ -1152,8 +1199,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if let id = dataSource.itemIdentifier(for: indexPath) { heights[id] = cell.bounds.height }
     }
     func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
-        guard let id = dataSource.itemIdentifier(for: indexPath) else { return 60 }
+        dataSource.itemIdentifier(for: indexPath).map { estimatedHeight(of: $0, known: heights) } ?? 60
+    }
+
+    /// A row's measured height, or a guess from its text until it is measured.
+    private func estimatedHeight(of id: String, known heights: [String: CGFloat]) -> CGFloat {
         if let known = heights[id] { return known }
+        let tableView = table
         let width = max(200, tableView.bounds.width - 40)
         func lines(_ text: String, per: CGFloat) -> CGFloat {
             text.split(separator: "\n", omittingEmptySubsequences: false)

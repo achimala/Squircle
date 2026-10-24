@@ -766,7 +766,10 @@ final class SquircleModel {
         private init(state: T3ThreadState, rows: [ChatMessage]) { self.state = state; self.rows = rows }
         static let empty = Transcript(state: T3ThreadState(), rows: [])
         nonisolated static func render(_ state: T3ThreadState) async -> Transcript {
-            Transcript(state: state, rows: await SquircleModel.conversation(state))
+            let rows = await SquircleModel.conversation(state)
+            // Here, off the main actor, rather than when the thread first shows.
+            ThreadItem.prepare(rows, running: state.isRunning)
+            return Transcript(state: state, rows: rows)
         }
     }
     /// Renders the open thread off the main actor, one pass at a time;
