@@ -113,7 +113,32 @@ instructions say the same.
 
 ## Phone
 
-**Pages (2026-10-24, superseding the grouped list below).** The Tasks tab is
+**Overview and pages (2026-10-24, user decision, superseding the
+page-per-item pager the same morning).** The pager alone was "absolutely
+unusable" on a real list (LanguageApp: 24 open items, long asks): 24 pages
+swiped blind with no way to scan, find or compare. The Tasks tab now opens
+on an overview of every work item: a search field (once there are more than
+six tasks; it looks through History too), then groups Needs you, Ready to
+try, In progress, Queued, Done (today's) and History (folded). Rows are
+compact: the round tick in the status colour (one tap marks it done; the
+batch, 0.65 s settle and the 4 s Undo capsule are back), the ask's first two
+lines, then sub-task progress ("2/5") and the note on one line, and the
+worker's jelly while one is alive or Install. Swipe left: Done / Drop;
+swipe right: Top; long press: any status. Tapping a row pushes that item's
+page (route `.overview | .item(id)` and one spring; the overview and the
+pages slide side by side, the destination takes touches at once). Pages
+swipe sideways through the overview's rows in its order ("3 of 24" at the
+top right); back is the chevron where the close button was, or a swipe
+right that starts at the left edge (a plain pan limited to the edge band:
+a screen-edge recogniser never fires inside the sheet). Only the shown page
+and its neighbours exist. The page itself is as below (status menu, ask,
+note, Install, sub-task checklist, threads, pictures). DEBUG:
+`SQUIRCLE_DEMO_TASKS=PATH` loads a real list (`squircle task list --json`)
+kept on the phone; validated on a simulator with the LanguageApp snapshot
+(24 open, 2 done, 20 History): find by search, open, page, back, swipe Done,
+tick and Undo.
+
+**Pages (2026-10-24 morning, superseded above).** The Tasks tab was
 a horizontal pager (native paging; the page follows the finger, dots at the
 foot also move it): one page per open work item, needs you first, then in
 progress, ready to try, queued. A page shows its status (tap: any status, or
@@ -122,12 +147,7 @@ own or a sub-task's) is ready, the sub-tasks as a checklist (tap the circle
 to tick one done, again to reopen it; the rest of the row opens its thread),
 its and its sub-tasks' threads (live workers with their jelly, finished
 ones as chips; tap pushes the thread) and their screenshots and clips at a
-readable size (tap opens). The last page is Done (today's) and History,
-searchable and paged as before, with the old rows; long press for any
-status. No swipe actions there (the pager owns horizontal swipes), no undo
-toast (a tick is undone by tapping again). The Tasks | Threads switch stays.
-DEBUG: `SQUIRCLE_DEMO_TASKS=1` has work items with sub-tasks;
-`SQUIRCLE_DEMO_PAGES=1` swipes through the pages.
+readable size (tap opens). The last page was Done and History.
 
 The grouped list (2026-10-15), kept for the record:
 

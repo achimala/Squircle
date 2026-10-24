@@ -1644,10 +1644,17 @@ final class SquircleModel {
         }
     }
     /// `SQUIRCLE_DEMO_TASKS=1`: made-up tasks kept on the phone, so ticking
-    /// through them on a simulator touches nobody's real list.
+    /// through them on a simulator touches nobody's real list;
+    /// `SQUIRCLE_DEMO_TASKS=PATH`: a copy of a real list instead (what
+    /// `squircle task list --json` prints), kept on the phone the same way.
     private var demoTasks: AppTasks? = SquircleModel.makeDemoTasks() { didSet { changed() } }
     private static func makeDemoTasks() -> AppTasks? {
-        guard ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_TASKS"] == "1" else { return nil }
+        guard let setting = ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_TASKS"] else { return nil }
+        if setting != "1" {
+            struct Envelope: Decodable { let data: AppTasks }
+            guard let data = FileManager.default.contents(atPath: setting) else { return nil }
+            return (try? JSONDecoder().decode(Envelope.self, from: data).data) ?? (try? JSONDecoder().decode(AppTasks.self, from: data))
+        }
         // Work items with sub-tasks, workers on some, so the crew shows:
         // (ask, status, note, [(title, state)], [(sub-task, status, note)], pictures).
         typealias Item = (String, String, String, [(String, String)], [(String, String, String)], Int)
