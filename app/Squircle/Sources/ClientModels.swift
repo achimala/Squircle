@@ -203,8 +203,10 @@ struct ImageAttachment: Identifiable, Equatable {
         let file: URL
         /// Its length (and, for performance, its hitches), e.g. "0:12 · 3 hitches".
         let label: String
+        /// What it is, for the sent message: a recording unless you picked a video.
+        var name: String?
         /// How the sent message names it.
-        var sentLabel: String { (kind == .video ? "Screen recording · " : "Performance recording · ") + label }
+        var sentLabel: String { (name ?? (kind == .video ? "Screen recording" : "Performance recording")) + " · " + label }
     }
 
     init(capture: Capture, thumbnail: UIImage, id: String = UUID().uuidString) {
@@ -212,6 +214,34 @@ struct ImageAttachment: Identifiable, Equatable {
         self.capture = capture
         self.thumbnail = thumbnail
         data = thumbnail.jpegData(compressionQuality: 0.8) ?? Data()
+    }
+
+    /// A video, picked, pasted or recorded: it goes to the Mac through
+    /// Squircle like a recording. `poster` is its thumbnail's picture.
+    init(video file: URL, poster: UIImage, duration: Double, name: String? = nil) {
+        let length = Elapsed.clock(duration.rounded())
+        self.init(capture: .init(kind: .video, file: file, label: length, name: name),
+                  thumbnail: Self.videoThumbnail(poster, length: length))
+    }
+
+    /// The top of `poster`, wide enough for the field's tray to show, with a
+    /// play badge and the video's length.
+    private static func videoThumbnail(_ poster: UIImage, length text: String) -> UIImage {
+        let size = CGSize(width: 200, height: 160)
+        return UIGraphicsImageRenderer(size: size).image { _ in
+            let height = size.width * poster.size.height / max(1, poster.size.width)
+            poster.draw(in: CGRect(x: 0, y: -height * 0.06, width: size.width, height: height))
+            let font = UIFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+            let label = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: UIColor.white])
+            let icon = UIImage(systemName: "play.fill", withConfiguration: UIImage.SymbolConfiguration(font: font))?
+                .withTintColor(.white, renderingMode: .alwaysOriginal)
+            let width = label.size().width + 32
+            let pill = CGRect(x: 8, y: size.height - 34, width: width, height: 26)
+            UIColor.black.withAlphaComponent(0.6).setFill()
+            UIBezierPath(roundedRect: pill, cornerRadius: 13).fill()
+            icon?.draw(in: CGRect(x: pill.minX + 8, y: pill.midY - 6, width: 12, height: 12))
+            label.draw(at: CGPoint(x: pill.minX + 24, y: pill.midY - label.size().height / 2))
+        }
     }
 
     /// Scales `image` so its long side is at most 2000 pixels.

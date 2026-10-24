@@ -57,6 +57,23 @@ in the same place.
   Metal pass 0.06–0.09 ms GPU a frame, render server 26% → 28% (it now
   draws the keyboard). Not yet measured on the phone, where H.264 is in
   hardware.
+  **2026-10-24 (user: phone recordings came through black):** on the phone
+  that whole-display pass draws nothing: both phone recordings since (Oct 21,
+  Oct 24; 590×1280, hardware encoder) are black frames with only the finger
+  dots, while the phone recording from before it (drawHierarchy) had the app.
+  The call reports success; an app may only render its own layers there. The
+  simulator renders the whole display, which is why it passed. Back to layer
+  mode (the call UIKit makes), one render per window below the overlay into
+  its own BGRA surface; the same Metal pass stacks them (premultiplied, bottom
+  first, at most 8) before the dots and 420v conversion. The keyboard and
+  status bar are not in the recording again. Simulator: 2 s → 58 frames,
+  upright, content as shown.
+- Videos from the library, the pasteboard or a drop (2026-10-24): the field's
+  picker offers images and videos; picked, pasted, dropped and recorded videos
+  all become `ImageAttachment(video:)`, upload through `/v1/captures?kind=video`
+  and are linked in the message ("Video · 0:12"). The file is sent as it is
+  (QuickTime stays `.mov`, checked by its `ftyp`); the 300 MB capture limit
+  applies.
 - Performance (`PerfRecorder`, `MainThreadSampler`): display-link frame times
   (hitch = frame more than 1.5 periods apart), main-thread stack every ~1 ms
   (suspend, `thread_get_state`, frame-pointer walk bounded to the main

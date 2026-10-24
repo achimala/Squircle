@@ -104,9 +104,7 @@ final class CaptureSession {
                 try? FileManager.default.removeItem(at: url)
                 return nil
             }
-            let label = Elapsed.clock(duration.rounded())
-            return ImageAttachment(capture: .init(kind: .video, file: url, label: label),
-                                   thumbnail: Self.badge(poster, text: label, symbol: "play.fill"))
+            return ImageAttachment(video: url, poster: poster, duration: duration)
         case .performance(let url, let duration, let gaps, let hitches):
             let count = hitches == 1 ? "1 hitch" : "\(hitches) hitches"
             return ImageAttachment(capture: .init(kind: .performance, file: url, label: Elapsed.clock(duration.rounded()) + " · " + count),
@@ -127,26 +125,6 @@ final class CaptureSession {
             break
         }
         state = .idle
-    }
-
-    /// The screen's top, wide enough for the field's tray to show, with a
-    /// play badge and the recording's length.
-    private static func badge(_ poster: UIImage, text: String, symbol: String) -> UIImage {
-        let size = CGSize(width: 200, height: 160)
-        return UIGraphicsImageRenderer(size: size).image { _ in
-            let height = size.width * poster.size.height / max(1, poster.size.width)
-            poster.draw(in: CGRect(x: 0, y: -height * 0.06, width: size.width, height: height))
-            let font = UIFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
-            let label = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: UIColor.white])
-            let icon = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(font: font))?
-                .withTintColor(.white, renderingMode: .alwaysOriginal)
-            let width = label.size().width + 32
-            let pill = CGRect(x: 8, y: size.height - 34, width: width, height: 26)
-            UIColor.black.withAlphaComponent(0.6).setFill()
-            UIBezierPath(roundedRect: pill, cornerRadius: 13).fill()
-            icon?.draw(in: CGRect(x: pill.minX + 8, y: pill.midY - 6, width: 12, height: 12))
-            label.draw(at: CGPoint(x: pill.minX + 24, y: pill.midY - label.size().height / 2))
-        }
     }
 
     /// Each frame's time as a bar, late frames (as the recording counted
