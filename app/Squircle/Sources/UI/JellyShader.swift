@@ -1,6 +1,6 @@
 import Metal
 import simd
-import UIKit
+import Foundation
 
 /// Matches `Uniforms` in the shader.
 struct JellyUniforms {
