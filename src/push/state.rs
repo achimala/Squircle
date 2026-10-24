@@ -15,6 +15,9 @@ pub(super) struct State {
     /// Each thread's last turn and phase, once the first shell is seen.
     pub(super) seen: Option<HashMap<String, (Option<String>, Phase)>>,
     pub(super) threads: Option<Arc<dyn Threads>>,
+    /// Writes to T3's database seen so far: a step may have changed since a
+    /// lookup that began at fewer.
+    pub(super) written: u64,
 }
 
 pub(super) type DeliveryPlan = (
@@ -162,6 +165,7 @@ impl State {
                     key,
                     text: None,
                     checked: None,
+                    seen: 0,
                     looking: false,
                 });
             }
@@ -189,8 +193,13 @@ impl State {
             presence,
             apps,
             generation,
+            written,
             ..
         } = self;
+        // A phone's report lapses on its own: what it allows changes then.
+        for report in presence.values().filter(|p| p.until > now) {
+            due(report.until);
+        }
         for app in apps.values_mut() {
             if let Want::Pausing { since, last } = &app.want {
                 if now.duration_since(*since) >= timing.pause {
@@ -243,6 +252,7 @@ impl State {
                     (Want::Show(_), Some(Stage::Starting { at }))
                         if now.duration_since(*at) < START_WAIT =>
                     {
+                        due(*at + START_WAIT);
                         continue;
                     }
                     (Want::Show(shown), _) => {
@@ -313,10 +323,14 @@ impl State {
             if step.looking || !recipients.contains(project) {
                 continue;
             }
+            // The turn's first look, then again only once T3 has written
+            // something since the last began, at most every STEP_EVERY.
             match step.checked {
+                Some(_) if step.seen >= *written => {}
                 Some(at) if now.duration_since(at) < STEP_EVERY => due(at + STEP_EVERY),
                 _ => {
                     step.looking = true;
+                    step.seen = *written;
                     lookups.push((project.clone(), step.key.clone()));
                 }
             }

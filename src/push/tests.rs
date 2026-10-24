@@ -118,13 +118,10 @@ impl Transport for Scripted {
     }
 }
 
-fn fast() -> Timing {
-    Timing {
-        coalesce: Duration::from_millis(10),
-        retry: Duration::from_millis(30),
-        pause: Duration::from_millis(40),
-        throttle: Duration::from_millis(20),
-    }
+/// The reconciler with no T3 database to watch.
+fn run(push: &Arc<Push>) {
+    use futures_util::StreamExt;
+    tokio::spawn(push.clone().run(futures_util::stream::pending().boxed()));
 }
 
 fn app(agent: Value) -> Vec<AppView> {
@@ -171,12 +168,15 @@ fn events(transport: &Scripted) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
+/// On tokio's paused clock: the policy's durations pass as the test says.
+#[tokio::test(start_paused = true)]
 async fn transient_failures_retry_and_an_end_keeps_its_token_until_accepted() {
+    use crate::clock::{elapse, settle};
     let dir = tempfile::tempdir().unwrap();
     let transport = Arc::new(Scripted::default());
-    let push = Push::with_transport(dir.path(), transport.clone(), fast()).unwrap();
-    tokio::spawn(push.clone().run());
+    let timing = Timing::default();
+    let push = Push::with_transport(dir.path(), transport.clone(), timing).unwrap();
+    run(&push);
     phone(&push).await;
 
     // An alert that APNs drops once arrives on the retry, under one collapse ID.
@@ -190,7 +190,7 @@ async fn transient_failures_retry_and_an_end_keeps_its_token_until_accepted() {
         line: "Build failed".into(),
         target: Target::default(),
     });
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    elapse(timing.coalesce + timing.retry).await;
     let alerts: Vec<Delivery> = transport
         .sent
         .lock()
@@ -204,7 +204,7 @@ async fn transient_failures_retry_and_an_end_keeps_its_token_until_accepted() {
     assert!(alerts[0].collapse_id.is_some() && alerts[0].collapse_id == alerts[1].collapse_id);
 
     push.apps_changed(app(working("t1"))).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle().await;
     assert_eq!(events(&transport), ["update"]);
 
     // Idle past the pause: the End fails once, and the token survives it.
@@ -215,21 +215,21 @@ async fn transient_failures_retry_and_an_end_keeps_its_token_until_accepted() {
         .push((PushType::LiveActivity, Outcome::Retry("HTTP 500".into())));
     push.apps_changed(app(json!({"latestRunId": "t1", "status": "completed"})))
         .await;
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    elapse(timing.pause).await;
     assert_eq!(events(&transport), ["update", "end"]);
     assert_eq!(
         push.status().await["devices"][0]["live_activities"],
         1,
         "token kept for the retry"
     );
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    elapse(timing.retry).await;
     assert_eq!(events(&transport), ["update", "end", "end"]);
     assert_eq!(
         push.status().await["devices"][0]["live_activities"],
         0,
         "forgotten once ended"
     );
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    elapse(RETRY_CAP).await;
     assert_eq!(
         events(&transport).len(),
         3,
@@ -270,32 +270,35 @@ impl Threads for SlowSteps {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_late_step_from_an_older_turn_is_dropped_and_steps_need_a_recipient() {
+    use crate::clock::{elapse, settle};
     let dir = tempfile::tempdir().unwrap();
     let transport = Arc::new(Scripted::default());
-    let push = Push::with_transport(dir.path(), transport.clone(), fast()).unwrap();
+    let timing = Timing::default();
+    let push = Push::with_transport(dir.path(), transport.clone(), timing).unwrap();
     let steps = Arc::new(SlowSteps {
         calls: Mutex::default(),
         release: tokio::sync::Notify::new(),
     });
     push.set_threads(steps.clone());
-    tokio::spawn(push.clone().run());
+    run(&push);
 
     push.apps_changed(app(working("t1"))).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle().await;
     assert!(
         steps.calls.lock().unwrap().is_empty(),
         "no phone, no lookup"
     );
 
     phone(&push).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle().await;
     assert_eq!(steps.calls.lock().unwrap().len(), 1);
     push.apps_changed(app(working("t2"))).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    settle().await;
     steps.release.notify_one();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Long enough for any throttled update to go out.
+    elapse(timing.throttle).await;
 
     let statuses: Vec<String> = transport
         .sent

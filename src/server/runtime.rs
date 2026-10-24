@@ -82,7 +82,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     // After the announcement, which is the first line supervisors read.
     background.push(tokio::spawn(agents.clone().run()));
     background.push(tokio::spawn(agents.clone().upkeep()));
-    background.push(tokio::spawn(push.clone().run()));
+    background.push(tokio::spawn(push.clone().run(crate::t3db::changes())));
     background.push(tokio::spawn(sims.clone().run()));
     background.push(tokio::spawn(pool.clone().run(sims.clone())));
     background.push(tokio::spawn(

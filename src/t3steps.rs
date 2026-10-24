@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use serde_json::{Map, Value, json};
 
 pub use crate::t3db::state_path;
-use crate::t3db::{DETAIL_READ, STEP_READ, params, query, sql};
+use crate::t3db::{params, query, sql};
 
 pub(crate) fn valid(id: &str, extra: &[char]) -> bool {
     !id.is_empty()
@@ -78,7 +78,7 @@ pub async fn current_step(thread: &str) -> Result<Option<String>> {
     if !valid(thread, &[]) {
         bail!("invalid thread ID");
     }
-    let rows = query(sql::CURRENT_STEP, params![thread], STEP_READ).await?;
+    let rows = query(sql::CURRENT_STEP, params![thread]).await?;
     Ok(rows.iter().find_map(|row| {
         let input = row["input"]
             .as_str()
@@ -94,7 +94,7 @@ pub async fn simulator_commands(since: &str) -> Result<Vec<crate::simpool::Activ
     if !since.is_empty() && !valid(since, &[':', '.', 'T', 'Z']) {
         bail!("invalid timestamp");
     }
-    let rows = query(sql::SIMULATOR_COMMANDS, params![since], DETAIL_READ).await?;
+    let rows = query(sql::SIMULATOR_COMMANDS, params![since]).await?;
     Ok(rows
         .into_iter()
         .filter_map(|row| {
@@ -165,7 +165,7 @@ pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
         s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "-:.TZ+".contains(c))
     });
-    let rows = query(sql::STEPS, params![thread, since], DETAIL_READ).await?;
+    let rows = query(sql::STEPS, params![thread, since]).await?;
     let mut order: Vec<String> = Vec::new();
     let mut steps: std::collections::HashMap<String, Map<String, Value>> = Default::default();
     for row in rows {
@@ -225,7 +225,7 @@ pub async fn image(thread: &str, call: &str, index: usize) -> Result<Option<Valu
     if !valid(thread, &[]) || !valid(call, &['_', ':', '%', '.']) {
         bail!("invalid identifier");
     }
-    let rows = query(sql::IMAGES, params![thread, call], DETAIL_READ).await?;
+    let rows = query(sql::IMAGES, params![thread, call]).await?;
     Ok(distinct(rows).into_iter().nth(index).map(|row| {
         json!({
             "media_type": row["media_type"].as_str().unwrap_or("image/png"),
@@ -290,7 +290,7 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
         bail!("invalid project id");
     }
     // Only a prefix of each image is read: enough for its header.
-    let rows = query(sql::PROJECT_SCREENSHOTS, params![project], DETAIL_READ).await?;
+    let rows = query(sql::PROJECT_SCREENSHOTS, params![project]).await?;
     let engine = base64::engine::general_purpose::STANDARD;
     for row in rows {
         if !simulator_capture(row["tool"].as_str().unwrap_or_default()) {
@@ -316,7 +316,7 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
             Some("v2") => sql::SCREENSHOT_DATA_V2,
             _ => sql::SCREENSHOT_DATA,
         };
-        let full = query(read, params![item, path], DETAIL_READ).await?;
+        let full = query(read, params![item, path]).await?;
         let Some(data) = full.first().and_then(|r| r["data"].as_str()) else {
             continue;
         };

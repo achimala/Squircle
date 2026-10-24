@@ -39,6 +39,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+# Tests run timed policy on tokio's paused clock instead of waiting.
+tokio = { version = "1", features = ["test-util"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", features = ["full", "visit"] }
 http-body-util = "0.1"

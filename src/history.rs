@@ -6,7 +6,7 @@
 //! for tool activity) and ranks the matches here, so results are short
 //! snippets with a stable reference that `show` expands.
 
-use crate::t3db::{DETAIL_READ, params, query, sql};
+use crate::t3db::{params, query, sql};
 use crate::t3steps::valid;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -106,7 +106,7 @@ pub async fn scope(thread: Option<&str>, project: Option<&str>, cwd: &Path) -> R
     };
     if let Some(thread) = thread {
         ensure!(valid(thread, &[]), "Thread ID must be a T3 ID");
-        let rows = query(sql::THREAD_PROJECT, params![thread], DETAIL_READ).await?;
+        let rows = query(sql::THREAD_PROJECT, params![thread]).await?;
         return rows
             .first()
             .map(row)
@@ -114,13 +114,13 @@ pub async fn scope(thread: Option<&str>, project: Option<&str>, cwd: &Path) -> R
     }
     if let Some(project) = project {
         ensure!(valid(project, &[]), "Project ID must be a T3 ID");
-        let rows = query(sql::PROJECT, params![project], DETAIL_READ).await?;
+        let rows = query(sql::PROJECT, params![project]).await?;
         return rows
             .first()
             .map(row)
             .with_context(|| format!("T3 has no project {project}"));
     }
-    let rows = query(sql::PROJECT_PLACES, params![], DETAIL_READ).await?;
+    let rows = query(sql::PROJECT_PLACES, params![]).await?;
     let places: Vec<PathBuf> = rows
         .iter()
         .map(|r| PathBuf::from(r["place"].as_str().unwrap_or("/nonexistent")))
@@ -402,7 +402,6 @@ async fn gather(
                 kinds.contains(&Kind::Thread),
                 kinds.contains(&Kind::Activity)
             ],
-            DETAIL_READ,
         )
         .await
         {
@@ -730,7 +729,7 @@ pub async fn show(
     match kind {
         Kind::Message => {
             ensure!(valid(id, &[':', '_', '.']), "Invalid message ID");
-            let rows = query(sql::MESSAGE, params![id], DETAIL_READ).await?;
+            let rows = query(sql::MESSAGE, params![id]).await?;
             let row = rows
                 .first()
                 .with_context(|| format!("T3 has no message {id}"))?;
@@ -768,16 +767,11 @@ pub async fn show(
         }
         Kind::Thread => {
             ensure!(valid(id, &[]), "Invalid thread ID");
-            let thread = query(sql::THREAD, params![id], DETAIL_READ).await?;
+            let thread = query(sql::THREAD, params![id]).await?;
             let thread = thread
                 .first()
                 .with_context(|| format!("T3 has no thread {id}"))?;
-            let messages = query(
-                sql::MESSAGES,
-                params![id, limit.clamp(1, 500) as i64],
-                DETAIL_READ,
-            )
-            .await?;
+            let messages = query(sql::MESSAGES, params![id, limit.clamp(1, 500) as i64]).await?;
             let s = |k: &str| thread[k].as_str().unwrap_or("").to_string();
             let total = thread["total"].as_u64().unwrap_or(0);
             let mut text = format!(
@@ -829,7 +823,7 @@ pub async fn show(
         }
         Kind::Activity => {
             ensure!(valid(id, &[':', '_', '.', '%']), "Invalid activity ID");
-            let rows = query(sql::ACTIVITY, params![id, max_chars as i64], DETAIL_READ).await?;
+            let rows = query(sql::ACTIVITY, params![id, max_chars as i64]).await?;
             let row = rows
                 .first()
                 .with_context(|| format!("T3 has no activity {id}"))?;

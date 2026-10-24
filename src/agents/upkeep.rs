@@ -88,7 +88,6 @@ impl Agents {
         let rows = crate::t3db::query(
             crate::t3db::sql::CONTEXT_READING,
             crate::t3db::params![thread],
-            crate::t3db::DETAIL_READ,
         )
         .await?;
         let row = rows.first().context("no reading")?;

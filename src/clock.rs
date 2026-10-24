@@ -24,7 +24,37 @@ pub async fn until(at: Option<f64>) {
     }
 }
 
+/// Resolves at `at` on tokio's clock (which tests pause and advance);
+/// never without one.
+pub async fn reach(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Resolves once `wait` has passed.
 pub async fn after(wait: Duration) {
     tokio::time::sleep(wait).await
+}
+
+/// Tests: lets `wait` pass on tokio's paused clock (`start_paused`),
+/// running everything that falls due meanwhile. The paused clock moves only
+/// once every task waits, so this is deterministic; on a running clock it
+/// panics rather than wait in real time.
+#[cfg(test)]
+pub async fn elapse(wait: Duration) {
+    // Panics unless the clock is paused.
+    tokio::time::advance(Duration::ZERO).await;
+    tokio::time::sleep(wait).await;
+    // What fell due at that moment runs before the test looks.
+    settle().await;
+}
+
+/// Tests: runs every task until all of them wait, on the paused clock
+/// (which moves a nanosecond once they do).
+#[cfg(test)]
+pub async fn settle() {
+    tokio::time::advance(Duration::ZERO).await;
+    tokio::time::sleep(Duration::from_nanos(1)).await;
 }
