@@ -26,9 +26,11 @@ struct T3ThreadState: Codable {
     var details: [String: JSONValue] = [:]
     /// Newest step detail fetched, so later fetches ask only for what's new.
     var detailsSince: String?
-    /// Details older than version 2 lack what rebuilds steps T3 no longer
-    /// sends; such a cache fetches them all again.
+    /// Details from an older version fetch them all again: before 2 they
+    /// lack what rebuilds steps T3 no longer sends, before 3 the pictures
+    /// agents looked at.
     var detailsVersion: Int?
+    static let detailsVersion = 3
     /// Recordings and images published into the thread.
     var media: [JSONValue] = []
     /// T3's sequence this state is at; -1 for none.

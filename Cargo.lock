@@ -1459,6 +1459,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "memchr",
  "plist",
  "proc-macro2",
  "reqwest",

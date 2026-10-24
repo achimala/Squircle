@@ -339,6 +339,7 @@ mod tests {
             create table orchestration_v2_projection_threads (thread_id text primary key, project_id text, title text, default_provider text, runtime_mode text, interaction_mode text, active_provider_thread_id text, created_at text, updated_at text, archived_at text, deleted_at text, payload_json text, provider_instance_id text);
             create table orchestration_v2_projection_messages (message_id text primary key, thread_id text, run_id text, node_id text, role text, streaming integer, created_at text, updated_at text, payload_json text);
             create table orchestration_v2_projection_turn_items (turn_item_id text primary key, thread_id text, run_id text, node_id text, provider_thread_id text, provider_turn_id text, parent_item_id text, ordinal integer, type text, status text, updated_at text, payload_json text);
+            create table orchestration_v2_projection_provider_threads (provider_thread_id text primary key, thread_id text, owner_node_id text, provider text, provider_session_id text, status text, first_run_ordinal integer, last_run_ordinal integer, updated_at text, payload_json text, driver text, provider_instance_id text);
             create table orchestration_v2_projection_provider_turns (provider_turn_id text primary key, thread_id text, provider_thread_id text, node_id text, run_attempt_id text, ordinal integer, status text, started_at text, completed_at text, payload_json text);
             insert into projection_projects values ('p','App','/app',null);
             insert into projection_threads values ('t','p','old title',null,null,'2026-10-18','2026-10-18',null,null);
@@ -353,6 +354,10 @@ mod tests {
                 '{"title":"test_name","startedAt":"2026-10-19","input":"xcrun simctl list","output":"done","nativeItemRef":{"nativeId":"toolu_1"}}');
             insert into orchestration_v2_projection_turn_items values ('i2','t','r',null,null,null,null,2,'dynamic_tool','completed','2026-10-19',
                 '{"toolName":"mcp__t3-code__device_screenshot","input":{"deviceId":"D"},"output":{"content":[{"type":"text","text":"x"},{"type":"image","data":"BBBB","mimeType":"image/png"}]},"nativeItemRef":{"nativeId":"toolu_2"}}');
+            insert into orchestration_v2_projection_turn_items values ('i3','t','r',null,'pth',null,null,3,'dynamic_tool','completed','2026-10-19',
+                '{"toolName":"Read","input":{"file_path":"/tmp/five.png"},"viewedImagePath":"/tmp/five.png","output":{"type":"image","file":{"type":"image/jpeg"}},"nativeItemRef":{"nativeId":"toolu_3"}}');
+            insert into orchestration_v2_projection_provider_threads values ('pth','t',null,'claudeAgent','s','active',1,1,'2026-10-19',
+                '{"nativeThreadRef":{"driver":"claudeAgent","nativeId":"session-1"}}','claudeAgent','squircle');
             insert into orchestration_v2_projection_provider_turns values ('pt','t','pth','n',null,1,'completed','2026-10-19','2026-10-19',
                 '{"tokenUsage":{"usedTokens":1200,"updatedAt":"2026-10-19T00:00:01Z"}}');
         "#).unwrap();
@@ -366,6 +371,7 @@ mod tests {
             (sql::STEPS, vec![text("t"), SqlValue::Null]),
             (sql::IMAGES, vec![text("t"), text("call")]),
             (sql::IMAGES, vec![text("t"), text("toolu_2")]),
+            (sql::VIEWED, vec![text("t"), text("toolu_3")]),
             (sql::PROJECT_SCREENSHOTS, vec![text("p")]),
             (
                 sql::SCREENSHOT_DATA,
@@ -401,6 +407,18 @@ mod tests {
             "xcrun simctl list"
         );
         assert_eq!(steps[1]["images"], 1);
+        assert_eq!(
+            (
+                &steps[1]["viewed"],
+                &steps[2]["viewed"],
+                &steps[2]["session"]
+            ),
+            (&Value::Null, &json!("/tmp/five.png"), &json!("session-1"))
+        );
+        assert_eq!(
+            read(sql::VIEWED, vec![text("t"), text("i3")])[0]["call"],
+            "toolu_3"
+        );
         assert_eq!(
             read(sql::IMAGES, vec![text("t"), text("toolu_2")])[0]["data"],
             "BBBB"

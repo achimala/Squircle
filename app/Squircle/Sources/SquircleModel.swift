@@ -1272,7 +1272,7 @@ final class SquircleModel {
     /// once to that thread if it is still open. False: try again later.
     private func fetchStepDetails(_ id: String) async -> Bool {
         guard let client, selectedSessionID == id else { return true }
-        let since = state.detailsVersion == 2 ? state.detailsSince : nil
+        let since = state.detailsVersion == T3ThreadState.detailsVersion ? state.detailsSince : nil
         let stepsStart = ContinuousClock.now
         defer { ConnectionTrace.mark("steps", "since=\(since != nil) \(stepsStart.duration(to: .now))") }
         let steps: [JSONValue], workers: [JSONValue]?, published: [JSONValue]
@@ -1285,7 +1285,7 @@ final class SquircleModel {
         // only, never to whichever thread is open now.
         guard !Task.isCancelled, selectedSessionID == id else { return true }
         if let workers {
-            state.detailsVersion = 2
+            state.detailsVersion = T3ThreadState.detailsVersion
             let known = Self.workers(workers)
             if known != self.workers { self.workers = known }
         }
