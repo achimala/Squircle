@@ -1,0 +1,20 @@
+#!/bin/bash
+# Format staged Rust files with rustfmt and stage the result.
+# Enable once per clone: git config core.hooksPath scripts/githooks
+set -eu
+MAIN=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+if [ -x "$MAIN/.tools/cargo/bin/rustfmt" ]; then
+    export CARGO_HOME="$MAIN/.tools/cargo" RUSTUP_HOME="$MAIN/.tools/rustup"
+    PATH="$CARGO_HOME/bin:$PATH"
+fi
+cd "$(git rev-parse --show-toplevel)"
+git diff --cached --name-only --diff-filter=ACMR -z -- '*.rs' |
+while IFS= read -r -d '' file; do
+    if ! git diff --quiet -- "$file"; then
+        echo "pre-commit: $file has unstaged changes; stage all of it (or stash the rest) so it can be formatted." >&2
+        exit 1
+    fi
+    # Format through stdin so rustfmt doesn't follow `mod` declarations into other files.
+    rustfmt --emit stdout < "$file" > "$file.rustfmt" && mv "$file.rustfmt" "$file" || { rm -f "$file.rustfmt"; exit 1; }
+    git add -- "$file"
+done

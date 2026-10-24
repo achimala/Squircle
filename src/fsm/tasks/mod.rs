@@ -726,7 +726,9 @@ impl Book {
         let task = &self.tasks[id];
         let item = self.tasks.get(target).ok_or(format!("No task {target}"))?;
         if target == id || self.children(id).next().is_some() {
-            Err(format!("{id} has sub-tasks of its own; it stays a work item"))
+            Err(format!(
+                "{id} has sub-tasks of its own; it stays a work item"
+            ))
         } else if item.parent.is_some() {
             Err(format!("{target} is itself a sub-task"))
         } else if item.project_id != task.project_id {
@@ -883,9 +885,11 @@ impl Machine for M17 {
                         Disposition::Rejected("A task needs the user's ask".into()),
                     );
                 }
-                let item = parent
-                    .as_deref()
-                    .map(|p| book.tasks.get(p).map(|t| (t.project_id.clone(), t.parent.clone())));
+                let item = parent.as_deref().map(|p| {
+                    book.tasks
+                        .get(p)
+                        .map(|t| (t.project_id.clone(), t.parent.clone()))
+                });
                 let project = match item {
                     None => project,
                     Some(None) => {
@@ -943,8 +947,11 @@ impl Machine for M17 {
                 let Some(current) = book.tasks.get(&id) else {
                     return missing(book, &id);
                 };
-                let (project, old_parent, before) =
-                    (current.project_id.clone(), current.parent.clone(), current.status);
+                let (project, old_parent, before) = (
+                    current.project_id.clone(),
+                    current.parent.clone(),
+                    current.status,
+                );
                 if let Some(target) = update.parent.as_deref().map(str::trim) {
                     let target = (!target.is_empty()).then(|| target.to_string());
                     if let Err(reason) = book.can_move(&id, target.as_deref()) {
@@ -1029,7 +1036,9 @@ impl Machine for M17 {
                 // Sub-tasks first, then work items (which roll them up), then
                 // the work items of sub-tasks that moved.
                 let mut reads = reads;
-                reads.sort_by_key(|(id, _, _)| book.tasks.get(id).is_none_or(|t| t.parent.is_none()));
+                reads.sort_by_key(|(id, _, _)| {
+                    book.tasks.get(id).is_none_or(|t| t.parent.is_none())
+                });
                 let mut moved = vec![];
                 for (id, revision, signals) in &reads {
                     // Read before a change made meanwhile: older news, dropped (the next tick reads again).

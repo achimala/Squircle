@@ -295,7 +295,9 @@ pub(super) async fn add_task(
     } else {
         "Break it down with `task sub add` if it has parts; link workers and builds as you start them; set its status when it changes."
     };
-    Ok(Json(success(json!({"task": task_view(&state, &task), "next": next}))))
+    Ok(Json(success(
+        json!({"task": task_view(&state, &task), "next": next}),
+    )))
 }
 
 pub(super) async fn show_task(

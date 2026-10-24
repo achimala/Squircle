@@ -14,7 +14,9 @@ Rust toolchain, plus T3 Code if you want to run the whole thing. Keep your
 private state (credentials, the phone's connection file, build products) in
 the ignored `.squircle/` directory or another `SQUIRCLE_DATA_DIR`; never
 commit it. `scripts/cargo-local` uses a toolchain in the ignored `.tools/`
-directory if one exists and otherwise your own `cargo`.
+directory if one exists and otherwise your own `cargo`. Run
+`git config core.hooksPath scripts/githooks` once so every commit, from any
+worktree, formats its staged Rust files.
 
 To use simulators while developing, start them through Squircle
 (`squircle sim start --thread ID`), not with `simctl` or `xcodebuild`, so the
@@ -36,8 +38,7 @@ xcodebuild -project app/Squircle/Squircle.xcodeproj -scheme Squircle \
 
 The app's unit tests run on a simulator you started through Squircle
 (`xcodebuild ... -scheme Squircle -destination 'platform=iOS Simulator,id=UDID' test`).
-There is no CI yet, and `cargo fmt --check` doesn't pass on the whole tree
-yet; format the files you touch.
+There is no CI yet; the pre-commit hook keeps `cargo fmt --check` passing.
 
 If you have [gitleaks](https://github.com/gitleaks/gitleaks), it can check
 staged changes for secrets and personal paths with the repository's config:

@@ -290,7 +290,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_tasks_come_back_for_new_work_including_ones_saved_before_revisions_and_sub_tasks() {
+    async fn history_tasks_come_back_for_new_work_including_ones_saved_before_revisions_and_sub_tasks()
+     {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("tasks.json"), r#"{"tasks": {"t": {"id": "t", "project_id": "p", "ask": "Stack the sims",
             "status": "done", "note": "", "threads": ["w"], "builds": [], "order": 1.0, "created_at": 0, "updated_at": 0,
@@ -414,7 +415,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();
         let id = tasks
-            .add("p", "Stack the sims", None, None, By::Agent, None, vec![], None)
+            .add(
+                "p",
+                "Stack the sims",
+                None,
+                None,
+                By::Agent,
+                None,
+                vec![],
+                None,
+            )
             .await
             .unwrap()
             .id;
