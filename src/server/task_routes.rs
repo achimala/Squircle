@@ -104,6 +104,12 @@ pub(super) fn task_view(state: &AppState, task: &tasks::Task) -> Value {
         .map(|m| json!({"id": m.id, "kind": m.kind, "caption": m.caption, "content_type": m.content_type, "created_at": m.created_at}))
         .collect();
     let mut value = serde_json::to_value(task).unwrap_or(Value::Null);
+    value["subtasks"] = json!(
+        task.subtasks
+            .iter()
+            .map(|t| task_view(state, t))
+            .collect::<Vec<_>>()
+    );
     value["threads"] = json!(threads);
     value["builds"] = json!(builds);
     value["media"] = json!(media);
@@ -241,6 +247,8 @@ pub(super) fn history_page<T>(
 
 #[derive(Deserialize)]
 pub(super) struct AddTask {
+    /// Add it as a sub-task of this work item (its app is taken from it).
+    pub(super) parent: Option<String>,
     pub(super) project: Option<String>,
     pub(super) thread: Option<String>,
     pub(super) ask: String,
@@ -255,7 +263,11 @@ pub(super) async fn add_task(
     payload: std::result::Result<Json<AddTask>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
-    let project = task_project(&state, r.project, r.thread.as_deref())?;
+    let tasks = tasks_of(&state)?;
+    let project = match &r.parent {
+        Some(parent) => tasks.get(parent).map_err(ApiError::missing)?.project_id,
+        None => task_project(&state, r.project, r.thread.as_deref())?,
+    };
     let source = match (&r.thread, &state.agents) {
         (Some(thread), Some(agents)) if !r.by_user => agents.source_message(thread).await,
         _ => None,
@@ -265,7 +277,7 @@ pub(super) async fn add_task(
     } else {
         tasks::By::Agent
     };
-    let task = tasks_of(&state)?
+    let task = tasks
         .add(
             &project,
             &r.ask,
@@ -274,11 +286,16 @@ pub(super) async fn add_task(
             by,
             source,
             vec![],
+            r.parent.as_deref(),
         )
         .await
         .map_err(task_error)?;
-    Ok(Json(success(json!({"task": task_view(&state, &task),
-        "next": "Link its workers and builds as you start them; set its status when it changes."}))))
+    let next = if r.parent.is_some() {
+        "Link its workers and builds as you start them; set its status when it changes (its work item follows)."
+    } else {
+        "Break it down with `task sub add` if it has parts; link workers and builds as you start them; set its status when it changes."
+    };
+    Ok(Json(success(json!({"task": task_view(&state, &task), "next": next}))))
 }
 
 pub(super) async fn show_task(

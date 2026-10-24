@@ -8,6 +8,13 @@
 //! and from then on any news re-derives the status exactly as it does for a
 //! followed one. "Held" is only the projection "the last status change was
 //! explicit and nothing has moved since".
+//!
+//! Work items and sub-tasks (2026-10-24): a task with a `parent` is a
+//! sub-task of that work item; one level only. Sub-tasks are ordinary tasks
+//! (their own links, media, status following and history). A work item with
+//! sub-tasks takes the roll-up of them and of its own linked work whenever
+//! one of them changes status (`rollup`); an explicit status on it holds
+//! until then. Closing a work item closes its open sub-tasks.
 
 use crate::fsm::core::{BuildID, Disposition, Machine, Reduction, TaskID, ThreadID, Violation};
 use serde::{Deserialize, Serialize};
@@ -74,6 +81,11 @@ pub struct Task {
     pub id: String,
     /// The T3 project of the app.
     pub project_id: String,
+    /// The work item this is a sub-task of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// A work item's sub-tasks, in order; always empty on a sub-task.
+    pub subtasks: Vec<Task>,
     /// The ask in the user's own words.
     pub ask: String,
     pub status: Status,
@@ -169,6 +181,36 @@ impl Signals {
         } else {
             None
         }
+    }
+}
+
+/// What a work item's sub-tasks and its own linked work (`own`) add up to:
+/// a question, then work (also some finished and some still queued), then
+/// queued, then something to try. All closed: done when the user closed the
+/// last one (`by`), ready to try otherwise, dropped if all were dropped.
+fn rollup(statuses: &[Status], own: Option<Status>, by: By) -> Option<Status> {
+    let all: Vec<Status> = statuses.iter().copied().chain(own).collect();
+    let any = |s: Status| all.contains(&s);
+    if all.is_empty() {
+        None
+    } else if any(Status::NeedsYou) {
+        Some(Status::NeedsYou)
+    } else if any(Status::InProgress)
+        || (any(Status::Queued) && (any(Status::Done) || any(Status::ReadyToTry)))
+    {
+        Some(Status::InProgress)
+    } else if any(Status::Queued) {
+        Some(Status::Queued)
+    } else if any(Status::ReadyToTry) {
+        Some(Status::ReadyToTry)
+    } else if any(Status::Done) {
+        Some(if by == By::User {
+            Status::Done
+        } else {
+            Status::ReadyToTry
+        })
+    } else {
+        Some(Status::Dropped)
     }
 }
 
@@ -323,6 +365,33 @@ impl Observation {
         }
         (next, news)
     }
+
+    /// The status the last known state of linked work implies.
+    fn implied(&self, threads: &[String], builds: &[String]) -> Option<Status> {
+        Signals {
+            revision: None,
+            workers: threads
+                .iter()
+                .filter_map(|id| {
+                    self.workers.get(id).map(|w| WorkerSignal {
+                        thread: id.clone(),
+                        turn: None,
+                        phase: w.phase,
+                    })
+                })
+                .collect(),
+            builds: builds
+                .iter()
+                .filter_map(|id| {
+                    self.builds.get(id).map(|phase| BuildSignal {
+                        build: id.clone(),
+                        phase: *phase,
+                    })
+                })
+                .collect(),
+        }
+        .implied()
+    }
 }
 
 /// A task as it is kept. Status and its history change together (`set`).
@@ -331,6 +400,8 @@ impl Observation {
 struct Record {
     id: String,
     project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
     ask: String,
     status: Status,
     note: String,
@@ -353,6 +424,8 @@ struct Record {
 struct StoredRecord {
     id: String,
     project_id: String,
+    #[serde(default)]
+    parent: Option<String>,
     ask: String,
     status: Status,
     #[serde(default)]
@@ -394,6 +467,7 @@ impl From<StoredRecord> for Record {
         Record {
             id: s.id,
             project_id: s.project_id,
+            parent: s.parent,
             ask: s.ask,
             status: s.status,
             note: s.note,
@@ -416,6 +490,8 @@ impl Record {
         Task {
             id: self.id.clone(),
             project_id: self.project_id.clone(),
+            parent_id: self.parent.clone(),
+            subtasks: vec![],
             ask: self.ask.clone(),
             status: self.status,
             note: self.note.clone(),
@@ -472,7 +548,7 @@ impl Record {
     /// or dropped task reopens only for new work (a new link, a new turn, a
     /// worker working or asking again), not old work finishing; new work also
     /// brings a task back from History. Returns whether anything changed.
-    fn follow(&mut self, signals: &Signals, now: u64) -> bool {
+    fn follow(&mut self, signals: &Signals, subtasks: &[Status], now: u64) -> bool {
         let (next, news) = self.observed.next(&self.threads, &self.builds, signals);
         if next == self.observed {
             return false;
@@ -484,7 +560,12 @@ impl Record {
         if news == News::NewWork {
             self.touch(now);
         }
-        if let Some(status) = signals.implied().filter(|s| *s != self.status) {
+        let implied = if subtasks.is_empty() {
+            signals.implied()
+        } else {
+            rollup(subtasks, signals.implied(), By::Auto)
+        };
+        if let Some(status) = implied.filter(|s| *s != self.status) {
             self.set(status, By::Auto, None, now);
         }
         true
@@ -505,6 +586,9 @@ impl Record {
     }
 
     fn ages(&self, now: u64) -> bool {
+        if self.parent.is_some() {
+            return false;
+        }
         let limit = if self.status.open() {
             STALE_AGE
         } else {
@@ -515,8 +599,8 @@ impl Record {
 
     /// Whether linked work can still say anything: History tasks are skipped
     /// only when all they link is builds that have finished.
-    fn watched(&self) -> bool {
-        self.placement == Placement::Active
+    fn watched(&self, placement: Placement) -> bool {
+        placement == Placement::Active
             || !self.threads.is_empty()
             || self.builds.iter().any(|b| {
                 !matches!(
@@ -535,29 +619,135 @@ pub struct Book {
 }
 
 impl Book {
+    /// A task; a work item with its sub-tasks.
     pub fn get(&self, id: &str) -> Option<Task> {
-        self.tasks.get(id).map(Record::publish)
+        self.tasks.get(id).map(|t| self.publish(t))
     }
 
+    fn publish(&self, record: &Record) -> Task {
+        let mut task = record.publish();
+        let mut subtasks: Vec<&Record> = self.children(&record.id).collect();
+        subtasks.sort_by(|a, b| a.order.total_cmp(&b.order));
+        task.subtasks = subtasks.into_iter().map(Record::publish).collect();
+        task
+    }
+
+    fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Record> + 'a {
+        self.tasks
+            .values()
+            .filter(move |t| t.parent.as_deref() == Some(id))
+    }
+
+    fn statuses(&self, id: &str) -> Vec<Status> {
+        self.children(id).map(|t| t.status).collect()
+    }
+
+    /// The app's work items (tasks without a parent), each with its sub-tasks.
     pub fn list(&self, project: &str) -> Vec<Task> {
         self.tasks
             .values()
-            .filter(|t| t.project_id == project)
-            .map(Record::publish)
+            .filter(|t| t.project_id == project && t.parent.is_none())
+            .map(|t| self.publish(t))
             .collect()
     }
 
+    /// Every task, sub-tasks as their own entries.
     pub fn all(&self) -> Vec<Task> {
         self.tasks.values().map(Record::publish).collect()
     }
 
-    /// Tasks whose linked work a tick should read.
+    /// Tasks whose linked work a tick should read, sub-tasks included (they
+    /// are listed where their work item is).
     pub fn watched(&self) -> Vec<Task> {
         self.tasks
             .values()
-            .filter(|t| t.watched())
+            .filter(|t| {
+                let placement = t
+                    .parent
+                    .as_ref()
+                    .and_then(|p| self.tasks.get(p))
+                    .map_or(t.placement, |p| p.placement);
+                t.watched(placement)
+            })
             .map(Record::publish)
             .collect()
+    }
+
+    /// Order after the last of the task's siblings (same app, same parent).
+    fn next_order(&self, project: &str, parent: Option<&str>) -> f64 {
+        self.tasks
+            .values()
+            .filter(|t| t.project_id == project && t.parent.as_deref() == parent)
+            .map(|t| t.order)
+            .fold(0.0, f64::max)
+            + 1.0
+    }
+
+    /// A change to a sub-task counts as touching its work item (it leaves
+    /// History); a status change re-derives the work item's status.
+    fn bubble(&mut self, id: &str, status_changed: bool, by: By, now: u64) {
+        let Some(parent) = self.tasks.get(id).and_then(|t| t.parent.clone()) else {
+            return;
+        };
+        if let Some(item) = self.tasks.get_mut(&parent) {
+            item.touch(now);
+        }
+        if status_changed {
+            self.rederive(&parent, by, now);
+        }
+    }
+
+    /// A work item takes the roll-up of its sub-tasks and its own linked
+    /// work. A closed one reopens only when a sub-task has work again
+    /// (queued, in progress or needing you); old work finishing leaves it closed.
+    fn rederive(&mut self, id: &str, by: By, now: u64) {
+        let statuses = self.statuses(id);
+        let Some(item) = self.tasks.get_mut(id) else {
+            return;
+        };
+        let active = statuses
+            .iter()
+            .any(|s| matches!(s, Status::Queued | Status::InProgress | Status::NeedsYou));
+        if !item.status.open() && !active {
+            return;
+        }
+        let own = item.observed.implied(&item.threads, &item.builds);
+        if let Some(status) = rollup(&statuses, own, by).filter(|s| *s != item.status) {
+            item.set(status, By::Auto, None, now);
+        }
+    }
+
+    /// Whether `id` may become a sub-task of `target` (or a work item of its
+    /// own with `None`): one level, within its app.
+    fn can_move(&self, id: &str, target: Option<&str>) -> Result<(), String> {
+        let Some(target) = target else {
+            return Ok(());
+        };
+        let task = &self.tasks[id];
+        let item = self.tasks.get(target).ok_or(format!("No task {target}"))?;
+        if target == id || self.children(id).next().is_some() {
+            Err(format!("{id} has sub-tasks of its own; it stays a work item"))
+        } else if item.parent.is_some() {
+            Err(format!("{target} is itself a sub-task"))
+        } else if item.project_id != task.project_id {
+            Err(format!("{target} belongs to another app"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Closing a work item closes its open sub-tasks the same way.
+    fn cascade(&mut self, id: &str, status: Status, by: By, now: u64) {
+        let open: Vec<String> = self
+            .children(id)
+            .filter(|t| t.status.open())
+            .map(|t| t.id.clone())
+            .collect();
+        for child in open {
+            if let Some(task) = self.tasks.get_mut(&child) {
+                task.set(status, by, None, now);
+            }
+        }
     }
 }
 
@@ -567,9 +757,11 @@ pub struct Update {
     pub ask: Option<String>,
     pub status: Option<Status>,
     pub note: Option<String>,
-    /// Put it first in its group.
+    /// Put it first in its group (among its siblings for a sub-task).
     #[serde(default)]
     pub to_top: bool,
+    /// Move it under this work item; empty makes a sub-task a work item of its own.
+    pub parent: Option<String>,
 }
 
 /// Everything that can happen to the task book. Time and new IDs come in
@@ -586,6 +778,8 @@ pub enum Event {
         by: By,
         source: Option<Source>,
         threads: Vec<String>,
+        /// The work item it is a sub-task of.
+        parent: Option<String>,
         now: u64,
     },
     /// An explicit change. A status set this way holds from `observed`, what
@@ -651,6 +845,7 @@ fn link(
         }
     }
     task.touch(now);
+    book.bubble(id, false, By::Auto, now);
     changed(book)
 }
 
@@ -678,6 +873,7 @@ impl Machine for M17 {
                 by,
                 source,
                 threads,
+                parent,
                 now,
             } => {
                 let ask = ask.trim();
@@ -687,17 +883,30 @@ impl Machine for M17 {
                         Disposition::Rejected("A task needs the user's ask".into()),
                     );
                 }
-                let order = book
-                    .tasks
-                    .values()
-                    .filter(|t| t.project_id == project)
-                    .map(|t| t.order)
-                    .fold(0.0, f64::max)
-                    + 1.0;
+                let item = parent
+                    .as_deref()
+                    .map(|p| book.tasks.get(p).map(|t| (t.project_id.clone(), t.parent.clone())));
+                let project = match item {
+                    None => project,
+                    Some(None) => {
+                        let parent = parent.unwrap_or_default();
+                        return missing(book, &parent);
+                    }
+                    Some(Some((_, Some(above)))) => {
+                        let reason = format!(
+                            "{} is a sub-task; add to its work item {above}",
+                            parent.unwrap_or_default()
+                        );
+                        return Reduction::same(book, Disposition::Rejected(reason));
+                    }
+                    Some(Some((project, None))) => project,
+                };
+                let order = book.next_order(&project, parent.as_deref());
                 let status = status.unwrap_or(Status::Queued);
                 let task = Record {
                     id: id.into(),
                     project_id: project,
+                    parent,
                     ask: ask.chars().take(500).collect(),
                     status,
                     note: note
@@ -719,7 +928,9 @@ impl Machine for M17 {
                         note: String::new(),
                     }],
                 };
-                book.tasks.insert(task.id.clone(), task);
+                let id = task.id.clone();
+                book.tasks.insert(id.clone(), task);
+                book.bubble(&id, true, by, now);
                 changed(book)
             }
             Event::Edit {
@@ -729,13 +940,33 @@ impl Machine for M17 {
                 observed,
                 now,
             } => {
-                let Some(project) = book.tasks.get(&id).map(|t| t.project_id.clone()) else {
+                let Some(current) = book.tasks.get(&id) else {
                     return missing(book, &id);
                 };
+                let (project, old_parent, before) =
+                    (current.project_id.clone(), current.parent.clone(), current.status);
+                if let Some(target) = update.parent.as_deref().map(str::trim) {
+                    let target = (!target.is_empty()).then(|| target.to_string());
+                    if let Err(reason) = book.can_move(&id, target.as_deref()) {
+                        return Reduction::same(book, Disposition::Rejected(reason));
+                    }
+                    if target != old_parent {
+                        let order = book.next_order(&project, target.as_deref());
+                        let task = book.tasks.get_mut(&id).expect("checked above");
+                        task.parent = target.clone();
+                        task.order = order;
+                        task.touch(now);
+                        if let Some(old) = &old_parent {
+                            book.rederive(old, by, now);
+                        }
+                        book.bubble(&id, true, by, now);
+                    }
+                }
+                let parent = book.tasks[&id].parent.clone();
                 let lowest = book
                     .tasks
                     .values()
-                    .filter(|t| t.project_id == project)
+                    .filter(|t| t.project_id == project && t.parent == parent)
                     .map(|t| t.order)
                     .fold(f64::INFINITY, f64::min);
                 let task = book.tasks.get_mut(&id).expect("checked above");
@@ -766,6 +997,11 @@ impl Machine for M17 {
                     task.order = lowest - 1.0;
                     task.touch(now);
                 }
+                let after = task.status;
+                if update.status.is_some_and(|s| !s.open()) {
+                    book.cascade(&id, after, by, now);
+                }
+                book.bubble(&id, after != before, by, now);
                 changed(book)
             }
             Event::Link {
@@ -785,17 +1021,31 @@ impl Machine for M17 {
                     return missing(book, &id);
                 };
                 task.touch(now);
+                book.bubble(&id, false, By::Auto, now);
                 changed(book)
             }
             Event::Observe { reads, now } => {
                 let mut any = false;
+                // Sub-tasks first, then work items (which roll them up), then
+                // the work items of sub-tasks that moved.
+                let mut reads = reads;
+                reads.sort_by_key(|(id, _, _)| book.tasks.get(id).is_none_or(|t| t.parent.is_none()));
+                let mut moved = vec![];
                 for (id, revision, signals) in &reads {
                     // Read before a change made meanwhile: older news, dropped (the next tick reads again).
-                    let Some(task) = book.tasks.get_mut(id).filter(|t| t.revision == *revision)
-                    else {
+                    if book.tasks.get(id).is_none_or(|t| t.revision != *revision) {
                         continue;
-                    };
-                    any |= task.follow(signals, now);
+                    }
+                    let subtasks = book.statuses(id);
+                    let task = book.tasks.get_mut(id).expect("checked above");
+                    let (before, turns) = (task.status, task.updated_at);
+                    any |= task.follow(signals, &subtasks, now);
+                    if task.status != before || task.updated_at != turns {
+                        moved.push((id.clone(), task.status != before));
+                    }
+                }
+                for (id, status_changed) in moved {
+                    book.bubble(&id, status_changed, By::Auto, now);
                 }
                 if any {
                     changed(book)
@@ -841,6 +1091,15 @@ impl Machine for M17 {
                     task.id
                 )));
             }
+            if let Some(parent) = &task.parent {
+                match book.tasks.get(parent) {
+                    Some(item) if item.parent.is_none() && item.project_id == task.project_id => {}
+                    _ => found.push(Violation(format!(
+                        "sub-task {} under {parent}, which is no work item of its app",
+                        task.id
+                    ))),
+                }
+            }
         }
         found
     }
@@ -873,6 +1132,7 @@ mod tests {
                 by: By::Agent,
                 source: None,
                 threads: vec!["w".into()],
+                parent: None,
                 now: 0,
             },
         );
@@ -1119,6 +1379,7 @@ mod tests {
                 by: By::User,
                 source: None,
                 threads: vec![],
+                parent: None,
                 now: 1,
             },
         );
@@ -1126,5 +1387,114 @@ mod tests {
             empty.disposition,
             Disposition::Rejected("A task needs the user's ask".into())
         );
+    }
+
+    fn sub(book: Book, parent: &str, ask: &str, by: By, now: u64) -> (Book, String) {
+        let id = TaskID::fresh();
+        let book = step(
+            book,
+            Event::Add {
+                id: id.clone(),
+                project: "elsewhere".into(),
+                ask: ask.into(),
+                status: None,
+                note: None,
+                by,
+                source: None,
+                threads: vec![],
+                parent: Some(parent.into()),
+                now,
+            },
+        );
+        (book, id.to_string())
+    }
+
+    #[test]
+    fn a_work_item_follows_its_sub_tasks_unless_set_until_one_changes() {
+        let (book, item) = book();
+        let (book, a) = sub(book, &item, "Fan out on tap", By::Agent, 1);
+        let (book, b) = sub(book, &item, "Badge the count", By::Agent, 2);
+        let task = book.get(&item).unwrap();
+        assert_eq!(
+            (task.subtasks.len(), task.subtasks[0].project_id.as_str()),
+            (2, "p")
+        );
+        assert_eq!(book.list("p").len(), 1);
+        // One done, one queued: under way.
+        let book = set(book, &a, Status::Done, By::Agent, None, 3);
+        assert_eq!(book.get(&item).unwrap().status, Status::InProgress);
+        // An explicit status on the item holds until a sub-task changes.
+        let book = set(book, &item, Status::NeedsYou, By::Agent, None, 4);
+        let book = step(
+            book,
+            Event::Edit {
+                id: b.clone(),
+                update: Update {
+                    note: Some("next".into()),
+                    ..Default::default()
+                },
+                by: By::Agent,
+                observed: None,
+                now: 5,
+            },
+        );
+        assert_eq!(book.get(&item).unwrap().status, Status::NeedsYou);
+        // The agent finishing the last one leaves it for the user to try...
+        let agent = set(book.clone(), &b, Status::Done, By::Agent, None, 6);
+        assert_eq!(agent.get(&item).unwrap().status, Status::ReadyToTry);
+        // ...the user ticking it closes the item.
+        let user = set(book, &b, Status::Done, By::User, None, 6);
+        assert_eq!(user.get(&item).unwrap().status, Status::Done);
+        // A new sub-task reopens a closed item; old work finishing doesn't.
+        let (book, _) = sub(user, &item, "Undo the badge", By::Agent, 7);
+        assert_eq!(book.get(&item).unwrap().status, Status::InProgress);
+    }
+
+    #[test]
+    fn closing_a_work_item_closes_its_sub_tasks_and_linked_work_moves_both() {
+        let (book, item) = book();
+        let (book, a) = sub(book, &item, "Fan out on tap", By::Agent, 1);
+        let (book, b) = sub(book, &item, "Badge the count", By::Agent, 1);
+        let book = step(
+            book,
+            Event::Link {
+                id: a.clone(),
+                thread: Some(ThreadID::parse(C).unwrap()),
+                build: None,
+                now: 2,
+            },
+        );
+        let signals = Signals {
+            revision: None,
+            workers: vec![WorkerSignal {
+                thread: C.into(),
+                turn: Some("1".into()),
+                phase: WorkerPhase::NeedsYou,
+            }],
+            builds: vec![],
+        };
+        let (book, _) = observe(book, &a, signals, 3);
+        assert_eq!(book.get(&a).unwrap().status, Status::NeedsYou);
+        assert_eq!(book.get(&item).unwrap().status, Status::NeedsYou);
+        let book = set(book, &item, Status::Dropped, By::User, None, 4);
+        let task = book.get(&item).unwrap();
+        assert!(task.subtasks.iter().all(|t| t.status == Status::Dropped));
+        // One level only.
+        let refused = M17::reduce(
+            book,
+            Event::Add {
+                id: TaskID::fresh(),
+                project: "p".into(),
+                ask: "deeper".into(),
+                status: None,
+                note: None,
+                by: By::Agent,
+                source: None,
+                threads: vec![],
+                parent: Some(b),
+                now: 5,
+            },
+        );
+        assert!(matches!(refused.disposition, Disposition::Rejected(_)));
     }
 }

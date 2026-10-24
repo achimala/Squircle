@@ -107,7 +107,7 @@ impl Tasks {
         task(&self.book.get(), id)
     }
 
-    /// The app's tasks, active and in History.
+    /// The app's work items, active and in History, each with its sub-tasks.
     pub fn list(&self, project: &str) -> Vec<Task> {
         self.book.get().list(project)
     }
@@ -126,6 +126,7 @@ impl Tasks {
         by: By,
         source: Option<Source>,
         threads: Vec<String>,
+        parent: Option<&str>,
     ) -> Result<Task> {
         let id = TaskID::fresh();
         let event = Event::Add {
@@ -137,6 +138,7 @@ impl Tasks {
             by,
             source,
             threads,
+            parent: parent.map(str::to_string),
             now: crate::model::now(),
         };
         self.owner
@@ -288,13 +290,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_tasks_come_back_for_new_work_including_ones_saved_before_revisions() {
+    async fn history_tasks_come_back_for_new_work_including_ones_saved_before_revisions_and_sub_tasks() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("tasks.json"), r#"{"tasks": {"t": {"id": "t", "project_id": "p", "ask": "Stack the sims",
             "status": "done", "note": "", "threads": ["w"], "builds": [], "order": 1.0, "created_at": 0, "updated_at": 0,
             "archived_at": 5, "seen": "w:done", "history": []}}}"#).unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();
-        assert_eq!(tasks.get("t").unwrap().archived_at, Some(5));
+        // Saved before sub-tasks: a work item with none.
+        let task = tasks.get("t").unwrap();
+        assert_eq!((task.archived_at, task.subtasks.len()), (Some(5), 0));
+        assert_eq!(tasks.list("p").len(), 1);
         // Unchanged work leaves it where it is.
         tasks.tick(|_| Signals::legacy("w:done")).await.unwrap();
         assert_eq!(tasks.get("t").unwrap().archived_at, Some(5));
@@ -323,6 +328,7 @@ mod tests {
                 By::Agent,
                 None,
                 vec!["w".into()],
+                None,
             )
             .await
             .unwrap()
@@ -365,6 +371,7 @@ mod tests {
                 By::Agent,
                 None,
                 vec!["w".into()],
+                None,
             )
             .await
             .unwrap()
@@ -407,7 +414,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();
         let id = tasks
-            .add("p", "Stack the sims", None, None, By::Agent, None, vec![])
+            .add("p", "Stack the sims", None, None, By::Agent, None, vec![], None)
             .await
             .unwrap()
             .id;
