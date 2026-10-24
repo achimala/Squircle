@@ -1117,13 +1117,28 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         rowText.table(id, markdown, quiet: quiet, width: max(200, table.bounds.width - 40), size: traitCollection.preferredContentSizeCategory)
     }
 
+    /// The thread a row opens over the agent: the worker it is about, or
+    /// the agent that sent it a message, while T3 still lists that thread.
+    /// Nil leaves the row to unfold, or not to be tapped at all.
+    private func opens(_ item: ThreadItem?) -> String? {
+        guard onOpenThread != nil else { return nil }
+        switch item {
+        case .update(let message): return message.threadIDs.first
+        // T3 no longer lists an archived worker's thread.
+        case .action(let line): return line.state == .archived ? nil : line.thread?.raw
+        case .agentMessage(let message):
+            return message.agent?.from.flatMap { id in model.sessions.contains { $0.id == id } ? id : nil }
+        default: return nil
+        }
+    }
+
     private func tappable(_ item: ThreadItem?) -> Bool {
         switch item {
         case .agentMessage: return true
-        case .action(let line): return line.text?.isEmpty == false || (line.thread != nil && line.state != .archived && onOpenThread != nil)
+        case .action(let line): return opens(item) != nil || line.text?.isEmpty == false
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
         case .earlier, .summary, .note, .changes: return true
-        case .update(let message): return !message.threadIDs.isEmpty && onOpenThread != nil
+        case .update: return opens(item) != nil
         default: return false
         }
     }
@@ -1182,11 +1197,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .summary(let summary): toggle(summary.turn)
         case .changes(let changes, _): showChanges(changes)
         case .note(let message): toggle(message.id)
-        case .update(let message): if let id = message.threadIDs.first { onOpenThread?(id) }
-        case .agentMessage(let message): toggle(message.id)
+        case .update: if let id = opens(item) { onOpenThread?(id) }
+        case .agentMessage(let message):
+            // "From Dark mode" opens Dark mode; the message under it unfolds.
+            if let id = opens(item), (tableView.cellForRow(at: indexPath) as? MessageCell)?.touchedFirstLine == true { onOpenThread?(id) }
+            else { toggle(message.id) }
         case .action(let line):
-            // T3 no longer lists an archived worker's thread.
-            if line.text?.isEmpty == false { toggle(line.id) } else if let id = line.thread?.raw, line.state != .archived { onOpenThread?(id) }
+            // What the agent sent reads in full in the worker it went to.
+            if let id = opens(item) { onOpenThread?(id) } else if line.text?.isEmpty == false { toggle(line.id) }
         default: break
         }
     }

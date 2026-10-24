@@ -328,6 +328,9 @@ final class SquircleModel {
             }
             Task { await StepVideos.list() }
         }
+        #if DEBUG
+        seedSentDemo()
+        #endif
         link?.host = self
         if link == nil {
             // No socket (an injected dispatch, or no configuration): nothing to wait for.
@@ -1548,6 +1551,51 @@ final class SquircleModel {
         if taskEditIDs[task.id] == id { taskEditIDs[task.id] = nil }
     }
     #if DEBUG
+    /// `SQUIRCLE_DEMO_SENT=1` with no Mac connection: a made-up app "Demo"
+    /// whose agent sent work to two workers and heard back from one, so its
+    /// "Sent to" and "From" lines can be tapped on a simulator.
+    private func seedSentDemo() {
+        guard configuration == nil, ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_SENT"] == "1" else { return }
+        let agent = "0d3a1c52-6c7e-4c38-9d8e-2f0a5b6e7a10", dark = "4b8e9f21-3c5d-4e6f-8a7b-9c0d1e2f3a41", deck = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e52"
+        func json(_ value: Any) -> JSONValue {
+            (try? JSONDecoder().decode(JSONValue.self, from: JSONSerialization.data(withJSONObject: value))) ?? .null
+        }
+        func at(_ second: Int) -> String { String(format: "2026-10-24T10:00:%02d.000Z", second) }
+        func thread(_ id: String, _ title: String) -> [String: Any] {
+            ["id": id, "projectId": "demo", "title": title, "status": "idle", "updatedAt": at(30), "archivedAt": NSNull(), "deletedAt": NSNull(), "pendingRuntimeRequest": NSNull()]
+        }
+        appMetadata = [AppMetadata(id: "demo", name: "Demo", project: "/demo/Demo.xcodeproj", scheme: "Demo", bundleID: nil, summary: "", updatedAt: 0, preview: nil)]
+        consumeShell(json(["kind": "snapshot", "snapshot": ["snapshotSequence": 1,
+            "projects": [["id": "demo", "title": "Demo", "workspaceRoot": "/demo", "updatedAt": at(30), "deletedAt": NSNull()]],
+            "threads": [thread(agent, "Demo"), thread(dark, "Dark mode"), thread(deck, "Sim deck")]]]))
+        agents["demo"] = agent
+        func send(_ id: String, to worker: String, _ text: String, _ second: Int) -> [String: Any] {
+            ["id": id, "type": "command_execution", "runId": "r1", "nativeItemRef": ["nativeId": "toolu_" + id], "status": "completed", "startedAt": at(second),
+             "input": "squircle thread send \(worker) \"\(text)\"", "output": "{\"data\":{\"id\":\"\(worker)\"}}"]
+        }
+        let agentState = json(["kind": "snapshot", "snapshotSequence": 1, "projection": ["thread": ["id": agent, "title": "Demo"],
+            "runs": [["id": "r1", "status": "completed"], ["id": "r2", "status": "completed"]],
+            "messages": [
+                ["id": "u1", "role": "user", "text": "Make the build sheet dark and stack the sims", "createdAt": at(1)],
+                ["id": "a1", "role": "assistant", "text": "Both are on it.", "runId": "r1", "createdAt": at(9)],
+                ["id": "m1", "role": "user", "text": "Dark mode is in. The sheet follows the system appearance now; want me to build it?", "createdAt": at(20),
+                 "context": ["version": 1, "records": [["kind": "squircle-agent-message", "label": "Message", "payload": ["from": dark]]]]],
+                ["id": "a2", "role": "assistant", "text": "Dark mode is ready to try.", "runId": "r2", "createdAt": at(25)]],
+            "turnItems": [send("t1", to: dark, "Make the build sheet follow dark mode.", 3), send("t2", to: deck, "Stack two or more sims into one deck.", 5)]]])
+        let workerState = json(["kind": "snapshot", "snapshotSequence": 1, "projection": ["thread": ["id": dark, "title": "Dark mode"],
+            "runs": [["id": "w1", "status": "completed"]],
+            "messages": [
+                ["id": "w-u1", "role": "user", "text": "Make the build sheet follow dark mode.", "createdAt": at(4),
+                 "context": ["version": 1, "records": [["kind": "squircle-agent-message", "label": "Message", "payload": ["from": agent]]]]],
+                ["id": "w-a1", "role": "assistant", "text": "Done: the build sheet follows the system appearance.", "runId": "w1", "createdAt": at(18)]],
+            "turnItems": []]])
+        Task {
+            for (id, value) in [(agent, agentState), (dark, workerState)] {
+                var state = T3ThreadState(); state.consume(value)
+                threadCache.set(await Transcript.render(state), for: id)
+            }
+        }
+    }
     /// `SQUIRCLE_DEMO_TASKS=1`: made-up tasks kept on the phone, so ticking
     /// through them on a simulator touches nobody's real list.
     private var demoTasks: AppTasks? = SquircleModel.makeDemoTasks() { didSet { changed() } }

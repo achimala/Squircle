@@ -179,6 +179,23 @@ final class MessageCell: TimelineCell {
         ])
     }
 
+    /// Where the last touch went down, so a row can tell its first line
+    /// (an agent's message's "From …") from the rest.
+    private var touch: CGPoint?
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        touch = touches.first?.location(in: contentView)
+        super.touchesBegan(touches, with: event)
+    }
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        touch = nil
+    }
+    var touchedFirstLine: Bool {
+        guard let touch, text.layoutManager.numberOfGlyphs > 0 else { return false }
+        let line = text.layoutManager.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil)
+        return touch.y < text.frame.minY + text.textContainerInset.top + line.maxY
+    }
+
     func configure(_ message: ChatMessage, style: Style, rendered: NSAttributedString, expanded: Bool) {
         let user = style == .user
         text.attributedText = rendered
