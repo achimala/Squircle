@@ -67,6 +67,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     let isAgent: Bool
     /// The agent's update lines open the app's other threads (nil: a new one).
     var onOpenThread: ((String?) -> Void)?
+    /// A finger went down on a line that opens a thread: its page can be made ahead.
+    var onPrepareThread: ((String) -> Void)?
+    /// A finger started scrolling it instead.
+    var onScrollBegan: (() -> Void)?
     /// The app's tasks, with its threads a tab away.
     var onTasks: (() -> Void)?
     var onBuilds: (() -> Void)?
@@ -95,12 +99,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// says whether it is in front (`deactivate`/`reactivate`); in front, it
     /// has the model while the model has this very conversation open.
     private var isActive: Bool { active && model.openConversation == conversation }
-    private var active = true
+    private var active: Bool
 
     private let model: SquircleModel
     /// Which conversation this is. Only the model's record of a draft
     /// becoming a thread (`successor`) or the app's agent moving on changes it.
-    private var conversation: ConversationID
+    private var conversation: ConversationID {
+        didSet {
+            guard conversation != oldValue else { return }
+            Self.heightCache.set(heights, for: oldValue)
+            heights = Self.heightCache.value(for: conversation) ?? [:]
+            guesses = [:]
+        }
+    }
     /// Keeps this conversation's published media fresh while it is in front.
     private var freshness: RefreshLease?
     /// Keeps the app's tasks fresh while the agent's task strip shows.
@@ -117,7 +128,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private let clip = UIView()
     private let fade = CAGradientLayer()
     private let table = ConversationTable(frame: .zero, style: .plain)
-    private let composer = Composer(placeholder: "Message")
+    private let composer: Composer
     private lazy var picker = AttachmentPicker(host: self) { [weak self] attachment in self?.model.attach(attachment) }
     private let notice = Theme.label("", Theme.font(.footnote, 13), color: Theme.failure, lines: 3)
     private let requestCard = RequestCard()
@@ -133,10 +144,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var stickyTurn: String?
     /// Measured row heights, so long conversations keep their place while
     /// rows above are measured, expanded or folded.
-    private var heights: [String: CGFloat] {
-        get { Self.heightCache.value(for: conversation) ?? [:] }
-        set { Self.heightCache.set(newValue, for: conversation) }
-    }
+    /// This conversation's, kept with the others' (`heightCache`) when it
+    /// moves on or is put away.
+    private var heights: [String: CGFloat] = [:]
+    /// Rows' guessed heights until measured, worked out once per row (from
+    /// their text) rather than each time the table asks.
+    private var guesses: [String: CGFloat] = [:]
+    private var guessWidth: CGFloat = 0
     /// Row heights of the most recently visited threads, so a returning
     /// thread lays out at its true size and opens exactly at the bottom.
     private static let heightCache = RecentCache<ConversationID, [String: CGFloat]>(limit: 16)
@@ -159,12 +173,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// A thread of `project`, or with nil a new conversation (its agent's
     /// first, with `agent`).
-    init(model: SquircleModel, project: AppProject, sessionID: String?, agent: Bool = false) {
+    /// `ahead`: made before its push, off screen; it shows the thread's
+    /// copy in memory and leaves the model alone until `resume`.
+    /// `composer`: one made a frame earlier, when the page is made ahead in steps.
+    init(model: SquircleModel, project: AppProject, sessionID: String?, agent: Bool = false, ahead: Bool = false, composer: Composer? = nil) {
+        self.composer = composer ?? Composer(placeholder: "Message")
         self.isAgent = agent
         self.model = model
         self.project = project
         self.conversation = sessionID.map { .thread($0, appID: project.id) } ?? .draft(UUID(), appID: project.id, agent: agent)
+        self.active = !ahead
         super.init(nibName: nil, bundle: nil)
+        heights = Self.heightCache.value(for: conversation) ?? [:]
     }
 
     @available(*, unavailable)
@@ -325,6 +345,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
         dataSource.defaultRowAnimation = .fade
         table.accessibilityIdentifier = "thread.messages"
+        // A finger down on a line that opens a thread: its page can start being made.
+        table.addGestureRecognizer(TouchDown { [weak self] point in
+            guard let self, let path = table.indexPathForRow(at: point),
+                  let id = opens(dataSource.itemIdentifier(for: path).flatMap { self.itemsByID[$0] }) else { return }
+            onPrepareThread?(id)
+        })
         // iOS 26 blurs the top scroll edge itself; earlier systems fade it.
         fade.colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
         fade.startPoint = CGPoint(x: 0.5, y: 0)
@@ -441,6 +467,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         view.accessibilityElements = topControls + [draftScroll, table, request, notice, jump, strip, composer]
 
         observations = [model.observe(by: self, after: .milliseconds(50)) { $0.render() }]
+        guard active else {
+            // Made ahead: the thread's copy in memory, its rows worked out and built later (`prepareRows`).
+            preparedHeight = 0
+            threadTitle = model.sessions.first { $0.id == conversation.threadID }?.displayTitle(in: project) ?? ""
+            draftScroll.isHidden = true
+            return
+        }
         model.selectProject(project)
         // What was last seen of this thread shows right away, at the bottom.
         open(conversation)
@@ -483,12 +516,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let previous = table.bounds.height
         let gap = table.contentSize.height + table.contentInset.bottom - (table.contentOffset.y + previous)
         let column = min(width, overlayLayout?.contentWidth ?? width)
-        table.frame = CGRect(x: ((width - column) / 2).rounded(), y: 0, width: column, height: height)
-        if previous > 0, abs(previous - height) > 0.5, pinToBottom {
+        // A page made ahead shows only its bottom part until it is ready (`prepareRows`).
+        let shown = min(height, preparedHeight ?? height)
+        table.frame = CGRect(x: ((width - column) / 2).rounded(), y: height - shown, width: column, height: shown)
+        if previous > 0, abs(previous - shown) > 0.5, pinToBottom {
             scrollToBottom()
-        } else if previous > 0, abs(previous - height) > 0.5, !table.isTracking {
+        } else if previous > 0, abs(previous - shown) > 0.5, !table.isTracking {
             for _ in 0..<3 {
-                let y = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - height - gap)
+                let y = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - shown - gap)
                 if abs(table.contentOffset.y - y) < 0.5 { break }
                 table.contentOffset.y = y
                 table.layoutIfNeeded()
@@ -555,12 +590,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// A thread opened over this one closed: it is in front again.
     func reactivate() {
         guard !tornDown, !active else { return }
+        outOfSight = false
+        covered = false
         active = true
         open(conversation)
+        // What arrived while it was covered is not news to watch arrive:
+        // it is in place when it shows (`resuming`).
+        let wasResuming = resuming
+        resuming = true
         render()
+        resuming = wasResuming
     }
     /// A thread is opening over this one; it lets go of the model.
     func deactivate() {
+        covered = isAgent
         active = false
         freshness = nil
         taskFreshness = nil
@@ -569,6 +612,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Closed and off screen, kept to be shown again: it lets go of the
     /// model and of the simulators it showed.
     func park() {
+        Self.heightCache.set(heights, for: conversation)
         deactivate()
         view.endEditing(true)
         if !reportedSimulators.isEmpty { host?.conversation(self, showsSimulators: []) }
@@ -579,20 +623,133 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// folded, the field empty, what changed meanwhile already in place.
     func resume() {
         guard !tornDown, !active else { return }
+        // Whatever of a page made ahead is not built yet is built now.
+        if preparedHeight != nil, items.isEmpty { renderItems() }
+        finishRows()
         expanded = []
         composer.text = ""
         pinToBottom = true
         jumpShown = false
         jump.alpha = 0
         jump.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
-        resuming = true
         reactivate()
-        resuming = false
         scrollToBottom()
         renderSend()
     }
+    /// A parked page put to use for another thread of the app: its view,
+    /// controls and the table's cells stay; everything of the old thread
+    /// goes. Its rows are then built like a page made ahead (`prepareRows`).
+    func retarget(to sessionID: String) {
+        guard !active, !tornDown, isViewLoaded else { return }
+        conversation = .thread(sessionID, appID: project.id)
+        items = []
+        itemsByID = [:]
+        expanded = []
+        liveTurn = nil
+        stickyTurn = nil
+        sticky.isHidden = true
+        reportedSimulators = []
+        media.seen([:])
+        composer.text = ""
+        pinToBottom = true
+        preparedHeight = 0
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        UIView.performWithoutAnimation { dataSource.applySnapshotUsingReloadData(NSDiffableDataSourceSnapshot<Int, String>()) }
+        threadTitle = model.sessions.first { $0.id == sessionID }?.displayTitle(in: project) ?? ""
+    }
+
+    /// The app's agent under one of its threads: the model keeps its copy
+    /// current (`SquircleModel.watch`), and its rows follow it and the rest
+    /// of what they show (workers, builds) quietly, a little at a time,
+    /// rather than all at once on coming back.
+    private var covered = false
+    private func renderCovered() {
+        guard covered, outOfSight, coveredRender == nil else { return }
+        // In frames of its own, never in one that moves something: whether
+        // anything changed, then the change with its table at nothing (no
+        // rows are built for a page no one sees), then its rows a few a frame.
+        coveredRender = Task { [weak self] in
+            await DisplayFrame.next()
+            guard let self, !Task.isCancelled, outOfSight, let next = currentItems()?.items, next != items else { self?.coveredRender = nil; return }
+            await DisplayFrame.next()
+            guard !Task.isCancelled, outOfSight else { coveredRender = nil; return }
+            if preparedHeight == nil { preparedHeight = 0; view.setNeedsLayout(); view.layoutIfNeeded() }
+            let wasResuming = resuming
+            resuming = true
+            renderItems()
+            resuming = wasResuming
+            coveredRender = nil
+            buildRowsInSlices()
+        }
+    }
+    private var coveredRender: Task<Void, Never>?
+
+    /// Fully covered by a thread and still: its rows can change and be
+    /// built a little at a time, unseen. Coming into sight finishes them.
+    var outOfSight = false {
+        didSet {
+            guard outOfSight != oldValue else { return }
+            if outOfSight { renderCovered() } else { finishRows() }
+        }
+    }
+    private var slicing: Task<Void, Never>?
+
+    /// Builds the rows not built yet, from the bottom, as many as fit in a
+    /// few milliseconds a frame.
+    private func buildRowsInSlices() {
+        guard slicing == nil, preparedHeight != nil else { return }
+        slicing = Task { [weak self] in
+            var done = false
+            while !done {
+                await DisplayFrame.next()
+                guard let self, !Task.isCancelled, outOfSight else { return }
+                let frame = CACurrentMediaTime()
+                var last: CFTimeInterval = 0
+                repeat {
+                    let started = CACurrentMediaTime()
+                    done = prepareRows()
+                    last = CACurrentMediaTime() - started
+                } while !done && CACurrentMediaTime() - frame + last < 0.004
+            }
+            self?.slicing = nil
+        }
+    }
+
+    /// Whatever rows are not built yet are built now.
+    private func finishRows() {
+        coveredRender?.cancel()
+        coveredRender = nil
+        slicing?.cancel()
+        slicing = nil
+        guard preparedHeight != nil else { return }
+        preparedHeight = nil
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+    }
+
     /// `resume` is rendering: rows that changed while parked are not news.
     private var resuming = false
+
+    /// How much of a page made ahead has its rows built, from the bottom:
+    /// nil once all of it has.
+    private var preparedHeight: CGFloat?
+    /// Builds the rows of another quarter screen of a page made ahead, at
+    /// its bottom, where it opens. True once the whole page is built.
+    func prepareRows() -> Bool {
+        guard let built = preparedHeight else { return true }
+        // First the rows themselves, from the thread's copy; then their cells.
+        if items.isEmpty, model.content(of: conversation) != nil {
+            renderItems()
+            return false
+        }
+        let full = view.bounds.height
+        let next = built + full / 8
+        preparedHeight = next >= full ? nil : next
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        return preparedHeight == nil
+    }
 
     /// Puts `id` on screen at once from what was last seen of it, then
     /// follows it live.
@@ -618,7 +775,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func render() {
-        guard isViewLoaded, active, !tornDown else { return }
+        guard isViewLoaded, !tornDown else { return }
+        guard active else { renderCovered(); return }
         if let next = successor() {
             pinToBottom = true
             open(next)
@@ -721,21 +879,30 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
     }
 
-    private func renderItems(animated: Bool = false) {
+    /// The rows the conversation shows now (nil: nothing to show yet), and its messages.
+    private func currentItems() -> (items: [ThreadItem], messages: [ChatMessage])? {
+        guard let content = model.content(of: conversation) else { return nil }
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
-        let messages = displayedMessages()
-        let next = header + resolve(ThreadItem.items(messages: messages, running: model.isRunning, expanded: expanded,
-                                                     builds: model.builds, changes: model.changes,
-                                                     simulators: model.threadSimulators, thread: currentSessionID))
-        guard next != items else { return }
+        let messages = displayedMessages(content.messages)
+        return (header + resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
+                                                  builds: model.builds, changes: content.changes,
+                                                  simulators: content.simulators, thread: currentSessionID)), messages)
+    }
+
+    private func renderItems(animated: Bool = false) {
+        guard let (next, messages) = currentItems(), next != items else { return }
         let previous = itemsByID
         // The conversation's rows arriving where only its title showed (a
         // thread not seen yet this session) are its first, not news: they
         // appear at once, not as a stream of rows sliding in mid-push. Your
         // own first message still flies in.
-        let first = resuming || (!items.contains { $0.id != "header" } && flyingID == nil)
+        // Until T3 has caught up with the copy shown, what arrives is what
+        // happened while away: in place at once, like a page coming back.
+        let quiet = resuming || (flyingID == nil && conversation.threadID != nil && !model.caughtUp)
+        let empty = !items.contains { $0.id != "header" } && flyingID == nil
+        let first = quiet || empty
         // A turn finishing folds its steps away; let the table animate that.
-        let folding = animated || (!resuming && previous["live"] != nil && !next.contains { $0.id == "live" })
+        let folding = animated || (!quiet && previous["live"] != nil && !next.contains { $0.id == "live" })
         items = next
         itemsByID = [:]
         var ids: [String] = []
@@ -746,18 +913,31 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         snapshot.appendSections([0])
         snapshot.appendItems(ids)
         let changed = ids.filter { previous[$0] != nil && previous[$0] != itemsByID[$0] }
-        snapshot.reconfigureItems(changed)
+        for id in changed { guesses[id] = nil }
+        let reflowed = changed.filter { !restyledInPlace($0) }
         let inserted = first ? [] : ids.filter { previous[$0] == nil }
         let removed = previous.keys.filter { itemsByID[$0] == nil }.count
         // Rows arriving or leaving while the agent works slide into place;
         // only streaming text, which just grows, updates without animation.
         let structural = !first && (!inserted.isEmpty || removed > 0) && inserted.count + removed <= 16 && !Motion.reduced
         if folding || structural {
+            // Changed rows out of view are told first, without animating: an
+            // animated update measures every row it reconfigures, wherever it is.
+            var before = dataSource.snapshot()
+            let away = reflowed.filter { id in before.indexOfItem(id) != nil && dataSource.indexPath(for: id).flatMap(table.cellForRow) == nil }
+            if !away.isEmpty {
+                before.reconfigureItems(away)
+                UIView.performWithoutAnimation { dataSource.apply(before, animatingDifferences: false) }
+            }
+            snapshot.reconfigureItems(reflowed.filter { !away.contains($0) })
             dataSource.apply(snapshot, animatingDifferences: true) { [weak self] in
                 guard let self, pinToBottom, flyingID == nil else { return }
                 scrollToBottom(animated: true)
             }
-        } else if first, !resuming, pinToBottom, flyingID == nil {
+        } else if covered, !active {
+            // Unseen, with its table at nothing: reloaded, not diffed row by row.
+            UIView.performWithoutAnimation { dataSource.applySnapshotUsingReloadData(snapshot) }
+        } else if empty, pinToBottom {
             // A whole conversation at once, shown from its end: loading it
             // lays out the rows where the table is, so it goes to where the
             // end will be first, and only the rows that show there are built.
@@ -766,6 +946,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             table.contentOffset.y = max(-table.contentInset.top, estimate + table.contentInset.bottom - table.bounds.height)
             UIView.performWithoutAnimation { dataSource.applySnapshotUsingReloadData(snapshot) }
         } else {
+            snapshot.reconfigureItems(reflowed)
             UIView.performWithoutAnimation {
                 dataSource.apply(snapshot, animatingDifferences: false)
                 table.layoutIfNeeded()
@@ -777,13 +958,33 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
         updateSticky()
         setNeedsMediaPass()
+        // The threads its lines open, newest first, ready before one is tapped.
+        if onOpenThread != nil {
+            var seen = Set<String>()
+            model.prefetch(threads: next.reversed().compactMap(opens).filter { seen.insert($0).inserted })
+        }
         // Only the turn that was live pulses, when it folds into its own
         // summary; a quick reply with no steps must not light up an older one.
         let wasLive = liveTurn
         liveTurn = itemsByID["live"] == nil ? nil : messages.last(where: { $0.role == "user" })?.id ?? "start"
-        if !resuming, previous["live"] != nil, liveTurn == nil, let turn = wasLive, itemsByID["summary:" + turn] != nil {
+        if !quiet, previous["live"] != nil, liveTurn == nil, let turn = wasLive, itemsByID["summary:" + turn] != nil {
             celebrate("summary:" + turn)
         }
+    }
+
+    /// A row in view whose new content keeps its height is updated where
+    /// it is: told to the table, every such row would be measured again on
+    /// a fresh cell. False when the table must hear of it (off screen, or
+    /// its height changed).
+    private func restyledInPlace(_ id: String) -> Bool {
+        guard let path = dataSource.indexPath(for: id), let cell = table.cellForRow(at: path), let item = itemsByID[id] else { return false }
+        let height = cell.bounds.height
+        configure(cell, with: item)
+        let fitted = cell.systemLayoutSizeFitting(CGSize(width: table.bounds.width, height: 0), withHorizontalFittingPriority: .required,
+                                                  verticalFittingPriority: .fittingSizeLevel).height
+        guard abs(fitted - height) < 0.5 else { return false }
+        cell.setNeedsLayout()
+        return true
     }
 
     /// Names and live states for the workers action lines mention.
@@ -822,8 +1023,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// The conversation with your message in place until T3's thread has
     /// it: the same ID, so the row stays put when T3's copy replaces it.
-    private func displayedMessages() -> [ChatMessage] {
-        var messages = model.messages
+    private func displayedMessages(_ messages: [ChatMessage]) -> [ChatMessage] {
+        var messages = messages
         guard let pending = pendingSend, !messages.contains(where: { $0.id == pending.messageID }) else { return messages }
         var message = ChatMessage(id: pending.messageID, role: "user", content: pending.text,
                                   createdAt: ISODate.format(.now))
@@ -912,7 +1113,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return spring
     }()
 
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { scrollSpring.stop() }
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        scrollSpring.stop()
+        // The finger scrolls: no tap is coming; the scroll has the frames.
+        onScrollBegan?()
+    }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         updateSticky()
@@ -1028,7 +1233,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             guard let cell = cell as? SimulatorCell else { return }
             let stepID = use.recordingID.map { "media:" + $0 }
             let tappable = !use.live || host?.expandsSimulators == true
-            let poster = use.recordingID.flatMap { StepImages.data(for: "poster:" + $0, index: 0) }.flatMap(UIImage.init(data:))
+            let poster = use.recordingID.flatMap { StepImages.data(for: "poster:" + $0, index: 0) }
             cell.configure(use, feeds: simulatorFeeds, video: stepID.flatMap(StepVideos.url(for:)), poster: poster, tappable: tappable)
             cell.showing = onScreen
             cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
@@ -1065,8 +1270,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// each with its distance from the middle of what shows. Nothing while
     /// the conversation is out of sight.
     private func mediaPass() {
-        reportVisibleSimulators()
-        guard onScreen, view.window != nil, table.bounds.height > 0 else { media.seen([:]); return }
+        // Only a page in sight shows live simulators.
+        if onScreen { reportVisibleSimulators() } else if !reportedSimulators.isEmpty {
+            reportedSimulators = []
+            host?.conversation(self, showsSimulators: [])
+        }
+        // A page made ahead loads its pictures and posters too, so they are
+        // there when it slides in.
+        let preloading = !active && !covered
+        guard onScreen || preloading, view.window != nil, table.bounds.height > 0 else { media.seen([:]); return }
         let top = table.contentOffset.y + table.contentInset.top
         let bottom = max(top, table.contentOffset.y + table.bounds.height - table.contentInset.bottom)
         let middle = (top + bottom) / 2, reach = table.bounds.height
@@ -1217,11 +1429,24 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// A row's measured height, or a guess from its text until it is measured.
     private func estimatedHeight(of id: String, known heights: [String: CGFloat]) -> CGFloat {
         if let known = heights[id] { return known }
+        if guessWidth != table.bounds.width { guessWidth = table.bounds.width; guesses = [:] }
+        if let guess = guesses[id] { return guess }
+        let guess = guessedHeight(of: id)
+        guesses[id] = guess
+        return guess
+    }
+
+    private func guessedHeight(of id: String) -> CGFloat {
         let tableView = table
         let width = max(200, tableView.bounds.width - 40)
+        // A guess, from one pass over the bytes: measuring (or even
+        // splitting) long texts here cost more than building the rows.
         func lines(_ text: String, per: CGFloat) -> CGFloat {
-            text.split(separator: "\n", omittingEmptySubsequences: false)
-                .reduce(0) { $0 + max(1, ceil(CGFloat($1.count) * per / width)) }
+            var lines: CGFloat = 0, run = 0
+            for byte in text.utf8 {
+                if byte == 10 { lines += max(1, ceil(CGFloat(run) * per / width)); run = 0 } else if byte & 0xC0 != 0x80 { run += 1 }
+            }
+            return lines + max(1, ceil(CGFloat(run) * per / width))
         }
         switch itemsByID[id] {
         case .header: return 44
@@ -1235,7 +1460,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .step, .earlier: return 36
         case .gallery: return GalleryCell.height + 20
         case .figure(_, let shots): return FigureCell.height(shots, width: tableView.bounds.width)
-        case .table(let id, let table, let quiet): return MarkdownTableCell.height(tableLayout(id, table, quiet: quiet))
+        case .table(_, let table, let quiet): return CGFloat(table.rows.count + 1) * (quiet ? 26 : 30) + 12
         case .summary: return 54
         case .live: return 72
         case .build: return 74
@@ -1478,6 +1703,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var tornDown = false
 
     func tearDown() {
+        Self.heightCache.set(heights, for: conversation)
         tornDown = true
         freshness = nil
         taskFreshness = nil

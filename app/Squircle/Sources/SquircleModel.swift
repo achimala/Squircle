@@ -661,8 +661,11 @@ final class SquircleModel {
         if let previous = open?.threadID, previous != id.threadID { command(.left(thread: previous)) }
         // A message T3 took needs no echo once nobody looks at it.
         deliver(.watch(id))
-        open = id; error = nil
+        open = id; error = nil; caughtUp = false; catchingUpTo = nil
         link?.send(.follow(id.threadID))
+        // The app's agent stays current under any other of its threads.
+        let agent = agents[id.appID]
+        watch(agent != id.threadID ? agent : nil)
         if let thread = id.threadID { sessionProjects[thread] = sessionProjects[thread] ?? id.appID }
         ConnectionTrace.mark("thread.open", id.threadID ?? "draft"); tracedRows = false
         guard let thread = id.threadID else {
@@ -681,6 +684,82 @@ final class SquircleModel {
                 ConnectionTrace.mark("thread.cached", "seq=\(loaded.sequence) memory=false")
                 state = loaded.restored; deriveFromState(); rebuildConversation()
             })
+        }
+    }
+    /// Threads the phone may open next (the workers the agent's lines
+    /// name, the threads Tasks lists): their copies on disk are read and
+    /// rendered off the main actor into the threads seen this session, so
+    /// opening one shows it whole from its first frame. Newest first; only
+    /// the first few, and none already in memory or under way.
+    func prefetch(threads ids: [String]) {
+        guard configuration != nil else { return }
+        for id in ids.prefix(6) where id != selectedSessionID && !prefetching.contains(id) && threadCache.peek(id) == nil {
+            prefetching.insert(id)
+            Task { [weak self, disk] in
+                let loaded = await disk.loadThread(id)
+                var rendered: Transcript?
+                if let loaded { rendered = await Transcript.render(loaded) }
+                guard let self else { return }
+                prefetching.remove(id)
+                // What the open thread or a newer copy put there wins.
+                guard let rendered, id != selectedSessionID, threadCache.peek(id) == nil else { return }
+                threadCache.set(rendered, for: id)
+            }
+        }
+    }
+    private var prefetching = Set<String>()
+    /// T3 has sent the open thread everything up to now (its completion
+    /// marker): what arrives before is catching up with the copy shown, not news.
+    private(set) var caughtUp = false { didSet { if caughtUp != oldValue { changed() } } }
+    /// The sequence T3's completion marker came at, until the rows reach it.
+    private var catchingUpTo: Int?
+    struct ConversationContent {
+        let messages: [ChatMessage], running: Bool, changes: [TurnChanges], simulators: [SimulatorUse]
+    }
+
+    /// The app's agent while one of its threads is open over it: kept
+    /// current by a subscription of its own from its copy in memory, and
+    /// rendered off the main actor into that copy, so its page stays up to
+    /// date underneath and coming back to it has nothing to catch up. Best
+    /// effort: if T3 ends it, coming back catches up as before.
+    private var watched: (id: String, state: T3ThreadState, subscription: Task<String?, Never>)?
+    private var watchBuild: Task<Void, Never>?
+    private var watchDirty = false
+
+    private func watch(_ id: String?) {
+        if let current = watched {
+            guard current.id != id else { return }
+            let subscription = current.subscription
+            Task { [gateway] in await gateway?.unsubscribe(await subscription.value) }
+            watched = nil
+            watchBuild?.cancel(); watchBuild = nil; watchDirty = false
+        }
+        guard let id, let gateway, let copy = threadCache.peek(id), copy.state.sequence >= 0 else { return }
+        let request: [String: JSONValue] = ["threadId": .string(id), "afterSequence": .int(copy.state.sequence), "requestCompletionMarker": true]
+        let subscription = Task { [weak self] () -> String? in
+            try? await gateway.subscribe("orchestration.subscribeThread", .object(request), receive: { [weak self] item in
+                self?.watchReceived(id, item)
+            }, ended: { [weak self] _ in
+                if self?.watched?.id == id { self?.watched = nil }
+            })
+        }
+        watched = (id, copy.state, subscription)
+    }
+
+    private func watchReceived(_ id: String, _ item: JSONValue) {
+        guard watched?.id == id, item["kind"].string != "synchronized" else { return }
+        watched?.state.consume(item)
+        watchDirty = true
+        guard watchBuild == nil else { return }
+        watchBuild = Task { [weak self] in
+            while let self, watchDirty, let current = watched, current.id == id, !Task.isCancelled {
+                watchDirty = false
+                let rendered = await Transcript.render(current.state)
+                guard !Task.isCancelled, watched?.id == id, id != selectedSessionID else { break }
+                threadCache.set(rendered, for: id)
+                changed()
+            }
+            self?.watchBuild = nil
         }
     }
     /// Shows `id` and follows it live: its thread's subscription replaces
@@ -786,6 +865,7 @@ final class SquircleModel {
                 guard !Task.isCancelled else { return }
                 if model.selectedSessionID == id {
                     model.transcript = rendered
+                    if let target = model.catchingUpTo, rendered.state.sequence >= target { model.caughtUp = true; model.catchingUpTo = nil }
                     if ConnectionTrace.enabled { model.traceRows(rendered.rows.count) }
                     if let id, rendered.state.sequence >= 0 { model.threadCache.set(rendered, for: id) }
                 }
@@ -814,6 +894,9 @@ final class SquircleModel {
     func consumeThread(_ item: JSONValue) {
         if item["kind"].string == "synchronized" {
             ConnectionTrace.mark("thread.synchronized"); tracedRows = true
+            // Caught up once the rows shown include everything up to here.
+            catchingUpTo = state.sequence
+            if transcript.state.sequence >= state.sequence { caughtUp = true; catchingUpTo = nil }
             return
         }
         if ConnectionTrace.enabled {
@@ -1419,8 +1502,23 @@ final class SquircleModel {
     /// The selected thread's simulator use: live now, and recorded earlier.
     var threadSimulators: [SimulatorUse] {
         guard let id = selectedSessionID else { return [] }
-        let working = isRunning ? Set([id]) : []
-        var uses = activeSimulators(threads: [id], working: working)
+        return simulators(of: id, media: media, running: isRunning)
+    }
+
+    /// What a conversation's page shows: the open one's, or a thread's
+    /// from its copy in memory without opening it (a page made ahead of
+    /// its push). Nil when neither is at hand.
+    func content(of id: ConversationID) -> ConversationContent? {
+        if id == open {
+            return ConversationContent(messages: messages, running: isRunning, changes: changes, simulators: threadSimulators)
+        }
+        guard let thread = id.threadID, let copy = threadCache.peek(thread) else { return nil }
+        return ConversationContent(messages: copy.rows, running: copy.state.isRunning, changes: copy.state.changes,
+                                   simulators: simulators(of: thread, media: copy.state.media, running: copy.state.isRunning))
+    }
+
+    private func simulators(of id: String, media: [JSONValue], running: Bool) -> [SimulatorUse] {
+        var uses = activeSimulators(threads: [id], working: running ? [id] : [])
         for item in media {
             let clip = item["simulator"]
             guard let session = clip["session_id"].string, let mediaID = item["id"].string,

@@ -10,7 +10,7 @@ final class ConversationText {
     private var tableLayouts: [String: (table: MarkdownTable, width: CGFloat, size: UIContentSizeCategory, layout: MarkdownTableLayout)] = [:]
 
     func message(_ message: ChatMessage, style: MessageCell.Style) -> NSAttributedString {
-        let key = message.id + "\(style)", source = message.markdown.map(AnyHashable.init) ?? AnyHashable(message.content)
+        let key = message.id + Self.name(style), source = message.markdown.map(AnyHashable.init) ?? AnyHashable(message.content)
         if let cached = rendered[key], cached.source == source { return cached.text }
         let text: NSAttributedString
         switch style {
@@ -34,6 +34,19 @@ final class ConversationText {
         }
         rendered[key] = (source, text)
         return text
+    }
+
+    /// Not `"\(style)"`: describing an enum goes through reflection, on every row shown.
+    private static func name(_ style: MessageCell.Style) -> String {
+        switch style {
+        case .user: "user"
+        case .answer: "answer"
+        case .note: "note"
+        case .thought: "thought"
+        case .update: "update"
+        case .action: "action"
+        case .agent: "agent"
+        }
     }
 
     private func markdown(_ message: ChatMessage) -> AttributedString {

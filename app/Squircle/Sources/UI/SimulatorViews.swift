@@ -723,8 +723,14 @@ final class SimulatorCell: TimelineCell {
     }
     private let frameView = UIView()
     private let playerLayer = AVPlayerLayer()
-    /// The recording's last screen, until (or instead of) the movie.
+    /// The recording's last screen, until (or instead of) the movie: it
+    /// stays until the movie's first picture is ready, never a black frame.
     private let posterView = UIImageView()
+    private var readiness: NSKeyValueObservation?
+    /// Which recording's poster the view shows or is being decoded for.
+    private var posterID: String?
+    /// Posters decoded off the main thread at the size they show, by recording.
+    private static let posters = NSCache<NSString, UIImage>()
     /// The recording's player, its looper and the file it plays, together.
     private struct Recorded { let url: URL; let player: AVQueuePlayer; let looper: AVPlayerLooper }
     /// What drives the picture: the shared live feed, or a recording.
@@ -743,6 +749,9 @@ final class SimulatorCell: TimelineCell {
         frameView.isUserInteractionEnabled = false
         playerLayer.videoGravity = .resizeAspect
         frameView.layer.addSublayer(playerLayer)
+        readiness = playerLayer.observe(\.isReadyForDisplay) { [weak self] _, _ in
+            Task { @MainActor in self?.showPoster() }
+        }
         posterView.contentMode = .scaleAspectFit
         frameView.addSubview(posterView)
         frameView.addSubview(screen)
@@ -764,7 +773,8 @@ final class SimulatorCell: TimelineCell {
 
     /// `tappable` false: a preview only, not a button (a host that can't
     /// bring a live simulator large).
-    func configure(_ use: SimulatorUse, feeds: SimulatorFeeds?, video: URL?, poster: UIImage? = nil, tappable: Bool) {
+    /// `poster`: the recording's poster file, decoded here off the main thread.
+    func configure(_ use: SimulatorUse, feeds: SimulatorFeeds?, video: URL?, poster: Data? = nil, tappable: Bool) {
         self.use = use
         if self.feeds !== feeds { self.feeds?.attach(screen, to: nil) }
         self.feeds = feeds
@@ -790,9 +800,35 @@ final class SimulatorCell: TimelineCell {
         button.isEnabled = tappable
         button.accessibilityTraits = tappable ? .button : .image
         button.accessibilityLabel = (live ? "Live simulator, " : "Simulator recording, ") + use.deviceName
-        posterView.image = poster
-        posterView.isHidden = live || recorded
+        setPoster(poster, for: use.recordingID)
+        showPoster()
         setNeedsLayout()
+    }
+
+    /// The poster, as soon as it is decoded; a row that moved on to another
+    /// recording meanwhile keeps its own.
+    private func setPoster(_ data: Data?, for recording: String?) {
+        guard let recording, let data else { posterID = nil; posterView.image = nil; return }
+        if let decoded = Self.posters.object(forKey: recording as NSString) { posterID = recording; posterView.image = decoded; return }
+        guard posterID != recording || posterView.image == nil else { return }
+        posterID = recording
+        posterView.image = nil
+        let height = Self.height * 3
+        Task { [weak self] in
+            guard let image = await Downsample.image(data, scale: { height / max(1, $0.height) }) else { return }
+            Self.posters.setObject(image, forKey: recording as NSString)
+            guard let self, posterID == recording else { return }
+            posterView.image = image
+        }
+    }
+
+    /// Live: the stream. Recorded: the poster until the movie has a picture.
+    private func showPoster() {
+        switch playback {
+        case .live: posterView.isHidden = true
+        case .recorded: posterView.isHidden = playerLayer.isReadyForDisplay
+        case .stopped: posterView.isHidden = false
+        }
     }
 
     /// Only a cell in a window holds a live stream: one scrolled away,

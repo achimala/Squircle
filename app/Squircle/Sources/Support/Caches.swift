@@ -113,7 +113,7 @@ actor DiskCache {
     /// 0.0.45's threads and sequences, and are deleted unread.
     private var homeURL: URL? { root?.appendingPathComponent("squircle-home-v2.json") }
     private var legacy: [URL] { ["squircle-home.json", "squircle-threads"].compactMap { root?.appendingPathComponent($0) } }
-    private func threadURL(_ id: String) -> URL? {
+    private nonisolated func threadURL(_ id: String) -> URL? {
         guard !id.isEmpty, !id.contains("/"), !id.hasPrefix(".") else { return nil }
         return root?.appendingPathComponent("squircle-threads-v2", isDirectory: true).appendingPathComponent(id + ".json")
     }
@@ -122,10 +122,11 @@ actor DiskCache {
         return read(homeURL)
     }
     func saveHome(_ home: Home, generation: UInt64) { write(home, to: homeURL, generation: generation) }
-    /// A copy on disk is never live: T3 confirms or replaces it.
-    func loadThread(_ id: String) -> T3ThreadState? { (read(threadURL(id)) as T3ThreadState?)?.restored }
+    /// A copy on disk is never live: T3 confirms or replaces it. Read off
+    /// the actor, several at once (files are replaced whole, never half written).
+    nonisolated func loadThread(_ id: String) async -> T3ThreadState? { (read(threadURL(id)) as T3ThreadState?)?.restored }
     func saveThread(_ id: String, _ state: T3ThreadState, generation: UInt64) { write(state, to: threadURL(id), generation: generation) }
-    private func read<T: Decodable>(_ url: URL?) -> T? {
+    private nonisolated func read<T: Decodable>(_ url: URL?) -> T? {
         guard let url, let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
     }

@@ -457,6 +457,8 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         behind = false
         if let current = model.projects.first(where: { $0.id == project.id }) { project = current }
         list = model.tasks(for: project)
+        // The threads open tasks link to, ready before one is tapped.
+        model.prefetch(threads: list.tasks.filter { $0.status.open }.flatMap(\.allThreads).map(\.id))
         let words = query.lowercased().split(separator: " ")
         let found: (AppTask) -> Bool = { task in
             guard !words.isEmpty else { return true }
