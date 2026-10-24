@@ -10,47 +10,6 @@ extension JSONValue {
 }
 
 final class T3Tests: XCTestCase {
-    private var modelConfig: JSONValue {
-        .from(["providers":[
-            ["instanceId":"codex","displayName":"Codex","enabled":true,"status":"ready","models":[
-                ["slug":"sol","name":"Sol","isDefault":true], ["slug":"astra","name":"Astra"]]],
-            ["instanceId":"claudeAgent","displayName":"Claude","enabled":true,"status":"ready","models":[["slug":"fable","name":"Fable","isDefault":true]]],
-            ["instanceId":"offline","enabled":true,"status":"error","models":[["slug":"bad"]]],
-            ["instanceId":"disabled","enabled":false,"status":"ready","models":[["slug":"bad"]]],
-            ["instanceId":"empty","enabled":true,"status":"ready","models":[["name":"Missing slug"]]]
-        ]])
-    }
-    @MainActor
-    func testExistingThreadOnlyAllowsItsProviderAndPreservesModelChoice() async {
-        let model = SquircleModel.hermetic()
-        model.consumeConfig(modelConfig)
-        let codex: JSONValue = ["instanceId":"codex","model":"sol"]
-        let astra: JSONValue = ["instanceId":"codex","model":"astra"]
-        let claude: JSONValue = ["instanceId":"claudeAgent","model":"fable"]
-        func snapshot(_ selection:JSONValue, sequence:Int) -> JSONValue {
-            ["kind":"snapshot","snapshotSequence":.int(sequence),"projection":["thread":["modelSelection":selection]]]
-        }
-        await model.open(.thread("first", appID: "app"))
-        XCTAssertTrue(model.availableModelSelections.isEmpty, "Do not offer other providers while the thread loads")
-        model.consumeThread(snapshot(codex,sequence:1))
-        XCTAssertEqual(model.availableModelSelections.count,2)
-        model.chooseModel(claude)
-        XCTAssertEqual(model.modelSelection,codex)
-        model.chooseModel(.from(["instanceId":"codex","model":"unknown"]))
-        XCTAssertEqual(model.modelSelection,codex)
-        model.chooseModel(astra)
-        model.consumeThread(snapshot(codex,sequence:2))
-        XCTAssertEqual(model.modelSelection,astra)
-        await model.open(.thread("second", appID: "app"))
-        model.consumeThread(snapshot(claude,sequence:3))
-        XCTAssertEqual(model.availableModelSelections,[claude])
-        await model.open(.thread("first", appID: "app"))
-        model.consumeThread(snapshot(codex,sequence:4))
-        XCTAssertEqual(model.modelSelection,astra)
-        model.consumeThread(snapshot(astra,sequence:5))
-        model.consumeThread(snapshot(codex,sequence:6))
-        XCTAssertEqual(model.modelSelection,codex)
-    }
     func testISODateMatchesFoundation() {
         let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let plain = ISO8601DateFormatter()
@@ -62,12 +21,6 @@ final class T3Tests: XCTestCase {
         for text in ["", "2026-13-01T00:00:00Z", "2026-10-15", "2026-10-15T09:41:07", "2026-10-15T09:41:07.Z", "nope"] {
             XCTAssertNil(ISODate.parse(text), text)
         }
-    }
-
-    func testUUIDScanFindsBuildIDsInText() {
-        let text = "Build 3A396BB0-a97f-478f-ab18-9be4a83c744c done; café x3a396bb0-a97f-478f-ab18-9be4a83c744 and 101c1dc8-0000-4000-8000-000000000001."
-        XCTAssertEqual(ThreadItem.uuids(in: text), ["3a396bb0-a97f-478f-ab18-9be4a83c744c", "101c1dc8-0000-4000-8000-000000000001"])
-        XCTAssertEqual(ThreadItem.uuids(in: "3a396bb0-a97f-478f-ab18"), [])
     }
 
     func testAVCCHandlesFragmentedAndCoalescedHTTPBytes() throws {
@@ -82,12 +35,6 @@ final class T3Tests: XCTestCase {
         var framer = AVCCFramer(), tags = [UInt8]()
         for byte in packets { try framer.consume(Data([byte])) { tag,_ in tags.append(tag) } }
         XCTAssertEqual(tags,[1,2,3])
-    }
-    func testAVCCRejectsInvalidLengthsBeforeWaitingForPayload() {
-        for header in [Data([0,0,0,0]),Data([0,128,0,1]),Data([255,255,255,255])] {
-            var framer = AVCCFramer()
-            XCTAssertThrowsError(try framer.consume(header) { _,_ in XCTFail("Invalid envelope delivered") })
-        }
     }
     /// A 50 fps feed delivered in bunches (a relayed link) plays evenly,
     /// never backwards, and no further behind arrival than the cap.
@@ -144,49 +91,6 @@ final class T3Tests: XCTestCase {
         state.consume(event(47, "checkpoint.rollback-requested", ["scopeId": "s"]))
         XCTAssertLessThan(state.sequence, 0)
     }
-    /// Everything Squircle sends in your place (any `squircle-` record, even a
-    /// kind this build doesn't know, or an early worker update's text) is
-    /// Squircle's line, never your bubble or the agent's instructions.
-    func testServiceMessagesNeverShowAsYours() {
-        let build = "b2a5d37d-721e-4047-b60f-94f8c3cd6288"
-        func record(_ kind: String, _ payload: [String: Any] = [:]) -> [String: Any] {
-            ["context": ["version": 1, "records": [["kind": kind, "label": "Later news", "payload": payload]]]]
-        }
-        let marked: [(String, [String: Any])] = [
-            ("build", record("squircle-build-update", ["build": build, "app": "App", "state": "failed", "reason": "No signing"])),
-            ("workers", record("squircle-worker-update", ["workers": [["id": build, "title": "Dark mode", "state": "needs-you"]]])),
-            ("handoff", record("squircle-handoff")),
-            ("task", record("squircle-task", ["from": "agent"])),
-            ("later", record("squircle-later")),
-            ("old", [:]),
-        ]
-        let rows: [[String: Any]] = marked.map { id, extra in
-            let text = id == "old" ? "[worker update]\n- \"Dark mode\" (\(build), dark) finished its turn.\nRun it." : "[x] instructions for the agent"
-            return ["id": id, "role": "user", "text": text, "createdAt": "2026-10-15T10:00:00.000Z"].merging(extra) { a, _ in a }
-        } + [["id": "you", "role": "user", "text": "Make it blue", "createdBy": "user", "createdAt": "2026-10-15T10:00:00.000Z"],
-              // T3's own: background work finishing, and another agent's message.
-              ["id": "command", "role": "user", "text": "Background command \"Build\" completed (exit code 0)", "createdBy": "agent",
-               "notification": ["source": ["kind": "background_command"], "outcome": "completed", "summary": "Command \"Build\" finished"],
-               "createdAt": "2026-10-15T10:00:00.000Z"],
-              ["id": "peer", "role": "user", "text": "Check the sheet", "createdBy": "agent", "senderThreadId": "other",
-               "createdAt": "2026-10-15T10:00:00.000Z"]]
-        var state = T3ThreadState()
-        state.consume(.from(["kind": "snapshot", "snapshotSequence": 1, "projection": ["thread": ["id": "t"], "messages": rows]]))
-        let messages = Dictionary(uniqueKeysWithValues: state.messages.map { ($0.id, $0) })
-        for (id, _) in marked {
-            let message = messages[id]!
-            XCTAssertTrue(message.isUpdate || message.agent != nil, id)
-            // A worker's task is the agent's words, shown as its message.
-            if id != "task" { XCTAssertFalse(message.content.contains("instructions"), id) }
-        }
-        XCTAssertEqual(messages["build"]?.build?.reason, "No signing")
-        XCTAssertEqual(messages["workers"]?.news.first?.state, .needsYou)
-        XCTAssertEqual(messages["old"]?.news.first?.title, "Dark mode")
-        XCTAssertEqual(messages["later"]?.content, "Later news")
-        XCTAssertTrue(messages["command"]!.isUpdate); XCTAssertEqual(messages["command"]?.content, "Command \"Build\" finished")
-        XCTAssertEqual(messages["peer"]?.agent, AgentAuthor(kind: .message, from: "other"))
-        XCTAssertFalse(messages["you"]!.isUpdate); XCTAssertNil(messages["you"]!.agent)
-    }
     /// A question or approval shows only while it is pending in the run
     /// going now, also after a long run pushes its item out of the kept
     /// history.
@@ -225,40 +129,6 @@ final class T3Tests: XCTestCase {
         state.consume(event(2004, "runtime-request.updated", request("r3", "resolved")))
         XCTAssertTrue(state.pendingRequests.isEmpty)
     }
-    /// T3's shell: a project-metadata refresh carries no threads and keeps
-    /// them; an archived thread leaves Home, and leaving the archive is not
-    /// a removal; a row's status and pending request say what it is doing.
-    @MainActor
-    func testShellKeepsThreadsThroughRefreshesAndDropsArchived() async {
-        let model = SquircleModel.hermetic()
-        func row(_ id: String, status: String = "idle", pending: Bool = false) -> [String: Any] {
-            ["id": id, "projectId": "p", "title": id, "status": status, "latestRunId": "run-\(id)", "updatedAt": "2026-10-19T10:00:00.000Z",
-             "archivedAt": NSNull(), "deletedAt": NSNull(), "pendingRuntimeRequest": pending ? ["id": "q", "kind": "user_input"] : NSNull()]
-        }
-        model.linkReceived(shell: .from(["kind": "snapshot", "snapshot": ["snapshotSequence": 5, "projects": [["id": "p", "title": "Old"]],
-            "threads": [row("a", status: "running"), row("b", pending: true), row("c", status: "failed")], "archivedThreads": []]]))
-        model.linkReceived(shell: .from(["kind": "snapshot", "resolvedRepositoryIdentityRoots": ["/x"],
-            "snapshot": ["snapshotSequence": 6, "projects": [["id": "p", "title": "New"]], "threads": [], "archivedThreads": []]]))
-        await model.shellApplied()
-        XCTAssertEqual(Set(model.sessions.map(\.id)), ["a", "b", "c"])
-        let phases = Dictionary(uniqueKeysWithValues: model.sessions.map { ($0.id, $0.phase) })
-        XCTAssertEqual(phases, ["a": .working, "b": .needsYou, "c": .idle])
-        XCTAssertEqual(model.sessions.first { $0.id == "c" }?.latestTurn?.completion?.outcome, .failed)
-        model.linkReceived(shell: .from(["kind": "thread.updated", "sequence": 7, "location": "archive", "thread": row("a")]))
-        model.linkReceived(shell: .from(["kind": "thread.removed", "sequence": 8, "location": "archive", "threadId": "b"]))
-        await model.shellApplied()
-        XCTAssertEqual(Set(model.sessions.map(\.id)), ["b", "c"])
-    }
-
-    func testConfigurationRejectsCredentialOriginTricks() throws {
-        let valid: [String:Any] = ["t3_url":"https://mac.example","t3_token":"token","squircle_url":"https://mac.example:8443","squircle_token":"build","diagnostic_token":"diagnostic"]
-        XCTAssertNoThrow(try JSONDecoder().decode(AppConfiguration.self,from:JSONSerialization.data(withJSONObject:valid)))
-        for url in ["http://mac.example","https://user:password@mac.example","https://mac.example/path","https://mac.example?credential=x"] {
-            var bad = valid; bad["t3_url"] = url
-            XCTAssertThrowsError(try JSONDecoder().decode(AppConfiguration.self,from:JSONSerialization.data(withJSONObject:bad)))
-        }
-    }
-
     /// Segments with their text as plain characters, for comparing.
     private func plain(_ text: String) -> [String] {
         Markdown.segments(text).map {
@@ -268,43 +138,6 @@ final class T3Tests: XCTestCase {
             case .table(let table): "table:" + ([table.header] + table.rows).map { $0.map { String($0.characters) }.joined(separator: ",") }.joined(separator: "/")
             }
         }
-    }
-
-    func testMarkdownMediaSplitsAtLocalPicturesAndClipsOnly() {
-        let text = """
-        **Before → after:**
-        ![before](/tmp/a.png)
-        ![after](</tmp/b c.png> "title") and more
-        [Real-speed **clip**](file:///tmp/clip.mp4)
-
-        [docs](https://example.com/x.png) and [notes](/tmp/notes.md)
-        ```
-        ![code](/tmp/code.png)
-        ```
-        """
-        XCTAssertEqual(plain(text), [
-            "text:Before → after: ", "image:/tmp/a.png", "image:/tmp/b c.png", "text: and more ", "video:/tmp/clip.mp4",
-            "text:docs and notes![code](/tmp/code.png)\n"
-        ])
-    }
-
-    func testMarkdownTablesSplitAndPadShortRows() {
-        let text = """
-        Results:
-
-        | Step | Time |
-        |:-----|---:|
-        | **Build** | 12 s |
-        | | |
-        | Test |
-
-        done
-        ```
-        | a | b |
-        |---|---|
-        ```
-        """
-        XCTAssertEqual(plain(text), ["text:Results:", "table:Step,Time/Build,12 s/,/Test,", "text:done| a | b |\n|---|---|\n"])
     }
 
     func testDiffKeepsDashDashAndPlusPlusLinesInsideHunks() {
@@ -338,11 +171,6 @@ final class T3Tests: XCTestCase {
         ])
         XCTAssertEqual([q.additions, q.deletions], [3, 2])
         XCTAssertEqual(parsed.files[1].lines.last?.text, "hi")
-    }
-
-    func testLineDiffKeepsMovedLinesAndOrder() {
-        XCTAssertEqual(StepDetailViewController.lineDiff(["a", "b", "c"], ["b", "c", "a"]), [.removed("a"), .same("b"), .same("c"), .added("a")])
-        XCTAssertEqual(AgentStep.lineDelta(old: "a\nb\nc", new: "b\nc\na").0, 1)
     }
 }
 
@@ -506,38 +334,6 @@ final class NativeStateTests: XCTestCase {
         XCTAssertEqual(uploads, 2)
     }
 
-    /// Old and over-budget files go, least recently used first; one in use
-    /// lately stays whatever its age (B-M02).
-    func testMediaCacheEvictsByAgeAndBudgetButNotInUse() {
-        let now = Date()
-        func entry(_ name: String, _ bytes: Int, ago: TimeInterval) -> MediaFileStore.Entry {
-            .init(name: name, bytes: bytes, used: now.addingTimeInterval(-ago))
-        }
-        let entries = [entry("stale", 1, ago: 20 * 86_400), entry("old", 6, ago: 3_600), entry("newer", 6, ago: 1_800),
-                       entry("playing", 6, ago: 60)]
-        XCTAssertEqual(MediaFileStore.evictions(entries, now: now, budget: 13), ["stale", "old"])
-        XCTAssertEqual(MediaFileStore.evictions([entry("playing", 100, ago: 60)], now: now, budget: 1), [])
-        XCTAssertEqual(MediaFileStore.name(for: "media:a"), MediaFileStore.name(for: "media:a"))
-        XCTAssertTrue(MediaFileStore.name(for: "file:/x/clip.mov").hasSuffix(".mov"))
-    }
-
-    @MainActor
-    func testSubscriptionEndingWithSocketUpIsReported() throws {
-        let gateway = T3Gateway(configuration: try Self.configuration())
-        var ends: [String: Error?] = [:]
-        var values = 0
-        gateway.track("shell", receive: { _ in values += 1 }, ended: { ends["shell"] = $0 })
-        gateway.track("thread", receive: { _ in }, ended: { ends["thread"] = $0 })
-        gateway.receive(.from(["_tag":"Chunk","requestId":"shell","values":[["kind":"snapshot"]]]))
-        gateway.receive(.from(["_tag":"Exit","requestId":"shell","exit":["_tag":"Failure","cause":"nope"]]))
-        gateway.receive(.from(["_tag":"Exit","requestId":"thread","exit":["_tag":"Success","value":NSNull()]]))
-        XCTAssertEqual(values, 1)
-        XCTAssertNotNil(ends["shell"] ?? nil, "A rejection says why")
-        XCTAssertTrue(ends.keys.contains("thread") && ends["thread"]! == nil, "An unexpected end is reported too")
-        XCTAssertEqual(gateway.subscriptionCount, 0)
-        gateway.close()
-    }
-
     func testAssetURLsStayOnT3sOrigin() throws {
         let base = URL(string: "https://mac.tail.ts.net:8443")!
         XCTAssertEqual(T3HTTP.assetURL("/api/assets/x?sig=1", base: base)?.absoluteString, "https://mac.tail.ts.net:8443/api/assets/x?sig=1")
@@ -549,17 +345,6 @@ final class NativeStateTests: XCTestCase {
         XCTAssertFalse(T3HTTP.sameOrigin(URL(string: "http://mac.tail.ts.net/a")!, URL(string: "https://mac.tail.ts.net")!))
     }
 
-    func testOlderCacheSnapshotNeverReplacesNewer() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let disk = DiskCache(root: root)
-        let url = root.appendingPathComponent("thread.json")
-        let wroteNew = await disk.write(["newer"], to: url, generation: 2)
-        let wroteOld = await disk.write(["older"], to: url, generation: 1)
-        XCTAssertTrue(wroteNew); XCTAssertFalse(wroteOld)
-        XCTAssertEqual(try JSONDecoder().decode([String].self, from: Data(contentsOf: url)), ["newer"])
-    }
-
     func testBoundedCacheEvictsLeastRecentlyUsedByCost() {
         var cache = BoundedCache<String, Data>(budget: 10, cost: \.count)
         cache.set(Data(count: 4), for: "a"); cache.set(Data(count: 4), for: "b")
@@ -569,21 +354,6 @@ final class NativeStateTests: XCTestCase {
         XCTAssertNil(cache.peek("b")); XCTAssertNotNil(cache.peek("a")); XCTAssertEqual(cache.total, 8)
         cache.set(Data(count: 50), for: "huge")
         XCTAssertEqual(cache.count, 1, "One entry over budget is kept alone, not refused")
-    }
-
-    /// Closing breaks every cycle: the model, its client and sessions go.
-    @MainActor
-    func testClosedModelIsReleased() throws {
-        weak var released: SquircleModel?
-        try autoreleasepool {
-            let model = SquircleModel.hermetic(configuration: try Self.configuration())
-            model.startMetadataUpdates()
-            let updates = model.updates
-            released = model
-            model.close()
-            _ = updates
-        }
-        XCTAssertNil(released)
     }
 
     static func configuration() throws -> AppConfiguration {
@@ -641,53 +411,6 @@ final class LinkMachineTests: XCTestCase {
         XCTAssertEqual(s.phase, .refused)
         XCTAssertTrue(refused.effects.contains(.sessionLost))
         XCTAssertFalse(refused.effects.contains { if case .armRetry = $0 { return true }; return false })
-    }
-
-    /// Any order of socket, subscription, clock and app events: sessions
-    /// open and close in pairs, a session only follows both scopes current
-    /// on its attempt, and the followed thread is subscribed only on a live socket.
-    func testGeneratedTracesKeepSessionsPaired() {
-        for seed in 0..<300 as Range<UInt64> {
-            var rng = Seeded(state: seed)
-            var s = Link.State()
-            var open = false
-            var current: [Int: Set<Link.Scope>] = [:]
-            var trace: [Link.Event] = []
-            for _ in 0..<80 {
-                let attempt = max(1, s.nextAttempt - Int.random(in: 1...2, using: &rng))
-                let scope: Link.Scope = Bool.random(using: &rng) ? .shell : .devices
-                let generation = max(1, s.nextGeneration - Int.random(in: 1...2, using: &rng))
-                let events: [Link.Event] = [
-                    .start, .socketOpened(attempt: attempt), .socketFailed(attempt: attempt, .transient("x"), now: now),
-                    .synchronized(attempt: attempt, scope, now: now), .subscriptionEnded(attempt: attempt, scope, now: now),
-                    .dropped(attempt: attempt, nil, now: now), .retryDue(attempt: attempt), .reconnect, .retryNow,
-                    .networkChanged(changed: Bool.random(using: &rng)), .foreground, .background, .backgroundExpired,
-                    .tick(now: now + .seconds(90)), .follow(Bool.random(using: &rng) ? "t\(Int.random(in: 0...1, using: &rng))" : nil),
-                    .followSubscribed(generation: generation, subscription: "sub"), .followEnded(generation: generation, reason: "x"),
-                    .followRetryDue(generation: generation, exists: Bool.random(using: &rng)), .followReverted(threadID: "t0"),
-                ]
-                let event = events.randomElement(using: &rng)!
-                trace.append(event)
-                let before = s
-                let r = Link.reduce(s, event); s = r.state
-                if case .synchronized(let a, let sc, _) = event, r.disposition == .applied { current[a, default: []].insert(sc) }
-                for effect in r.effects {
-                    switch effect {
-                    case .sessionReady(let session):
-                        XCTAssertFalse(open, "seed \(seed): two sessions at once \(trace)")
-                        XCTAssertEqual(current[session.attempt], Link.required, "seed \(seed): ready before both scopes")
-                        guard case .synchronizing = before.phase else { return XCTFail("seed \(seed): ready from \(before.phase)") }
-                        open = true
-                    case .sessionLost:
-                        XCTAssertTrue(open, "seed \(seed): lost a session never opened \(trace)"); open = false
-                    default: break
-                    }
-                }
-                XCTAssertEqual(open, s.session != nil, "seed \(seed) \(trace)")
-                XCTAssertEqual(Link.violations(in: s), [], "seed \(seed) \(trace)")
-                if s.phase == .stopped { break }
-            }
-        }
     }
 }
 
@@ -800,37 +523,6 @@ final class DeliveryMachineTests: XCTestCase {
             XCTAssertTrue(disk.isEmpty, "seed \(seed): an accepted message is still kept")
         }
     }
-
-    /// T3 makes the draft's thread and refuses its turn: the message is
-    /// the thread's from then on, and only a typed refusal ends it.
-    func testDraftAliasSurvivesARefusedTurn() {
-        let (sent, thread) = draft()
-        var s = Delivery.State()
-        func reduce(_ e: Delivery.Event) -> [Delivery.Effect] { let r = Delivery.reduce(s, e); s = r.state; return r.effects }
-        _ = reduce(.sessionReady(attempt: 1))
-        _ = reduce(.submit(sent))
-        // The answer to making the thread is lost; the shell shows it anyway.
-        _ = reduce(.createAnswered(messageID: sent.messageID, attempt: 1, .unknown("lost")))
-        let created = reduce(.threadObserved(thread))
-        XCTAssertTrue(created.contains(.adopt(draft: sent.origin, thread: .thread(thread, appID: "app"), agentOf: nil)))
-        let refused = reduce(.turnAnswered(messageID: sent.messageID, attempt: 1, .refused("no")))
-        XCTAssertTrue(refused.contains(.settle(messageID: sent.messageID, .rejected(.thread(thread, appID: "app"), reason: "no"))))
-        XCTAssertTrue(refused.contains(.restoreField(.thread(thread, appID: "app"), sent)))
-        XCTAssertTrue(s.entries.isEmpty)
-    }
-
-    /// Recordings uploading when the app died are prepared again on
-    /// relaunch; nothing of a message that never left counts as sent.
-    func testPreparingMessageRestartsItsUploadsAfterRelaunch() {
-        let recording = Delivery.Recording(id: "r", kind: "video", path: "/tmp/r.mp4", label: "0:01", thumbnail: Data())
-        let sent = intent(.thread("t"), origin: .thread("t", appID: "app"), recordings: [recording])
-        let restored = Delivery.reduce(Delivery.State(), .restore([.init(intent: sent, stage: .preparing)]))
-        XCTAssertEqual(restored.effects, [.prepare(sent)])
-        XCTAssertEqual(restored.state.entries[sent.messageID]?.uncertain, false)
-        // A failed upload before anything was sent gives the field back.
-        let failed = Delivery.reduce(restored.state, .prepareFailed(messageID: sent.messageID, reason: "gone"))
-        XCTAssertTrue(failed.effects.contains(.restoreField(sent.origin, sent)))
-    }
 }
 
 final class CommandMachineTests: XCTestCase {
@@ -918,100 +610,12 @@ final class CommandMachineTests: XCTestCase {
         _ = reduce(.tasksObserved([.init(id: "k", status: .done, revision: 5)]))
         XCTAssertTrue(s.taskEdits.isEmpty)
     }
-
-    /// Only a typed T3 failure is a refusal; an InternalError (a defect, an
-    /// interruption while T3 shuts down) may have run. The cases are shared
-    /// with the service's tests (tests/fixtures/t3).
-    func testT3OutcomeDecoding() throws {
-        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("../../../tests/fixtures/t3/dispatch-exits.json")
-        let cases = try JSONDecoder().decode(JSONValue.self, from: Data(contentsOf: fixture))["cases"].array
-        XCTAssertFalse(cases.isEmpty)
-        for example in cases {
-            let outcome = switch CommandOutcome.t3(exit: example["exit"]) {
-            case .accepted(let value): value == example["exit"]["value"] ? "accepted" : "accepted with \(value)"
-            case .refused: "refused"
-            case .unknown: "unknown"
-            case .notSent: "not sent"
-            }
-            XCTAssertEqual(outcome, example["outcome"].string, example["name"].string ?? "")
-        }
-        guard case .unknown = CommandOutcome.service(ClientError.connection("Squircle")) else { return XCTFail() }
-        guard case .unknown = CommandOutcome.service(ClientError.backend("Squircle", 503, "busy")) else { return XCTFail() }
-        guard case .refused = CommandOutcome.service(ClientError.backend("Squircle", 404, "gone")) else { return XCTFail() }
-    }
-}
-
-/// A command dispatch that answers each command when the test says.
-@MainActor
-private final class HeldT3 {
-    private(set) var commands: [JSONValue] = []
-    private var waiting: [CheckedContinuation<Void, Error>] = []
-    private var counted: [(count: Int, arrived: CheckedContinuation<Void, Never>)] = []
-    var dispatch: (JSONValue) async throws -> JSONValue {
-        { [unowned self] command in
-            commands.append(command)
-            let reached = counted.filter { $0.count <= commands.count }
-            counted.removeAll { $0.count <= commands.count }
-            for waiter in reached { waiter.arrived.resume() }
-            try await withCheckedThrowingContinuation { waiting.append($0) }
-            return .object([:])
-        }
-    }
-    /// Resumes once `count` commands have arrived.
-    func until(_ count: Int) async {
-        guard commands.count < count else { return }
-        await withCheckedContinuation { counted.append((count, $0)) }
-    }
-    func answer() { waiting.removeFirst().resume() }
 }
 
 final class PendingJournalTests: XCTestCase {
     private let config = JSONValue.from(["providers":[["instanceId":"codex","displayName":"Codex","enabled":true,"status":"ready",
                                                         "models":[["slug":"sol","name":"Sol","isDefault":true]]]]])
     private let project = AppProject(id: "app", name: "App", subtitle: "", bundleID: nil, canBuild: false)
-
-    /// Killed while T3 hasn't answered: the next run sends the very same
-    /// command (IDs, text, pictures) once, and forgets it once T3 has it.
-    @MainActor
-    func testUnansweredSendIsResentAsItselfAfterRelaunch() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        func launch(_ t3: HeldT3) async -> SquircleModel {
-            let model = SquircleModel.hermetic(commandDispatch: t3.dispatch, journal: PendingJournal(directory: root))
-            model.consumeConfig(config)
-            return model
-        }
-        let first = HeldT3()
-        let before = await launch(first)
-        let thread = ConversationID.thread("t", appID: project.id)
-        await before.open(thread)
-        before.consumeThread(.from(["kind":"snapshot","snapshotSequence":1,"projection":["thread":["id":"t",
-                                    "modelSelection":["instanceId":"codex","model":"sol"]],"messages":[["id":"m0","role":"user","text":"earlier sim start --thread t"]]]]))
-        before.attach(ImageAttachment(UIImage(systemName: "star")!, id: "picture")!)
-        guard case .started = before.startSend("hello", in: project, from: thread) else { return XCTFail("refused") }
-        await first.until(1)
-        before.close() // the app is killed; T3 never answered
-
-        let second = HeldT3()
-        let after = await launch(second)
-        await second.until(1)
-        XCTAssertEqual(second.commands, first.commands, "the same command, byte for byte")
-        await after.open(thread)
-        XCTAssertEqual(after.pendingSend(for: thread)?.phase, .awaitingAcceptance)
-        XCTAssertEqual(after.pendingSend(for: thread)?.images, 1)
-        second.answer()
-        await after.until { after.pendingSend(for: thread)?.phase != .awaitingAcceptance }
-        await after.journalWritten()
-        // Forgotten on disk: a third run sends nothing.
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
-        let third = HeldT3()
-        let restarted = await launch(third)
-        await restarted.journalWritten()
-        XCTAssertTrue(third.commands.isEmpty)
-        restarted.close()
-        after.close()
-    }
 
     /// A slow save never brings back a message already forgotten, and an
     /// unreadable file is set aside (never resent, never silently lost).

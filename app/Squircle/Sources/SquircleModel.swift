@@ -158,13 +158,6 @@ final class SquircleModel {
     private var journalSequence: UInt64 = 0
     /// The journal's writes, in the order they were asked for.
     private var journalWork: Task<Void, Never>?
-    /// Returns once every journal write asked for so far is done.
-    func journalWritten() async {
-        while let work = journalWork {
-            await work.value
-            if journalWork == work { return }
-        }
-    }
     /// The fields messages were sent with, to put back if T3 refuses one.
     private var sentFields: [String: [ImageAttachment]] = [:]
     private var sendWaiters: [String: AsyncStream<SendOutcome>.Continuation] = [:]
@@ -578,8 +571,6 @@ final class SquircleModel {
     }
     /// The pending application of a burst of shell events, if one is queued.
     private var shellApply: Task<Void, Never>?
-    /// Returns once the shell events received so far show on Home.
-    func shellApplied() async { await shellApply?.value }
     private func shellChanged() {
         sessions = shell["threads"].array.filter { $0["deletedAt"] == .null && $0["archivedAt"] == .null }.map { t in
             if let id = t["id"].string { sessionProjects[id] = t["projectId"].string }
