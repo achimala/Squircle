@@ -7,6 +7,11 @@ pub struct Agent {
     pub thread_id: String,
     pub created_at: u64,
     pub lifecycle: Lifecycle,
+    /// The newest of the user's messages the agent said asks nothing to
+    /// track (`task heard`); with the tracker's sources, where its unheard
+    /// messages start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heard: Option<String>,
 }
 
 pub use crate::fsm::coordinator::agent::{Lifecycle, Replacement, Reset};
@@ -57,6 +62,8 @@ pub(super) struct AgentFile {
     pub(super) reset_error: Option<String>,
     #[serde(default)]
     pub(super) refresh: bool,
+    #[serde(default)]
+    pub(super) heard: Option<String>,
 }
 
 impl TryFrom<AgentFile> for Agent {
@@ -90,6 +97,7 @@ impl TryFrom<AgentFile> for Agent {
             thread_id: f.thread_id,
             created_at: f.created_at,
             lifecycle,
+            heard: f.heard,
         })
     }
 }

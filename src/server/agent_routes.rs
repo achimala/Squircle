@@ -131,6 +131,24 @@ pub(super) async fn t3_providers(State(state): State<AppState>) -> ApiResult<Jso
     Ok(Json(success(json!({"providers": providers}))))
 }
 
+#[derive(Deserialize)]
+pub(super) struct Heard {
+    pub(super) thread: String,
+}
+
+pub(super) async fn agent_heard(
+    State(state): State<AppState>,
+    payload: std::result::Result<Json<Heard>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let thread = body(payload)?.thread;
+    Ok(Json(success(
+        agents(&state)?
+            .mark_heard(&thread)
+            .await
+            .map_err(agent_error)?,
+    )))
+}
+
 pub(super) async fn agent_context(
     State(state): State<AppState>,
     query: std::result::Result<Query<ContextQuery>, QueryRejection>,
@@ -177,16 +195,25 @@ pub(super) async fn spawn_worker(
     payload: std::result::Result<Json<SpawnWorker>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let r = body(payload)?;
-    if let Some(task) = &r.task {
-        tasks_of(&state)?.get(task).map_err(ApiError::missing)?;
-    }
-    let worker = agents(&state)?
+    let task = r.task.as_deref().ok_or_else(|| {
+        ApiError::bad(
+            "Pass --task: the work item or sub-task this worker serves. Put the user's ask in the tracker first (squircle task --help).",
+        )
+    })?;
+    tasks_of(&state)?.get(task).map_err(ApiError::missing)?;
+    let agents = agents(&state)?;
+    agents
+        .ensure_heard(&r.coordinator)
+        .await
+        .map_err(agent_error)?;
+    let prompt = format!("{}{}", r.prompt, agents.asks_for(Some(task), None));
+    let worker = agents
         .spawn(
             &r.coordinator,
             &r.title,
             &r.branch,
             r.base.as_deref(),
-            &r.prompt,
+            &prompt,
             r.provider.as_deref(),
             r.model.as_deref(),
             r.effort.as_deref(),
@@ -194,7 +221,7 @@ pub(super) async fn spawn_worker(
         )
         .await
         .map_err(agent_error)?;
-    if let (Some(task), Some(id)) = (&r.task, worker["id"].as_str()) {
+    if let Some(id) = worker["id"].as_str() {
         tasks_of(&state)?
             .link(task, Some(id), None, false)
             .await
@@ -226,10 +253,15 @@ pub(super) async fn message_worker(
     if text.trim().is_empty() {
         return Err(ApiError::bad("Message text is empty"));
     }
-    agents(&state)?
-        .message(&id, &text)
-        .await
-        .map_err(agent_error)?;
+    let agents = agents(&state)?;
+    if let Some(coordinator) = agents.coordinator_of(&id) {
+        agents
+            .ensure_heard(&coordinator)
+            .await
+            .map_err(agent_error)?;
+    }
+    let text = format!("{text}{}", agents.asks_for(None, Some(&id)));
+    agents.message(&id, &text).await.map_err(agent_error)?;
     Ok(Json(success(json!({"sent": id}))))
 }
 
@@ -239,10 +271,14 @@ pub(super) async fn answer_worker(
     payload: std::result::Result<Json<WorkerText>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let text = body(payload)?.text;
-    agents(&state)?
-        .answer(&id, &text)
-        .await
-        .map_err(agent_error)?;
+    let agents = agents(&state)?;
+    if let Some(coordinator) = agents.coordinator_of(&id) {
+        agents
+            .ensure_heard(&coordinator)
+            .await
+            .map_err(agent_error)?;
+    }
+    agents.answer(&id, &text).await.map_err(agent_error)?;
     Ok(Json(success(json!({"answered": id}))))
 }
 

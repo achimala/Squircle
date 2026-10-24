@@ -93,6 +93,9 @@ pub(super) struct AgentTarget {
 #[derive(Subcommand)]
 pub(super) enum ThreadCommand {
     /// Start a worker thread in its own worktree. Its prompt must stand alone.
+    #[command(
+        after_help = "Refused while one of the user's messages to you is neither in the tracker nor marked heard (task heard); send and answer too."
+    )]
     Spawn {
         #[arg(long, help = "Your (the app agent's) thread ID")]
         coordinator: String,
@@ -119,10 +122,13 @@ pub(super) enum ThreadCommand {
         #[arg(long, value_parser = ["approval-required", "auto-accept-edits", "auto", "full-access"],
             help = "T3 runtime mode; default: yours (the app agent's), mapped to the provider's closest; the result says what it allows")]
         runtime_mode: Option<String>,
-        #[arg(long, help = "Link the worker to this task (squircle task --help)")]
-        task: Option<String>,
+        #[arg(
+            long,
+            help = "The work item or sub-task it serves (squircle task --help); its brief ends with that work item's asks in the user's words"
+        )]
+        task: String,
     },
-    /// Message a thread; folds into its turn if it is mid-turn.
+    /// Message a thread; folds into its turn if it is mid-turn. To your worker, it ends with its work item's asks in the user's words.
     Send { id: String, text: String },
     /// Workers and their state: working, needs-you, done, error.
     Status {

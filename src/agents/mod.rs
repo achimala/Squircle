@@ -45,6 +45,7 @@ use state::*;
 mod worktrees;
 use worktrees::*;
 mod builds;
+mod demands;
 mod lifecycle;
 mod messages;
 mod outbox_driver;
