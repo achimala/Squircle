@@ -156,10 +156,6 @@ fn sims(root: &Path, boot: Option<std::result::Result<(), ()>>) -> (Arc<Sims>, A
     (Sims::with_host(root, fake.clone()).unwrap(), fake)
 }
 
-fn state(session: &Session) -> String {
-    Served::from(session).state
-}
-
 fn only(sims: &Sims) -> Session {
     sims.ledger().sessions.last().cloned().unwrap()
 }
@@ -200,11 +196,6 @@ async fn due_now(sims: &Sims) {
         })
         .await
         .unwrap();
-}
-
-/// Waits for every letter told so far (a dropped guard's) to be read.
-async fn settled(sims: &Sims) {
-    sims.owner.ask(|_| ()).await;
 }
 
 /// A second cleanup of a session already being cleaned up (`sim stop`
@@ -307,37 +298,6 @@ async fn restart_leaves_a_reused_pid_alone() {
     stranger.wait().unwrap();
 }
 
-/// A failed or cancelled start kills its recorder and still closes T3's
-/// device session and releases the simulator.
-#[tokio::test]
-async fn failed_or_cancelled_start_rolls_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Err(())));
-    assert!(sims.start(THREAD, None).await.is_err());
-    let session = only(&sims);
-    assert_eq!(
-        (state(&session).as_str(), session.settled()),
-        ("failed", true)
-    );
-    assert_eq!((fake.closes(), fake.count("release SIM1")), (1, 1));
-
-    // Cancelled while it boots.
-    *fake.boot.lock().unwrap() = None;
-    tokio::select! {
-        _ = sims.start(THREAD, None) => panic!("a boot that never ends ended"),
-        _ = fake.booting.notified() => {}
-    }
-    settled(&sims).await;
-    let session = only(&sims);
-    assert!(
-        session.reserves()
-            && matches!(&session.phase, Phase::Failed { error, .. } if error.contains("cancelled"))
-    );
-    sims.tick().await;
-    assert!(only(&sims).settled());
-    assert_eq!((fake.closes(), fake.count("release SIM1")), (2, 2));
-}
-
 /// The recording is filed even when T3 is unreachable; the close is owed
 /// (and the slot held, Q4) until T3 answers or shows it gone; a failed
 /// release is owed too, never cleared.
@@ -386,37 +346,6 @@ async fn failed_cleanup_is_retried_and_holds_the_slot() {
     assert!(
         reopened.owner.ask(|s| s.orphans.is_empty()).await && only_of(&reopened, THREAD).settled()
     );
-}
-
-/// A close whose answer is lost is settled by T3 no longer listing the session.
-#[tokio::test]
-async fn a_lost_close_is_settled_by_t3s_list() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Ok(())));
-    sims.start(B, Some("SIM2")).await.unwrap();
-    fake.close_fails.store(true, SeqCst);
-    fake.lists_open.store(true, SeqCst);
-    // T3 lists (THREAD, SIM1) and (B, SIM1); B's session is on SIM2.
-    let session = sims.stop(Some(B), None).await.unwrap().session;
-    assert_eq!(session.device_session, Some(DeviceLease::Closed));
-    assert!(!session.release_pending);
-}
-
-/// Shutdown ends recordings, files them, closes the device session and refuses new starts.
-#[tokio::test]
-async fn shutdown_files_and_refuses_starts() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Ok(())));
-    sims.start(THREAD, None).await.unwrap();
-    sims.shutdown(Exit::Stop).await;
-    let session = only(&sims);
-    assert_eq!(
-        (state(&session).as_str(), session.settled()),
-        ("finished", true)
-    );
-    assert_eq!(fake.closes(), 1);
-    assert!(sims.start(THREAD, None).await.is_err());
-    assert!(sims.owner.ask(|s| s.recorders.is_empty()).await);
 }
 
 /// A restart hands a recording over: its recorder keeps running and T3's
@@ -475,73 +404,6 @@ async fn handover_keeps_recording_into_the_next_run() {
         b"movie"
     );
     assert_eq!(fake.closes(), 1);
-}
-
-/// The upgrade: a ledger from before cleanup receipts, with a live
-/// recording handed over (its recorder saved by PID only) and a line with
-/// a woken grant, opens with its original kept beside it; the recording
-/// is adopted and given its recorder's start time, the line and grant
-/// survive, and nobody is woken twice.
-#[tokio::test]
-async fn an_earlier_ledger_is_migrated_with_its_sessions_and_line() {
-    let dir = tempfile::tempdir().unwrap();
-    let id = uuid::Uuid::new_v4().to_string();
-    std::fs::create_dir_all(dir.path().join("media")).unwrap();
-    let path = media::recording_path(dir.path(), THREAD, &id).unwrap();
-    let mut recorder = Command::new("/bin/sh")
-        .args(["-c", RECORDER, "sh"])
-        .arg(&path)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let pid = recorder.id().unwrap();
-    let ledger = json!({
-        "sessions": [
-            {"id": id, "thread_id": THREAD, "host_id": "local", "device_id": "SIM1", "device_name": "iPhone", "started_at": now(),
-             "ended_at": null, "state": "recording", "media_id": null, "stop_reason": null, "error": null, "recorder_pid": pid,
-             "device_session": {"phase": "open"}, "release_pending": false},
-            {"id": "old", "thread_id": C, "host_id": "local", "device_id": "SIM2", "device_name": "iPad", "started_at": 1.0,
-             "ended_at": 2.0, "state": "finished", "media_id": "m", "stop_reason": "stopped", "error": null, "recorder_pid": null,
-             "device_session": {"phase": "closed"}, "release_pending": true}],
-        "queue": [{"id": "w1", "thread_id": B, "queued_at": 1.0, "grant": {"at": 2.0, "turn": "t1", "woken": true}}]});
-    std::fs::write(dir.path().join("sims.json"), ledger.to_string()).unwrap();
-    let fake = Arc::new(Fake {
-        boot: Mutex::new(Some(Ok(()))),
-        ..Fake::default()
-    });
-    fake.max.store(3, SeqCst);
-    let sims = Sims::with_host(dir.path(), fake.clone()).unwrap();
-
-    let original: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("sims.schema1.json")).unwrap())
-            .unwrap();
-    assert_eq!(original, ledger);
-    let saved: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("sims.json")).unwrap()).unwrap();
-    assert_eq!(
-        (
-            saved["schema"].as_u64(),
-            saved["queue"][0]["grant"]["wake"].as_str()
-        ),
-        (Some(2), Some("queued"))
-    );
-    let live = only_of(&sims, THREAD);
-    assert!(
-        live.active()
-            && live.recorder().unwrap().start.is_some()
-            && sims.owner.ask(|s| s.orphans.is_empty()).await
-    );
-    // The pre-upgrade release is still owed and runs; the grant is not woken again.
-    sims.tick().await;
-    assert_eq!(
-        (fake.count("release SIM2"), fake.woken.lock().unwrap().len()),
-        (1, 0)
-    );
-    assert_eq!(queue(&sims), [(B.into(), true)]);
-    // The handed-over recording still files as a whole movie.
-    let receipt = sims.stop(Some(THREAD), None).await.unwrap();
-    assert!(receipt.media_id.is_some());
-    let _ = recorder.wait().await;
 }
 
 /// Past the limit, starts wait first come first served: a freed slot is

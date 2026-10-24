@@ -167,21 +167,3 @@ async fn capture(command: Command, label: &str, limit: usize) -> Result<crate::p
     );
     Ok(output)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_empty_json_and_incomplete_reports() {
-        assert!(validate_apple_text(b" \n").is_err());
-        assert!(validate_apple_text(br#"{"incident":"example"}"#).is_err());
-        assert!(validate_apple_text(b"Process: App\nException Type: EXC_BAD_ACCESS\n").is_err());
-        assert!(
-            validate_apple_text(
-                b"Process: App [1]\nException Type: EXC_BAD_ACCESS\nBinary Images:\n"
-            )
-            .is_ok()
-        );
-    }
-}

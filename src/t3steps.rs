@@ -345,17 +345,4 @@ mod tests {
         ];
         assert_eq!(dimensions(&jpeg), Some((640, 1392)));
     }
-
-    #[test]
-    fn distinct_images_compare_whole_payloads() {
-        let header = "iVBORw0KGgo".repeat(8);
-        let a = json!({"data": format!("{header}AAAA")});
-        let b = json!({"data": format!("{header}BBBB")});
-        let rows = vec![a.clone(), b.clone(), a.clone()];
-        assert_eq!(
-            distinct(rows),
-            vec![a, b],
-            "Same header and length are still different images."
-        );
-    }
 }

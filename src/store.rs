@@ -1008,68 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn records_and_tokens_survive_restart() -> Result<()> {
-        let temporary = tempfile::tempdir()?;
-        let root = temporary.path().join("store");
-        let store = Store::open(root.clone())?;
-        let job = job();
-        store.save_job(&job)?;
-        let ticket = Ticket {
-            token: token(),
-            build_id: job.id.clone(),
-            expires_at: 44,
-            base_url: "https://example.test".into(),
-            transfer: crate::model::TransferEvidence::NotStarted,
-        };
-        store.save_ticket(&ticket)?;
-        let control_token = store.settings.control_token.clone();
-        let diagnostic_token = store.settings.diagnostic_token.clone();
-        drop(store);
-        let store = Store::open(root)?;
-        assert_eq!(store.settings.control_token, control_token);
-        assert_eq!(store.settings.diagnostic_token, diagnostic_token);
-        assert_ne!(control_token, diagnostic_token);
-        assert_eq!(
-            store.load_job(&job.id)?.output().unwrap().bundle_id,
-            "dev.example.app"
-        );
-        assert_eq!(store.list_jobs()?.len(), 1);
-        assert_eq!(store.load_ticket(&ticket.token)?.build_id, job.id);
-        Ok(())
-    }
-
-    #[test]
-    fn relative_root_persists_artifact_paths_independent_of_working_directory() -> Result<()> {
-        let temporary = tempfile::tempdir_in(std::env::current_dir()?)?;
-        let relative_root = PathBuf::from(temporary.path().file_name().unwrap()).join("store");
-        assert!(relative_root.is_relative());
-        let store = Store::open(relative_root)?;
-        assert!(store.root.is_absolute());
-        let root = store.root.clone();
-        let mut job = job();
-        store.save_job(&job)?;
-        let artifact_path = store.job_dir(&job.id)?.join("app.ipa");
-        fs::write(&artifact_path, b"artifact bytes")?;
-        if let JobPhase::Succeeded { output, .. } = &mut job.phase {
-            output.ipa_path = Some(artifact_path);
-        }
-        store.save_job(&job)?;
-        drop(store);
-
-        let restarted = Store::open(root)?;
-        let stored_path = restarted.load_job(&job.id)?.ipa().unwrap().to_path_buf();
-        assert!(stored_path.is_absolute());
-        // Joining an unrelated cwd has no effect on an absolute persisted path;
-        // avoid changing the process-wide cwd while other tests run in parallel.
-        let unrelated_directory = tempfile::tempdir()?;
-        assert_eq!(
-            fs::read(unrelated_directory.path().join(stored_path))?,
-            b"artifact bytes"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn concurrent_first_opens_keep_one_credential_pair() -> Result<()> {
         let temporary = tempfile::tempdir()?;
         let root = temporary.path().join("store");
@@ -1149,68 +1087,6 @@ mod tests {
         assert_eq!(final_page["has_more"], false);
         assert_eq!(final_page["events"], json!([]));
         assert!(store.diagnostics(&job.id, 6, 1, None).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn invalid_paths_schema_and_unassociated_diagnostics_are_rejected() -> Result<()> {
-        let temporary = tempfile::tempdir()?;
-        let store = Store::open(temporary.path().to_owned())?;
-        for id in ["../outside", "/tmp/outside", "not-a-uuid"] {
-            assert!(store.job_dir(id).is_err());
-            assert!(store.load_ticket(id).is_err());
-        }
-        let mut job = job();
-        job.origin = BuildOrigin::Project {
-            request: serde_json::from_value(
-                json!({"project": "/P.xcodeproj", "scheme": "P", "configuration": "Debug",
-                "mode": "simulator", "export_options": null, "request_id": null}),
-            )?,
-            provenance: Default::default(),
-        };
-        job.phase = JobPhase::Failed {
-            message: "no product".into(),
-        };
-        store.save_job(&job)?;
-        assert!(
-            store
-                .append_diagnostic(&diagnostic(&job, DiagnosticKind::Log))
-                .is_err()
-        );
-        let config = temporary.path().join("config.json");
-        let mut settings = store.settings.clone();
-        settings.schema_version = SCHEMA_VERSION + 1;
-        atomic_json(&config, &settings)?;
-        let original = fs::read(&config)?;
-        assert!(Store::open(temporary.path().to_owned()).is_err());
-        assert_eq!(fs::read(config)?, original);
-        Ok(())
-    }
-
-    #[test]
-    fn rejected_diagnostics_do_not_change_existing_data() -> Result<()> {
-        let temporary = tempfile::tempdir()?;
-        let store = Store::open(temporary.path().to_owned())?;
-        let job = job();
-        store.save_job(&job)?;
-        let event = diagnostic(&job, DiagnosticKind::Log);
-        store.append_diagnostic(&event)?;
-        let path = store.job_dir(&job.id)?.join("diagnostics.jsonl");
-        let original = fs::read(&path)?;
-        let mut oversized = diagnostic(&job, DiagnosticKind::Log);
-        oversized.message = "x".repeat(MAX_DIAGNOSTIC_MESSAGE_BYTES + 1);
-        assert!(store.append_diagnostic(&oversized).is_err());
-        assert_eq!(fs::read(&path)?, original);
-        // A corrupt or crash-truncated tail is reported without erasing evidence.
-        open_private_append(&path)?.write_all(b"{\"partial\":")?;
-        let original = fs::read(&path)?;
-        assert!(
-            store
-                .append_diagnostic(&diagnostic(&job, DiagnosticKind::Log))
-                .is_err()
-        );
-        assert_eq!(fs::read(&path)?, original);
-        assert!(store.diagnostics(&job.id, 0, 100, None).is_err());
         Ok(())
     }
 

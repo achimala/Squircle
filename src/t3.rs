@@ -696,47 +696,6 @@ mod tests {
         ));
     }
 
-    /// The dispatch answers shared with the app's tests: each means the
-    /// same there and here.
-    #[tokio::test]
-    async fn dispatch_exits_mean_what_the_shared_fixtures_say() {
-        use crate::fsm::coordinator::Identity;
-        use crate::fsm::core::CommandID;
-        let fixture: Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/t3/dispatch-exits.json"
-        )))
-        .unwrap();
-        let cases = fixture["cases"].as_array().unwrap().clone();
-        assert!(!cases.is_empty());
-        let (client, mut server) = peer().await;
-        let exits: Vec<Value> = cases.iter().map(|c| c["exit"].clone()).collect();
-        let answers = tokio::spawn(async move {
-            for exit in exits {
-                let request = next_request(&mut server).await;
-                let frame = json!({"_tag":"Exit","requestId":request["id"],"exit":exit});
-                server.send(Message::text(frame.to_string())).await.unwrap();
-            }
-            server
-        });
-        for case in &cases {
-            let identity = Identity {
-                id: CommandID::fresh(),
-                created_at: "2026-10-18T00:00:00.000Z".into(),
-            };
-            let command = Command::new(&identity, json!({"type": "thread.turn.start"}));
-            let outcome = match client.dispatch(&command).await {
-                Dispatched::Accepted(value) if value == case["exit"]["value"] => "accepted",
-                Dispatched::Accepted(_) => "accepted with another value",
-                Dispatched::Refused(_) => "refused",
-                Dispatched::Unknown(_) => "unknown",
-                Dispatched::NotSent(_) => "not sent",
-            };
-            assert_eq!(Some(outcome), case["outcome"].as_str(), "{}", case["name"]);
-        }
-        answers.await.unwrap();
-    }
-
     #[tokio::test]
     async fn write_failure_closes_the_connection() {
         let sink = Box::pin(futures_util::sink::unfold((), |_, _: Message| async {

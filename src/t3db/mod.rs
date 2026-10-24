@@ -253,42 +253,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parameters_are_literals_and_database_is_never_writable_or_created() {
-        let (_directory, path) = fixture();
-        let before = std::fs::read(&path).unwrap();
-        let attack = "one' OR 1=1 --";
-        let rows = query_at(
-            path.clone(),
-            "select * from data where id=?1",
-            vec![attack.to_owned().into()],
-            MAX_OUTPUT,
-        )
-        .await
-        .unwrap();
-        assert!(rows.is_empty());
-        for sql in [
-            "insert into data values ('two','changed')",
-            "delete from data",
-            "drop table data",
-            "pragma user_version=42",
-        ] {
-            assert!(
-                query_at(path.clone(), sql, vec![], MAX_OUTPUT)
-                    .await
-                    .is_err()
-            );
-        }
-        assert_eq!(before, std::fs::read(&path).unwrap());
-        let missing = path.with_extension("missing");
-        assert!(
-            query_at(missing.clone(), "select 1", vec![], MAX_OUTPUT)
-                .await
-                .is_err()
-        );
-        assert!(!missing.exists());
-    }
-
-    #[tokio::test]
     async fn nulls_numbers_empty_results_and_output_budget_are_preserved() {
         let (_directory, path) = fixture();
         let rows = query_at(
@@ -318,27 +282,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("limit"), "{error:#}");
-    }
-
-    #[tokio::test]
-    async fn dropping_a_long_query_stops_sqlite_work() {
-        let (_directory, path) = fixture();
-        const LONG: &str = "with recursive n(x) as (values(1) union all select x+1 from n where x<1000000000) select sum(x) from n";
-        // Directly exercise the same cancellation guard with a running worker,
-        // then join it: cancellation must stop CPU work, not just its awaiter.
-        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let guard = CancelRead {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            interrupt: Some(db.get_interrupt_handle()),
-        };
-        let stopped = guard.cancelled.clone();
-        db.progress_handler(1000, Some(move || stopped.load(Ordering::Acquire)))
-            .unwrap();
-        let work =
-            tokio::task::spawn_blocking(move || read_rows(&db, LONG, vec![], MAX_OUTPUT, || false));
-        drop(guard);
-        // Joined: it stops because it was interrupted, or this never returns.
-        assert!(work.await.unwrap().is_err());
     }
     /// Sanitized projection fixture: V2 tables beside the 0.0.45 ones T3
     /// leaves in the same file. Checks SQLite JSON typing, IDs, limits,

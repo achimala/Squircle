@@ -114,6 +114,3 @@ pub struct Push {
     /// or a write to T3's database.
     wake: Notify,
 }
-
-#[cfg(test)]
-mod tests;

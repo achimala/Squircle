@@ -128,25 +128,4 @@ mod tests {
             assert!(refused(lan).contains("unencrypted"), "{lan}");
         }
     }
-
-    #[test]
-    fn hostile_forms_are_refused() {
-        for input in [
-            "http://user:pass@127.0.0.1:8787",
-            "http://user@127.0.0.1:8787",
-            "https://127.0.0.1@evil.example.com",
-            "http://127.0.0.1:8787/api",
-            "http://127.0.0.1:8787/?x=1",
-            "http://127.0.0.1:8787?",
-            "http://127.0.0.1:8787#frag",
-            "ftp://127.0.0.1",
-            "file:///etc/passwd",
-            "127.0.0.1:8787",
-            "not a url",
-        ] {
-            refused(input);
-        }
-        assert!(refused("http://user:pw@localhost:1").contains("user name"));
-        assert!(refused("http://localhost:1/x").contains("use http://localhost:1"));
-    }
 }

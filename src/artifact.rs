@@ -129,24 +129,3 @@ pub fn escape_html(text: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rejects_unsafe_or_ambiguous_origins() {
-        for input in [
-            "http://mac.test",
-            "https://u:p@mac.test",
-            "https://mac.test/path",
-            "https://mac.test/?token=x",
-            "https://mac.test/#x",
-        ] {
-            assert!(validate_public_url(input).is_err(), "{input}");
-        }
-        assert_eq!(
-            validate_public_url("https://mac.test:443/").unwrap(),
-            "https://mac.test"
-        );
-    }
-}

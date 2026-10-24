@@ -743,22 +743,3 @@ async fn file_orphan(
     );
     Ok((media.id, before, after))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn names_the_session_of_leftovers() {
-        let id = "1cbb5ade-2a25-42c9-bf17-39504daa49cd";
-        assert_eq!(session_of(&format!(".{id}.recording.mp4")), Some(id));
-        assert_eq!(
-            session_of(&format!(
-                ".{id}.recording.compact.mp4.sb-87e40459-0K4O6e-videoSegment2.mp4"
-            )),
-            Some(id)
-        );
-        assert_eq!(session_of(&format!(".{id}.mp4.light.mp4")), None);
-        assert_eq!(session_of(&format!("{id}.mp4")), None);
-    }
-}

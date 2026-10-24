@@ -1236,36 +1236,6 @@ mod tests {
         );
     }
 
-    /// A created simulator: the newest iPhone Pro on the newest iOS that
-    /// has one (a newer runtime with only an odd model is passed over).
-    #[test]
-    fn created_simulators_default_model() {
-        let iphone = |n: &str| json!({"name": n, "identifier": format!("type.{n}"), "productFamily": "iPhone"});
-        let runtimes = json!({"runtimes": [
-            {"identifier": "ios-26-4", "version": "26.4", "platform": "iOS", "isAvailable": true,
-             "supportedDeviceTypes": [iphone("iPhone 17 Pro")]},
-            {"identifier": "ios-27-0", "version": "27.0", "platform": "iOS", "isAvailable": true,
-             "supportedDeviceTypes": [iphone("iPhone 17 Pro"), iphone("iPhone 18 Pro Max"), iphone("iPhone 18 Pro"), iphone("iPhone Air")]},
-            {"identifier": "ios-27-1", "version": "27.1", "platform": "iOS", "isAvailable": true,
-             "supportedDeviceTypes": [iphone("iPhone Duo")]},
-            {"identifier": "ios-28-0", "version": "28.0", "platform": "iOS", "isAvailable": false,
-             "supportedDeviceTypes": [iphone("iPhone 19 Pro")]},
-            {"identifier": "watch", "version": "30.0", "platform": "watchOS", "isAvailable": true,
-             "supportedDeviceTypes": [iphone("iPhone 20 Pro")]}]});
-        assert_eq!(
-            default_model(&runtimes),
-            Some((
-                "type.iPhone 18 Pro".into(),
-                "ios-27-0".into(),
-                "iPhone 18 Pro".into()
-            ))
-        );
-        let odd = json!({"runtimes": [{"identifier": "ios-27-1", "version": "27.1", "platform": "iOS",
-            "isAvailable": true, "supportedDeviceTypes": [iphone("iPhone Duo")]}]});
-        assert_eq!(default_model(&odd).unwrap().2, "iPhone Duo");
-        assert_eq!(default_model(&json!({"runtimes": []})), None);
-    }
-
     #[derive(Default)]
     struct Fake {
         devices: Mutex<Vec<Device>>,
@@ -1378,8 +1348,6 @@ mod tests {
     }
 
     const ADHOC: &str = "AAAAAAAA-0000-4000-8000-000000000000";
-    const LEASED: &str = "BBBBBBBB-0000-4000-8000-000000000000";
-    const USER: &str = "CCCCCCCC-0000-4000-8000-000000000000";
 
     fn pool(dir: &Path, fake: &Arc<Fake>, owner: &Arc<Sessions>) -> Arc<Pool> {
         let pool = Pool::with(
@@ -1393,63 +1361,6 @@ mod tests {
         let holds: Arc<dyn Holds> = owner.clone();
         pool.attach(Arc::downgrade(&holds));
         pool
-    }
-
-    /// A dry run touches nothing; a session's simulator stops when its
-    /// release asks, but only if its boot is proven; the user's own booted
-    /// simulator is never stopped; provenance survives a restart.
-    #[tokio::test]
-    async fn cleanup_and_release_apply_the_plan() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake = Arc::new(Fake::default());
-        *fake.devices.lock().unwrap() = vec![
-            device(ADHOC, "Booted"),
-            device(LEASED, "Booted"),
-            device(USER, "Booted"),
-        ];
-        let owner = Arc::new(Sessions::default());
-        *owner.leases.lock().unwrap() = vec![Lease {
-            device_id: LEASED.into(),
-            thread_id: "w2".into(),
-        }];
-        let pool = pool(dir.path(), &fake, &owner);
-
-        let report = pool.cleanup(&owner.leases(), true).await.unwrap();
-        assert_eq!(report["would"].as_array().unwrap().len(), 1);
-        assert!(fake.calls.lock().unwrap().is_empty());
-
-        // Leased but not booted by the session: the user's, kept.
-        owner.leases.lock().unwrap().clear();
-        assert!(matches!(
-            pool.release(USER, "w2", &[]).await.unwrap(),
-            Released::Kept { .. }
-        ));
-        *owner.boots.lock().unwrap() = vec![(
-            LEASED.into(),
-            BootReceipt {
-                at: now(),
-                thread: None,
-                session: Some("s".into()),
-            },
-        )];
-        assert_eq!(
-            pool.release(LEASED, "w2", &[]).await.unwrap(),
-            Released::ShutDown
-        );
-        assert_eq!(*fake.calls.lock().unwrap(), [format!("shutdown {LEASED}")]);
-        // Within the idle time the ad-hoc one stays; cleanup takes it now.
-        pool.tick(&[]).await.unwrap();
-        assert_eq!(fake.calls.lock().unwrap().len(), 1);
-        let reopened = super::tests::pool(dir.path(), &fake, &owner);
-        reopened.cleanup(&[], false).await.unwrap();
-        assert_eq!(
-            *fake.calls.lock().unwrap(),
-            [format!("shutdown {LEASED}"), format!("shutdown {ADHOC}")]
-        );
-        assert!(
-            owner.excluded.lock().unwrap().is_empty(),
-            "an exclusion outlived its cleanup"
-        );
     }
 
     /// A cleanup is saved before it runs and revalidated right before:

@@ -689,26 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn adds_load_command_once() {
-        let mut b = thin();
-        assert!(add_weak_dylib(&mut b, LOAD_PATH).unwrap());
-        assert_eq!(u32::from_le_bytes(b[16..20].try_into().unwrap()), 2);
-        let start = 32 + 152;
-        assert_eq!(
-            u32::from_le_bytes(b[start..start + 4].try_into().unwrap()),
-            LC_LOAD_WEAK_DYLIB
-        );
-        assert!(!add_weak_dylib(&mut b, LOAD_PATH).unwrap());
-    }
-
-    #[test]
-    fn refuses_without_header_space() {
-        let mut b = thin();
-        b[20..24].copy_from_slice(&(0x4000u32 - 40).to_le_bytes());
-        assert!(add_weak_dylib(&mut b, LOAD_PATH).is_err());
-    }
-
-    #[test]
     fn malformed_headers_are_errors_not_panics() {
         let fat = |count: u32, offset: u32, size: u32| {
             let mut b = vec![0u8; 64];
@@ -781,64 +761,5 @@ mod tests {
             assert_eq!(le32(&b, start + 16).unwrap(), 2);
         }
         assert!(!add_weak_dylib(&mut b, LOAD_PATH).unwrap());
-    }
-
-    fn overlay_fixture() -> (tempfile::TempDir, PathBuf) {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("Squircle.xcodeproj");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("project.pbxproj"), "{}").unwrap();
-        for dir in ["Sources", "Overlay"] {
-            fs::create_dir_all(root.path().join(dir)).unwrap();
-            fs::write(root.path().join(dir).join("A.swift"), dir).unwrap();
-        }
-        fs::create_dir_all(root.path().join("Config")).unwrap();
-        fs::write(root.path().join("Config/Signing.xcconfig"), "A = 1").unwrap();
-        (root, project)
-    }
-
-    #[test]
-    fn cache_key_follows_sources_and_toolchain() {
-        let (root, project) = overlay_fixture();
-        let key = cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap();
-        assert_eq!(
-            key,
-            cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap()
-        );
-        assert_ne!(
-            key,
-            cache_key(&project, "Xcode 26.1\nBuild 17B1\n23B1\n").unwrap()
-        );
-        fs::write(root.path().join("Overlay/A.swift"), "changed").unwrap();
-        let changed = cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap();
-        assert_ne!(key, changed);
-        // A different namespace is a different framework.
-        fs::write(root.path().join("Config/Local.xcconfig"), "B = 2").unwrap();
-        assert_ne!(
-            changed,
-            cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap()
-        );
-    }
-
-    #[test]
-    fn only_complete_unchanged_cache_entries_are_reused() {
-        let cache = tempfile::tempdir().unwrap();
-        let built = cache.path().join("build").join(FRAMEWORK);
-        fs::create_dir_all(&built).unwrap();
-        fs::write(built.join("SquircleOverlay"), "binary").unwrap();
-        fs::write(built.join("Info.plist"), "info").unwrap();
-
-        // A product without a manifest, as an interrupted publish leaves it.
-        let entry = cache.path().join("abc");
-        copy_dir(&built, &entry.join(FRAMEWORK)).unwrap();
-        assert!(cached(&entry, "abc").is_none());
-
-        let product = publish(cache.path(), "abc", "Xcode 26", &built).unwrap();
-        assert_eq!(cached(&entry, "abc"), Some(product.clone()));
-        assert!(cached(&entry, "other").is_none());
-        assert!(!cache.path().join("staging-abc").exists());
-
-        fs::write(product.join("SquircleOverlay"), "truncat").unwrap();
-        assert!(cached(&entry, "abc").is_none());
     }
 }

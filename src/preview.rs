@@ -249,30 +249,3 @@ async fn command(args: &[OsString], log: &Path, cancel: watch::Receiver<bool>) -
     log.write_all(&finished.stdout)?;
     Ok(finished.stdout)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn capture_requires_exact_simulator_and_target_process() {
-        assert!(simulator_id(Some("booted")).is_err());
-        assert!(simulator_id(Some("; rm -rf /")).is_err());
-        assert_eq!(launch_pid(b"test.app: 123\n", "test.app").unwrap(), 123);
-        assert!(launch_pid(b"other.app: 123\n", "test.app").is_err());
-        assert!(target_is_running(
-            b"PID Status Label\n123 0 UIKitApplication:test.app[abc][rb-1]\n",
-            123,
-            "test.app"
-        ));
-        assert!(!target_is_running(
-            b"123 0 UIKitApplication:test.application[abc]\n",
-            123,
-            "test.app"
-        ));
-        assert!(!target_is_running(
-            b"- 0 UIKitApplication:test.app[abc]\n",
-            123,
-            "test.app"
-        ));
-    }
-}

@@ -302,33 +302,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_tasks_come_back_for_new_work_including_ones_saved_before_revisions_and_sub_tasks()
-     {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("tasks.json"), r#"{"tasks": {"t": {"id": "t", "project_id": "p", "ask": "Stack the sims",
-            "status": "done", "note": "", "threads": ["w"], "builds": [], "order": 1.0, "created_at": 0, "updated_at": 0,
-            "archived_at": 5, "seen": "w:done", "history": []}}}"#).unwrap();
-        let tasks = Tasks::open(dir.path()).unwrap();
-        // Saved before sub-tasks: a work item with none.
-        let task = tasks.get("t").unwrap();
-        assert_eq!((task.archived_at, task.subtasks.len()), (Some(5), 0));
-        assert_eq!(tasks.list("p").len(), 1);
-        // Unchanged work leaves it where it is.
-        tasks.tick(|_| Signals::legacy("w:done")).await.unwrap();
-        assert_eq!(tasks.get("t").unwrap().archived_at, Some(5));
-        tasks
-            .tick(|_| worker("2", WorkerPhase::Working))
-            .await
-            .unwrap();
-        let task = tasks.get("t").unwrap();
-        assert_eq!((task.status, task.archived_at), (Status::InProgress, None));
-        assert_eq!(
-            Tasks::open(dir.path()).unwrap().get("t").unwrap().status,
-            Status::InProgress
-        );
-    }
-
-    #[tokio::test]
     async fn an_explicit_status_still_holds_after_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();

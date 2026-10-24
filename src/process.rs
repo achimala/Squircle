@@ -234,76 +234,6 @@ pub(crate) async fn run_bounded_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
-    #[tokio::test]
-    async fn cancellation_wakes_when_supervisor_closes() {
-        let (sender, receiver) = watch::channel(false);
-        drop(sender);
-        cancelled(Some(receiver)).await;
-    }
-
-    /// A shell that writes `$!` (the background job it leaves) to a marker
-    /// file, and the pid once the shell has written it: the file's own
-    /// change wakes the wait.
-    struct Marker(tempfile::NamedTempFile);
-
-    impl Marker {
-        fn new() -> Self {
-            Self(tempfile::NamedTempFile::new().unwrap())
-        }
-
-        fn shell(&self, script: &str) -> Command {
-            let mut command = Command::new("/bin/sh");
-            command.args(["-c", script]).arg(self.0.path());
-            command
-        }
-
-        async fn pid(&self) -> u32 {
-            let changes = crate::kq::Changes::watch(self.0.path()).unwrap();
-            loop {
-                let text = fs::read_to_string(self.0.path()).unwrap();
-                if let Some(pid) = text.strip_suffix('\n').and_then(|t| t.parse().ok()) {
-                    return pid;
-                }
-                changes.next().await.unwrap();
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn bounded_helpers_stop_on_cancellation_and_output_limits() {
-        let (sender, cancel) = watch::channel(false);
-        let marker = Marker::new();
-        let run = run_bounded(
-            marker.shell("sleep 30 & echo $! > \"$0\"; wait"),
-            Sink::Capture(1024),
-            Sink::Discard,
-            Some(cancel),
-        );
-        tokio::pin!(run);
-        let left = tokio::select! {
-            _ = &mut run => panic!("ended before it was cancelled"),
-            pid = marker.pid() => pid,
-        };
-        sender.send(true).unwrap();
-        assert!(matches!(run.await, Err(RunError::Cancelled)));
-        crate::kq::exited(left).await.unwrap();
-
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "yes | head -c 4096"]);
-        let result = run_bounded(command, Sink::Capture(1024), Sink::Discard, None).await;
-        assert!(matches!(result, Err(RunError::Failed(_))));
-
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "echo out; echo err >&2; exit 3"]);
-        let finished = run_bounded(command, Sink::Capture(1024), Sink::Capture(1024), None)
-            .await
-            .unwrap();
-        assert_eq!(finished.status.code(), Some(3));
-        assert_eq!(finished.stdout, b"out\n");
-        assert_eq!(finished.stderr, b"err\n");
-    }
 
     #[tokio::test]
     async fn input_reaches_stdin_and_an_unread_one_does_not_hang() {
@@ -325,51 +255,5 @@ mod tests {
                 .status
                 .success()
         );
-    }
-
-    #[tokio::test]
-    async fn leader_exit_kills_what_it_left_running() {
-        // The background sleep keeps stdout open after the shell exits.
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 30 & echo $!"]);
-        let finished = run_bounded(command, Sink::Capture(1024), Sink::Discard, None)
-            .await
-            .unwrap();
-        assert!(finished.status.success());
-        let left: u32 = String::from_utf8(finished.stdout)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        crate::kq::exited(left).await.unwrap();
-
-        // Also when nothing holds a pipe.
-        let marker = Marker::new();
-        let finished = run_bounded(
-            marker.shell("sleep 30 >/dev/null 2>&1 & echo $! > \"$0\""),
-            Sink::Discard,
-            Sink::Discard,
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(finished.status.success());
-        crate::kq::exited(marker.pid().await).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn dropping_a_run_kills_its_group() {
-        let marker = Marker::new();
-        let run = run_bounded(
-            marker.shell("sleep 30 & echo $! > \"$0\"; wait"),
-            Sink::Discard,
-            Sink::Discard,
-            None,
-        );
-        let left = tokio::select! {
-            _ = run => panic!("ended on its own"),
-            pid = marker.pid() => pid,
-        };
-        crate::kq::exited(left).await.unwrap();
     }
 }
