@@ -35,6 +35,11 @@ pub trait Host: Send + Sync {
     fn device_sessions(&self) -> Pending<'_, Result<Vec<(String, String)>>>;
     /// What T3 currently says the thread is doing.
     fn seen(&self, thread: &str) -> Seen;
+    /// One item each time what `seen` reads may have changed.
+    fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        futures_util::stream::pending().boxed()
+    }
     /// The squircle invocation agents are told to use.
     fn cli(&self) -> String;
     fn boot<'a>(&'a self, device: &'a str) -> Pending<'a, Result<()>>;
@@ -95,21 +100,27 @@ impl Host for AgentsHost {
         seen(&self.0, thread)
     }
 
+    fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        self.0.changes()
+    }
+
     fn cli(&self) -> String {
         self.0.cli().to_string()
     }
 
     fn boot<'a>(&'a self, device: &'a str) -> Pending<'a, Result<()>> {
         Box::pin(async move {
-            let status = Command::new("xcrun")
+            // Returns once the simulator has booted, or fails; dropping it
+            // (the start was cancelled) stops it.
+            let booted = Command::new("xcrun")
                 .args(["simctl", "bootstatus", device, "-b"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .kill_on_drop(true)
-                .status();
-            let booted = tokio::time::timeout(Duration::from_secs(180), status).await;
+                .status()
+                .await;
             ensure!(
-                matches!(booted, Ok(Ok(status)) if status.success()),
+                matches!(booted, Ok(status) if status.success()),
                 "did not finish booting"
             );
             Ok(())
@@ -204,13 +215,12 @@ impl Host for AgentsHost {
     fn poster<'a>(&'a self, device: &'a str, path: &'a Path) -> Pending<'a, ()> {
         Box::pin(async move {
             let run = |program: &str, args: &[&std::ffi::OsStr]| {
-                let status = Command::new(program)
+                Command::new(program)
                     .args(args)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .kill_on_drop(true)
-                    .status();
-                tokio::time::timeout(Duration::from_secs(15), status)
+                    .status()
             };
             let shot = path.with_extension("png");
             let taken = run(
@@ -224,7 +234,7 @@ impl Host for AgentsHost {
                 ],
             )
             .await;
-            if matches!(taken, Ok(Ok(s)) if s.success()) {
+            if matches!(taken, Ok(s) if s.success()) {
                 let _ = run(
                     "/usr/bin/sips",
                     &[

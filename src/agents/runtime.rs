@@ -113,7 +113,8 @@ impl Agents {
             if synced && started.elapsed() >= STABLE {
                 delay = 1;
             }
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+            // Nothing announces T3 listening again: retries are paced.
+            crate::clock::after(Duration::from_secs(delay)).await;
             delay = (delay * 2).min(30);
         }
     }
@@ -166,6 +167,12 @@ impl Agents {
     /// stop or remove anything on one.
     pub fn observe(&self, id: &str) -> Observed<Option<ThreadObservation>> {
         self.shell().observe(id)
+    }
+
+    /// One item each time what `observe` reads may have changed.
+    pub fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        self.view.changes().boxed()
     }
 
     /// Notifications and Live Activities follow the agents from here on.
@@ -288,21 +295,21 @@ impl Agents {
 
     pub(super) async fn ready(&self) -> Result<Arc<dyn Peer>> {
         let client = self.client().await?;
-        self.view_when(Duration::from_secs(5), |v| v.shell.current())
+        self.view_when(|v| v.shell.current())
             .await
             .context("T3 has not sent its thread list yet; try again")?;
         Ok(client)
     }
 
-    /// The first view, within `limit`, for which `ready` holds.
+    /// The first view for which `ready` holds; None if the connection goes
+    /// down first (or is down), when it won't come on this one.
     pub(super) async fn view_when(
         &self,
-        limit: Duration,
-        ready: impl FnMut(&View) -> bool,
+        mut ready: impl FnMut(&View) -> bool,
     ) -> Option<Arc<View>> {
-        tokio::time::timeout(limit, self.view.wait_for(ready))
+        self.view
+            .wait_for(|v| ready(v) || v.shell.offline())
             .await
-            .ok()
-            .flatten()
+            .filter(|v| ready(v))
     }
 }

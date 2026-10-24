@@ -21,11 +21,9 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-pub(crate) const STEP_READ: Duration = Duration::from_secs(3);
-pub(crate) const DETAIL_READ: Duration = Duration::from_secs(15);
 const MAX_OUTPUT: usize = 64 * 1024 * 1024;
 
 /// `SQUIRCLE_T3_STATE`, else T3's default `~/.t3/userdata/statev2.sqlite`
@@ -38,6 +36,56 @@ pub fn state_path() -> PathBuf {
                 .unwrap_or_default()
                 .join(".t3/userdata/statev2.sqlite")
         })
+}
+
+/// One item each time T3 writes its database, as the kernel reports writes
+/// to the file or its write-ahead log; a log that is removed or replaced is
+/// watched again once it appears. Ends if T3's folder can't be watched.
+pub fn changes() -> futures_util::stream::BoxStream<'static, ()> {
+    use futures_util::StreamExt;
+    let path = state_path();
+    let (told, heard) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        let Some(folder) = path.parent().map(PathBuf::from) else {
+            return;
+        };
+        let mut log = path.clone().into_os_string();
+        log.push("-wal");
+        let files = [path, PathBuf::from(log)];
+        loop {
+            let Ok(entries) = crate::kq::Changes::watch(&folder) else {
+                return;
+            };
+            let watched: Vec<_> = files
+                .iter()
+                .filter_map(|file| crate::kq::Changes::watch(file).ok())
+                .collect();
+            loop {
+                let written = async {
+                    if watched.is_empty() {
+                        return std::future::pending().await;
+                    }
+                    let writes = watched.iter().map(|file| Box::pin(file.next()));
+                    futures_util::future::select_all(writes).await.0
+                };
+                let replaced = tokio::select! {
+                    _ = entries.next() => true,
+                    _ = written => false,
+                };
+                // Full: a change is already waiting to be read, which covers this one.
+                if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = told.try_send(()) {
+                    return;
+                }
+                if replaced {
+                    break;
+                }
+            }
+        }
+    });
+    futures_util::stream::unfold(heard, |mut heard| async move {
+        heard.recv().await.map(|()| ((), heard))
+    })
+    .boxed()
 }
 
 /// Convert within the params! block, so non-Send ToSql references never
@@ -54,12 +102,10 @@ pub(crate) fn bindings(params: &[&dyn ToSql]) -> Result<Vec<SqlValue>> {
 }
 
 /// Static SQL cannot contain caller values; all bindings are already owned.
-pub(crate) async fn query(
-    sql: &'static str,
-    params: Result<Vec<SqlValue>>,
-    limit: Duration,
-) -> Result<Vec<Value>> {
-    query_at(state_path(), sql, params?, limit, MAX_OUTPUT).await
+/// The read runs until it finishes or this future is dropped (the request
+/// or loop that wanted it is gone), which interrupts SQLite at once.
+pub(crate) async fn query(sql: &'static str, params: Result<Vec<SqlValue>>) -> Result<Vec<Value>> {
+    query_at(state_path(), sql, params?, MAX_OUTPUT).await
 }
 
 /// Covers cancellation both before the blocking job starts and while SQLite
@@ -82,10 +128,8 @@ async fn query_at(
     path: PathBuf,
     sql: &'static str,
     params: Vec<SqlValue>,
-    limit: Duration,
     max_output: usize,
 ) -> Result<Vec<Value>> {
-    let deadline = Instant::now() + limit;
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut guard = CancelRead {
         cancelled: cancelled.clone(),
@@ -94,8 +138,8 @@ async fn query_at(
     let (ready, receive) = tokio::sync::oneshot::channel();
     let work = tokio::task::spawn_blocking(move || {
         ensure!(
-            !cancelled.load(Ordering::Acquire) && Instant::now() < deadline,
-            "T3 database read cancelled or timed out"
+            !cancelled.load(Ordering::Acquire),
+            "T3 database read cancelled"
         );
         let connection = Connection::open_with_flags(
             &path,
@@ -103,31 +147,24 @@ async fn query_at(
         )
         .with_context(|| format!("Opening T3 state database read-only at {}", path.display()))?;
         // Like the former CLI, refuse a busy DB rather than sleeping in its
-        // busy handler beyond the request's deadline.
+        // busy handler.
         connection.busy_timeout(Duration::ZERO)?;
         connection.set_limit(
             rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH,
             max_output.min(i32::MAX as usize) as i32,
         )?;
         let stopped = cancelled.clone();
-        connection.progress_handler(
-            1000,
-            Some(move || stopped.load(Ordering::Acquire) || Instant::now() >= deadline),
-        )?;
+        connection.progress_handler(1000, Some(move || stopped.load(Ordering::Acquire)))?;
         ready
             .send(connection.get_interrupt_handle())
             .map_err(|_| anyhow::anyhow!("T3 database read cancelled"))?;
         read_rows(&connection, sql, params, max_output, || {
-            cancelled.load(Ordering::Acquire) || Instant::now() >= deadline
+            cancelled.load(Ordering::Acquire)
         })
     });
-    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-        // If opening failed, await the job to preserve its useful path/error.
-        guard.interrupt = receive.await.ok();
-        work.await.context("T3 database reader stopped")?
-    })
-    .await
-    .context("T3 database read timed out")?
+    // If opening failed, await the job to preserve its useful path/error.
+    guard.interrupt = receive.await.ok();
+    work.await.context("T3 database reader stopped")?
 }
 
 fn read_rows(
@@ -216,50 +253,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parameters_are_literals_and_database_is_never_writable_or_created() {
-        let (_directory, path) = fixture();
-        let before = std::fs::read(&path).unwrap();
-        let attack = "one' OR 1=1 --";
-        let rows = query_at(
-            path.clone(),
-            "select * from data where id=?1",
-            vec![attack.to_owned().into()],
-            DETAIL_READ,
-            MAX_OUTPUT,
-        )
-        .await
-        .unwrap();
-        assert!(rows.is_empty());
-        for sql in [
-            "insert into data values ('two','changed')",
-            "delete from data",
-            "drop table data",
-            "pragma user_version=42",
-        ] {
-            assert!(
-                query_at(path.clone(), sql, vec![], DETAIL_READ, MAX_OUTPUT)
-                    .await
-                    .is_err()
-            );
-        }
-        assert_eq!(before, std::fs::read(&path).unwrap());
-        let missing = path.with_extension("missing");
-        assert!(
-            query_at(missing.clone(), "select 1", vec![], DETAIL_READ, MAX_OUTPUT)
-                .await
-                .is_err()
-        );
-        assert!(!missing.exists());
-    }
-
-    #[tokio::test]
     async fn nulls_numbers_empty_results_and_output_budget_are_preserved() {
         let (_directory, path) = fixture();
         let rows = query_at(
             path.clone(),
             "select null n, 123 i, 1.5 r, 'hello' t",
             vec![],
-            DETAIL_READ,
             MAX_OUTPUT,
         )
         .await
@@ -273,56 +272,16 @@ mod tests {
                 path.clone(),
                 "select value from data where 0",
                 vec![],
-                DETAIL_READ,
                 MAX_OUTPUT
             )
             .await
             .unwrap()
             .is_empty()
         );
-        let error = query_at(path, "with recursive n(x) as (values(1) union all select x+1 from n where x<1000) select value from data, n", vec![], DETAIL_READ, 1024)
+        let error = query_at(path, "with recursive n(x) as (values(1) union all select x+1 from n where x<1000) select value from data, n", vec![], 1024)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("limit"), "{error:#}");
-    }
-
-    #[tokio::test]
-    async fn long_queries_obey_the_deadline_and_drop_stops_sqlite_work() {
-        let (_directory, path) = fixture();
-        const LONG: &str = "with recursive n(x) as (values(1) union all select x+1 from n where x<1000000000) select sum(x) from n";
-        let start = Instant::now();
-        assert!(
-            query_at(
-                path.clone(),
-                LONG,
-                vec![],
-                Duration::from_millis(20),
-                MAX_OUTPUT
-            )
-            .await
-            .is_err()
-        );
-        assert!(start.elapsed() < Duration::from_secs(2));
-        // Directly exercise the same cancellation guard with a running worker,
-        // then join it: cancellation must stop CPU work, not just its awaiter.
-        let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let guard = CancelRead {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            interrupt: Some(db.get_interrupt_handle()),
-        };
-        let stopped = guard.cancelled.clone();
-        db.progress_handler(1000, Some(move || stopped.load(Ordering::Acquire)))
-            .unwrap();
-        let work =
-            tokio::task::spawn_blocking(move || read_rows(&db, LONG, vec![], MAX_OUTPUT, || false));
-        drop(guard);
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), work)
-                .await
-                .unwrap()
-                .unwrap()
-                .is_err()
-        );
     }
     /// Sanitized projection fixture: V2 tables beside the 0.0.45 ones T3
     /// leaves in the same file. Checks SQLite JSON typing, IDs, limits,

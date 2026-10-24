@@ -54,7 +54,6 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::process::{Child, Command};
 use tokio::sync::Notify;
@@ -92,16 +91,14 @@ pub struct Sims {
     starts: Lane,
     /// Set once by `shutdown`: no new starts, and `run` returns.
     draining: tokio::sync::watch::Sender<bool>,
-    /// Woken after every save: a start waiting for a release receipt looks again.
+    /// Woken after every save: a start waiting for a release receipt looks
+    /// again, and the watchdog reconsiders.
     saved: Arc<Notify>,
+    /// Woken when a recorder exits: the watchdog ends its session.
+    poke: Arc<Notify>,
 }
 
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
+use crate::clock::now;
 
 #[cfg(test)]
 mod tests;

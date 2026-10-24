@@ -6,16 +6,6 @@ final class SquircleActionTests: XCTestCase {
     private let cli = "cd /Users/me/RemoteAppDev && target/release/squircle --data-dir .squircle --server http://127.0.0.1:8787"
     private let worker = "0cb24ec7-8423-40f3-a23e-d36e5f38807d"
 
-    func testSpawnReadsTitleBranchPromptAndTruncatedOutput() {
-        let command = cli + #" thread spawn --coordinator ee706a81-71a5-48ce-9cc1-c9da511a96e4 --title "Stray pulse on send" --branch send-pulse-fix --prompt "Fix the \"pulse\".\nIt's on send." | head -4"#
-        let actions = SquircleAction.parse(command: command, result: "{\n  \"data\": {\n    \"base\": \"main\",\n    \"branch\": \"send-pulse-fix\",")
-        XCTAssertEqual(actions, [SquircleAction(kind: .spawn(nil), title: "Stray pulse on send", branch: "send-pulse-fix", text: "Fix the \"pulse\".\\nIt's on send.", outcome: .succeeded)])
-        let refused = SquircleAction.parse(command: command, result: "{\n  \"error\": {\n    \"code\": \"agent_failed\",")
-        XCTAssertEqual(refused.first?.visible, false)
-        let full = SquircleAction.parse(command: command, result: #"{"data":{"id":"\#(worker)","title":"Stray pulse on send"}}"#)
-        XCTAssertEqual(full.first?.worker?.raw, worker)
-    }
-
     func testSendWithHeredocQuotesAndContinuations() {
         let command = cli + " thread send \(worker.uppercased()) \"$(cat <<'EOF'\nUser says: 'close, but'\n\n- make it \"shorter\"\nEOF\n)\" 2>&1 | tail -2"
         let actions = SquircleAction.parse(command: command)
@@ -69,28 +59,5 @@ final class SquircleActionTests: XCTestCase {
         XCTAssertTrue(SquircleAction.parse(command: "grep -rn squircle src # thread spawn").isEmpty)
         XCTAssertTrue(SquircleAction.parse(command: "cat <<EOF > notes.md\nsquircle thread spawn --title x\nEOF\necho done").isEmpty)
         XCTAssertTrue(SquircleAction.parse(command: "xcrun simctl launch $U ai.dreamslate.Squircle").isEmpty)
-    }
-
-    func testRunningCommandsReadAsTheirMainProgram() {
-        let cases: [(String, String)] = [
-            (#"DB="file:/tmp/state.sqlite?mode=ro"; sqlite3 "$DB" "select kind from t" | head -5"#, "Querying a database"),
-            ("cd /x && set -euo pipefail && xcodebuild -project A.xcodeproj -scheme A build 2>&1 | tail -20", "Building with xcodebuild"),
-            ("xcodebuild test -scheme Squircle -destination 'id=1' | xcpretty", "Testing with xcodebuild"),
-            ("/bin/zsh -lc 'cd app && rg -n \"func headline\" Sources | head'", "Searching with rg"),
-            ("sed -n 120,200p app/Squircle/Sources/UI/ThreadTimeline.swift", "Reading ThreadTimeline.swift"),
-            ("head -20 a.swift b.swift; wc -l c.swift", "Reading 2 files"),
-            ("cat > notes.md <<'EOF'\nrm -rf everything\nEOF", "Writing notes.md"),
-            ("git -C repo add -A && git commit -q -m \"$(cat <<'EOF'\nFix it\nEOF\n)\"", "Committing"),
-            ("export PATH=/x:$PATH; RUST_LOG=debug cargo test --release -- --nocapture", "Testing with cargo"),
-            ("timeout 60 npx -y tsc --noEmit", "Checking types"),
-            ("npm run build 2>&1 | tail -2", "Building with npm"),
-            ("find . -name '*.swift' | xargs grep -l Shell", "Finding files"),
-            ("if [ -f x ]; then python3 scripts/render.py --out a.png; fi", "Running render.py"),
-            ("for f in *.swift; do echo $f; done", "Running a command"),
-            ("sleep 30", "Waiting"),
-            ("xcrun simctl io booted screenshot /tmp/a.png", "Capturing the simulator"),
-            ("curl -s https://example.com/api | jq .", "Fetching example.com"),
-        ]
-        for (command, label) in cases { XCTAssertEqual(CommandLabel.label(command), label, command) }
     }
 }

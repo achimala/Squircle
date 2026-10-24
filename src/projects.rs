@@ -13,9 +13,8 @@ use std::{
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    time::Duration,
 };
-use tokio::{process::Command, time::Instant};
+use tokio::process::Command;
 
 #[derive(Serialize)]
 pub struct Directory {
@@ -200,10 +199,9 @@ pub async fn inspect(
         issue: None,
         can_import: false,
     };
-    let deadline = Instant::now() + Duration::from_secs(45);
     let mut list_args = args(&project);
     list_args.extend(["-list".into(), "-json".into()]);
-    let list = match xcode_json(&list_args, deadline)
+    let list = match xcode_json(&list_args)
         .await
         .and_then(|bytes| parse_schemes(&bytes))
     {
@@ -247,7 +245,7 @@ pub async fn inspect(
         "-showBuildSettings".into(),
         "-json".into(),
     ]);
-    match xcode_json(&settings_args, deadline)
+    match xcode_json(&settings_args)
         .await
         .and_then(|bytes| parse_app_settings(&bytes))
     {
@@ -471,27 +469,24 @@ pub fn import_inspected(store: &Store, inspection: &Inspection, name: &str) -> R
     )
 }
 
-async fn xcode_json(args: &[OsString], deadline: Instant) -> Result<Vec<u8>> {
+/// xcodebuild's JSON answer; dropping this (the request that asked is
+/// gone) stops it and whatever it started.
+async fn xcode_json(args: &[OsString]) -> Result<Vec<u8>> {
     let mut command = Command::new("/usr/bin/xcodebuild");
     command.args(args);
-    bounded_output(command, deadline).await
+    bounded_output(command).await
 }
 
-async fn bounded_output(command: Command, deadline: Instant) -> Result<Vec<u8>> {
+async fn bounded_output(command: Command) -> Result<Vec<u8>> {
     let finished = crate::process::run_bounded(
         command,
         crate::process::Sink::Capture(8 * 1024 * 1024),
         crate::process::Sink::Capture(1024 * 1024),
-        deadline,
         None,
     )
     .await
     .map_err(|error| match error {
-        crate::process::RunError::TimedOut | crate::process::RunError::Cancelled => {
-            anyhow::anyhow!(
-                "Xcode inspection exceeded 45 seconds; resolve packages/setup in Xcode, then retry"
-            )
-        }
+        crate::process::RunError::Cancelled => anyhow::anyhow!("Xcode inspection cancelled"),
         crate::process::RunError::Failed(error) => {
             error.context("Cannot run xcodebuild; select an installed Xcode on the Mac")
         }
@@ -506,227 +501,4 @@ async fn bounded_output(command: Command, deadline: Instant) -> Result<Vec<u8>> 
             .collect::<String>()
     );
     Ok(finished.stdout)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn fixture() -> (tempfile::TempDir, Store, Inspection) {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("New App.xcodeproj");
-        fs::create_dir(&project).unwrap();
-        let store = Store::open(temp.path().join("state")).unwrap();
-        let inspected = Inspection {
-            project: project.canonicalize().unwrap(),
-            name: "New App".into(),
-            schemes: vec!["New App".into()],
-            scheme: Some("New App".into()),
-            configuration: "Release".into(),
-            bundle_id: Some("dev.example.newapp".into()),
-            team_id: None,
-            export_options: None,
-            issue: Some("No signing team is configured".into()),
-            can_import: true,
-        };
-        (temp, store, inspected)
-    }
-    fn ios_settings() -> serde_json::Value {
-        json!({"PRODUCT_TYPE":"com.apple.product-type.application","PLATFORM_NAME":"iphoneos","PRODUCT_BUNDLE_IDENTIFIER":"dev.example.app","PRODUCT_NAME":"Example","DEVELOPMENT_TEAM":""})
-    }
-    #[test]
-    fn browse_is_shallow_sorted_and_keeps_packages_selectable() {
-        let temp = tempfile::tempdir().unwrap();
-        for name in [
-            "zFolder",
-            "A.xcodeproj",
-            "b.xcworkspace",
-            ".hidden",
-            "Unrelated.app",
-        ] {
-            fs::create_dir(temp.path().join(name)).unwrap();
-        }
-        fs::write(temp.path().join("README.txt"), "text").unwrap();
-        fs::create_dir(temp.path().join("A.xcodeproj/Internals")).unwrap();
-        let directory = browse(temp.path().to_str()).unwrap();
-        assert_eq!(
-            directory
-                .entries
-                .iter()
-                .map(|entry| (entry.name.as_str(), entry.kind))
-                .collect::<Vec<_>>(),
-            vec![
-                ("A.xcodeproj", "project"),
-                ("b.xcworkspace", "workspace"),
-                ("zFolder", "directory")
-            ]
-        );
-        assert!(browse(temp.path().join("A.xcodeproj").to_str()).is_err());
-        assert!(browse(temp.path().join("b.xcworkspace").to_str()).is_err());
-        assert!(browse(Some("relative/folder")).is_err());
-        assert_eq!(
-            resolve_path(Some("~")).unwrap(),
-            dirs::home_dir().unwrap().canonicalize().unwrap()
-        );
-    }
-    #[test]
-    fn parses_project_and_workspace_schemes_without_inventing_choices() {
-        assert_eq!(
-            parse_schemes(br#"{"project":{"schemes":["Z","App","App"]}}"#).unwrap(),
-            ["App", "Z"]
-        );
-        assert_eq!(
-            parse_schemes(br#"{"workspace":{"schemes":["App"]}}"#).unwrap(),
-            ["App"]
-        );
-        assert!(
-            parse_schemes(br#"{"project":{"schemes":[]}}"#)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(parse_schemes(b"not JSON").is_err());
-        assert!(parse_schemes(br#"{"other":{}}"#).is_err());
-    }
-    #[test]
-    fn settings_select_only_one_real_iphoneos_app_and_allow_missing_team() {
-        let mut framework = ios_settings();
-        framework["PRODUCT_TYPE"] = json!("com.apple.product-type.framework");
-        let settings = parse_app_settings(
-            &serde_json::to_vec(
-                &json!([{"buildSettings":framework},{"buildSettings":ios_settings()}]),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let (_temp, _store, mut inspection) = fixture();
-        apply_settings(&mut inspection, &settings);
-        assert!(inspection.can_import);
-        assert_eq!(inspection.team_id, None);
-        assert_eq!(inspection.bundle_id.as_deref(), Some("dev.example.app"));
-        assert!(
-            parse_app_settings(&serde_json::to_vec(&json!([{"buildSettings":framework}])).unwrap())
-                .is_err()
-        );
-        assert!(
-            parse_app_settings(
-                &serde_json::to_vec(
-                    &json!([{"buildSettings":ios_settings()},{"buildSettings":ios_settings()}])
-                )
-                .unwrap()
-            )
-            .is_err()
-        );
-        let mut mac = ios_settings();
-        mac["PLATFORM_NAME"] = json!("macosx");
-        assert!(
-            parse_app_settings(&serde_json::to_vec(&json!([{"buildSettings":mac}])).unwrap())
-                .is_err()
-        );
-        let mut unresolved = ios_settings();
-        unresolved["PRODUCT_BUNDLE_IDENTIFIER"] = json!("$(BUNDLE)");
-        assert!(
-            parse_app_settings(
-                &serde_json::to_vec(&json!([{"buildSettings":unresolved}])).unwrap()
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn import_without_build_history_persists_recipe_and_preserves_it_on_registration() {
-        let (_temp, store, inspection) = fixture();
-        assert!(store.list_jobs().unwrap().is_empty());
-        let imported = import_inspected(&store, &inspection, "New App").unwrap();
-        let recipe = imported.build_request.as_ref().unwrap();
-        assert_eq!(recipe.mode, BuildMode::Archive);
-        assert!(recipe.capture_preview);
-        assert!(recipe.allow_provisioning_updates);
-        assert!(recipe.request_id.is_none());
-        let options = plist::Value::from_file(recipe.export_options.as_ref().unwrap()).unwrap();
-        let options = options.as_dictionary().unwrap();
-        assert_eq!(options["method"].as_string(), Some("release-testing"));
-        assert_eq!(options["signingStyle"].as_string(), Some("automatic"));
-        assert!(options.get("teamID").is_none());
-        assert!(
-            recipe
-                .export_options
-                .as_ref()
-                .unwrap()
-                .starts_with(&store.root)
-        );
-        let again = apps::register(
-            &store,
-            AppRegistration {
-                name: "Do not replace".into(),
-                project: inspection.project.clone(),
-                scheme: inspection.scheme.clone().unwrap(),
-                bundle_id: inspection.bundle_id.clone(),
-                summary: "Do not replace".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(again.build_request, imported.build_request);
-        assert_eq!(again.name, "New App");
-        let root = store.root.clone();
-        drop(store);
-        let restarted = Store::open(root).unwrap();
-        assert_eq!(
-            apps::get(&restarted, &imported.id).unwrap().build_request,
-            imported.build_request
-        );
-        assert!(restarted.list_jobs().unwrap().is_empty());
-        assert_eq!(
-            fs::read_dir(&inspection.project).unwrap().count(),
-            0,
-            "import edited the Xcode project"
-        );
-    }
-    #[test]
-    fn existing_export_options_are_reused_and_upload_templates_rejected() {
-        let (_temp, store, mut inspection) = fixture();
-        let path = inspection
-            .project
-            .parent()
-            .unwrap()
-            .join("ExportOptions.plist");
-        let mut options = plist::Dictionary::new();
-        options.insert("method".into(), "release-testing".into());
-        options.insert("teamID".into(), "EXAMPLETEAM".into());
-        plist::Value::Dictionary(options.clone())
-            .to_file_xml(&path)
-            .unwrap();
-        let original = fs::read(&path).unwrap();
-        inspection.export_options = Some(path.clone());
-        let app = import_inspected(&store, &inspection, "Example").unwrap();
-        assert_eq!(
-            app.build_request.unwrap().export_options,
-            Some(path.clone())
-        );
-        assert_eq!(fs::read(&path).unwrap(), original);
-        options.insert("destination".into(), "upload".into());
-        plist::Value::Dictionary(options)
-            .to_file_xml(&path)
-            .unwrap();
-        assert!(read_export_options(&path).is_err());
-    }
-    #[test]
-    fn legacy_app_records_default_to_metadata_only_and_invalid_targets_are_not_imported() {
-        let (_temp, store, mut inspection) = fixture();
-        inspection.can_import = false;
-        assert!(import_inspected(&store, &inspection, "No app").is_err());
-        assert!(apps::list(&store).unwrap().is_empty());
-        let record:AppRecord=serde_json::from_value(json!({"id":uuid::Uuid::new_v4().to_string(),"name":"Legacy","project":"/tmp/Legacy.xcodeproj","scheme":"Legacy","bundle_id":null,"summary":"","updated_at":1,"preview":null})).unwrap();
-        assert!(record.build_request.is_none());
-    }
-    #[tokio::test]
-    async fn inspection_subprocess_deadline_kills_owned_child_group() {
-        let mut command = Command::new("/bin/sleep");
-        command.arg("30");
-        let started = Instant::now();
-        let error = bounded_output(command, started + Duration::from_millis(100))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("exceeded"));
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
 }

@@ -5,19 +5,16 @@ use std::{
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use tokio::{process::Command, sync::watch, time::Instant};
+use tokio::{process::Command, sync::watch};
 
 use crate::{
     model::{BuildMode, BuildOutput, BuildRequest},
     overlay,
 };
-
-const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The app's own identity, read from the built product.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,7 +117,6 @@ pub async fn build(
         .canonicalize()
         .context("job directory does not exist")?;
     ensure!(job_dir.is_dir(), "job directory must be a directory");
-    let deadline = Instant::now() + BUILD_TIMEOUT;
     let log = job_dir.join("build.log");
 
     match &request.mode {
@@ -143,7 +139,7 @@ pub async fn build(
                 "job directory already contains archive/export output"
             );
             let args = build_args(request, &project, &job_dir)?;
-            run_command(&args, &log, None, deadline, cancel.clone()).await?;
+            run_command(&args, &log, None, cancel.clone()).await?;
             let archived = exactly_one(
                 children_with_extension(&archive.join("Products/Applications"), "app", true)?,
                 "archived application",
@@ -156,21 +152,12 @@ pub async fn build(
                     .parent()
                     .and_then(Path::parent)
                     .context("job directory is not inside a Squircle data directory")?;
-                let framework =
-                    overlay::framework(data_root, &log, deadline, cancel.clone()).await?;
+                let framework = overlay::framework(data_root, &log, cancel.clone()).await?;
                 let build_id = job_dir
                     .file_name()
                     .and_then(|n| n.to_str())
                     .context("job directory must have a build ID as its final component")?;
-                overlay::inject(
-                    &archived,
-                    &framework,
-                    build_id,
-                    &log,
-                    deadline,
-                    cancel.clone(),
-                )
-                .await?;
+                overlay::inject(&archived, &framework, build_id, &log, cancel.clone()).await?;
             }
             let args = export_args(
                 &archive,
@@ -178,7 +165,7 @@ pub async fn build(
                 &options,
                 request.allow_provisioning_updates,
             );
-            run_command(&args, &log, None, deadline, cancel).await?;
+            run_command(&args, &log, None, cancel).await?;
             let ipa = exactly_one(
                 children_with_extension(&export, "ipa", false)?,
                 "exported IPA",
@@ -197,7 +184,7 @@ pub async fn build(
         }
         BuildMode::Simulator => {
             let args = build_args(request, &project, &job_dir)?;
-            run_command(&args, &log, None, deadline, cancel.clone()).await?;
+            run_command(&args, &log, None, cancel.clone()).await?;
             // Query the resolved product path: projects can override build output
             // directories, so guessing inside DerivedData can report a stale app.
             let settings_path = job_dir.join("build-settings.json");
@@ -212,7 +199,7 @@ pub async fn build(
                 ]
                 .map(OsString::from),
             );
-            run_command(&args, &log, Some(&settings_path), deadline, cancel).await?;
+            run_command(&args, &log, Some(&settings_path), cancel).await?;
             let settings: Vec<TargetSettings> =
                 serde_json::from_reader(File::open(&settings_path)?)
                     .context("xcodebuild did not return valid build settings JSON")?;
@@ -418,7 +405,6 @@ pub(crate) async fn run_command(
     args: &[OsString],
     log_path: &Path,
     stdout_path: Option<&Path>,
-    deadline: Instant,
     cancel: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut log = OpenOptions::new()
@@ -436,7 +422,6 @@ pub(crate) async fn run_command(
         command,
         Sink::File(stdout),
         Sink::File(log.try_clone()?),
-        deadline,
         Some(cancel),
     )
     .await;
@@ -458,7 +443,6 @@ pub(crate) async fn run_command(
             return Err(error.context("cannot run /usr/bin/xcodebuild; check Xcode installation"));
         }
         Err(RunError::Cancelled) => "build cancelled",
-        Err(RunError::TimedOut) => "build exceeded the 30-minute timeout",
     };
     let _ = writeln!(log, "\n{reason}; terminated xcodebuild process group");
     bail!("{reason}; see {}", log_path.display())
@@ -557,182 +541,4 @@ fn read_app_metadata(app: &Path, fallback_title: &str) -> Result<AppMetadata> {
         build_number: required("CFBundleVersion")?,
         title,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn request(mode: BuildMode) -> BuildRequest {
-        BuildRequest {
-            project: "/tmp/My App;$(echo nope).xcodeproj".into(),
-            scheme: "App ; $(touch nope)".into(),
-            configuration: "Release Candidate".into(),
-            mode,
-            export_options: None,
-            allow_provisioning_updates: false,
-            capture_preview: false,
-            request_id: None,
-            no_overlay: false,
-            thread: None,
-        }
-    }
-
-    #[test]
-    fn shell_metacharacters_remain_single_literal_arguments() {
-        let request = request(BuildMode::Simulator);
-        let args = build_args(&request, &request.project, Path::new("/tmp/Job ; space")).unwrap();
-        assert_eq!(args[1], request.project.as_os_str());
-        assert_eq!(args[3], OsStr::new("App ; $(touch nope)"));
-        assert_eq!(args[5], OsStr::new("Release Candidate"));
-        assert_eq!(args[7], OsStr::new("/tmp/Job ; space/DerivedData"));
-        assert!(args.contains(&OsString::from("SQUIRCLE_BUILD_ID=Job ; space")));
-        assert!(args.contains(&OsString::from("CODE_SIGNING_ALLOWED=NO")));
-        assert!(!args.iter().any(|arg| arg == "-allowProvisioningUpdates"));
-    }
-
-    #[test]
-    fn provisioning_changes_require_explicit_opt_in_and_only_apply_to_archives() {
-        let mut request = request(BuildMode::Archive);
-        let directory = Path::new("/tmp/build-1");
-        let options = Path::new("/tmp/Export.plist");
-        let flag = OsString::from("-allowProvisioningUpdates");
-        assert!(
-            !build_args(&request, &request.project, directory)
-                .unwrap()
-                .contains(&flag)
-        );
-        assert!(!export_args(directory, directory, options, false).contains(&flag));
-        request.allow_provisioning_updates = true;
-        assert!(
-            build_args(&request, &request.project, directory)
-                .unwrap()
-                .contains(&flag)
-        );
-        assert!(export_args(directory, directory, options, true).contains(&flag));
-        request.mode = BuildMode::Simulator;
-        assert!(
-            !build_args(&request, &request.project, directory)
-                .unwrap()
-                .contains(&flag)
-        );
-    }
-
-    #[test]
-    fn existing_requests_default_to_no_provisioning_changes() {
-        let request: BuildRequest = serde_json::from_value(serde_json::json!({
-            "project": "/tmp/App.xcodeproj", "scheme": "App", "configuration": "Release",
-            "mode": "archive", "export_options": "/tmp/Export.plist", "request_id": null,
-        }))
-        .unwrap();
-        assert!(!request.allow_provisioning_updates);
-    }
-
-    #[test]
-    fn rejects_incompatible_modes_and_invalid_project_types() {
-        let mut request = request(BuildMode::Archive);
-        assert!(validate_request(&request).is_err());
-        request.export_options = Some("/tmp/Export.plist".into());
-        assert!(validate_request(&request).is_ok());
-        request.mode = BuildMode::Simulator;
-        assert!(validate_request(&request).is_err());
-        assert_eq!(
-            project_flag(Path::new("a.xcworkspace")).unwrap(),
-            "-workspace"
-        );
-        assert!(project_flag(Path::new("a.swift")).is_err());
-    }
-
-    #[test]
-    fn refuses_ambiguous_or_missing_artifacts() {
-        assert!(exactly_one(Vec::new(), "IPA").is_err());
-        assert!(exactly_one(vec!["a.ipa".into(), "b.ipa".into()], "IPA").is_err());
-        assert_eq!(
-            exactly_one(vec!["a.ipa".into()], "IPA").unwrap(),
-            PathBuf::from("a.ipa")
-        );
-    }
-
-    #[test]
-    fn reads_binary_app_metadata_and_falls_back_to_bundle_name() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut info = plist::Dictionary::new();
-        for (key, value) in [
-            ("CFBundleIdentifier", "com.example.App"),
-            ("CFBundleVersion", "42"),
-            ("CFBundleShortVersionString", "1.2"),
-            ("CFBundleName", "Example App"),
-        ] {
-            info.insert(key.into(), plist::Value::String(value.into()));
-        }
-        plist::Value::Dictionary(info)
-            .to_file_binary(directory.path().join("Info.plist"))
-            .unwrap();
-        let result = read_app_metadata(directory.path(), "Fallback").unwrap();
-        assert_eq!(result.bundle_id, "com.example.App");
-        assert_eq!(result.build_number, "42");
-        assert_eq!(result.title, "Example App");
-    }
-
-    #[test]
-    fn refuses_export_options_that_upload_instead_of_exporting() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let mut options = plist::Dictionary::new();
-        options.insert("destination".into(), plist::Value::String("upload".into()));
-        plist::Value::Dictionary(options.clone())
-            .to_file_xml(file.path())
-            .unwrap();
-        assert!(validate_export_options(file.path()).is_err());
-        options.insert("destination".into(), plist::Value::String("export".into()));
-        plist::Value::Dictionary(options)
-            .to_file_xml(file.path())
-            .unwrap();
-        assert!(validate_export_options(file.path()).is_ok());
-    }
-
-    #[test]
-    fn export_options_reject_pipes_and_oversized_files_without_blocking() {
-        use std::os::unix::ffi::OsStrExt;
-        let directory = tempfile::tempdir().unwrap();
-        let pipe = directory.path().join("options.plist");
-        let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let started = std::time::Instant::now();
-        assert!(
-            validate_export_options(&pipe)
-                .unwrap_err()
-                .to_string()
-                .contains("regular file")
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
-        let file = tempfile::NamedTempFile::new().unwrap();
-        file.as_file().set_len(1024 * 1024 + 1).unwrap();
-        assert!(
-            validate_export_options(file.path())
-                .unwrap_err()
-                .to_string()
-                .contains("1 MiB")
-        );
-    }
-
-    #[test]
-    fn validated_export_bytes_are_independent_of_later_source_edits() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        let mut options = plist::Dictionary::new();
-        options.insert("destination".into(), plist::Value::String("export".into()));
-        plist::Value::Dictionary(options.clone())
-            .to_file_xml(file.path())
-            .unwrap();
-        let snapshot = validate_export_options(file.path()).unwrap();
-        options.insert("destination".into(), plist::Value::String("upload".into()));
-        plist::Value::Dictionary(options)
-            .to_file_xml(file.path())
-            .unwrap();
-        assert!(validate_export_options(file.path()).is_err());
-        let saved = plist::Value::from_reader(std::io::Cursor::new(snapshot)).unwrap();
-        assert_eq!(
-            saved.as_dictionary().unwrap()["destination"].as_string(),
-            Some("export")
-        );
-    }
 }

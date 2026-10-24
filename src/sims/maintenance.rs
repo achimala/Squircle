@@ -6,7 +6,12 @@ impl Sims {
     /// Ends sessions whose turn has stopped, whose recorder died, or that ran
     /// too long, and runs owed cleanup and saves. Sessions a previous run
     /// left unfinished are finished first. Returns once `shutdown` begins.
+    ///
+    /// It looks again when something it reads changes: T3's thread states,
+    /// a recorder exiting, the ledger being saved. The only clock is the
+    /// policy's: the next idle grace, recording limit or cleanup retry due.
     pub async fn run(self: Arc<Self>) {
+        use futures_util::StreamExt;
         let mut draining = self.draining.subscribe();
         let orphans = self.owner.ask(|s| std::mem::take(&mut s.orphans)).await;
         for id in orphans {
@@ -15,18 +20,45 @@ impl Sims {
             }
             self.resume(&id, "service restarted").await;
         }
+        let mut threads = self.host.changes();
         loop {
+            // Listening before looking, so a save during the tick isn't missed.
+            let saved = self.saved.notified();
+            tokio::pin!(saved);
+            saved.as_mut().enable();
+            self.tick().await;
+            let due = self.next_due().await;
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(3)) => {}
                 _ = draining.wait_for(|d| *d) => return,
+                _ = &mut saved => {}
+                _ = self.poke.notified() => {}
+                Some(()) = threads.next() => {}
+                _ = crate::clock::until(due) => {}
             }
             if *draining.borrow() {
                 return;
             }
-            self.tick().await;
         }
     }
 
+    /// When the policy next asks for something without any event: an idle
+    /// grace or the recording limit running out, or an owed cleanup's retry.
+    pub(super) async fn next_due(&self) -> Option<f64> {
+        self.owner
+            .ask(|s| {
+                s.ledger()
+                    .sessions
+                    .iter()
+                    .flat_map(|session| {
+                        let clock = s.clocks.get(&session.id).copied().unwrap_or_default();
+                        session::due_at(session, clock)
+                    })
+                    .min_by(f64::total_cmp)
+            })
+            .await
+    }
+
+    /// One look at every session: what is due now runs.
     pub(super) async fn tick(self: &Arc<Self>) {
         if let Err(error) = self.owner.ask(|s| s.ledger.resolve()).await {
             eprintln!("Simulator session ledger still not saved: {error}");

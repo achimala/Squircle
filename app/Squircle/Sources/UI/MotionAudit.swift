@@ -32,7 +32,8 @@ final class MotionAudit: NSObject {
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         self.link = link
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(duration))
             guard self?.generation == this else { return }
             self?.finish()
         }

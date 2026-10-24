@@ -112,9 +112,14 @@ pub(super) async fn diagnostics(cli: &Cli, command: &DiagnosticCommand) -> Resul
     Ok(Some(data))
 }
 
-pub(super) fn doctor(cli: &Cli) -> Value {
-    fn check(program: &str, args: &[&str]) -> Value {
-        match Command::new(program).args(args).output() {
+pub(super) async fn doctor(cli: &Cli) -> Value {
+    async fn check(program: &str, args: &[&str]) -> Value {
+        match tokio::process::Command::new(program)
+            .args(args)
+            .kill_on_drop(true)
+            .output()
+            .await
+        {
             Ok(output) => {
                 json!({"available":output.status.success(),"summary":String::from_utf8_lossy(&output.stdout).trim(),"error":if output.status.success(){String::new()}else{String::from_utf8_lossy(&output.stderr).chars().take(2000).collect()}})
             }
@@ -124,8 +129,11 @@ pub(super) fn doctor(cli: &Cli) -> Value {
     let identities = check(
         "/usr/bin/security",
         &["find-identity", "-v", "-p", "codesigning"],
-    );
+    )
+    .await;
+    let xcode = check("/usr/bin/xcodebuild", &["-version"]).await;
+    let developer = check("/usr/bin/xcode-select", &["-p"]).await;
     success(
-        json!({"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,"xcode":check("/usr/bin/xcodebuild",&["-version"]),"developer_directory":check("/usr/bin/xcode-select",&["-p"]),"signing":identities,"server":cli.server,"data_dir":root(cli).ok(),"notes":["Signing visibility depends on the actual service user, Keychain access and sandbox.","This command does not validate provisioning, device registration or cellular HTTPS reachability.","Tailscale and HTTPS are configured by the user; no settings were changed."]}),
+        json!({"platform":std::env::consts::OS,"architecture":std::env::consts::ARCH,"xcode":xcode,"developer_directory":developer,"signing":identities,"server":cli.server,"data_dir":root(cli).ok(),"notes":["Signing visibility depends on the actual service user, Keychain access and sandbox.","This command does not validate provisioning, device registration or cellular HTTPS reachability.","Tailscale and HTTPS are configured by the user; no settings were changed."]}),
     )
 }

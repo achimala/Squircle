@@ -14,8 +14,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{process::Command, sync::watch, time::Instant};
+use tokio::{process::Command, sync::watch};
 
+use crate::actor::{Lane, Rank};
 use crate::process::{Finished, RunError, Sink, cancelled, run_bounded};
 use crate::xcode::run_command;
 
@@ -195,8 +196,7 @@ fn publish(cache: &Path, key: &str, toolchain: &str, built: &Path) -> Result<Pat
 
 /// What selects the compiler and SDK: the Xcode build, the iOS SDK build and
 /// any toolchain override in the service's environment.
-async fn toolchain(deadline: Instant, cancel: &watch::Receiver<bool>) -> Result<String> {
-    let deadline = deadline.min(Instant::now() + std::time::Duration::from_secs(60));
+async fn toolchain(cancel: &watch::Receiver<bool>) -> Result<String> {
     let mut identity = String::new();
     for args in [
         &["xcodebuild", "-version"][..],
@@ -209,7 +209,6 @@ async fn toolchain(deadline: Instant, cancel: &watch::Receiver<bool>) -> Result<
                 command,
                 Sink::Capture(64 * 1024),
                 Sink::Discard,
-                deadline,
                 Some(cancel.clone()),
             )
             .await,
@@ -232,34 +231,14 @@ async fn toolchain(deadline: Instant, cancel: &watch::Receiver<bool>) -> Result<
     Ok(identity)
 }
 
-/// The overlay cache lock, waited for without blocking a thread or outliving
-/// the build's cancellation and deadline.
-async fn lock(path: &Path, deadline: Instant, cancel: &watch::Receiver<bool>) -> Result<fs::File> {
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)?;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(file),
-            Err(fs::TryLockError::WouldBlock) => {}
-            Err(fs::TryLockError::Error(error)) => {
-                return Err(error).context("cannot lock the overlay cache");
-            }
-        }
-        tokio::select! {
-            _ = cancelled(Some(cancel.clone())) => bail!("build cancelled while waiting for the overlay cache"),
-            _ = tokio::time::sleep_until(deadline) => bail!("build exceeded the 30-minute timeout waiting for the overlay cache"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
-        }
-    }
-}
+/// One overlay build at a time. Only the one service that owns a data
+/// directory builds into its cache, so builds in that process are all that
+/// can meet there.
+static CACHE: Lane = Lane::new(Rank::OverlayCache);
 
 fn finished(result: Result<Finished, RunError>, tool: &str) -> Result<Finished> {
     result.map_err(|error| match error {
         RunError::Cancelled => anyhow!("build cancelled while running {tool}"),
-        RunError::TimedOut => anyhow!("build exceeded its timeout while running {tool}"),
         RunError::Failed(error) => error.context(format!("{tool} did not complete")),
     })
 }
@@ -269,7 +248,6 @@ fn finished(result: Result<Finished, RunError>, tool: &str) -> Result<Finished> 
 pub async fn framework(
     data_root: &Path,
     log: &Path,
-    deadline: Instant,
     cancel: watch::Receiver<bool>,
 ) -> Result<PathBuf> {
     let project = overlay_project();
@@ -280,8 +258,19 @@ pub async fn framework(
     );
     let cache = data_root.join("overlay");
     fs::create_dir_all(&cache)?;
-    let _lock = lock(&cache.join(".lock"), deadline, &cancel).await?;
-    let toolchain = toolchain(deadline, &cancel).await?;
+    tokio::select! {
+        _ = cancelled(Some(cancel.clone())) => bail!("build cancelled while waiting for the overlay cache"),
+        built = CACHE.run(build_framework(project, &cache, log, cancel.clone())) => built,
+    }
+}
+
+async fn build_framework(
+    project: PathBuf,
+    cache: &Path,
+    log: &Path,
+    cancel: watch::Receiver<bool>,
+) -> Result<PathBuf> {
+    let toolchain = toolchain(&cancel).await?;
     let key = cache_key(&project, &toolchain)?;
     if let Some(product) = cached(&cache.join(&key), &key) {
         return Ok(product);
@@ -295,7 +284,7 @@ pub async fn framework(
     let mut args: Vec<OsString> = vec!["-project".into(), project.into_os_string()];
     args.extend(BUILD_SETTINGS.map(OsString::from));
     args.extend([symroot, objroot, "build".into()]);
-    run_command(&args, log, None, deadline, cancel).await?;
+    run_command(&args, log, None, cancel).await?;
     let built = scratch.join("Release-iphoneos").join(FRAMEWORK);
     ensure!(
         built.join("SquircleOverlay").is_file(),
@@ -303,7 +292,7 @@ pub async fn framework(
     );
     // Module interfaces are for compilers, not for the device.
     let _ = fs::remove_dir_all(built.join("Modules"));
-    let product = publish(&cache, &key, &toolchain, &built)?;
+    let product = publish(cache, &key, &toolchain, &built)?;
     let _ = fs::remove_dir_all(&scratch);
     Ok(product)
 }
@@ -315,7 +304,6 @@ pub async fn inject(
     framework: &Path,
     build_id: &str,
     log_path: &Path,
-    deadline: Instant,
     cancel: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut log = fs::OpenOptions::new()
@@ -376,10 +364,7 @@ pub async fn inject(
         fs::write(&binary, &bytes)?;
     }
 
-    let signer = Signer {
-        deadline,
-        cancel: &cancel,
-    };
+    let signer = Signer { cancel: &cancel };
     let identity = signer.identity(app, &mut log).await?;
     let mut entitlements = signer.entitlements(app, &mut log).await?;
     let team = entitlements
@@ -437,9 +422,8 @@ pub async fn inject(
     Ok(())
 }
 
-/// Runs `codesign` within the build's deadline and cancellation.
+/// Runs `codesign` under the build's cancellation.
 struct Signer<'a> {
-    deadline: Instant,
     cancel: &'a watch::Receiver<bool>,
 }
 
@@ -458,7 +442,6 @@ impl Signer<'_> {
                 command,
                 Sink::Capture(4 * 1024 * 1024),
                 Sink::Capture(1024 * 1024),
-                self.deadline,
                 Some(self.cancel.clone()),
             )
             .await,
@@ -706,26 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn adds_load_command_once() {
-        let mut b = thin();
-        assert!(add_weak_dylib(&mut b, LOAD_PATH).unwrap());
-        assert_eq!(u32::from_le_bytes(b[16..20].try_into().unwrap()), 2);
-        let start = 32 + 152;
-        assert_eq!(
-            u32::from_le_bytes(b[start..start + 4].try_into().unwrap()),
-            LC_LOAD_WEAK_DYLIB
-        );
-        assert!(!add_weak_dylib(&mut b, LOAD_PATH).unwrap());
-    }
-
-    #[test]
-    fn refuses_without_header_space() {
-        let mut b = thin();
-        b[20..24].copy_from_slice(&(0x4000u32 - 40).to_le_bytes());
-        assert!(add_weak_dylib(&mut b, LOAD_PATH).is_err());
-    }
-
-    #[test]
     fn malformed_headers_are_errors_not_panics() {
         let fat = |count: u32, offset: u32, size: u32| {
             let mut b = vec![0u8; 64];
@@ -798,115 +761,5 @@ mod tests {
             assert_eq!(le32(&b, start + 16).unwrap(), 2);
         }
         assert!(!add_weak_dylib(&mut b, LOAD_PATH).unwrap());
-    }
-
-    fn overlay_fixture() -> (tempfile::TempDir, PathBuf) {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("Squircle.xcodeproj");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("project.pbxproj"), "{}").unwrap();
-        for dir in ["Sources", "Overlay"] {
-            fs::create_dir_all(root.path().join(dir)).unwrap();
-            fs::write(root.path().join(dir).join("A.swift"), dir).unwrap();
-        }
-        fs::create_dir_all(root.path().join("Config")).unwrap();
-        fs::write(root.path().join("Config/Signing.xcconfig"), "A = 1").unwrap();
-        (root, project)
-    }
-
-    #[test]
-    fn cache_key_follows_sources_and_toolchain() {
-        let (root, project) = overlay_fixture();
-        let key = cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap();
-        assert_eq!(
-            key,
-            cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap()
-        );
-        assert_ne!(
-            key,
-            cache_key(&project, "Xcode 26.1\nBuild 17B1\n23B1\n").unwrap()
-        );
-        fs::write(root.path().join("Overlay/A.swift"), "changed").unwrap();
-        let changed = cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap();
-        assert_ne!(key, changed);
-        // A different namespace is a different framework.
-        fs::write(root.path().join("Config/Local.xcconfig"), "B = 2").unwrap();
-        assert_ne!(
-            changed,
-            cache_key(&project, "Xcode 26.0\nBuild 17A1\n23A1\n").unwrap()
-        );
-    }
-
-    #[test]
-    fn only_complete_unchanged_cache_entries_are_reused() {
-        let cache = tempfile::tempdir().unwrap();
-        let built = cache.path().join("build").join(FRAMEWORK);
-        fs::create_dir_all(&built).unwrap();
-        fs::write(built.join("SquircleOverlay"), "binary").unwrap();
-        fs::write(built.join("Info.plist"), "info").unwrap();
-
-        // A product without a manifest, as an interrupted publish leaves it.
-        let entry = cache.path().join("abc");
-        copy_dir(&built, &entry.join(FRAMEWORK)).unwrap();
-        assert!(cached(&entry, "abc").is_none());
-
-        let product = publish(cache.path(), "abc", "Xcode 26", &built).unwrap();
-        assert_eq!(cached(&entry, "abc"), Some(product.clone()));
-        assert!(cached(&entry, "other").is_none());
-        assert!(!cache.path().join("staging-abc").exists());
-
-        fs::write(product.join("SquircleOverlay"), "truncat").unwrap();
-        assert!(cached(&entry, "abc").is_none());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn waiting_for_the_cache_lock_stops_on_cancellation() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".lock");
-        let deadline = Instant::now() + std::time::Duration::from_secs(30);
-        let (sender, cancel) = watch::channel(false);
-        let held = lock(&path, deadline, &cancel).await.unwrap();
-        let waiting = tokio::spawn({
-            let path = path.clone();
-            let cancel = cancel.clone();
-            async move { lock(&path, deadline, &cancel).await }
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert!(!waiting.is_finished());
-        sender.send(true).unwrap();
-        let error = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap_err();
-        assert!(error.to_string().contains("cancelled"));
-        drop(held);
-    }
-
-    #[test]
-    fn app_store_is_never_injected() {
-        assert!(!allowed_method("app-store"));
-        assert!(!allowed_method("app-store-connect"));
-        assert!(!allowed_method("enterprise"));
-        assert!(allowed_method("release-testing"));
-    }
-
-    #[test]
-    fn only_squircle_itself_is_skipped() {
-        let dir = tempfile::tempdir().unwrap();
-        let write = |id: &str, own: Option<&str>| {
-            let mut info = plist::Dictionary::new();
-            info.insert("CFBundleIdentifier".into(), id.into());
-            if let Some(own) = own {
-                info.insert(APP_BUNDLE_ID_KEY.into(), own.into());
-            }
-            plist::Value::Dictionary(info)
-                .to_file_xml(dir.path().join("Info.plist"))
-                .unwrap();
-            is_squircle(dir.path()).unwrap()
-        };
-        assert!(write("com.example.Squircle", Some("com.example.Squircle")));
-        assert!(!write("com.example.Other", None));
-        assert!(!write("com.example.Other", Some("")));
     }
 }

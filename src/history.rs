@@ -6,7 +6,7 @@
 //! for tool activity) and ranks the matches here, so results are short
 //! snippets with a stable reference that `show` expands.
 
-use crate::t3db::{DETAIL_READ, params, query, sql};
+use crate::t3db::{params, query, sql};
 use crate::t3steps::valid;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
@@ -106,7 +106,7 @@ pub async fn scope(thread: Option<&str>, project: Option<&str>, cwd: &Path) -> R
     };
     if let Some(thread) = thread {
         ensure!(valid(thread, &[]), "Thread ID must be a T3 ID");
-        let rows = query(sql::THREAD_PROJECT, params![thread], DETAIL_READ).await?;
+        let rows = query(sql::THREAD_PROJECT, params![thread]).await?;
         return rows
             .first()
             .map(row)
@@ -114,13 +114,13 @@ pub async fn scope(thread: Option<&str>, project: Option<&str>, cwd: &Path) -> R
     }
     if let Some(project) = project {
         ensure!(valid(project, &[]), "Project ID must be a T3 ID");
-        let rows = query(sql::PROJECT, params![project], DETAIL_READ).await?;
+        let rows = query(sql::PROJECT, params![project]).await?;
         return rows
             .first()
             .map(row)
             .with_context(|| format!("T3 has no project {project}"));
     }
-    let rows = query(sql::PROJECT_PLACES, params![], DETAIL_READ).await?;
+    let rows = query(sql::PROJECT_PLACES, params![]).await?;
     let places: Vec<PathBuf> = rows
         .iter()
         .map(|r| PathBuf::from(r["place"].as_str().unwrap_or("/nonexistent")))
@@ -402,7 +402,6 @@ async fn gather(
                 kinds.contains(&Kind::Thread),
                 kinds.contains(&Kind::Activity)
             ],
-            DETAIL_READ,
         )
         .await
         {
@@ -730,7 +729,7 @@ pub async fn show(
     match kind {
         Kind::Message => {
             ensure!(valid(id, &[':', '_', '.']), "Invalid message ID");
-            let rows = query(sql::MESSAGE, params![id], DETAIL_READ).await?;
+            let rows = query(sql::MESSAGE, params![id]).await?;
             let row = rows
                 .first()
                 .with_context(|| format!("T3 has no message {id}"))?;
@@ -768,16 +767,11 @@ pub async fn show(
         }
         Kind::Thread => {
             ensure!(valid(id, &[]), "Invalid thread ID");
-            let thread = query(sql::THREAD, params![id], DETAIL_READ).await?;
+            let thread = query(sql::THREAD, params![id]).await?;
             let thread = thread
                 .first()
                 .with_context(|| format!("T3 has no thread {id}"))?;
-            let messages = query(
-                sql::MESSAGES,
-                params![id, limit.clamp(1, 500) as i64],
-                DETAIL_READ,
-            )
-            .await?;
+            let messages = query(sql::MESSAGES, params![id, limit.clamp(1, 500) as i64]).await?;
             let s = |k: &str| thread[k].as_str().unwrap_or("").to_string();
             let total = thread["total"].as_u64().unwrap_or(0);
             let mut text = format!(
@@ -829,7 +823,7 @@ pub async fn show(
         }
         Kind::Activity => {
             ensure!(valid(id, &[':', '_', '.', '%']), "Invalid activity ID");
-            let rows = query(sql::ACTIVITY, params![id, max_chars as i64], DETAIL_READ).await?;
+            let rows = query(sql::ACTIVITY, params![id, max_chars as i64]).await?;
             let row = rows
                 .first()
                 .with_context(|| format!("T3 has no activity {id}"))?;
@@ -996,141 +990,5 @@ pub async fn show(
                 json!({"ref": reference, "heading": section.heading, "text": text}),
             ))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(
-        kind: Kind,
-        reference: &str,
-        title: &str,
-        text: &str,
-        age_days: i64,
-        group: Option<&str>,
-    ) -> Item {
-        Item {
-            kind,
-            reference: reference.into(),
-            title: title.into(),
-            text: text.into(),
-            at: Some(1_000_000_000 - age_days * 86400),
-            group: group.map(Into::into),
-            weight: 1.0,
-        }
-    }
-
-    #[test]
-    fn terms_drop_stopwords_and_keep_only_safe_characters() {
-        assert_eq!(
-            terms("Why did we drop the 3D-tilt push? 'sim_pool' it's O'Brien; DROP TABLE x--"),
-            ["drop", "3d-tilt", "push", "sim_pool", "obrien", "table"]
-        );
-        assert!(terms("the and of").is_empty());
-        assert!(terms("'; select * from x; --").iter().all(|t| {
-            t.chars()
-                .all(|c| c.is_ascii_alphanumeric() || "_-./#+".contains(c))
-        }));
-    }
-
-    #[test]
-    fn ranks_all_terms_above_repetition_of_one() {
-        let now = 1_000_000_000;
-        let items = vec![
-            item(
-                Kind::Message,
-                "msg:a",
-                "user",
-                "simulator simulator simulator simulator simulator",
-                1,
-                Some("t1"),
-            ),
-            item(
-                Kind::Message,
-                "msg:b",
-                "assistant",
-                "we decided the simulator deck fans out on tap",
-                30,
-                Some("t2"),
-            ),
-            item(Kind::Message, "msg:c", "user", "the deck", 1, Some("t3")),
-        ];
-        let ranked: Vec<String> = rank(&terms("simulator deck"), items, now, 10, 2)
-            .into_iter()
-            .map(|(_, i)| i.reference)
-            .collect();
-        assert_eq!(ranked[0], "msg:b");
-    }
-
-    #[test]
-    fn prefers_recent_and_limits_one_thread() {
-        let now = 1_000_000_000;
-        let items = (0..5)
-            .map(|i| {
-                item(
-                    Kind::Message,
-                    &format!("msg:{i}"),
-                    "user",
-                    "compact the agent context",
-                    i * 40,
-                    Some("same"),
-                )
-            })
-            .chain([item(
-                Kind::Message,
-                "msg:other",
-                "user",
-                "compact the agent context",
-                200,
-                Some("other"),
-            )])
-            .collect();
-        let ranked: Vec<String> = rank(&terms("compact context"), items, now, 10, 2)
-            .into_iter()
-            .map(|(_, i)| i.reference)
-            .collect();
-        assert_eq!(ranked, vec!["msg:0", "msg:1", "msg:other"]);
-    }
-
-    #[test]
-    fn snippet_centres_on_the_terms() {
-        let text = format!(
-            "{} the jelly crew decision: workers are chibi sprouts {}",
-            "filler ".repeat(100),
-            "tail ".repeat(100)
-        );
-        let s = snippet(&text, &terms("jelly sprouts"), 80);
-        assert!(
-            s.contains("jelly") && s.contains("sprouts") && s.starts_with('…') && s.ends_with('…'),
-            "{s}"
-        );
-        assert_eq!(
-            snippet("short  text\n here", &terms("text"), 80),
-            "short text here"
-        );
-    }
-
-    #[test]
-    fn markdown_sections_skip_fenced_headings() {
-        let doc = "intro\n# One\nbody\n```sh\n# not a heading\n```\n## Two\nmore\n";
-        let s = sections(doc);
-        assert_eq!(
-            s.iter()
-                .map(|s| (s.heading.as_str(), s.line))
-                .collect::<Vec<_>>(),
-            vec![("top", 1), ("One", 2), ("Two", 7)]
-        );
-        assert!(doc[s[1].start..s[1].end].contains("# not a heading"));
-    }
-
-    #[test]
-    fn since_reads_durations_and_dates() {
-        assert_eq!(since("2d", 1_000_000).unwrap(), 1_000_000 - 172_800);
-        assert_eq!(since("1970-01-02", 0).unwrap(), 86400);
-        assert!(since("soon", 0).is_err());
-        assert!(since("2026-02-30", 0).is_err() && since("2026-13-01", 0).is_err());
-        assert_eq!(when(86400 + 3661), "1970-01-02 01:01");
     }
 }

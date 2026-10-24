@@ -3,21 +3,51 @@ use super::*;
 impl Agents {
     // MARK: Upkeep
 
-    /// Every five minutes, compacts or starts fresh the idle agents whose
-    /// context grew large (`crate::upkeep`). Never touches a running turn.
+    /// Compacts or starts fresh the idle agents whose context grew large
+    /// (`crate::upkeep`). Never touches a running turn. An agent is looked
+    /// at when its thread, or what keeps upkeep away from it, changes in
+    /// T3's shell, and again when its idle time reaches a rule's threshold.
     pub async fn upkeep(self: Arc<Self>) {
+        use futures_util::StreamExt;
         let config = match crate::upkeep::Upkeep::from_env() {
             Ok(config) => config,
             Err(error) => return eprintln!("Agent upkeep is off: {error:#}"),
         };
-        let mut tick = tokio::time::interval(Duration::from_secs(300));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut changes = self.changes();
+        // Each agent's thread as last looked at, and when a rule may next apply.
+        let mut looked: HashMap<String, String> = HashMap::new();
+        let mut due: HashMap<String, f64> = HashMap::new();
         loop {
-            tick.tick().await;
+            let now = crate::clock::now();
             for agent in self.list() {
-                if let Err(error) = self.upkeep_agent(&config, &agent).await {
-                    eprintln!("Agent upkeep of {}: {error:#}", agent.project_id);
+                let thread = agent.thread_id.clone();
+                let seen = format!(
+                    "{}|{:?}",
+                    self.thread(&thread).unwrap_or_default(),
+                    self.upkeep_blocker(&agent)
+                );
+                let changed = looked.get(&thread) != Some(&seen);
+                if !changed && due.get(&thread).is_none_or(|at| *at > now) {
+                    continue;
                 }
+                looked.insert(thread.clone(), seen);
+                match self.upkeep_agent(&config, &agent).await {
+                    Ok(Some(at)) => {
+                        due.insert(thread, at);
+                    }
+                    Ok(None) => {
+                        due.remove(&thread);
+                    }
+                    Err(error) => {
+                        due.remove(&thread);
+                        eprintln!("Agent upkeep of {}: {error:#}", agent.project_id);
+                    }
+                }
+            }
+            let next = due.values().copied().min_by(f64::total_cmp);
+            tokio::select! {
+                changed = changes.next() => if changed.is_none() { return },
+                _ = crate::clock::until(next) => {}
             }
         }
     }
@@ -43,20 +73,21 @@ impl Agents {
         None
     }
 
+    /// Reads the agent's context and acts on it if a rule applies now.
+    /// Returns when a rule may next apply with nothing else changing.
     pub(super) async fn upkeep_agent(
         self: &Arc<Self>,
         config: &crate::upkeep::Upkeep,
         agent: &Agent,
-    ) -> Result<()> {
+    ) -> Result<Option<f64>> {
         use crate::upkeep::tokens;
         let thread = &agent.thread_id;
         if !crate::t3steps::valid(thread, &[]) || self.upkeep_blocker(agent).is_some() {
-            return Ok(());
+            return Ok(None);
         }
         let rows = crate::t3db::query(
             crate::t3db::sql::CONTEXT_READING,
             crate::t3db::params![thread],
-            crate::t3db::DETAIL_READ,
         )
         .await?;
         let row = rows.first().context("no reading")?;
@@ -65,11 +96,13 @@ impl Agents {
             row["used"].as_u64(),
             row["last_at"].as_str().and_then(crate::t3::iso_parse),
         ) else {
-            return Ok(());
+            return Ok(None);
         };
-        let idle = (crate::model::now() as f64 - last).max(0.0) as u64;
+        let now = crate::clock::now();
+        let idle = (now - last).max(0.0) as u64;
+        let next = config.next_due(used, last, now);
         let wanted = config
-            .decide(used, idle, crate::upkeep::local_hour())
+            .decide(used, idle, crate::upkeep::local_hour(now))
             .map(|decision| Reading {
                 origin: Origin::Automatic,
                 decision,
@@ -84,10 +117,10 @@ impl Agents {
             .filter(|a| a.thread_id == *thread)
             .cloned()
         else {
-            return Ok(());
+            return Ok(None);
         };
         if self.upkeep_blocker(&agent).is_some() {
-            return Ok(());
+            return Ok(None);
         }
         let compact = self.compact_command(
             thread,
@@ -112,7 +145,7 @@ impl Agents {
             ) => eprintln!("Agent upkeep: compaction of {thread} not confirmed: {detail}"),
             None => {}
         }
-        Ok(())
+        Ok(next)
     }
 
     /// Feeds one event to the app's upkeep (M26) and carries out what it

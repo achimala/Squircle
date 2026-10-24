@@ -67,11 +67,7 @@ pub(super) async fn import_catalog_app(
     if state.draining.load(Ordering::Acquire) {
         return Err(ApiError::unavailable());
     }
-    let _permit = state
-        .inspection_slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| inspection_busy())?;
+    let _permit = state.inspection().ok_or_else(inspection_busy)?;
     let inspected = projects::inspect(
         &input.project,
         Some(&input.scheme),

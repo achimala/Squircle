@@ -79,6 +79,15 @@ final class SpringDriver {
         link?.invalidate()
         link = nil
         lastTimestamp = nil
+        let rested = resting; resting.removeAll()
+        rested.forEach { $0.resume() }
+    }
+
+    private var resting: [CheckedContinuation<Void, Never>] = []
+    /// Returns once nothing animates it: settled, set by a finger or stopped.
+    func rest() async {
+        guard isAnimating else { return }
+        await withCheckedContinuation { resting.append($0) }
     }
 
     #if DEBUG

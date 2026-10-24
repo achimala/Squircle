@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, UNIX_EPOCH},
 };
 use tokio::process::Command;
 
@@ -47,12 +47,7 @@ const CRASH_WINDOW: f64 = 30.0 * 60.0;
 /// past this it is stuck, which is what the check looks for.
 const PROBE_DEADLINE: Duration = Duration::from_secs(60);
 
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
+use crate::clock::now;
 
 // MARK: Runaway apps
 
@@ -314,11 +309,15 @@ async fn simctl_within(args: &[&str]) -> Option<Result<(), String>> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output();
-    match tokio::time::timeout(PROBE_DEADLINE, output).await {
-        Err(_) => None,
-        Ok(Err(error)) => Some(Err(error.to_string())),
-        Ok(Ok(output)) if output.status.success() => Some(Ok(())),
-        Ok(Ok(output)) => Some(Err(String::from_utf8_lossy(&output.stderr)
+    // The policy's hang rule: an answer past the deadline is a stuck host.
+    let answered = tokio::select! {
+        output = output => output,
+        () = crate::clock::after(PROBE_DEADLINE) => return None,
+    };
+    match answered {
+        Err(error) => Some(Err(error.to_string())),
+        Ok(output) if output.status.success() => Some(Ok(())),
+        Ok(output) => Some(Err(String::from_utf8_lossy(&output.stderr)
             .trim()
             .to_string())),
     }
@@ -417,7 +416,8 @@ impl Watch {
         let mut runaways = Runaways::default();
         let mut checked = 0.0;
         loop {
-            tokio::time::sleep(SAMPLE).await;
+            // CPU use has no event: the runaway rule is judged on samples.
+            crate::clock::after(SAMPLE).await;
             match ps(&["-axww", "-o", "pid=,time=,command="]).await {
                 Ok(text) => {
                     for proc in runaways.sample(now(), &parse_ps(&text)) {

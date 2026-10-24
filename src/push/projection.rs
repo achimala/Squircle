@@ -85,6 +85,8 @@ pub(super) struct Step {
     pub(super) key: StepKey,
     pub(super) text: Option<String>,
     pub(super) checked: Option<Instant>,
+    /// T3's database writes counted when the last lookup began.
+    pub(super) seen: u64,
     pub(super) looking: bool,
 }
 

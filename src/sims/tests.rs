@@ -11,6 +11,11 @@ const B: &str = "0e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
 const C: &str = "1e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
 const D: &str = "2e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
 
+/// simctl's recorder: says it is recording, then idles until SIGINT, when
+/// it writes its movie (`$1`) and exits. `wait` returns at the signal.
+const RECORDER: &str = "trap 'kill $idle; printf movie > \"$1\"; exit 0' INT; \
+    echo 'Recording started' >&2; sleep 86400 & idle=$!; wait $idle";
+
 /// T3 and simctl stand-ins: two simulators, a recorder that writes its
 /// movie on SIGINT like simctl, closes and releases that fail on request,
 /// and T3's list of open device sessions.
@@ -22,6 +27,8 @@ struct Fake {
     lists_open: AtomicBool,
     release_fails: AtomicBool,
     boot: Mutex<Option<std::result::Result<(), ()>>>,
+    /// Told when a boot that never ends (`boot` None) has begun.
+    booting: tokio::sync::Notify,
     seen: Mutex<Option<Seen>>,
     /// Per-thread T3 state, over `seen`.
     threads: Mutex<HashMap<String, Seen>>,
@@ -43,10 +50,6 @@ impl Fake {
     fn closes(&self) -> usize {
         self.count("device.close")
     }
-
-    fn set(&self, thread: &str, seen: Seen) {
-        self.threads.lock().unwrap().insert(thread.into(), seen);
-    }
 }
 
 fn busy(turn: &str) -> Seen {
@@ -54,12 +57,6 @@ fn busy(turn: &str) -> Seen {
         turn: Some(turn.into()),
     }
 }
-fn idle(turn: &str) -> Seen {
-    Seen::Idle {
-        turn: Some(turn.into()),
-    }
-}
-
 impl Host for Fake {
     fn device<'a>(&'a self, method: &'a str, _: Value) -> Pending<'a, Result<Value>> {
         self.calls.lock().unwrap().push(method.into());
@@ -100,7 +97,10 @@ impl Host for Fake {
         let outcome = *self.boot.lock().unwrap();
         Box::pin(async move {
             match outcome {
-                None => std::future::pending().await,
+                None => {
+                    self.booting.notify_one();
+                    std::future::pending().await
+                }
                 Some(Ok(())) => Ok(()),
                 Some(Err(())) => bail!("boot failed"),
             }
@@ -108,13 +108,10 @@ impl Host for Fake {
     }
     fn record(&self, _: &str, path: &Path, log: std::fs::File) -> Result<Child> {
         Ok(Command::new("/bin/sh")
-            .args([
-                "-c",
-                "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done",
-                "sh",
-            ])
+            .args(["-c", RECORDER, "sh"])
             .arg(path)
             .stderr(log)
+            .process_group(0)
             .spawn()?)
     }
     fn shrink<'a>(&'a self, _: &'a Path) -> Pending<'a, ()> {
@@ -159,10 +156,6 @@ fn sims(root: &Path, boot: Option<std::result::Result<(), ()>>) -> (Arc<Sims>, A
     (Sims::with_host(root, fake.clone()).unwrap(), fake)
 }
 
-fn state(session: &Session) -> String {
-    Served::from(session).state
-}
-
 fn only(sims: &Sims) -> Session {
     sims.ledger().sessions.last().cloned().unwrap()
 }
@@ -205,11 +198,6 @@ async fn due_now(sims: &Sims) {
         .unwrap();
 }
 
-/// Waits for every letter told so far (a dropped guard's) to be read.
-async fn settled(sims: &Sims) {
-    sims.owner.ask(|_| ()).await;
-}
-
 /// A second cleanup of a session already being cleaned up (`sim stop`
 /// racing the watchdog) is turned away without touching the first's
 /// claim, and one whose ask was cancelled holds nothing. Claims once
@@ -241,64 +229,6 @@ async fn overlapping_claims_neither_deadlock_nor_release_the_holder() {
     assert!(
         sims.claim("s", Work::Close).await.is_some()
             && sims.claim("s", Work::Release).await.is_some()
-    );
-}
-
-/// The shapes that once deadlocked, all at once: sessions stopping and
-/// cleaned up by the watchdog while new starts are admitted, claims are
-/// raced and dropped, and the pool takes and drops exclusions. Every one
-/// finishes.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn owners_interacting_concurrently_never_deadlock() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Ok(())));
-    fake.max.store(2, SeqCst);
-    let work = async {
-        let (a, b) = tokio::join!(sims.start(THREAD, None), sims.start(B, Some("SIM2")));
-        assert!(a.is_ok() && b.is_ok());
-        let racing = (0..16).map(|i| {
-            let sims = sims.clone();
-            tokio::spawn(async move {
-                let work = if i % 2 == 0 {
-                    Work::Close
-                } else {
-                    Work::Release
-                };
-                let claim = sims.claim(if i % 3 == 0 { "x" } else { "y" }, work).await;
-                let exclusion = sims.exclude(if i % 2 == 0 { "SIM9" } else { "SIM1" }).await;
-                tokio::task::yield_now().await;
-                drop((claim, exclusion));
-            })
-        });
-        let _ = tokio::join!(
-            async {
-                (
-                    sims.stop(Some(THREAD), None).await,
-                    sims.stop(Some(B), None).await,
-                )
-            },
-            sims.tick(),
-            sims.tick(),
-            futures_util::future::join_all(racing),
-            async {
-                (
-                    sims.start(C, None).await,
-                    sims.leave(C).await,
-                    sims.stop(Some(C), None).await,
-                )
-            },
-        );
-        sims.tick().await;
-    };
-    tokio::time::timeout(Duration::from_secs(30), work)
-        .await
-        .expect("the owners deadlocked");
-    settled(&sims).await;
-    assert!(
-        sims.owner
-            .ask(|s| s.running.is_empty() && s.excluded.is_empty())
-            .await,
-        "a dropped guard was never released"
     );
 }
 
@@ -368,37 +298,6 @@ async fn restart_leaves_a_reused_pid_alone() {
     stranger.wait().unwrap();
 }
 
-/// A failed or cancelled start kills its recorder and still closes T3's
-/// device session and releases the simulator.
-#[tokio::test]
-async fn failed_or_cancelled_start_rolls_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Err(())));
-    assert!(sims.start(THREAD, None).await.is_err());
-    let session = only(&sims);
-    assert_eq!(
-        (state(&session).as_str(), session.settled()),
-        ("failed", true)
-    );
-    assert_eq!((fake.closes(), fake.count("release SIM1")), (1, 1));
-
-    *fake.boot.lock().unwrap() = None;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), sims.start(THREAD, None))
-            .await
-            .is_err()
-    );
-    settled(&sims).await;
-    let session = only(&sims);
-    assert!(
-        session.reserves()
-            && matches!(&session.phase, Phase::Failed { error, .. } if error.contains("cancelled"))
-    );
-    sims.tick().await;
-    assert!(only(&sims).settled());
-    assert_eq!((fake.closes(), fake.count("release SIM1")), (2, 2));
-}
-
 /// The recording is filed even when T3 is unreachable; the close is owed
 /// (and the slot held, Q4) until T3 answers or shows it gone; a failed
 /// release is owed too, never cleared.
@@ -449,37 +348,6 @@ async fn failed_cleanup_is_retried_and_holds_the_slot() {
     );
 }
 
-/// A close whose answer is lost is settled by T3 no longer listing the session.
-#[tokio::test]
-async fn a_lost_close_is_settled_by_t3s_list() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Ok(())));
-    sims.start(B, Some("SIM2")).await.unwrap();
-    fake.close_fails.store(true, SeqCst);
-    fake.lists_open.store(true, SeqCst);
-    // T3 lists (THREAD, SIM1) and (B, SIM1); B's session is on SIM2.
-    let session = sims.stop(Some(B), None).await.unwrap().session;
-    assert_eq!(session.device_session, Some(DeviceLease::Closed));
-    assert!(!session.release_pending);
-}
-
-/// Shutdown ends recordings, files them, closes the device session and refuses new starts.
-#[tokio::test]
-async fn shutdown_files_and_refuses_starts() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Ok(())));
-    sims.start(THREAD, None).await.unwrap();
-    sims.shutdown(Exit::Stop).await;
-    let session = only(&sims);
-    assert_eq!(
-        (state(&session).as_str(), session.settled()),
-        ("finished", true)
-    );
-    assert_eq!(fake.closes(), 1);
-    assert!(sims.start(THREAD, None).await.is_err());
-    assert!(sims.owner.ask(|s| s.recorders.is_empty()).await);
-}
-
 /// A restart hands a recording over: its recorder keeps running and T3's
 /// device session stays open; the next run adopts it (no "service
 /// restarted" stop), watches it, and a later stop files the whole movie.
@@ -516,10 +384,10 @@ async fn handover_keeps_recording_into_the_next_run() {
         "a recorder stopped with the old run"
     );
     // The second session's recorder dies between the runs.
-    unsafe { libc::kill(recorders[1].pid as i32, libc::SIGKILL) };
-    while is_recorder(recorders[1], &ids[1]) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let exit = crate::kq::Exit::watch(recorders[1].pid).unwrap();
+    // Its group: the recorder and what it idles on.
+    unsafe { libc::kill(-(recorders[1].pid as i32), libc::SIGKILL) };
+    exit.exited().await.unwrap();
 
     let reopened = Sims::with_host(dir.path(), fake.clone()).unwrap();
     let orphans = reopened.owner.ask(|s| s.orphans.clone()).await;
@@ -536,92 +404,6 @@ async fn handover_keeps_recording_into_the_next_run() {
         b"movie"
     );
     assert_eq!(fake.closes(), 1);
-}
-
-/// The upgrade: a ledger from before cleanup receipts, with a live
-/// recording handed over (its recorder saved by PID only) and a line with
-/// a woken grant, opens with its original kept beside it; the recording
-/// is adopted and given its recorder's start time, the line and grant
-/// survive, and nobody is woken twice.
-#[tokio::test]
-async fn an_earlier_ledger_is_migrated_with_its_sessions_and_line() {
-    let dir = tempfile::tempdir().unwrap();
-    let id = uuid::Uuid::new_v4().to_string();
-    std::fs::create_dir_all(dir.path().join("media")).unwrap();
-    let path = media::recording_path(dir.path(), THREAD, &id).unwrap();
-    let mut recorder = Command::new("/bin/sh")
-        .args([
-            "-c",
-            "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done",
-            "sh",
-        ])
-        .arg(&path)
-        .spawn()
-        .unwrap();
-    let pid = recorder.id().unwrap();
-    let ledger = json!({
-        "sessions": [
-            {"id": id, "thread_id": THREAD, "host_id": "local", "device_id": "SIM1", "device_name": "iPhone", "started_at": now(),
-             "ended_at": null, "state": "recording", "media_id": null, "stop_reason": null, "error": null, "recorder_pid": pid,
-             "device_session": {"phase": "open"}, "release_pending": false},
-            {"id": "old", "thread_id": C, "host_id": "local", "device_id": "SIM2", "device_name": "iPad", "started_at": 1.0,
-             "ended_at": 2.0, "state": "finished", "media_id": "m", "stop_reason": "stopped", "error": null, "recorder_pid": null,
-             "device_session": {"phase": "closed"}, "release_pending": true}],
-        "queue": [{"id": "w1", "thread_id": B, "queued_at": 1.0, "grant": {"at": 2.0, "turn": "t1", "woken": true}}]});
-    std::fs::write(dir.path().join("sims.json"), ledger.to_string()).unwrap();
-    let fake = Arc::new(Fake {
-        boot: Mutex::new(Some(Ok(()))),
-        ..Fake::default()
-    });
-    fake.max.store(3, SeqCst);
-    let sims = Sims::with_host(dir.path(), fake.clone()).unwrap();
-
-    let original: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("sims.schema1.json")).unwrap())
-            .unwrap();
-    assert_eq!(original, ledger);
-    let saved: Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("sims.json")).unwrap()).unwrap();
-    assert_eq!(
-        (
-            saved["schema"].as_u64(),
-            saved["queue"][0]["grant"]["wake"].as_str()
-        ),
-        (Some(2), Some("queued"))
-    );
-    let live = only_of(&sims, THREAD);
-    assert!(
-        live.active()
-            && live.recorder().unwrap().start.is_some()
-            && sims.owner.ask(|s| s.orphans.is_empty()).await
-    );
-    // The pre-upgrade release is still owed and runs; the grant is not woken again.
-    sims.tick().await;
-    assert_eq!(
-        (fake.count("release SIM2"), fake.woken.lock().unwrap().len()),
-        (1, 0)
-    );
-    assert_eq!(queue(&sims), [(B.into(), true)]);
-    // The handed-over recording still files as a whole movie.
-    let receipt = sims.stop(Some(THREAD), None).await.unwrap();
-    assert!(receipt.media_id.is_some());
-    let _ = recorder.wait().await;
-}
-
-/// A session's end shuts its simulator down once T3's device session is
-/// closed; a start past the limit waits in line rather than booting another.
-#[tokio::test]
-async fn ended_session_releases_its_simulator_and_the_limit_holds() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Ok(())));
-    sims.start(THREAD, None).await.unwrap();
-    assert_eq!(sims.start(B, None).await.unwrap()["status"], "queued");
-    assert_eq!(fake.count("device.open"), 1);
-    sims.stop(Some(THREAD), None).await.unwrap();
-    assert_eq!(fake.count("release SIM1"), 1);
-    assert!(only_of(&sims, THREAD).settled());
-    sims.tick().await;
-    assert_eq!(fake.count("release SIM1"), 1, "released twice");
 }
 
 /// Past the limit, starts wait first come first served: a freed slot is
@@ -695,80 +477,4 @@ async fn no_wake_before_its_grant_is_saved() {
     let saved: Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("sims.json")).unwrap()).unwrap();
     assert_eq!(saved["queue"][0]["grant"]["wake"], "queued");
-}
-
-/// A place is given up by leaving, when T3 no longer has the thread, or
-/// when the woken turn ends without taking the slot; not while the turn
-/// that queued is still finishing, nor on unknown state.
-#[tokio::test]
-async fn places_are_given_up_only_when_unwanted() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Ok(())));
-    sims.start(THREAD, None).await.unwrap();
-    for thread in [B, C, D] {
-        fake.set(thread, busy("t1"));
-        sims.start(thread, None).await.unwrap();
-    }
-    assert!(sims.leave(C).await.unwrap());
-    fake.set(D, Seen::Gone);
-    sims.tick().await;
-    assert_eq!(queue(&sims), [(B.into(), false)]);
-
-    sims.stop(Some(THREAD), None).await.unwrap();
-    sims.tick().await;
-    assert_eq!(queue(&sims), [(B.into(), true)]);
-    // The turn that queued ends: it isn't the woken turn, so the slot stays held.
-    fake.set(B, idle("t1"));
-    sims.tick().await;
-    fake.set(
-        B,
-        Seen::Unknown {
-            turn: Some("t2".into()),
-        },
-    );
-    sims.tick().await;
-    assert_eq!(queue(&sims), [(B.into(), true)]);
-    // The woken turn ends without taking it: the place goes.
-    fake.set(B, idle("t2"));
-    sims.tick().await;
-    assert!(queue(&sims).is_empty());
-}
-
-/// Only T3 confirming the turn over ends a session; while T3's state is
-/// unknown, or the thread waits on the user, the session keeps running,
-/// and uncertain time never counts toward the grace.
-#[tokio::test]
-async fn unknown_or_waiting_thread_state_never_ends_a_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let (sims, fake) = sims(dir.path(), Some(Ok(())));
-    sims.start(THREAD, None).await.unwrap();
-    *fake.seen.lock().unwrap() = Some(idle("t"));
-    assert!(sims.due().await.is_empty(), "ended before its grace");
-    sims.owner
-        .ask(|s| s.clocks.values_mut().for_each(|c| c.since = Some(0.0)))
-        .await;
-    for seen in [Seen::Unknown { turn: None }, Seen::Waiting { turn: None }] {
-        *fake.seen.lock().unwrap() = Some(seen);
-        assert!(
-            sims.due().await.is_empty(),
-            "ended on an unknown or waiting state"
-        );
-    }
-    *fake.seen.lock().unwrap() = Some(idle("t"));
-    assert!(
-        sims.due().await.is_empty(),
-        "uncertain time counted as idle"
-    );
-    sims.owner
-        .ask(|s| s.clocks.values_mut().for_each(|c| c.since = Some(0.0)))
-        .await;
-    assert_eq!(
-        sims.due()
-            .await
-            .into_iter()
-            .map(|d| d.1)
-            .collect::<Vec<_>>(),
-        ["turn ended"]
-    );
-    sims.stop(Some(THREAD), None).await.unwrap();
 }

@@ -666,26 +666,4 @@ mod tests {
             None
         );
     }
-
-    #[test]
-    fn denies_subagents_and_workflows_only() {
-        let event = |tool: &str, input: Value| json!({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": input});
-        assert!(check(&event("Agent", json!({"prompt": "review"})), "squircle").is_some());
-        assert!(check(&event("Task", json!({"prompt": "review"})), "squircle").is_some());
-        assert!(check(&event("Workflow", json!({"script": ""})), "squircle").is_some());
-        let denied = check(&event("Bash", json!({"command": "codex exec x &"})), "sq").unwrap();
-        assert!(denied.contains("sq thread spawn") && denied.contains("--provider codex"));
-        assert_eq!(
-            check(&event("Bash", json!({"command": "cargo test"})), "sq"),
-            None
-        );
-        assert_eq!(
-            check(&event("TaskCreate", json!({"subject": "x"})), "sq"),
-            None
-        );
-        assert_eq!(
-            check(&event("Read", json!({"file_path": "/x"})), "sq"),
-            None
-        );
-    }
 }

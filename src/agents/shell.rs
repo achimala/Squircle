@@ -125,6 +125,10 @@ impl Shell {
     pub(super) fn current(&self) -> bool {
         matches!(self.link, Link::Current { .. })
     }
+    /// The connection is down: nothing waited for on this shell will come.
+    pub(super) fn offline(&self) -> bool {
+        matches!(self.link, Link::Offline { .. })
+    }
     pub(super) fn observe(&self, id: &str) -> Observed<Option<ThreadObservation>> {
         let value = self.threads.get(id).map(|t| ThreadObservation::decode(t));
         match self.link {

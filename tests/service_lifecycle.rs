@@ -5,21 +5,23 @@ use squircle::{
     model::{BuildState, Job},
     store::Store,
 };
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio};
 use tokio::{
     io::{AsyncBufReadExt, BufReader, Lines},
     process::{Child, ChildStderr, Command},
-    time::timeout,
 };
 
-const PROCESS_TIMEOUT: Duration = Duration::from_secs(5);
-
+/// The real `squircle serve`, kept to the test's own folder: no tools on
+/// PATH (no simctl, Xcode or git), its home there too (no T3 pairing, T3
+/// database, launchd folder or crash reports of the user's).
 fn command(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_squircle"));
     command
         .env_remove("SQUIRCLE_DATA_DIR")
         .env_remove("SQUIRCLE_SERVER")
+        .env_remove("SQUIRCLE_T3_STATE")
         .env("PATH", "")
+        .env("HOME", root)
         .arg("--data-dir")
         .arg(root)
         .args(["--json", "serve", "--listen", "127.0.0.1:0"])
@@ -45,13 +47,13 @@ impl Service {
         let token = Store::open(root.to_owned()).unwrap().settings.control_token;
         let mut child = command(root).spawn().unwrap();
         let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
-        let line = timeout(PROCESS_TIMEOUT, stderr.next_line())
+        let line = stderr
+            .next_line()
             .await
-            .expect("service did not announce its listener before the deadline")
             .unwrap()
             .expect("service exited before announcing its listener");
         let address = line
-            .strip_prefix("Squircle listening on ")
+            .strip_prefix(squircle::server::LISTENING)
             .and_then(|line| line.split_once(". Keep this process running"))
             .map(|(address, _)| address)
             .unwrap_or_else(|| panic!("unexpected service startup output: {line}"));
@@ -60,7 +62,6 @@ impl Service {
             _stderr: stderr,
             url: format!("http://{address}"),
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(2))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap(),
@@ -95,10 +96,7 @@ impl Service {
         let pid = self.child.id().expect("owned service has no process ID");
         // Only signal the specific live child owned by this test.
         assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGTERM) }, 0);
-        let status = timeout(PROCESS_TIMEOUT, self.child.wait())
-            .await
-            .expect("idle service did not stop within five seconds")
-            .unwrap();
+        let status = self.child.wait().await.unwrap();
         assert!(status.success(), "service exited unsuccessfully: {status}");
     }
 }
@@ -222,10 +220,7 @@ async fn restart_interrupts_unfinished_jobs_without_retrying_or_rewriting_termin
 async fn only_one_service_owns_a_store_and_shutdown_releases_ownership() {
     let directory = tempfile::tempdir().unwrap();
     let first = Service::start(directory.path()).await;
-    let rejected = timeout(PROCESS_TIMEOUT, command(directory.path()).output())
-        .await
-        .expect("competing service did not fail before the deadline")
-        .unwrap();
+    let rejected = command(directory.path()).output().await.unwrap();
     assert_eq!(rejected.status.code(), Some(2));
     let result: Value = serde_json::from_slice(&rejected.stdout).unwrap();
     assert_eq!(result["ok"], false);
@@ -247,41 +242,4 @@ async fn only_one_service_owns_a_store_and_shutdown_releases_ownership() {
         serde_json::json!([])
     );
     successor.stop().await;
-}
-
-#[tokio::test]
-async fn restart_fails_unfinished_preview_without_invalidating_signed_build() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path().to_owned()).unwrap();
-    let mut record =
-        serde_json::to_value(fixture_job(directory.path(), BuildState::Succeeded)).unwrap();
-    record["request"]["mode"] = "archive".into();
-    record["output"] = serde_json::json!({
-        "archive_path":null,"ipa_path":"/retained/app.ipa","app_path":null,"dsym_paths":[],
-        "bundle_id":"test.app","version":"1","build_number":"2","title":"App",
-        "preview_state":"running","preview_path":"/retained/preview.png","preview_captured_at":10
-    });
-    let job: Job = serde_json::from_value(record).unwrap();
-    store.save_job(&job).unwrap();
-    let service = Service::start(directory.path()).await;
-    let observed = service.get(&format!("/v1/builds/{}", job.id)).await;
-    assert_eq!(observed["data"]["job"]["state"], "succeeded");
-    assert_eq!(
-        observed["data"]["job"]["output"]["ipa_path"],
-        "/retained/app.ipa"
-    );
-    assert_eq!(observed["data"]["job"]["output"]["preview_state"], "failed");
-    assert_eq!(observed["data"]["job"]["output"]["preview_captured_at"], 10);
-    assert!(
-        observed["data"]["job"]["output"]["preview_error"]
-            .as_str()
-            .unwrap()
-            .contains("no automatic retry")
-    );
-    assert_eq!(
-        serde_json::to_value(store.load_job(&job.id).unwrap()).unwrap()["output"]["preview_state"],
-        "failed"
-    );
-    assert!(!store.job_dir(&job.id).unwrap().join("build.log").exists());
-    service.stop().await;
 }

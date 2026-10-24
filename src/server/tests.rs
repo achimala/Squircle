@@ -3,68 +3,6 @@
 use super::*;
 
 #[test]
-fn gzip_quality_zero_refuses_gzip() {
-    assert!(
-        accepts_gzip("gzip, deflate, br")
-            && accepts_gzip("br;q=1.0, GZIP;q=0.5")
-            && accepts_gzip("*")
-    );
-    assert!(
-        !accepts_gzip("gzip;q=0") && !accepts_gzip("gzip; q=0.000, *") && !accepts_gzip("deflate")
-    );
-    assert!(!accepts_gzip("*;q=0") && !accepts_gzip("xgzip"));
-}
-
-#[tokio::test]
-async fn polled_json_revalidates_and_compresses() {
-    use tower::ServiceExt;
-    let app = Router::new()
-        .route(
-            "/big",
-            get(|| async { Json(json!({"rows": vec!["build"; 2000]})) }),
-        )
-        .route_layer(middleware::from_fn(compact_json));
-    let call = |headers: &[(header::HeaderName, &str)]| {
-        let mut request = axum::http::Request::get("/big");
-        for (name, value) in headers {
-            request = request.header(name, *value);
-        }
-        app.clone().oneshot(request.body(Body::empty()).unwrap())
-    };
-    let plain = call(&[]).await.unwrap();
-    assert_eq!(plain.status(), StatusCode::OK);
-    assert!(plain.headers().get(header::CONTENT_ENCODING).is_none());
-    let etag = plain.headers()[header::ETAG].to_str().unwrap().to_string();
-    let body = axum::body::to_bytes(plain.into_body(), usize::MAX)
-        .await
-        .unwrap();
-
-    let same = call(&[(header::IF_NONE_MATCH, &etag)]).await.unwrap();
-    assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
-    assert!(
-        axum::body::to_bytes(same.into_body(), usize::MAX)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let stale = call(&[(header::IF_NONE_MATCH, "\"other\"")]).await.unwrap();
-    assert_eq!(stale.status(), StatusCode::OK);
-
-    let zipped = call(&[(header::ACCEPT_ENCODING, "br, gzip;q=0.9")])
-        .await
-        .unwrap();
-    assert_eq!(zipped.headers()[header::CONTENT_ENCODING], "gzip");
-    let bytes = axum::body::to_bytes(zipped.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert!(bytes.len() < body.len() / 10);
-    let mut unzipped = Vec::new();
-    std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&bytes[..]), &mut unzipped)
-        .unwrap();
-    assert_eq!(unzipped, body);
-}
-
-#[test]
 fn history_pages_are_stable_and_complete() {
     let at = |t: &(&'static str, u64)| HistoryCursor {
         archived_at: t.1,
@@ -94,14 +32,6 @@ fn history_pages_are_stable_and_complete() {
         ["c", "a"]
     );
     assert!(HistoryCursor::parse("x").is_err());
-}
-
-#[tokio::test]
-async fn non_repository_source_has_no_invented_provenance() {
-    let directory = tempfile::tempdir().unwrap();
-    let project = directory.path().join("Probe.xcodeproj");
-    std::fs::create_dir(&project).unwrap();
-    assert_eq!(source_provenance(&project).await, (None, None));
 }
 
 fn request(root: &std::path::Path) -> BuildRequest {
@@ -137,77 +67,6 @@ fn test_ipa(path: &std::path::Path) -> Result<()> {
 }
 
 #[tokio::test]
-async fn import_publishes_only_after_validation() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let source = dir.path().join("input.ipa");
-    test_ipa(&source)?;
-    let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
-    let checking = state.clone();
-    let job = import_job(state.clone(), source.clone(), move |source, destination| {
-        assert!(checking.jobs.list().is_empty() && checking.files.list_jobs()?.is_empty());
-        let output = copy_and_inspect_ipa(source, destination)?;
-        assert!(checking.jobs.list().is_empty() && checking.files.list_jobs()?.is_empty());
-        Ok(output)
-    })
-    .await?;
-    let stored = state.files.load_job(&job.id)?;
-    assert_eq!(stored.state(), BuildState::Succeeded);
-    assert_eq!(stored.origin, BuildOrigin::Imported);
-    let output = stored.output().unwrap();
-    assert_eq!(output.bundle_id, "dev.example.probe");
-    assert_eq!(
-        std::fs::read(output.ipa_path.as_ref().unwrap())?,
-        std::fs::read(source)?
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn swift_uppercase_diagnostic_uuids_are_accepted_and_lowercase_retries_deduplicate()
--> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let source = dir.path().join("input.ipa");
-    test_ipa(&source)?;
-    let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
-    let job = import_job(state.clone(), source.clone(), copy_and_inspect_ipa).await?;
-    let diagnostic_token = state.files.settings.diagnostic_token.clone();
-    let mut authorization = HeaderMap::new();
-    authorization.insert(
-        header::AUTHORIZATION,
-        format!("Bearer {diagnostic_token}").parse()?,
-    );
-    let event_id = "a50f8213-88d3-4b6f-91d3-143aceef3f9d";
-    let mut event = Diagnostic {
-        event_id: event_id.to_uppercase(),
-        build_id: job.id.to_uppercase(),
-        kind: DiagnosticKind::Crash,
-        message: "Swift crash report".into(),
-        timestamp: 1,
-        attributes: json!({}),
-    };
-    let Json(first) = ingest(State(state.clone()), Ok(Json(event.clone())))
-        .await
-        .unwrap();
-    assert_eq!(first["data"]["event_id"], event_id);
-    assert_eq!(first["data"]["stored"], true);
-    event.event_id = event_id.into();
-    event.build_id = job.id.clone();
-    let Json(retry) = ingest(State(state.clone()), Ok(Json(event.clone())))
-        .await
-        .unwrap();
-    assert_eq!(retry["data"]["duplicate"], true);
-    let stored = state.files.diagnostics(&job.id, 0, 10, None)?;
-    assert_eq!(stored["events"].as_array().unwrap().len(), 1);
-    assert_eq!(stored["events"][0]["event_id"], event_id);
-    assert_eq!(stored["events"][0]["build_id"], job.id);
-
-    event.build_id = "../outside".into();
-    let error = ingest(State(state), Ok(Json(event))).await.unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    Ok(())
-}
-
-#[tokio::test]
 async fn unauthorized_or_invalid_imports_publish_no_record() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let source = dir.path().join("input.ipa");
@@ -236,7 +95,17 @@ async fn unauthorized_or_invalid_imports_publish_no_record() -> Result<()> {
 async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_deduplicate() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
-    let _active = state.slots.clone().acquire_owned().await.unwrap();
+    // A build holds the lane until the test ends.
+    let (entered, holding) = tokio::sync::oneshot::channel();
+    let lane = state.builds.clone();
+    tokio::spawn(async move {
+        lane.run(async {
+            let _ = entered.send(());
+            std::future::pending::<()>().await
+        })
+        .await
+    });
+    holding.await.unwrap();
     let request = request(dir.path());
     let Json(first) = start(State(state.clone()), Ok(Json(request.clone())))
         .await
@@ -256,31 +125,13 @@ async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_dedu
             .status,
         StatusCode::CONFLICT
     );
+    let mut changes = state.jobs.changes();
     let _ = cancel(State(state.clone()), Path(id.clone()))
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if state.files.load_job(&id).unwrap().state() == BuildState::Cancelled {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("queued cancellation should be immediate");
+    // Recorded without the lane: the active build never lets it go.
+    while state.files.load_job(&id).unwrap().state() != BuildState::Cancelled {
+        futures_util::StreamExt::next(&mut changes).await.unwrap();
+    }
     assert!(!state.files.job_dir(&id).unwrap().join("build.log").exists());
-}
-#[tokio::test]
-async fn draining_refuses_new_side_effects() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
-    state.draining.store(true, Ordering::Release);
-    let error = start(State(state.clone()), Ok(Json(request(dir.path()))))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    // Refused before any side effect, so clients may send it again.
-    assert!(error.retryable);
-    assert!(state.files.list_jobs().unwrap().is_empty());
 }

@@ -262,7 +262,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             // A headless simulator never makes the scene active; the phone does.
             model.startMetadataUpdates()
             Task { [weak self] in
-                while let self, !(model.connected && projects.contains { $0.name == name }) { try? await Task.sleep(for: .milliseconds(100)) }
+                guard let model = self?.model else { return }
+                await model.until { model.connected && model.projects.contains { $0.name == name } }
                 try? await Task.sleep(for: .seconds(value("SQUIRCLE_PERF_WAIT").map(Double.init) ?? 3))
                 guard let self, let project = projects.first(where: { $0.name == name }) else { return }
                 ConnectionTrace.mark("tap.app", name)
@@ -273,11 +274,15 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 openThread(thread)
             }
         }
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(4))
+        Task { [weak self, model] in
+            // Home's apps first: from the copy on disk or the Mac.
+            let name = environment["SQUIRCLE_APP"]
+            guard name != nil || value("SQUIRCLE_GRID") != nil else { return }
+            await model.until { name.map { name in model.projects.contains { $0.name == name } } ?? !model.projects.isEmpty }
             guard let self else { return }
+            render()
             if let y = value("SQUIRCLE_GRID") { grid.contentOffset.y = y; applyScene() }
-            guard let name = environment["SQUIRCLE_APP"], let project = projects.first(where: { $0.name == name }) else { return }
+            guard let name, let project = projects.first(where: { $0.name == name }) else { return }
             openApp(project.id)
             if let scrub = value("SQUIRCLE_APP_SCRUB") { hold(appSpring, at: scrub); return }
             appSpring.set(1)
@@ -503,7 +508,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         if dragging != nil { endBack(velocity: 0, closing: Bool.random()) }
         dropLift()
-        try? await Task.sleep(for: .seconds(2.5))
+        await appSpring.rest()
+        await spring.rest()
         let settled = !appSpring.isAnimating && !spring.isAnimating
             && appSpring.value == appTarget && spring.value == threadTarget
             && selectedID == (route.app ?? selectedID) && mountedThread?.key == route.thread

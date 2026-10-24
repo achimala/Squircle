@@ -96,7 +96,7 @@ impl Push {
                 return;
             }
             tokio::spawn(async move {
-                tokio::time::sleep(this.timing.coalesce).await;
+                crate::clock::after(this.timing.coalesce).await;
                 this.flush().await;
             });
         });
@@ -144,7 +144,7 @@ impl Push {
                 return;
             }
             if attempt < ALERT_ATTEMPTS {
-                tokio::time::sleep(backoff(self.timing.retry, attempt)).await;
+                crate::clock::after(backoff(self.timing.retry, attempt)).await;
             }
         }
     }
@@ -217,16 +217,16 @@ impl Push {
     }
 
     /// Keeps every phone's activities in line with what each app wants, until
-    /// the service stops. Runs on each change and at least every `TICK`.
-    pub async fn run(self: Arc<Self>) {
+    /// the service stops. Runs on each change (`written`: T3 writing its
+    /// database, which may change a step) and when the policy next asks.
+    pub async fn run(self: Arc<Self>, mut written: futures_util::stream::BoxStream<'static, ()>) {
+        use futures_util::StreamExt;
         loop {
             let next = self.reconcile().await;
-            let wait = next
-                .map_or(TICK, |at| at.saturating_duration_since(Instant::now()))
-                .min(TICK);
             tokio::select! {
                 _ = self.wake.notified() => {}
-                _ = tokio::time::sleep(wait) => {}
+                Some(()) = written.next() => self.owner.ask(|s| s.written += 1).await,
+                _ = crate::clock::reach(next) => {}
             }
         }
     }
@@ -280,10 +280,7 @@ impl Push {
     pub(super) async fn look_up(&self, project: String, key: StepKey) {
         let threads = self.owner.ask(|s| s.threads.clone()).await;
         let text = match threads {
-            Some(t) => tokio::time::timeout(STEP_DEADLINE, t.current_step(&key.thread))
-                .await
-                .ok()
-                .flatten(),
+            Some(t) => t.current_step(&key.thread).await,
             None => None,
         };
         self.owner

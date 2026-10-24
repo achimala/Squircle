@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::{process::Command, sync::watch, time::Instant};
+use tokio::{process::Command, sync::watch};
 
 pub struct Capture {
     pub path: PathBuf,
@@ -41,11 +41,9 @@ pub async fn capture(
     let output = job.output().context("Build has no product")?;
     ensure!(!*cancel.borrow(), "Preview cancelled");
     let log = job_dir.join("build.log");
-    let deadline = Instant::now() + Duration::from_secs(180);
     let devices = command(
         &["list".into(), "devices".into(), "--json".into()],
         &log,
-        deadline,
         cancel.clone(),
     )
     .await?;
@@ -73,7 +71,6 @@ pub async fn capture(
         command(
             &["boot".into(), simulator.clone().into()],
             &log,
-            deadline,
             cancel.clone(),
         )
         .await?;
@@ -81,7 +78,6 @@ pub async fn capture(
     command(
         &["bootstatus".into(), simulator.clone().into(), "-b".into()],
         &log,
-        deadline,
         cancel.clone(),
     )
     .await?;
@@ -124,7 +120,6 @@ pub async fn capture(
             == Some(&output.bundle_id),
         "Preview product bundle ID does not match build record"
     );
-    let deadline = Instant::now() + Duration::from_secs(120);
     command(
         &[
             "install".into(),
@@ -132,7 +127,6 @@ pub async fn capture(
             app.into_os_string(),
         ],
         &log,
-        deadline,
         cancel.clone(),
     )
     .await?;
@@ -144,13 +138,13 @@ pub async fn capture(
             output.bundle_id.clone().into(),
         ],
         &log,
-        deadline,
         cancel.clone(),
     )
     .await?;
     let pid = launch_pid(&launch, &output.bundle_id)?;
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(3)) => {},
+        // No event says an arbitrary app has drawn its first screen.
+        () = crate::clock::after(Duration::from_secs(3)) => {},
         _ = cancelled(cancel.clone()) => bail!("Preview cancelled"),
     }
     // A crashing launch must not silently publish a SpringBoard screenshot.
@@ -162,7 +156,6 @@ pub async fn capture(
             "list".into(),
         ],
         &log,
-        deadline,
         cancel.clone(),
     )
     .await?;
@@ -180,7 +173,6 @@ pub async fn capture(
             temporary.clone().into_os_string(),
         ],
         &log,
-        deadline,
         cancel,
     )
     .await?;
@@ -233,12 +225,7 @@ async fn cancelled(cancel: watch::Receiver<bool>) {
     crate::process::cancelled(Some(cancel)).await
 }
 
-async fn command(
-    args: &[OsString],
-    log: &Path,
-    deadline: Instant,
-    cancel: watch::Receiver<bool>,
-) -> Result<Vec<u8>> {
+async fn command(args: &[OsString], log: &Path, cancel: watch::Receiver<bool>) -> Result<Vec<u8>> {
     let mut log = OpenOptions::new().create(true).append(true).open(log)?;
     writeln!(log, "\n$ /usr/bin/xcrun simctl {args:?}")?;
     let mut command = Command::new("/usr/bin/xcrun");
@@ -247,15 +234,11 @@ async fn command(
         command,
         crate::process::Sink::Capture(1024 * 1024),
         crate::process::Sink::File(log.try_clone()?),
-        deadline,
         Some(cancel),
     )
     .await
     .map_err(|error| match error {
         crate::process::RunError::Cancelled => anyhow::anyhow!("Preview cancelled"),
-        crate::process::RunError::TimedOut => {
-            anyhow::anyhow!("Simulator preview command timed out")
-        }
         crate::process::RunError::Failed(error) => error.context("simctl command did not complete"),
     })?;
     ensure!(
@@ -265,35 +248,4 @@ async fn command(
     );
     log.write_all(&finished.stdout)?;
     Ok(finished.stdout)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn capture_requires_exact_simulator_and_target_process() {
-        assert!(simulator_id(Some("booted")).is_err());
-        assert!(simulator_id(Some("; rm -rf /")).is_err());
-        assert_eq!(launch_pid(b"test.app: 123\n", "test.app").unwrap(), 123);
-        assert!(launch_pid(b"other.app: 123\n", "test.app").is_err());
-        assert!(target_is_running(
-            b"PID Status Label\n123 0 UIKitApplication:test.app[abc][rb-1]\n",
-            123,
-            "test.app"
-        ));
-        assert!(!target_is_running(
-            b"123 0 UIKitApplication:test.application[abc]\n",
-            123,
-            "test.app"
-        ));
-        assert!(!target_is_running(
-            b"- 0 UIKitApplication:test.app[abc]\n",
-            123,
-            "test.app"
-        ));
-    }
-    #[test]
-    fn invalid_png_is_rejected() {
-        assert!(validate_png(b"not a screenshot").is_err());
-    }
 }

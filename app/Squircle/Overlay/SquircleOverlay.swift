@@ -1674,9 +1674,10 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         func settle(_ label: String) async {
             settles += 1
             let start = CACurrentMediaTime()
+            // The jelly moves only on display frames: each is a chance it settled.
             while CACurrentMediaTime() - start < 6 {
                 if glass.debugSettled { return }
-                try? await Task.sleep(for: .milliseconds(50))
+                await DisplayFrame.next()
             }
             unsettled.append(label)
             NSLog("JELLY STRESS did not settle: %@ — %@", label, glass.debugState)

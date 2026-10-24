@@ -28,11 +28,7 @@ pub(super) async fn inspect_project(
     query: std::result::Result<Query<InspectQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
-    let _permit = state
-        .inspection_slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| inspection_busy())?;
+    let _permit = state.inspection().ok_or_else(inspection_busy)?;
     let result = projects::inspect(
         &query.project,
         query.scheme.as_deref(),

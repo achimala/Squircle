@@ -98,12 +98,11 @@ pub(super) async fn start_build(state: AppState, mut request: BuildRequest) -> A
                 job.id
             );
         }
-        let mut receiver = lease.cancelled.clone();
-        let permit = tokio::select! {
-            result = state.slots.clone().acquire_owned() => result.ok(),
-            _ = receiver.changed() => None,
-        };
-        if permit.is_none() || *receiver.borrow() {
+        let cancel = lease.cancelled.clone();
+        let lane = state.clone();
+        in_build_lane(&lane, cancel, move |admitted| async move {
+        let receiver = lease.cancelled.clone();
+        if !admitted || *receiver.borrow() {
             job.phase = JobPhase::Cancelled { message: None };
         } else {
             job.phase = JobPhase::Running;
@@ -159,7 +158,8 @@ pub(super) async fn start_build(state: AppState, mut request: BuildRequest) -> A
             push.build_finished(&job, app.as_ref());
         }
         tell_agent(&state, &job, app.as_ref()).await;
-        drop(permit);
+        })
+        .await;
     });
     Ok(success(json!({"job":response,"replayed":false})))
 }
@@ -278,38 +278,38 @@ pub(super) async fn start_preview(
     let (mut job, lease) = state.jobs.begin_preview(&id).await.map_err(admit_error)?;
     let response = state.jobs.get(&id);
     tokio::spawn(async move {
-        let mut receiver = lease.cancelled.clone();
-        let permit = tokio::select! {
-            result = state.slots.clone().acquire_owned() => result.ok(),
-            _ = receiver.changed() => None,
-        };
-        let result = if permit.is_none() || *receiver.borrow() {
-            Err(anyhow::anyhow!("Preview cancelled before capture"))
-        } else {
-            let capturing = job
-                .preview()
-                .map(PreviewState::capturing)
-                .unwrap_or_default();
-            job.set_preview(capturing);
-            job.updated_at = now();
-            match state.jobs.commit(&lease, &job).await {
-                Ok(()) => preview::capture(&job, &directory, &simulator, receiver).await,
-                Err(error) => {
-                    state.draining.store(true, Ordering::Release);
-                    Err(error.context("Could not persist preview Running state"))
+        let cancel = lease.cancelled.clone();
+        let lane = state.clone();
+        in_build_lane(&lane, cancel, move |admitted| async move {
+            let receiver = lease.cancelled.clone();
+            let result = if !admitted || *receiver.borrow() {
+                Err(anyhow::anyhow!("Preview cancelled before capture"))
+            } else {
+                let capturing = job
+                    .preview()
+                    .map(PreviewState::capturing)
+                    .unwrap_or_default();
+                job.set_preview(capturing);
+                job.updated_at = now();
+                match state.jobs.commit(&lease, &job).await {
+                    Ok(()) => preview::capture(&job, &directory, &simulator, receiver).await,
+                    Err(error) => {
+                        state.draining.store(true, Ordering::Release);
+                        Err(error.context("Could not persist preview Running state"))
+                    }
                 }
+            };
+            finish_preview(&mut job, result);
+            job.updated_at = now();
+            if let Err(error) = state.jobs.finish(lease, &job).await {
+                eprintln!("Cannot persist preview of {id}: {error:#}. Service paused.");
+                state.draining.store(true, Ordering::Release);
+            } else {
+                build_app(&state, &job).await;
             }
-        };
-        finish_preview(&mut job, result);
-        job.updated_at = now();
-        if let Err(error) = state.jobs.finish(lease, &job).await {
-            eprintln!("Cannot persist preview of {id}: {error:#}. Service paused.");
-            state.draining.store(true, Ordering::Release);
-        } else {
-            build_app(&state, &job).await;
-        }
-        xcode::shed(directory, job.request().map(|r| r.mode.clone())).await;
-        drop(permit);
+            xcode::shed(directory, job.request().map(|r| r.mode.clone())).await;
+        })
+        .await;
     });
     Ok(success(json!({"job":response})))
 }
@@ -320,14 +320,8 @@ pub(super) async fn source_provenance(project: &std::path::Path) -> (Option<Stri
     let Some(directory) = project.parent() else {
         return (None, None);
     };
-    let limit = std::time::Duration::from_secs(5);
-    let Ok(revision) = crate::git::run(
-        directory,
-        &["rev-parse", "--verify", "HEAD^{commit}"],
-        limit,
-        128,
-    )
-    .await
+    let Ok(revision) =
+        crate::git::run(directory, &["rev-parse", "--verify", "HEAD^{commit}"], 128).await
     else {
         return (None, None);
     };
@@ -345,7 +339,7 @@ pub(super) async fn source_provenance(project: &std::path::Path) -> (Option<Stri
         "--untracked-files=normal",
         "--ignore-submodules=none",
     ];
-    let dirty = crate::git::run(directory, &status, limit, 1024 * 1024)
+    let dirty = crate::git::run(directory, &status, 1024 * 1024)
         .await
         .ok()
         .map(|output| !output.is_empty());
@@ -428,4 +422,46 @@ pub(super) fn import_ipa(
     // Work admitted before shutdown may finish. Publication (`Jobs::insert`)
     // occurs only after the copied IPA has been synced and its metadata validated.
     Ok(job)
+}
+
+/// Runs `work` in the build lane: one build or preview at a time, in
+/// order. Its argument says whether it got there; a job cancelled while it
+/// waits runs `work(false)` at once, outside the lane, to record that.
+async fn in_build_lane<F, Fut>(
+    state: &AppState,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    work: F,
+) where
+    F: FnOnce(bool) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let entered = AtomicBool::new(false);
+    let mut work = Some(work);
+    let waited_out = tokio::select! {
+        biased;
+        () = state.builds.run(async {
+            entered.store(true, Ordering::Release);
+            (work.take().expect("runs once"))(true).await
+        }) => false,
+        () = cancelled_outside(&entered, cancel) => true,
+    };
+    if waited_out {
+        (work.take().expect("runs once"))(false).await;
+    }
+}
+
+/// Resolves when the job is cancelled (or its record goes) before it has
+/// entered the lane; once in, cancellation is the work's own to handle.
+async fn cancelled_outside(entered: &AtomicBool, mut cancel: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if entered.load(Ordering::Acquire) {
+            return std::future::pending().await;
+        }
+        if *cancel.borrow_and_update() || cancel.changed().await.is_err() {
+            if entered.load(Ordering::Acquire) {
+                return std::future::pending().await;
+            }
+            return;
+        }
+    }
 }

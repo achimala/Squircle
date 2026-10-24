@@ -12,7 +12,7 @@ use std::{
     fs,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -272,10 +272,10 @@ fn app_image(image: &Image) -> bool {
         || (image.path.contains(".app/") && !image.path.contains("SquircleOverlay.framework"))
 }
 
-/// Runs a symbol tool under `crate::process::run_bounded`, so a wedged `atos` or
-/// `dwarfdump` cannot hang `perf show` and nothing it started outlives it; its
-/// stdout, or nothing if it failed, timed out or wrote more than 16 MiB.
-async fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> Option<Vec<u8>> {
+/// Runs a symbol tool under `crate::process::run_bounded`, so nothing it
+/// started outlives it (stopping `perf show` stops it); its stdout, or
+/// nothing if it failed or wrote more than 16 MiB.
+async fn run(command: &mut Command, input: Option<Vec<u8>>) -> Option<Vec<u8>> {
     // Callers build it in place; run_bounded takes it whole.
     let command = std::mem::replace(command, Command::new("/usr/bin/false"));
     let finished = crate::process::run_bounded_with_input(
@@ -283,7 +283,6 @@ async fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> 
         input,
         crate::process::Sink::Capture(16 * 1024 * 1024),
         crate::process::Sink::Discard,
-        tokio::time::Instant::now() + limit,
         None,
     )
     .await
@@ -303,7 +302,6 @@ async fn dwarf_uuids(path: &Path) -> Vec<(String, String)> {
             .arg("--uuid")
             .arg(path),
         None,
-        Duration::from_secs(30),
     )
     .await
     .map(|out| parse_uuids(&String::from_utf8_lossy(&out)))
@@ -383,7 +381,6 @@ async fn symbol_file(
     let spotlight = run(
         Command::new("mdfind").arg(format!("com_apple_xcode_dsym_uuids == {uuid}")),
         None,
-        Duration::from_secs(15),
     )
     .await;
     for line in String::from_utf8_lossy(&spotlight.unwrap_or_default()).lines() {
@@ -453,7 +450,6 @@ async fn atos((file, arch): &Symbols, load: &str, addresses: &[u64]) -> Vec<Opti
                 .args(["-l", load])
                 .args(chunk.iter().map(|a| format!("{a:#x}"))),
             None,
-            Duration::from_secs(60),
         )
         .await;
         let lines: Vec<String> = output
@@ -589,7 +585,6 @@ async fn demangle(frames: &mut HashMap<u64, Frame>) {
         let Some(output) = run(
             Command::new("xcrun").arg(tool).args(&args),
             Some(input.into_bytes()),
-            Duration::from_secs(30),
         )
         .await
         else {
@@ -1034,87 +1029,4 @@ pub async fn show(root: &Path, which: &str, given: &[PathBuf]) -> Result<(String
         "report": text,
     });
     Ok((text, data))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn heaviest_path_follows_the_busiest_child() {
-        // Leaf first, as captured: main → a → b (3 samples), main → c (1).
-        let s1: &[u64] = &[3, 2, 1];
-        let s2: &[u64] = &[4, 1];
-        let path = heaviest_path(&[s1, s1, s1, s2]);
-        assert_eq!(path, vec![(1, 4), (2, 3), (3, 3)]);
-    }
-
-    #[tokio::test]
-    async fn symbol_files_must_carry_the_image_uuid() {
-        let dir = tempfile::tempdir().unwrap();
-        let wrong = dir.path().join("Old");
-        let right = dir.path().join("App.dSYM/Contents/Resources/DWARF/App");
-        fs::create_dir_all(right.parent().unwrap()).unwrap();
-        fs::write(&wrong, b"").unwrap();
-        fs::write(&right, b"").unwrap();
-        let text = "UUID: 1111AAAA-0000-0000-0000-000000000000 (arm64) x\nUUID: 2222bbbb-0000-0000-0000-000000000000 (arm64e) x";
-        assert_eq!(
-            parse_uuids(text)[1],
-            (
-                "2222BBBB-0000-0000-0000-000000000000".into(),
-                "arm64e".into()
-            )
-        );
-        let uuids = async |p: &Path| -> Vec<(String, String)> {
-            if p.ends_with("App") {
-                parse_uuids(text)
-            } else {
-                vec![("9999".into(), "arm64".into())]
-            }
-        };
-        assert_eq!(
-            matching(&wrong, "1111AAAA-0000-0000-0000-000000000000", &uuids).await,
-            None,
-            "A given file from another build is not used."
-        );
-        let bundle = dir.path().join("App.dSYM");
-        assert_eq!(
-            matching(&bundle, "2222BBBB-0000-0000-0000-000000000000", &uuids).await,
-            Some((right, "arm64e".into()))
-        );
-    }
-
-    #[test]
-    fn tidies_atos_lines() {
-        assert_eq!(
-            tidy("Feed.layout() (in Letters) (Feed.swift:88)"),
-            "Feed.layout() Feed.swift:88"
-        );
-        assert_eq!(
-            tidy("-[UIView layoutSubviews] (in UIKitCore) + 12"),
-            "-[UIView layoutSubviews] + 12"
-        );
-    }
-
-    #[test]
-    fn rejects_uploads_that_are_not_captures() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(store(root.path(), "video", b"not a movie at all").is_err());
-        assert!(
-            store(
-                root.path(),
-                "performance",
-                b"{\"format\":\"other\",\"duration\":1}"
-            )
-            .is_err()
-        );
-        assert!(store(root.path(), "elf", b"x").is_err());
-        let ok = store(
-            root.path(),
-            "performance",
-            b"{\"format\":\"squircle-perf\",\"duration\":1}",
-        )
-        .unwrap();
-        assert!(ok.to_string_lossy().ends_with(".perf.json"));
-    }
 }

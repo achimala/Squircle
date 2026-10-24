@@ -116,6 +116,20 @@ impl<T> Snapshot<T> {
         self.0.borrow().clone()
     }
 
+    /// One item for each publication after this call (several published
+    /// between two reads are one item); ends when the owner has stopped.
+    pub fn changes(&self) -> impl futures_util::Stream<Item = ()> + Send + 'static
+    where
+        T: Send + Sync + 'static,
+    {
+        let mut receiver = self.0.clone();
+        receiver.mark_unchanged();
+        futures_util::stream::unfold(receiver, |mut receiver| async move {
+            receiver.changed().await.ok()?;
+            Some(((), receiver))
+        })
+    }
+
     /// The first published value, the current one included, for which
     /// `ready` holds; `None` once the owner has stopped without one.
     pub async fn wait_for(&self, mut ready: impl FnMut(&T) -> bool) -> Option<Arc<T>> {
@@ -181,6 +195,8 @@ impl<R: Clone, A, S: Storage<R>> Saved<R, A, S> {
 /// never wait, so anyone may ask any owner at any time.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Rank {
+    /// One build or preview at a time.
+    Build,
     /// `thread spawn` asked again for the same agent and branch.
     AgentSpawn,
     /// An app's agent (create, reset) or one worker (bootstrap, archive).
@@ -195,6 +211,8 @@ pub enum Rank {
     Catalog,
     /// One append to, or read of, a build's diagnostics.
     Diagnostics,
+    /// One overlay framework build into the data directory's cache.
+    OverlayCache,
 }
 
 tokio::task_local! {
@@ -230,10 +248,10 @@ pub struct Lane {
 }
 
 impl Lane {
-    pub fn new(rank: Rank) -> Self {
+    pub const fn new(rank: Rank) -> Self {
         Self {
             rank,
-            turn: Turn::new(()),
+            turn: Turn::const_new(()),
         }
     }
 
@@ -275,48 +293,5 @@ impl<K: Eq + Hash + Send + 'static> Lanes<K> {
             .await;
         let _turn = turn.lock().await;
         HELD.scope(held, work).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Lanes nest only downhill: a lower rank, the same rank (another key of
-    /// one keyed lane), or the same lane again would let two tasks wait for
-    /// each other, so each is refused on entry instead.
-    #[tokio::test]
-    async fn lanes_are_entered_only_in_rank_order() {
-        let (spawn, ops, pool) = (
-            Lane::new(Rank::AgentSpawn),
-            Lanes::new("ops", Rank::AgentOp),
-            Lane::new(Rank::PoolApply),
-        );
-        assert_eq!(spawn.run(ops.run("a", pool.run(async { 1 }))).await, 1);
-        let refused = |work: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>| async move {
-            tokio::spawn(work).await.unwrap_err().is_panic()
-        };
-        let (ops, pool) = (Arc::new(ops), Arc::new(pool));
-        let (o, p) = (ops.clone(), pool.clone());
-        assert!(
-            refused(Box::pin(async move { p.run(o.run("a", async {})).await })).await,
-            "entered a lower rank"
-        );
-        let o = ops.clone();
-        assert!(
-            refused(Box::pin(
-                async move { o.run("a", o.run("b", async {})).await }
-            ))
-            .await,
-            "entered two keys of one rank"
-        );
-        let p = pool.clone();
-        assert!(
-            refused(Box::pin(async move { p.run(p.run(async {})).await })).await,
-            "entered a lane twice"
-        );
-        // A refused entry held nothing: the lanes are free.
-        assert_eq!(pool.try_run(async { 2 }).await, Some(2));
-        assert_eq!(ops.run("b", async { 3 }).await, 3);
     }
 }

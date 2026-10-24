@@ -7,11 +7,13 @@ disallowed-types = [
     { path = "std::sync::Condvar", reason = "owners never wait; tell an owner instead" },
     { path = "tokio::sync::Mutex", reason = "async work that must not overlap runs in a ranked crate::actor::Lane" },
     { path = "tokio::sync::RwLock", reason = "publish a crate::actor::Snapshot instead" },
+    { path = "tokio::sync::Semaphore", reason = "a semaphore is a lock: use a ranked crate::actor::Lane or an owner" },
     { path = "parking_lot::Mutex", reason = "no locks; see crate::actor", allow-invalid = true },
     { path = "parking_lot::RwLock", reason = "no locks; see crate::actor", allow-invalid = true },
     { path = "parking_lot::ReentrantMutex", reason = "no locks; see crate::actor", allow-invalid = true },
 ]
 disallowed-methods = [
+    { path = "std::thread::sleep", reason = "wait for the event; policy durations go through crate::clock" },
     { path = "tokio::sync::oneshot::Receiver::blocking_recv", reason = "waits on a thread; await it instead" },
     { path = "tokio::sync::mpsc::Receiver::blocking_recv", reason = "waits on a thread; await it instead" },
     { path = "tokio::sync::mpsc::UnboundedReceiver::blocking_recv", reason = "waits on a thread; await it instead" },

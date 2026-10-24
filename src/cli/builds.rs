@@ -255,7 +255,7 @@ pub(super) async fn preview(cli: &Cli, command: &PreviewCommand) -> Result<Optio
             )
             .await;
             match submitted {
-                Err(_) => WaitFor::Preview.timeout(),
+                Err(_) => WaitFor::Preview.timed_out(),
                 Ok(Err(error)) => return Err(error),
                 Ok(Ok(value)) if value["ok"] == false => value,
                 Ok(Ok(_)) => poll(cli, build_id, deadline, WaitFor::Preview).await?,

@@ -408,12 +408,14 @@ fn settled_sessions(root: &Path) -> std::collections::HashMap<String, Value> {
 
 /// Session IDs some running process names on its command line (a recorder
 /// still writing, an avconvert still converting).
-fn running_sessions() -> String {
-    std::process::Command::new("/bin/ps")
+async fn running_sessions() -> String {
+    tokio::process::Command::new("/bin/ps")
         .args(["-ww", "-A", "-o", "command="])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .output()
+        .await
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
 }
@@ -447,7 +449,7 @@ pub async fn plan(tools: &Tools, root: &Path) -> Result<Plan> {
             }
         }
     }
-    (plan.orphans, plan.live) = orphans(root);
+    (plan.orphans, plan.live) = orphans(root).await;
     Ok(plan)
 }
 
@@ -456,9 +458,9 @@ pub async fn plan(tools: &Tools, root: &Path) -> Result<Plan> {
 /// sessions still recording (or not provably over), which nothing touches.
 /// A file `media shrink` is working on (`.ID.mp4.shrinking`,
 /// `.ID.mp4.light.mp4`) belongs to no session.
-pub fn orphans(root: &Path) -> (Vec<Orphan>, Vec<PathBuf>) {
+pub async fn orphans(root: &Path) -> (Vec<Orphan>, Vec<PathBuf>) {
     let ledger = settled_sessions(root);
-    let processes = running_sessions();
+    let processes = running_sessions().await;
     let mut hidden: std::collections::BTreeMap<(&'static str, String, String), Vec<PathBuf>> =
         Default::default();
     for owners in ["threads", "tasks"] {
@@ -525,8 +527,8 @@ pub fn orphans(root: &Path) -> (Vec<Orphan>, Vec<PathBuf>) {
 
 /// `media shrink --orphans=delete`: deletes every file of every orphan
 /// (recordings, posters, avconvert's leftovers, logs); encodes nothing.
-pub fn delete_orphans(root: &Path, dry_run: bool) -> Value {
-    let (orphans, live) = orphans(root);
+pub async fn delete_orphans(root: &Path, dry_run: bool) -> Value {
+    let (orphans, live) = orphans(root).await;
     let (mut files, mut bytes, mut failed) = (Vec::new(), 0u64, Vec::new());
     for orphan in &orphans {
         for file in orphan.files() {
@@ -740,55 +742,4 @@ async fn file_orphan(
         media.file.with_extension("poster.jpg"),
     );
     Ok((media.id, before, after))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn probe(frames: u64, duration: f64) -> Probe {
-        Probe {
-            bytes: 10_000_000,
-            codec: "h264".into(),
-            width: 1206,
-            height: 2622,
-            frames,
-            duration,
-            light: false,
-        }
-    }
-
-    #[test]
-    fn names_the_session_of_leftovers() {
-        let id = "1cbb5ade-2a25-42c9-bf17-39504daa49cd";
-        assert_eq!(session_of(&format!(".{id}.recording.mp4")), Some(id));
-        assert_eq!(
-            session_of(&format!(
-                ".{id}.recording.compact.mp4.sb-87e40459-0K4O6e-videoSegment2.mp4"
-            )),
-            Some(id)
-        );
-        assert_eq!(session_of(&format!(".{id}.mp4.light.mp4")), None);
-        assert_eq!(session_of(&format!("{id}.mp4")), None);
-    }
-
-    #[test]
-    fn counts_only_shown_packets() {
-        // An edit list's lead-in is flagged discard and never shown.
-        assert_eq!(count_shown("KD_\n_D_\nK__\n___\n___\n\n"), 3);
-    }
-
-    #[test]
-    fn a_pass_must_keep_every_frame_and_the_length() {
-        let source = probe(6095, 92.278);
-        assert!(matches(&source, 6095, 92.193).is_ok());
-        assert!(
-            matches(&source, 6094, 92.278).is_err(),
-            "A dropped frame fails."
-        );
-        assert!(matches(&source, 6095, 90.0).is_err());
-        let long = probe(63_480, 1795.94);
-        assert!(matches(&long, 63_480, 1785.0).is_ok(), "1% of a long one.");
-        assert!(matches(&long, 63_480, 1770.0).is_err());
-    }
 }

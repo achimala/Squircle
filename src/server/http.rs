@@ -238,18 +238,12 @@ pub(super) async fn compact_json(request: Request, next: Next) -> Response {
         return ApiError::rejection(StatusCode::INTERNAL_SERVER_ERROR, "Reply too large".into())
             .into_response();
     };
-    let digest = Sha256::digest(&bytes);
-    let tag: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
-    let etag = HeaderValue::from_str(&format!("\"{tag}\"")).expect("hex ETag");
+    let etag = HeaderValue::from_str(&etag(&bytes)).expect("hex ETag");
     parts.headers.insert(header::ETAG, etag.clone());
     parts
         .headers
         .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
-    if known.as_ref().is_some_and(|k| {
-        k.as_bytes()
-            .split(|&c| c == b',')
-            .any(|t| t.trim_ascii() == etag.as_bytes())
-    }) {
+    if known.as_ref().is_some_and(|k| holds(k, etag.as_bytes())) {
         parts.status = StatusCode::NOT_MODIFIED;
         parts.headers.remove(header::CONTENT_TYPE);
         parts.headers.remove(header::CONTENT_LENGTH);
@@ -271,6 +265,46 @@ pub(super) async fn compact_json(request: Request, next: Next) -> Response {
         }
     }
     Response::from_parts(parts, Body::from(bytes))
+}
+
+/// A JSON body's ETag, quoted.
+pub(super) fn etag(body: &[u8]) -> String {
+    let digest = Sha256::digest(body);
+    let tag: String = digest[..12].iter().map(|b| format!("{b:02x}")).collect();
+    format!("\"{tag}\"")
+}
+
+/// Whether an If-None-Match value names `etag`.
+fn holds(known: &HeaderValue, etag: &[u8]) -> bool {
+    known
+        .as_bytes()
+        .split(|&c| c == b',')
+        .any(|t| t.trim_ascii() == etag)
+}
+
+/// The ETag a GET asked to wait past: `If-None-Match` with `Prefer:
+/// wait-for-change` holds the reply until it would differ, instead of an
+/// immediate 304. Nothing but a change (or the client leaving) ends it.
+pub(super) fn waits_past(headers: &HeaderMap) -> Option<HeaderValue> {
+    let wait = headers
+        .get_all(header::HeaderName::from_static("prefer"))
+        .iter()
+        .any(|v| {
+            v.to_str().is_ok_and(|v| {
+                v.split(',')
+                    .any(|p| p.trim().eq_ignore_ascii_case(WAIT_FOR_CHANGE))
+            })
+        });
+    wait.then(|| headers.get(header::IF_NONE_MATCH).cloned())
+        .flatten()
+}
+
+/// The `Prefer` token for [`waits_past`].
+pub const WAIT_FOR_CHANGE: &str = "wait-for-change";
+
+/// Whether `reply`, sent as JSON, is the one the client already holds.
+pub(super) fn unchanged(reply: &Value, known: &HeaderValue) -> bool {
+    serde_json::to_vec(reply).is_ok_and(|body| holds(known, etag(&body).as_bytes()))
 }
 
 /// Whether an Accept-Encoding value allows gzip: listed (or `*` when gzip

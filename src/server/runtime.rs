@@ -1,5 +1,9 @@
 use super::*;
 
+/// How the service's announcement begins: printed once it listens, the
+/// first line supervisors (and `service restart`) read.
+pub const LISTENING: &str = "Squircle listening on ";
+
 pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>) -> Result<()> {
     let mut store = Store::open(root)?;
     let lock = OpenOptions::new()
@@ -53,25 +57,36 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     // Service loops, stopped explicitly once requests have drained.
     let mut background = Vec::new();
     {
-        // Linked workers and builds move tasks on; old ones age into History.
+        // Linked workers and builds move tasks on, as T3, the builds and the
+        // tasks themselves change; old ones age into History when due.
         let state = state.clone();
+        let mut changes = futures_util::stream::select_all([
+            agents.changes(),
+            state.jobs.changes(),
+            tasks.changes(),
+        ]);
         background.push(tokio::spawn(async move {
+            use futures_util::StreamExt;
             loop {
                 if let Err(error) = tasks.tick(|task| task_signals(&state, task)).await {
                     eprintln!("Tasks not updated: {error:#}");
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let aged = tasks.next_age().map(|at| at as f64);
+                tokio::select! {
+                    changed = changes.next() => if changed.is_none() { return },
+                    _ = crate::clock::until(aged) => {}
+                }
             }
         }));
     }
     eprintln!(
-        "Squircle listening on {}. Keep this process running; HTTPS/Tailscale is managed separately.",
+        "{LISTENING}{}. Keep this process running; HTTPS/Tailscale is managed separately.",
         listener.local_addr()?
     );
     // After the announcement, which is the first line supervisors read.
     background.push(tokio::spawn(agents.clone().run()));
     background.push(tokio::spawn(agents.clone().upkeep()));
-    background.push(tokio::spawn(push.clone().run()));
+    background.push(tokio::spawn(push.clone().run(crate::t3db::changes())));
     background.push(tokio::spawn(sims.clone().run()));
     background.push(tokio::spawn(pool.clone().run(sims.clone())));
     background.push(tokio::spawn(
@@ -110,22 +125,14 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         // so no job registers after the cutoff.
         shutdown.draining.store(true, Ordering::Release);
         shutdown.jobs.close().await;
-        // Let cancelled runners reap their children and persist terminal state.
-        for _ in 0..100 {
-            if shutdown.jobs.operations() == 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+        // Cancelled runners reap their children and persist terminal state:
+        // their group's death ends each, so this ends.
+        shutdown.jobs.idle().await;
         // Refuses new simulator starts; on a stop, also stops and files
-        // recordings and closes their T3 device sessions. Anything cut off
-        // here is left in the durable ledger for the next start to recover.
-        if tokio::time::timeout(std::time::Duration::from_secs(10), sims.shutdown(exit))
-            .await
-            .is_err()
-        {
-            eprintln!("Simulator shutdown timed out; the next start recovers it.");
-        }
+        // recordings and closes their T3 device sessions. Anything a
+        // supervisor cuts off here is left in the durable ledger for the
+        // next start to recover.
+        sims.shutdown(exit).await;
     })
     .await;
     for task in background {

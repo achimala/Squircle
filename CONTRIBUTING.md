@@ -53,8 +53,15 @@ rendered output. Compiling is not visual verification.
 **Service (Rust): no locks.** Every piece of shared state has a single owner
 (`src/actor.rs`). Others send it messages, read its published snapshots, or
 run async work that must not overlap in a ranked lane. `Drop` only tells an
-owner. Clippy and `tests/ownership.rs` fail on any mutex, read-write lock or
-blocking wait. See [owners](docs/fsm-architecture.md#owners-and-who-may-wait-for-whom-implemented-2026-10-17).
+owner. Clippy and `build.rs` fail on any mutex, read-write lock, semaphore,
+file lock or blocking wait.
+
+**Service (Rust): no waits or timers.** Wait for the event (an owner's
+message, a channel closing, a process exiting or a file changing through
+`src/kq.rs`, a T3 event), never for a time. Durations the user chose as
+rules wait through `src/clock.rs` and are listed in `build.rs`
+(`POLICY_CLOCKS`); every build fails on any other sleep, timeout or
+interval, tests included. Tests run timed policy on tokio's paused clock. See [owners](docs/fsm-architecture.md#owners-and-who-may-wait-for-whom-implemented-2026-10-17).
 
 **App (Swift): concurrency only through Swift concurrency.** Use
 async/await, `Task`, `AsyncStream`, `@MainActor` and `DisplayFrame.next()`.

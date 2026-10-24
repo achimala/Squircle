@@ -55,9 +55,18 @@ Read [README.md](README.md), then only the linked detail relevant to the task. D
 - **No locks** (user, 2026-10-17). Service state lives in single owners
   (`src/actor.rs`): letters are synchronous, readers use published
   snapshots, async work that must not overlap runs in ranked lanes, and
-  `Drop` only tells an owner. `clippy.toml` and `tests/ownership.rs` fail on
-  any mutex, read-write lock or blocking wait. See
+  `Drop` only tells an owner. `clippy.toml` and `build.rs` (every build)
+  fail on any mutex, read-write lock, semaphore, file lock or blocking wait.
+  See
   [owners](docs/fsm-architecture.md#owners-and-who-may-wait-for-whom-implemented-2026-10-17).
+- **No waits or timers** (user, 2026-10-24). Code waits for the event it
+  needs (an owner's message, a channel closing, a process exiting or file
+  changing via `src/kq.rs`, a T3 event), never "a bit", a poll or a time
+  limit. The only clock is `src/clock.rs`, for durations the user chose as
+  rules; each place that waits on it is listed in `build.rs`'s
+  `POLICY_CLOCKS`, which fails the build on any new sleep, timeout or
+  interval, in tests too. Rules take the time as an argument; tests run timed
+  policy on tokio's paused clock (`clock::elapse`) and never sleep.
 
 ## Documentation discipline
 

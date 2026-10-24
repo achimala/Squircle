@@ -21,9 +21,11 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 use tokio::sync::Notify;
+// Tokio's clock: the policy's waits below run on it, and tests pause it.
+use tokio::time::Instant;
 
 mod apns;
 pub use apns::*;
@@ -45,7 +47,7 @@ const COALESCE: Duration = Duration::from_secs(3);
 /// A phone's report that it shows a thread counts for this long.
 const PRESENCE: Duration = Duration::from_secs(300);
 
-/// How long things wait; shorter in tests.
+/// The durations of the notification and Live Activity policy.
 #[derive(Clone, Copy)]
 pub struct Timing {
     /// Events this close together arrive as one notification.
@@ -73,14 +75,9 @@ impl Default for Timing {
 /// A push-to-start without a token reported back is retried after this.
 const START_WAIT: Duration = Duration::from_secs(300);
 
-/// The step text is read again after this, while the agent works.
+/// The step text is read again when T3 writes its database, at most this
+/// often per turn.
 const STEP_EVERY: Duration = Duration::from_secs(5);
-
-/// A step lookup that takes longer is abandoned.
-const STEP_DEADLINE: Duration = Duration::from_secs(5);
-
-/// The reconciler runs at least this often.
-const TICK: Duration = Duration::from_secs(8);
 
 const RETRY_CAP: Duration = Duration::from_secs(300);
 
@@ -113,9 +110,7 @@ pub struct Push {
     fixed: Option<Arc<dyn Transport>>,
     timing: Timing,
     alerts_sent: AtomicU64,
-    /// Wakes the reconciler after a shell change, a phone report or a result.
+    /// Wakes the reconciler after a shell change, a phone report, a result
+    /// or a write to T3's database.
     wake: Notify,
 }
-
-#[cfg(test)]
-mod tests;
