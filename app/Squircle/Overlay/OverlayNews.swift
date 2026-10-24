@@ -24,15 +24,11 @@ final class OverlayNews {
         var workers: [(id: String, title: String, mood: JellyLook.Mood)] = []
     }
 
-    /// Brief news ("Done · …", "2 workers"), shown until it expires and
-    /// then absorbed into the jelly.
-    private struct Notice {
-        let line: Line
-        let expires: ContinuousClock.Instant
-    }
-    private var notice: Notice?
+    /// Brief news ("Done · …", "2 workers"), shown for `dwell` and then
+    /// absorbed into the jelly.
+    private var notice: Line?
     private static let dwell = Duration.seconds(4)
-    /// Renders again when the notice expires; replaced by a newer one.
+    /// Takes the notice down when its dwell is over; replaced by a newer one.
     private var expiry: Task<Void, Never>?
     /// The notice ran out: the bubble should render again.
     var onExpire: (() -> Void)?
@@ -47,10 +43,7 @@ final class OverlayNews {
     var unseen: GlassJelly.Mood?
 
     /// The news showing now, if any.
-    var line: Line? {
-        guard let notice, notice.expires > .now else { return nil }
-        return notice.line
-    }
+    var line: Line? { notice }
     func dismiss() { notice = nil }
     func cancel() { expiry?.cancel() }
 
@@ -96,12 +89,13 @@ final class OverlayNews {
 
     /// Shows `line` for `dwell`, then lets it go.
     private func announce(_ line: Line) {
-        notice = Notice(line: line, expires: .now + Self.dwell)
+        notice = line
         expiry?.cancel()
         expiry = Task { [weak self] in
-            try? await Task.sleep(for: Self.dwell + .milliseconds(100))
-            guard !Task.isCancelled else { return }
-            self?.onExpire?()
+            try? await Task.sleep(for: Self.dwell)
+            guard !Task.isCancelled, let self else { return }
+            notice = nil
+            onExpire?()
         }
     }
 

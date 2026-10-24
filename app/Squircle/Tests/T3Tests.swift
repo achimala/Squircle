@@ -365,11 +365,6 @@ extension SquircleModel {
                              transport: .offline, sharesMedia: false)
     }
 
-    /// Returns once `condition` holds, checking after each change the model reports.
-    func until(_ condition: () -> Bool) async {
-        if condition() { return }
-        for await _ in updates where condition() { return }
-    }
 }
 
 /// A command dispatch that holds each command until the test releases it.

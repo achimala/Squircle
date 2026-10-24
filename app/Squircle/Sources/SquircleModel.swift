@@ -117,6 +117,12 @@ final class SquircleModel {
         return stream
     }
     private func changed() { for observer in observers.values { observer.yield() } }
+    /// Returns once `condition` holds, checking after each change the model
+    /// reports (or when it closes).
+    func until(_ condition: () -> Bool) async {
+        if condition() { return }
+        for await _ in updates where condition() { return }
+    }
     /// Calls `action` `delay` after a change, once for all the changes in
     /// between, for as long as `owner` lives. Cancel the task to stop sooner.
     /// (Not a debounce: changes that never pause, such as a view whose own
