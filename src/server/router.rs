@@ -6,6 +6,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/builds", get(list).post(start))
         .route("/v1/apps", get(list_apps).post(register_app))
         .route("/v1/apps/import", post(import_app))
+        .route("/v1/apps/order", put(order_apps))
         .route("/v1/projects", get(browse_projects))
         .route("/v1/projects/inspect", get(inspect_project))
         .route("/v1/apps/{id}", get(get_app).patch(update_app))

@@ -42,7 +42,8 @@ private enum PendingOpen {
 }
 
 /// The root: every app's real device. Home is a grid of still portraits of
-/// those devices that scroll natively. Opening an app pushes in the
+/// those devices that scroll natively, in the order the user arranged them
+/// (long-press one, then drag it). Opening an app pushes in the
 /// conversation with its agent while Home falls back beneath it. The app's
 /// other threads open from the agent's Threads page or its update lines,
 /// pushing in over it the same way. Simulators the app's agents are using
@@ -75,8 +76,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private let spring = SpringDriver()
     private var cells: [String: GridCell] = [:]
     private var bindings: [String: ScreenshotBinding] = [:]
-    /// Display order. It changes only while the grid is out of sight, so
-    /// nothing rearranges under a finger.
+    /// Home's order, the Mac's (see `SquircleModel.arrangeApps`).
     private var projects: [AppProject] = []
     /// Pending model render (at most one) and portrait drawing.
     private var renderTask: Task<Void, Never>?
@@ -111,6 +111,32 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// A notification tapped before what it names arrived from the Mac.
     private var pendingOpen: PendingOpen?
 
+    // MARK: Arranging state
+
+    /// An app a finger holds on Home, and the place it would drop into.
+    private struct Lift: Equatable {
+        let id: String
+        var index: Int
+        /// The finger in the grid's content, and the held cell's centre less it.
+        var finger: CGPoint
+        let grab: CGPoint
+        var center: CGPoint { CGPoint(x: finger.x + grab.x, y: finger.y + grab.y) }
+    }
+    private var lift: Lift?
+    /// 0 = resting, 1 = held: how far `raised` is lifted off the grid. It
+    /// stays raised until the spring lands it.
+    private let liftSpring = SpringDriver()
+    private var raised: String?
+    private let arrange = UILongPressGestureRecognizer()
+    private var autoscroll: Task<Void, Never>?
+    /// Home as shown: the held app in the place it would drop into.
+    private var shown: [AppProject] {
+        guard let lift, let from = projects.firstIndex(where: { $0.id == lift.id }) else { return projects }
+        var order = projects
+        order.insert(order.remove(at: from), at: min(lift.index, order.count))
+        return order
+    }
+
     init(model: SquircleModel) {
         self.model = model
         super.init(nibName: nil, bundle: nil)
@@ -142,6 +168,17 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         [connection, add].forEach(home.addSubview)
         connection.showsMenuAsPrimaryAction = true
         add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
+        arrange.addTarget(self, action: #selector(arrangePressed(_:)))
+        arrange.minimumPressDuration = 0.35
+        arrange.delegate = self
+        grid.addGestureRecognizer(arrange)
+        liftSpring.parameters = .init(response: 0.32, damping: 0.78)
+        liftSpring.onChange = { [weak self] _ in self?.applyScene() }
+        liftSpring.onRest = { [weak self] value in
+            guard let self, value <= 0.001, lift == nil else { return }
+            raised = nil
+            applyScene()
+        }
 
 
         let edge = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(backPanned(_:)))
@@ -383,7 +420,23 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 actions.append { [weak self] in self?.endBack(velocity: CGFloat.random(in: -2...2), closing: Bool.random()) }
             } else {
                 switch route {
-                case .grid: for project in projects.prefix(3) { actions.append { [weak self] in self?.openApp(project.id) } }
+                case .grid:
+                    for project in projects.prefix(3) { actions.append { [weak self] in self?.openApp(project.id) } }
+                    // Holding, dragging and dropping apps, mixed in with the rest.
+                    if lift == nil {
+                        let index = Int.random(in: 0..<max(1, projects.count))
+                        actions.append { [weak self] in
+                            guard let self else { return }
+                            let frame = layout.cellFrame(index)
+                            beginLift(at: CGPoint(x: frame.midX, y: frame.midY))
+                        }
+                    } else {
+                        actions.append { [weak self] in
+                            guard let self else { return }
+                            moveLift(to: CGPoint(x: .random(in: 0...grid.bounds.width), y: .random(in: 0...grid.contentSize.height)))
+                        }
+                        actions.append { [weak self] in self?.dropLift() }
+                    }
                 case .app:
                     actions.append { [weak self] in self?.closeApp() }
                     if let project = selectedProject {
@@ -399,6 +452,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             try? await Task.sleep(for: .milliseconds(Int.random(in: 20...450)))
         }
         if dragging != nil { endBack(velocity: 0, closing: Bool.random()) }
+        dropLift()
         try? await Task.sleep(for: .seconds(2.5))
         let settled = !appSpring.isAnimating && !spring.isAnimating
             && appSpring.value == appTarget && spring.value == threadTarget
@@ -417,6 +471,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             NSLog("AUDIT %@ route=%@ a=%.3f t=%.3f", what, "\(route)", a, t)
         }
         if route == .grid, !appSpring.isAnimating, dragging == nil, dock.alpha > 0.001 { fail("simulators over Home") }
+        if lift != nil, route != .grid { fail("an app held off Home") }
+        // Each app rests in its place in Home's order; only a held one follows the finger.
+        for (index, project) in shown.enumerated() where laidOut != nil && project.id != lift?.id {
+            let frame = layout.cellFrame(index)
+            if let cell = cells[project.id], cell.center != CGPoint(x: frame.midX, y: frame.midY) { fail("app out of its place") }
+        }
         if let problem = JellyDirector.shared.debugViolation() { fail(problem) }
         guard !appSpring.isAnimating, !spring.isAnimating, dragging == nil else { return }
         switch route {
@@ -462,24 +522,15 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private var layout: StageLayout { laidOut ?? makeLayout() }
     private var selectedProject: AppProject? { projects.first { $0.id == selectedID } }
-    /// The grid is entirely out of sight, so apps may reorder in it.
-    private var gridHidden: Bool { appSpring.value >= 1 && !appSpring.isAnimating }
 
     // MARK: Model
 
     private func render() {
-        let next = model.projects
-        let ids = Set(next.map(\.id))
-        if !gridHidden {
-            // Keep what is on screen where it is; new apps join at the end.
-            let known = Set(projects.map(\.id))
-            let byID = Dictionary(next.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-            projects = projects.compactMap { byID[$0.id] } + next.filter { !known.contains($0.id) }
-        } else {
-            projects = next
-        }
-        // An app that disappeared from the Mac takes its route with it.
+        projects = model.projects
+        let ids = Set(projects.map(\.id))
+        // An app that disappeared from the Mac takes its route, or the finger's hold, with it.
         if let app = route.app, !ids.contains(app) { route = .grid }
+        if let held = lift?.id, !ids.contains(held) { lift = nil }
         for id in Array(cells.keys) where !ids.contains(id) {
             cells.removeValue(forKey: id)?.removeFromSuperview()
             bindings[id] = nil
@@ -489,6 +540,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             let cell = cells[project.id] ?? {
                 let cell = GridCell(id: project.id)
                 cell.addAction(UIAction { [weak self] _ in self?.openApp(project.id) }, for: .touchUpInside)
+                cell.accessibilityCustomActions = [("Move earlier", -1), ("Move later", 1)].map { name, step in
+                    UIAccessibilityCustomAction(name: name) { [weak self] _ in self?.move(project.id, by: step) ?? false }
+                }
                 cells[project.id] = cell
                 grid.addSubview(cell)
                 return cell
@@ -540,25 +594,28 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }])
     }
 
-    private func layoutGrid() {
-        let layout = self.layout
-        grid.contentSize = CGSize(width: view.bounds.width, height: layout.gridContentHeight(count: projects.count))
-        for (index, project) in projects.enumerated() {
-            guard let cell = cells[project.id] else { continue }
-            cell.transform = .identity
-            cell.frame = layout.cellFrame(index)
-            cell.phoneHeight = layout.gridPhoneHeight
-        }
-        schedulePortraits()
-        // An app reordered while the grid was hidden stays in sight for its return.
-        if gridHidden, let id = selectedID, let cell = cells[id] {
-            let visible = CGRect(x: 0, y: grid.contentOffset.y + layout.gridTop, width: grid.bounds.width,
-                                 height: grid.bounds.height - layout.gridTop)
-            if !visible.contains(cell.frame) {
-                let maxY = max(0, grid.contentSize.height - grid.bounds.height)
-                grid.contentOffset.y = (cell.frame.minY - layout.gridTop).clamped(0, maxY)
+    /// Every cell in its place in `shown`; the held one under the finger.
+    /// Animated, each cell moves on one spring from wherever it is.
+    private func layoutGrid(animated: Bool = false) {
+        let layout = self.layout, shown = self.shown, held = lift
+        grid.contentSize = CGSize(width: view.bounds.width, height: layout.gridContentHeight(count: shown.count))
+        let place = { [cells] in
+            for (index, project) in shown.enumerated() {
+                guard let cell = cells[project.id] else { continue }
+                let frame = layout.cellFrame(index)
+                cell.bounds = CGRect(origin: .zero, size: frame.size)
+                cell.phoneHeight = layout.gridPhoneHeight
+                if project.id != held?.id { cell.center = CGPoint(x: frame.midX, y: frame.midY) }
             }
         }
+        if animated {
+            UIView.animate(springDuration: 0.42, bounce: 0, initialSpringVelocity: 0, delay: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState], animations: place)
+        } else {
+            place()
+        }
+        if let held, let cell = cells[held.id] { cell.center = held.center }
+        schedulePortraits()
     }
 
     // MARK: Navigation
@@ -671,6 +728,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Safe to call at any moment, any number of times.
     private func sync() {
         guard !syncing else { return }
+        // Leaving Home drops whatever a finger was holding there.
+        if route != .grid, lift != nil { dropLift() }
         syncing = true
         defer {
             syncing = false
@@ -768,6 +827,99 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         agent?.reactivate()
     }
 
+    // MARK: Arranging
+
+    /// Long-press an app, then drag it: the others make way under the
+    /// finger, and it drops into the place it is over.
+    @objc private func arrangePressed(_ press: UILongPressGestureRecognizer) {
+        let point = press.location(in: grid)
+        switch press.state {
+        case .began: beginLift(at: point)
+        case .changed: moveLift(to: point)
+        case .ended, .cancelled, .failed: dropLift()
+        default: break
+        }
+    }
+
+    /// The app whose place holds `point` (in the grid's content).
+    private func app(at point: CGPoint) -> Int? {
+        shown.indices.first { layout.cellFrame($0).contains(point) }
+    }
+
+    private func beginLift(at point: CGPoint) {
+        guard lift == nil, route == .grid, presentedViewController == nil, let index = app(at: point) else { return }
+        let id = shown[index].id, frame = layout.cellFrame(index)
+        Theme.selectionHaptic()
+        lift = Lift(id: id, index: index, finger: point, grab: CGPoint(x: frame.midX - point.x, y: frame.midY - point.y))
+        raised = id
+        if let cell = cells[id] { grid.bringSubviewToFront(cell) }
+        liftSpring.animate(to: 1)
+        layoutGrid(animated: true)
+    }
+
+    private func moveLift(to point: CGPoint) {
+        guard var held = lift else { return }
+        held.finger = point
+        held.index = slot(at: held.center)
+        lift = held
+        layoutGrid(animated: true)
+        scrollNearEdges()
+    }
+
+    /// The place a cell centred at `point` drops into.
+    private func slot(at point: CGPoint) -> Int {
+        let layout = self.layout
+        let column = Int(((point.x - StageLayout.gridMargin + StageLayout.gridGap / 2) / (layout.cellWidth + StageLayout.gridGap)).rounded(.down))
+        let row = Int(((point.y - layout.gridTop) / layout.rowPitch).rounded(.down))
+        let index = max(0, row) * layout.columns + min(max(0, column), layout.columns - 1)
+        return min(index, max(0, projects.count - 1))
+    }
+
+    private func dropLift() {
+        guard lift != nil else { return }
+        let order = shown
+        lift = nil
+        autoscroll?.cancel()
+        autoscroll = nil
+        if order.map(\.id) != projects.map(\.id) {
+            projects = order
+            model.arrangeApps(order.map(\.id))
+        }
+        liftSpring.animate(to: 0)
+        layoutGrid(animated: true)
+    }
+
+    /// VoiceOver's way to arrange Home: one place earlier or later.
+    private func move(_ id: String, by step: Int) -> Bool {
+        guard lift == nil, route == .grid, let from = projects.firstIndex(where: { $0.id == id }),
+              projects.indices.contains(from + step) else { return false }
+        projects.swapAt(from, from + step)
+        model.arrangeApps(projects.map(\.id))
+        layoutGrid(animated: true)
+        return true
+    }
+
+    /// A finger holding an app near the grid's top or bottom edge scrolls
+    /// it, faster the closer it is, and the app goes along.
+    private func scrollNearEdges() {
+        guard autoscroll == nil else { return }
+        autoscroll = Task { [weak self] in
+            while let self, !Task.isCancelled, let held = lift {
+                let y = held.finger.y - grid.contentOffset.y, band: CGFloat = 70
+                let top = layout.gridTop + band, bottom = grid.bounds.height - view.safeAreaInsets.bottom - band
+                let speed = y < top ? -(top - y) / band * 14 : y > bottom ? (y - bottom) / band * 14 : 0
+                let maxY = max(0, grid.contentSize.height - grid.bounds.height)
+                let offset = (grid.contentOffset.y + speed).clamped(0, maxY)
+                guard offset != grid.contentOffset.y else { break }
+                let moved = offset - grid.contentOffset.y
+                grid.contentOffset.y = offset
+                moveLift(to: CGPoint(x: held.finger.x, y: held.finger.y + moved))
+                await DisplayFrame.next()
+            }
+            self?.autoscroll = nil
+        }
+    }
+
     // MARK: Back
 
     /// Swipe in from the left edge to go back a level, following the finger.
@@ -817,6 +969,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === arrange {
+            return route == .grid && presentedViewController == nil && projects.count > 1
+                && app(at: arrange.location(in: grid)) != nil
+        }
         guard let pan = gestureRecognizer as? UIPanGestureRecognizer, presentedViewController == nil,
               pan.velocity(in: view).x >= 0, dragging == nil else { return false }
         if route.thread != nil {
@@ -831,7 +987,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// two never move together.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-        otherGestureRecognizer is UIPanGestureRecognizer && otherGestureRecognizer.view is UIScrollView
+        gestureRecognizer !== arrange && otherGestureRecognizer is UIPanGestureRecognizer && otherGestureRecognizer.view is UIScrollView
     }
 
     // MARK: Portraits
@@ -865,7 +1021,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// to the foreground, and a failed draw stays stale for the next pass.
     private func drawNextPortrait() -> Bool {
         guard UIApplication.shared.applicationState != .background else { return false }
-        for (index, project) in projects.enumerated() {
+        for (index, project) in shown.enumerated() {
             guard let cell = cells[project.id] else { continue }
             let pose = gridPose(index), key = portraitKey(project.id, pose)
             guard cell.portraitKey != key else { continue }
@@ -900,7 +1056,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let a = appSpring.value.clamped(), t = spring.value.clamped()
         let scroll = grid.contentOffset.y
         var origin = CGPoint(x: width / 2, y: view.safeAreaInsets.top + 58)
-        if let id = selectedID, let index = projects.firstIndex(where: { $0.id == id }) {
+        let shown = self.shown
+        if let id = selectedID, let index = shown.firstIndex(where: { $0.id == id }) {
             let cell = layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll)
             origin = CGPoint(x: cell.midX, y: cell.minY + layout.gridPhoneHeight / 2)
         }
@@ -909,10 +1066,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         // drifts away from the opened one, shrinks and fades.
         home.alpha = (1 - a * 1.6).clamped()
         home.isHidden = a >= 1 && !appSpring.isAnimating && dragging == nil
-        for (index, project) in projects.enumerated() {
+        let raise = 1 + 0.08 * liftSpring.value
+        for (index, project) in shown.enumerated() {
             guard let cell = cells[project.id] else { continue }
             let frame = layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll)
-            cell.layer.transform = layout.recede(frame, from: origin, progress: a)
+            let recede = layout.recede(frame, from: origin, progress: a)
+            cell.layer.transform = project.id == raised ? CATransform3DScale(recede, raise, raise, 1) : recede
             cell.alpha = layout.recedeAlpha(progress: a)
             cell.captionAlpha = project.id == selectedID ? (1 - a * 4).clamped() : 1
         }

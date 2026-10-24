@@ -42,6 +42,14 @@ final class AppProjectTests: XCTestCase {
         let nested = shell([["id":"repo","title":"Squircle","workspaceRoot":"/src/Repo"],
                             ["id":"probe-t3","title":"Squircle Probe","workspaceRoot":"/src/Repo/examples/Probe"]])
         let rows = T3AppCatalog.projects(shell:nested,metadata:[probe,main],builds:[])
-        XCTAssertEqual(rows.map(\.metadataID),["main","probe"])
+        XCTAssertEqual(rows.map(\.metadataID),["probe","main"])
+    }
+    /// Home arranges the apps it shows; catalog records it doesn't show
+    /// (another app's overlay, a T3 project gone) keep their places.
+    func testArrangingHomeKeepsRecordsItDoesNotShowInPlace() {
+        XCTAssertEqual(AppOrder.arranged(["a","x","b","c","y"], showing:["c","a","b"]), ["c","x","a","b","y"])
+        XCTAssertEqual(AppOrder.arranged(["a","b"], showing:["b","gone","a"]), ["b","a"])
+        let records = ["a","b","c"].map { AppMetadata(id:$0,name:$0,project:"/p",scheme:"s",bundleID:nil,summary:"",updatedAt:0,preview:nil) }
+        XCTAssertEqual(AppOrder.apply(["c","a"], to: records).map(\.id), ["c","a","b"])
     }
 }

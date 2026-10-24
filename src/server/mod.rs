@@ -25,7 +25,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};

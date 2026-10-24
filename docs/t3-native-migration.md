@@ -625,7 +625,7 @@ Signed build 22 succeeded, job `bba26565-54c6-403b-baf7-efaba4495f8b`. Not insta
   per-thread cached row heights, at the bottom. A restored thread accepts the
   next live snapshot regardless of sequence.
 - Home orders apps by last opened (UserDefaults), reordering only when a
-  thread opens.
+  thread opens. (Superseded 2026-10-24: see [arranging Home](#2026-10-24-arranging-home).)
 
 Evidence (simulator): unit tests and the draft, approval, navigation and
 reduced-motion UI tests pass. Re-entry captured every 150 ms: the thread
@@ -2830,3 +2830,48 @@ agent-device needs an app `open` in its session before `screenshot` or
 `thread:delegated-task:command%3A…`, not UUIDs; `sim start` now takes any T3
 thread ID that is one safe path component (letters, digits, `-_:%`, at most
 200).
+
+## 2026-10-24 arranging Home
+
+**Decision (user).** Ordering Home by most recent use reshuffled the grid
+under the user ("infuriating"). Recency ordering is gone. Home shows apps in
+the order the user put them: long-press an app, drag it, and it drops into
+the place it is over; the others make way under the finger. New apps join at
+the end. Tapping still opens the app.
+
+**Where the order lives.** On the Mac, with the catalog it orders, so it
+survives reinstalls and is the same on every phone: `apps/order.json` in the
+service's data directory, written atomically in the catalog lane.
+`GET /v1/apps` lists the catalog in that order; apps it doesn't name follow,
+oldest registration first (the app directory's creation time), so a new app
+lands last and editing an app never moves it. `PUT /v1/apps/order` with
+`{"ids": [...]}` (catalog record IDs) puts those first in that order; the rest
+keep their places after them, unknown IDs are ignored, and the reply is the
+catalog in its new order. The service's own recency sort of `apps::list` went
+with it.
+
+**Phone.** `T3AppCatalog.projects` orders apps by their record's place in the
+Mac's list (`AppProject.updatedAt`, which existed only for the recency sort,
+is gone). A drop is an M04 command (`Commands.Kind.appOrder`, one slot): Home
+shows the new order at once and keeps it over the Mac's list until the Mac's
+reply holds it; a lost reply is settled or sent again by the next catalog
+read, a refusal puts the Mac's order back. Records Home doesn't show (another
+app's overlay, a T3 project gone) keep their places (`AppOrder.arranged`).
+In `StudioViewController` the order is `projects`; a held app is a `Lift`
+(id, the place it would drop into, the finger), and every cell's place is
+derived from `shown` (the order with the held app moved). Each move is one
+interruptible UIKit spring from where the cell is; the held cell follows the
+finger exactly and is raised by one `SpringDriver`; near the grid's top or
+bottom edge the grid scrolls under it. Leaving Home drops it. VoiceOver gets
+Move earlier / Move later actions. `SQUIRCLE_DEMO_APPS=1` (DEBUG) shows
+made-up apps arranged only on the phone, for simulator checks.
+
+**Verified 2026-10-24** on an iOS 27.0 simulator with `SQUIRCLE_DEMO_APPS=1`:
+long-press and drag moved Weather past Recipes and Budget up two places (the
+grid scrolled under the held app near the top edge); the accessibility order
+matched each drop. `SQUIRCLE_STRESS=1` for 40 s, with holds, drags and drops
+mixed into navigation and the audit checking every frame that each app rests
+in its place and none is held off Home: settled, `violations=0`. The service
+side by `apps::tests::home_order_holds_and_new_apps_join_at_the_end`; the
+round trip from a paired phone to the Mac was not exercised (the simulator copy
+can't pair).

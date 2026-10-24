@@ -15,6 +15,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 use uuid::Uuid;
 
@@ -67,6 +68,14 @@ pub struct AppUpdate {
     pub summary: Option<String>,
 }
 
+/// Home's order, as the user arranged it on the phone. Apps it doesn't name
+/// (new ones) follow it, oldest first.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppOrder {
+    pub ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewPublication {
@@ -78,6 +87,7 @@ pub struct PreviewPublication {
     pub source: Option<String>,
 }
 
+/// The catalog in Home's order (see `AppOrder`).
 pub fn list(store: &Store) -> Result<Vec<AppRecord>> {
     let root = catalog_dir(store)?;
     let mut apps = Vec::new();
@@ -92,16 +102,62 @@ pub fn list(store: &Store) -> Result<Vec<AppRecord>> {
         check_dir(&entry.path())?;
         // A failed initial atomic write may leave an empty directory.
         if entry.path().join("app.json").try_exists()? {
-            apps.push(get(store, &id)?);
+            // Registration made the directory: its age is the app's.
+            let made = fs::symlink_metadata(entry.path())?
+                .created()
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            apps.push((get(store, &id)?, made));
         }
     }
-    apps.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| left.id.cmp(&right.id))
+    Ok(arrange(apps, &read_order(store)?))
+}
+
+/// Apps the order names first, in its order; the rest after, oldest first.
+fn arrange(mut apps: Vec<(AppRecord, SystemTime)>, order: &[String]) -> Vec<AppRecord> {
+    apps.sort_by(|(left, left_made), (right, right_made)| {
+        let place = |app: &AppRecord| order.iter().position(|id| id == &app.id);
+        match (place(left), place(right)) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left_made
+                .cmp(right_made)
+                .then_with(|| left.id.cmp(&right.id)),
+        }
     });
-    Ok(apps)
+    apps.into_iter().map(|(app, _)| app).collect()
+}
+
+fn order_path(store: &Store) -> Result<PathBuf> {
+    Ok(catalog_dir(store)?.join("order.json"))
+}
+
+fn read_order(store: &Store) -> Result<Vec<String>> {
+    let path = order_path(store)?;
+    if !path.try_exists()? {
+        return Ok(Vec::new());
+    }
+    Ok(read_json::<AppOrder>(&path)?.ids)
+}
+
+/// Puts the named apps in this order; apps it doesn't name keep their
+/// places after them, and IDs the catalog doesn't have are ignored.
+pub fn set_order(store: &Store, order: AppOrder) -> Result<Vec<AppRecord>> {
+    ensure!(order.ids.len() <= 10_000, "too many apps in the order");
+    let current = list(store)?;
+    let mut ids: Vec<String> = Vec::new();
+    for id in order.ids {
+        if !ids.contains(&id) && current.iter().any(|app| app.id == id) {
+            ids.push(id);
+        }
+    }
+    for app in &current {
+        if !ids.contains(&app.id) {
+            ids.push(app.id.clone());
+        }
+    }
+    atomic_json(&order_path(store)?, &AppOrder { ids })?;
+    list(store)
 }
 
 /// The registered app a build belongs to: its project (in the main checkout,
@@ -655,6 +711,67 @@ mod tests {
         drop(store);
         let reopened = Store::open(root)?;
         assert_eq!(list(&reopened)?, vec![edited]);
+        Ok(())
+    }
+
+    #[test]
+    fn home_order_holds_and_new_apps_join_at_the_end() -> Result<()> {
+        let (temp, store, registration) = setup()?;
+        let register_named = |name: &str| -> Result<AppRecord> {
+            let project = temp.path().join(format!("{name}.xcodeproj"));
+            fs::create_dir(&project)?;
+            register(
+                &store,
+                AppRegistration {
+                    name: name.into(),
+                    project,
+                    scheme: name.into(),
+                    bundle_id: None,
+                    summary: String::new(),
+                },
+            )
+        };
+        let a = register(&store, registration)?;
+        let b = register_named("B")?;
+        let c = register_named("C")?;
+        let ids = |apps: Vec<AppRecord>| apps.into_iter().map(|app| app.id).collect::<Vec<_>>();
+        // Oldest first until arranged; an edit doesn't move an app.
+        update(
+            &store,
+            &a.id,
+            AppUpdate {
+                name: Some("A".into()),
+                summary: None,
+            },
+        )?;
+        assert_eq!(
+            ids(list(&store)?),
+            [a.id.clone(), b.id.clone(), c.id.clone()]
+        );
+        // A partial order keeps the rest after it; unknown IDs are ignored.
+        let unknown = Uuid::new_v4().to_string();
+        let arranged = set_order(
+            &store,
+            AppOrder {
+                ids: vec![c.id.clone(), unknown, a.id.clone(), c.id.clone()],
+            },
+        )?;
+        assert_eq!(ids(arranged), [c.id.clone(), a.id.clone(), b.id.clone()]);
+        let d = register_named("D")?;
+        update(
+            &store,
+            &b.id,
+            AppUpdate {
+                name: None,
+                summary: Some("busy".into()),
+            },
+        )?;
+        let root = store.root.clone();
+        drop(store);
+        assert_eq!(
+            ids(list(&Store::open(root)?)?),
+            [c.id.clone(), a.id.clone(), b.id.clone(), d.id.clone()]
+        );
         Ok(())
     }
 

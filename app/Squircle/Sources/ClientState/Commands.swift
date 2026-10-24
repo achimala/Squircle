@@ -1,7 +1,7 @@
 import Foundation
 
 /// M04: addressed commands (answers, approvals, interrupts, approval mode,
-/// task edits, new projects) and what each shows until it is settled. Each
+/// task edits, Home's order, new projects) and what each shows until it is settled. Each
 /// keeps the identity it was made with. A lost answer leaves it pending:
 /// a T3 command is sent again, unchanged, on the next session (T3 answers
 /// a command it already took from its receipt), and anything already
@@ -18,10 +18,12 @@ enum Commands {
         case mode(thread: String, T3RuntimeMode)
         case task(id: String, status: AppTask.Status?, toTop: Bool)
         case project(id: String, root: String)
+        /// Home's order: every Mac catalog record, as the user arranged them.
+        case appOrder([String])
         var thread: String? {
             switch self {
             case .approval(let t, _, _), .answer(let t, _, _), .interrupt(let t, _), .mode(let t, _): t
-            case .task, .project: nil
+            case .task, .project, .appOrder: nil
             }
         }
         var request: String? {
@@ -34,15 +36,16 @@ enum Commands {
             switch self {
             case .mode(let thread, _): .mode(thread)
             case .task(let id, _, _): .task(id)
+            case .appOrder: .appOrder
             default: nil
             }
         }
     }
-    enum Slot: Hashable { case mode(String), task(String) }
+    enum Slot: Hashable { case mode(String), task(String), appOrder }
     struct Intent: Equatable {
         let identity: CommandIdentity
         let kind: Kind
-        /// The exact T3 command; nil for a task edit, which goes to the Mac.
+        /// The exact T3 command; nil for a task edit or Home's order, which go to the Mac.
         let command: JSONValue?
         var id: String { identity.id }
     }
@@ -71,6 +74,11 @@ enum Commands {
         func mode(for thread: String) -> T3RuntimeMode? {
             func mode(_ intent: Intent?) -> T3RuntimeMode? { if case .mode(thread, let m)? = intent?.kind { return m }; return nil }
             return mode(queued[.mode(thread)]) ?? mode(entries.last { $0.intent.kind.slot == .mode(thread) }?.intent)
+        }
+        /// The order you gave Home that the Mac doesn't show yet.
+        var appOrder: [String]? {
+            func order(_ intent: Intent?) -> [String]? { if case .appOrder(let ids)? = intent?.kind { return ids }; return nil }
+            return order(queued[.appOrder]) ?? order(entries.last { $0.intent.kind.slot == .appOrder }?.intent)
         }
         /// Your task edits the Mac doesn't show yet, newest last.
         var taskEdits: [(id: String, status: AppTask.Status?, toTop: Bool)] {
@@ -106,12 +114,16 @@ enum Commands {
         case threadObserved(ThreadSight)
         case tasksObserved([TaskSight])
         case projectsObserved(roots: Set<String>)
+        /// The Mac's catalog records, in its order.
+        case appsObserved(order: [String])
         /// The thread is no longer on screen: nothing more will be seen of it here.
         case left(thread: String)
     }
     enum Effect: Equatable {
         case dispatch(id: String, command: JSONValue, attempt: Int)
         case editTask(id: String, task: String, status: AppTask.Status?, toTop: Bool)
+        /// Its reply is the catalog in the new order, adopted before it is answered.
+        case orderApps(id: String, ids: [String])
         /// Read the Mac's tasks again to settle a lost edit of `task`.
         case readTasks(task: String)
         case settle(id: String, Settlement)
@@ -129,6 +141,9 @@ enum Commands {
             if case .task(let task, let status, let toTop) = e.intent.kind {
                 e.phase = .dispatching(attempt: 0)
                 effects.append(.editTask(id: e.intent.id, task: task, status: status, toTop: toTop))
+            } else if case .appOrder(let ids) = e.intent.kind {
+                e.phase = .dispatching(attempt: 0)
+                effects.append(.orderApps(id: e.intent.id, ids: ids))
             } else if let attempt = s.session, let command = e.intent.command {
                 e.phase = .dispatching(attempt: attempt)
                 effects.append(.dispatch(id: e.intent.id, command: command, attempt: attempt))
@@ -178,7 +193,8 @@ enum Commands {
                 if case .acknowledged = s.entries[i].phase { return done(.duplicate) }
                 effects.append(.settle(id: id, .done))
                 switch s.entries[i].intent.kind {
-                case .interrupt: remove(i, nil)
+                // The reply was the catalog in this order: the Mac shows it.
+                case .interrupt, .appOrder: remove(i, nil)
                 case .task:
                     let revision = value["revision"].double.map { UInt64($0) }
                     if revision == nil { remove(i, nil) } else { s.entries[i].phase = .acknowledged(revision: revision) }
@@ -192,6 +208,8 @@ enum Commands {
                 if case .notSent = outcome { s.entries[i].phase = .waiting } else { s.entries[i].phase = .unknown }
                 switch s.entries[i].intent.kind {
                 case .task(let task, _, _): effects.append(.readTasks(task: task))
+                // Settled, or sent again, by the Mac's next catalog.
+                case .appOrder: break
                 // Settled by looking at the thread: a resend could stop a newer turn.
                 case .interrupt where s.entries[i].phase == .unknown: break
                 default: if s.session != attempt { send(at: i) }
@@ -203,7 +221,7 @@ enum Commands {
             for i in s.entries.indices {
                 if case .dispatching(let old) = s.entries[i].phase, old != 0, old != attempt { s.entries[i].phase = .unknown }
                 switch (s.entries[i].phase, s.entries[i].intent.kind) {
-                case (.unknown, .interrupt), (_, .task): continue
+                case (.unknown, .interrupt), (_, .task), (_, .appOrder): continue
                 case (.waiting, _), (.unknown, _): send(at: i)
                 default: continue
                 }
@@ -223,7 +241,7 @@ enum Commands {
                 case .interrupt(_, let turn):
                     if !sight.running || sight.activeTurn != turn { resolved(i); applied = true }
                     else if s.entries[i].phase == .unknown, s.session != nil { send(at: i); applied = true }
-                case .task, .project: break
+                case .task, .project, .appOrder: break
                 }
             }
             if !applied { return done(.irrelevant) }
@@ -253,6 +271,20 @@ enum Commands {
             }
             if !applied { return done(.irrelevant) }
 
+        case .appsObserved(let order):
+            var applied = false
+            for i in s.entries.indices.reversed() {
+                guard case .appOrder(let ids) = s.entries[i].intent.kind else { continue }
+                switch s.entries[i].phase {
+                case .waiting, .unknown:
+                    // An order sets the whole list, so sending it again is the same order.
+                    if order.filter(Set(ids).contains) == ids { resolved(i) } else { send(at: i) }
+                    applied = true
+                case .dispatching, .acknowledged: break
+                }
+            }
+            if !applied { return done(.irrelevant) }
+
         case .left(let thread):
             var applied = false
             for i in s.entries.indices.reversed() where s.entries[i].intent.kind.thread == thread {
@@ -277,6 +309,7 @@ enum Commands {
             if let slot = e.intent.kind.slot, !slots.insert(slot).inserted { found.append("two commands for one slot at once") }
             if let command = e.intent.command, command["commandId"].string != e.intent.id { found.append("command lost its identity") }
             if case .task = e.intent.kind, e.intent.command != nil { found.append("a task edit addressed to T3") }
+            if case .appOrder = e.intent.kind, e.intent.command != nil { found.append("Home's order addressed to T3") }
         }
         let requests = s.entries.compactMap(\.intent.kind.request)
         if Set(requests).count != requests.count { found.append("one request answered twice") }

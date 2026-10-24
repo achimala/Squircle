@@ -62,6 +62,25 @@ pub(super) async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<V
     Ok(Json(success(apps)))
 }
 
+/// Home's order, as the user dragged it; answers the catalog in that order.
+pub(super) async fn order_apps(
+    State(state): State<AppState>,
+    input: std::result::Result<Json<apps::AppOrder>, JsonRejection>,
+) -> ApiResult<Json<Value>> {
+    let input = body(input)?;
+    let apps = in_lane(&state.catalog.clone(), move || {
+        if state.draining.load(Ordering::Acquire) {
+            return Err(ApiError::unavailable());
+        }
+        apps::set_order(&state.files, input).map_err(ApiError::bad)
+    })
+    .await
+    .map_err(ApiError::internal)??;
+    Ok(Json(success(
+        apps.into_iter().map(public_app).collect::<Vec<_>>(),
+    )))
+}
+
 pub(super) async fn get_app(
     State(state): State<AppState>,
     Path(id): Path<String>,
