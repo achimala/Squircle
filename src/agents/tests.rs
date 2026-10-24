@@ -957,6 +957,10 @@ fn service_messages_are_marked() {
     let later =
         json!({"role": "user", "text": "t", "context": {"records": [{"kind": "squircle-later"}]}});
     assert!(!users_own(&later));
+    // T3's background-work notices and other agents' messages.
+    assert!(!users_own(
+        &json!({"role": "user", "text": "Background task completed.", "createdBy": "agent"})
+    ));
     assert!(users_own(&json!({"role": "user", "text": "hi"})));
     assert!(users_own(
         &json!({"role": "user", "text": "hi", "context": {"records": [{"kind": "file"}]}})
