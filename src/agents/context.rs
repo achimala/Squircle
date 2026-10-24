@@ -209,6 +209,61 @@ pub(super) fn owner<'a>(
 }
 
 impl Agents {
+    /// The app's open work items, most urgent first, each with its open
+    /// sub-tasks, one line each. With `everything`, also open ones that aged
+    /// into History and no cap, so a fresh agent forgets nothing.
+    pub(super) fn open_tasks(&self, project: &str, everything: bool) -> String {
+        let mut open: Vec<_> = self
+            .tasks
+            .list(project)
+            .into_iter()
+            .filter(|t| (everything || t.archived_at.is_none()) && t.status.open())
+            .collect();
+        let rank = |s: Status| {
+            [
+                Status::NeedsYou,
+                Status::InProgress,
+                Status::ReadyToTry,
+                Status::Queued,
+            ]
+            .iter()
+            .position(|x| *x == s)
+        };
+        open.sort_by(|a, b| {
+            rank(a.status)
+                .cmp(&rank(b.status))
+                .then(a.order.total_cmp(&b.order))
+        });
+        if open.is_empty() {
+            return " none".to_string();
+        }
+        let line = |t: &crate::tasks::Task| {
+            format!(
+                "[{}] {}{} ({})",
+                t.status.label(),
+                t.ask.replace('\n', " "),
+                if t.note.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", t.note)
+                },
+                t.id
+            )
+        };
+        open.iter()
+            .take(if everything { usize::MAX } else { 40 })
+            .map(|t| {
+                let subtasks: String = t
+                    .subtasks
+                    .iter()
+                    .filter(|s| s.status.open())
+                    .map(|s| format!("\n  · {}", line(s)))
+                    .collect();
+                format!("\n- {}{subtasks}", line(t))
+            })
+            .collect()
+    }
+
     /// What a new agent needs from the old one, gathered without a model:
     /// the app, recent commits, open workers, what the user said lately, the
     /// old agent's last reply and its own note.
@@ -270,8 +325,11 @@ impl Agents {
         let mut text = format!(
             "[handoff] You are taking over as {app}'s app agent in a fresh conversation. \
              The previous one stays readable in the app's Threads; `{cli} thread read {old}` gives its last reply.\n\n\
-             Recent commits:\n{commits}\n\nYour workers: {workers}\n\nWhat the user said lately, oldest first:{said}",
+             Recent commits:\n{commits}\n\nYour workers: {workers}\n\n\
+             Every open work item and sub-task (`{cli} task --help`); these are the user's asks, keep them all:{tasks}\n\n\
+             What the user said lately, oldest first:{said}",
             cli = self.cli,
+            tasks = self.open_tasks(&agent.project_id, true),
             old = agent.thread_id,
             commits = if commits.is_empty() {
                 "none".into()
@@ -389,47 +447,7 @@ impl Agents {
                 })
                 .collect()
         };
-        let mut open: Vec<_> = self
-            .tasks
-            .list(&agent.project_id)
-            .into_iter()
-            .filter(|t| t.archived_at.is_none() && t.status.open())
-            .collect();
-        let rank = |s: Status| {
-            [
-                Status::NeedsYou,
-                Status::InProgress,
-                Status::ReadyToTry,
-                Status::Queued,
-            ]
-            .iter()
-            .position(|x| *x == s)
-        };
-        open.sort_by(|a, b| {
-            rank(a.status)
-                .cmp(&rank(b.status))
-                .then(a.order.total_cmp(&b.order))
-        });
-        let tasks = if open.is_empty() {
-            " none".to_string()
-        } else {
-            open.iter()
-                .take(40)
-                .map(|t| {
-                    format!(
-                        "\n- [{}] {}{} ({})",
-                        t.status.label(),
-                        t.ask.replace('\n', " "),
-                        if t.note.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" — {}", t.note)
-                        },
-                        t.id
-                    )
-                })
-                .collect()
-        };
+        let tasks = self.open_tasks(&agent.project_id, false);
         let notes = match crate::notes::load(&self.root, &agent.project_id) {
             Ok(notes) if notes.notes.is_empty() => {
                 " none yet; add the user's preferences, decisions and gotchas as you learn them"
@@ -449,10 +467,12 @@ impl Agents {
              or claude CLIs yourself or through subagents or workflows, so the user can see it; the one subagent is `squircle:history`, \
              cheap and read-only: ask it, in the foreground, before answering anything about past work or decisions. Archive a worker once its work is merged or abandoned, \
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
-             Your tasks, the user's open asks (`{cli} task --help`):{tasks}\n\
+             Your work items and their open sub-tasks, the user's open asks (`{cli} task --help`):{tasks}\n\
              Your notes (`{cli} notes --help`; keep them current):{notes}\n\
-             Add a task for each new ask, in the user's words; link its workers (`thread spawn --task`) and builds (`build start --task`), \
-             attach screenshots or clips worth seeing, and set its status and note when that changes (linked workers and builds move it too).\n\
+             Before any work on something the user asks, put it in the tracker in their words: a sub-task (`task sub add ITEM`) of the work item it clearly belongs to, \
+             otherwise a new work item (`task add`); never under an unrelated one. Track your own breakdown as sub-tasks; link workers (`thread spawn --task`) \
+             and builds (`build start --task`) to the sub-task or item they serve, attach screenshots or clips worth seeing, and set status and note when that changes \
+             (linked workers and builds move them too; an item follows its sub-tasks).\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
              copied out of /tmp into ~/.t3/userdata/attachments. Builds you or your workers start (`build start --thread {id}`) appear in the chat \
              by themselves when they finish, with Install or why they failed: don't promise otherwise or paste build IDs. \

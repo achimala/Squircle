@@ -1565,7 +1565,7 @@ final class SquircleModel {
         taskLists.adopt(list, for: app, fresh: fresh)
         // An edit the Mac shows is the Mac's now.
         guard commands.entries.contains(where: { if case .task = $0.intent.kind { return true }; return false }) else { return }
-        command(.tasksObserved((list.tasks + list.history).map { .init(id: $0.id, status: $0.status, revision: $0.revision) }))
+        command(.tasksObserved(list.everyTask.map { .init(id: $0.id, status: $0.status, revision: $0.revision) }))
     }
     /// Reads the list of the app `task` is in (the open app's if not known yet).
     private func readTasks(containing task: String) async {
@@ -1648,19 +1648,31 @@ final class SquircleModel {
     private var demoTasks: AppTasks? = SquircleModel.makeDemoTasks() { didSet { changed() } }
     private static func makeDemoTasks() -> AppTasks? {
         guard ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_TASKS"] == "1" else { return nil }
-        // Workers on some of them, so the crew shows: (title, state).
-        let asks: [(String, String, [(String, String)])] = [
-            ("Workers should ask before restarting the service", "needs_you", [("Workers inherit approvals", "needs-you")]),
-            ("Stack the sims and fan them out", "in_progress", [("Sim deck", "working")]),
-            ("Make the task pills look alive, like agents", "in_progress", [("Jelly crew prototype", "working"), ("Jelly crew doc", "working")]),
-            ("Faster cold launch", "in_progress", [("Launch trace", "error"), ("Old profile", "done")]),
-            ("Make the send button smaller", "ready_to_try", []), ("Dark mode for the build sheet", "ready_to_try", []),
-            ("Swipe back from anywhere in a thread", "queued", []), ("Show the build number on cards", "queued", []),
-            ("Pin the newest build to the top", "queued", []), ("Haptic when a turn finishes", "queued", [])]
+        // Work items with sub-tasks, workers on some, so the crew shows:
+        // (ask, status, note, [(title, state)], [(sub-task, status, note)], pictures).
+        typealias Item = (String, String, String, [(String, String)], [(String, String, String)], Int)
+        let asks: [Item] = [
+            ("Tasks need a better design: a page per work item I can swipe through", "in_progress", "Pages are in; checking the swipe",
+             [("Work item pages", "working")],
+             [("Sub-tasks under each work item", "done", ""), ("One page per item, swipe between them", "in_progress", "Recording a clip"),
+              ("Never act on an ask before it's tracked", "done", ""), ("Fresh agents keep every open item", "queued", "")], 2),
+            ("Workers should ask before restarting the service", "needs_you", "Pick: ask every time, or once per day?",
+             [("Workers inherit approvals", "needs-you")],
+             [("Find where workers restart it", "done", ""), ("Ask the user first", "needs_you", "Every time or once a day?")], 0),
+            ("Stack the sims and fan them out", "in_progress", "", [("Sim deck", "working")],
+             [("Deck with a count badge", "done", ""), ("Fan out into a labelled row", "in_progress", ""), ("Tap brings one large", "queued", "")], 1),
+            ("Make the send button smaller", "ready_to_try", "In build 212", [("Send button", "done")], [], 0),
+            ("Swipe back from anywhere in a thread", "queued", "", [], [], 0),
+            ("Dark mode for the build sheet", "done", "", [], [("Follow the system appearance", "done", "")], 0)]
         let tasks = asks.enumerated().map { index, item in
-            let threads = item.2.enumerated().map { ["id": "demo-worker-\(index)-\($0.offset)", "title": $0.element.0, "state": $0.element.1] }
-            return ["id": "demo-\(index)", "ask": item.0, "status": item.1, "note": "", "order": Double(index),
-                    "updated_at": 0, "threads": threads, "builds": [], "media": []] as [String: Any]
+            let threads = item.3.enumerated().map { ["id": "demo-worker-\(index)-\($0.offset)", "title": $0.element.0, "state": $0.element.1] }
+            let subtasks = item.4.enumerated().map { offset, sub in
+                ["id": "demo-\(index)-\(offset)", "ask": sub.0, "status": sub.1, "note": sub.2, "order": Double(offset), "updated_at": 0,
+                 "threads": [] as [Any], "builds": [] as [Any], "media": [] as [Any], "parent_id": "demo-\(index)"] as [String: Any]
+            }
+            let media = (0..<item.5).map { ["id": "demo-media-\(index)-\($0)", "kind": "image", "caption": ""] }
+            return ["id": "demo-\(index)", "ask": item.0, "status": item.1, "note": item.2, "order": Double(index),
+                    "updated_at": 0, "threads": threads, "builds": [], "media": media, "subtasks": subtasks] as [String: Any]
         }
         let data = try? JSONSerialization.data(withJSONObject: ["tasks": tasks, "history": []])
         return data.flatMap { try? JSONDecoder().decode(AppTasks.self, from: $0) }
@@ -1670,6 +1682,13 @@ final class SquircleModel {
     /// A picture attached to a task, downloaded once.
     func taskMediaData(task: String, media: String) async -> Data? {
         if let data = taskMedia.value(for: media) { return data }
+        #if DEBUG
+        // Made-up tasks show what's on screen under the sheet.
+        if demoTasks != nil, let view = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first?.rootViewController?.view {
+            let image = UIGraphicsImageRenderer(bounds: view.bounds).image { _ in view.drawHierarchy(in: view.bounds, afterScreenUpdates: false) }
+            return image.jpegData(compressionQuality: 0.8)
+        }
+        #endif
         guard let client, let data = try? await client.taskMediaFile(taskID: task, id: media) else { return nil }
         taskMedia.set(data, for: media)
         return data

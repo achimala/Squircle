@@ -440,7 +440,11 @@ async fn gather(
     if kinds.contains(&Kind::Task) {
         match crate::tasks::read(root) {
             Ok(tasks) => {
-                for task in tasks.list(project) {
+                let work = tasks.list(project);
+                let all = work
+                    .iter()
+                    .flat_map(|t| std::iter::once(t).chain(&t.subtasks));
+                for task in all {
                     let notes: Vec<&str> = task
                         .history
                         .iter()
@@ -452,7 +456,15 @@ async fn gather(
                         items.push(Item {
                             kind: Kind::Task,
                             reference: format!("task:{}", task.id),
-                            title: format!("task, {}", task.status.label()),
+                            title: format!(
+                                "{}, {}",
+                                if task.parent_id.is_some() {
+                                    "sub-task"
+                                } else {
+                                    "task"
+                                },
+                                task.status.label()
+                            ),
                             text,
                             at: Some(task.updated_at as i64),
                             group: None,
@@ -850,6 +862,12 @@ pub async fn show(
             );
             if !task.note.is_empty() {
                 text += &format!("Note: {}\n", task.note);
+            }
+            if let Some(parent) = &task.parent_id {
+                text += &format!("Sub-task of task:{parent}\n");
+            }
+            for sub in &task.subtasks {
+                text += &format!("Sub-task task:{} ({}): {}\n", sub.id, sub.status.label(), sub.ask);
             }
             for thread in &task.threads {
                 text += &format!("Worker: thread:{thread}\n");

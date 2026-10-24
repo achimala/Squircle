@@ -5,6 +5,44 @@ too. Tasks are what the user asked an app's agent for, in their words, and
 where each stands. The service owns them, the agent keeps them, the phone
 shows and edits them.
 
+**2026-10-24 (user decision): work items and sub-tasks.** "Each top level
+big work item should get like a page and then small tasks should be tracked
+under it as well as threads and builds and media. And I can swipe through
+these. Allow agent to formally track these details or sub tasks inside the
+task. No user asks should be acted on without being put in the tracker."
+A task is now a work item; small items are sub-tasks under it (below).
+
+## Work items and sub-tasks (2026-10-24)
+
+A sub-task is an ordinary task with a `parent` (one level only, same app):
+its own wording, status, note, linked workers and builds, media and history,
+and the same following of linked work. `squircle task sub add ITEM --ask
+...` adds one; `update`, `link`, `attach` and `show` take its ID like any
+task's; `task update ID --under ITEM|none` moves a misfiled ask. Existing
+`tasks.json` records load as work items with no sub-tasks (no `parent`).
+
+**Roll-up** (`rollup` in `src/fsm/tasks/`): a work item with sub-tasks takes
+the roll-up of its sub-tasks and its own linked work whenever a sub-task's
+status changes (or its own linked work has news): any needs you → needs you;
+any in progress, or some finished and some still queued → in progress; all
+queued → queued; else any ready to try → ready to try; all closed → done if
+the user closed the last one, ready to try if the agent or linked work did
+(the user decides done), dropped if all were dropped. A status set on the
+work item explicitly holds until then. A closed work item reopens only when
+a sub-task has work again (added, queued, in progress, needs you). Closing a
+work item (done or dropped) closes its open sub-tasks the same way. Sub-tasks
+don't age on their own: they move to History with their work item, and any
+change to one touches its work item.
+
+**Tracker first.** The per-turn note, the plugin's instructions and worker
+prompts say: put every user ask in the tracker, in their words, before any
+work on it: a sub-task of the work item it clearly belongs to, otherwise a
+new work item; never under an unrelated one; track your own breakdown as
+sub-tasks. The note lists open work items with their open sub-tasks (`·`
+lines). A fresh agent's handoff lists every open work item and sub-task,
+History's open ones included, uncapped (after an ask filed under an
+unrelated task was lost across a fresh start).
+
 ## Model
 
 Kept per app (T3 project) in `<data>/tasks.json`; attachments in
@@ -66,7 +104,7 @@ is not fetched.
 
 ## Agent
 
-`squircle task add|update|link|attach|list|show` (`--help`, `--json`);
+`squircle task add|sub add|update|link|attach|list|show` (`--help`, `--json`);
 `thread spawn --task` and `build start --task` link as they start. The
 per-turn `[squircle]` note lists the open tasks (also after compaction) and
 asks the agent to add one per new ask, link workers and builds, attach
@@ -74,6 +112,24 @@ pictures worth seeing and keep status and note current. The plugin's
 instructions say the same.
 
 ## Phone
+
+**Pages (2026-10-24, superseding the grouped list below).** The Tasks tab is
+a horizontal pager (native paging; the page follows the finger, dots at the
+foot also move it): one page per open work item, needs you first, then in
+progress, ready to try, queued. A page shows its status (tap: any status, or
+Move to Front), the ask large, the note, Install when a linked build (its
+own or a sub-task's) is ready, the sub-tasks as a checklist (tap the circle
+to tick one done, again to reopen it; the rest of the row opens its thread),
+its and its sub-tasks' threads (live workers with their jelly, finished
+ones as chips; tap pushes the thread) and their screenshots and clips at a
+readable size (tap opens). The last page is Done (today's) and History,
+searchable and paged as before, with the old rows; long press for any
+status. No swipe actions there (the pager owns horizontal swipes), no undo
+toast (a tick is undone by tapping again). The Tasks | Threads switch stays.
+DEBUG: `SQUIRCLE_DEMO_TASKS=1` has work items with sub-tasks;
+`SQUIRCLE_DEMO_PAGES=1` swipes through the pages.
+
+The grouped list (2026-10-15), kept for the record:
 
 - **Tasks button** replaces Threads beside Builds on the app's agent. The
   sheet has a Tasks | Threads switch; Threads is the old list.

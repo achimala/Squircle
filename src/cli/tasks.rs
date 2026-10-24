@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Subcommand)]
 pub(super) enum TaskCommand {
-    /// Record a new ask in the user's words; it starts queued unless you say otherwise.
+    /// Record a new work item: an ask in the user's words, before any work on it; it starts queued unless you say otherwise.
     Add {
         #[arg(long, help = "Your thread ID (the app is taken from it)")]
         thread: Option<String>,
@@ -29,6 +29,17 @@ pub(super) enum TaskCommand {
         ask: Option<String>,
         #[arg(long, help = "Put it first in its group")]
         top: bool,
+        #[arg(
+            long,
+            value_name = "ITEM_ID|none",
+            help = "Move it under this work item, or with none make it a work item of its own"
+        )]
+        under: Option<String>,
+    },
+    /// Sub-tasks: the small items under a work item (an ask that belongs to it, or your own breakdown).
+    Sub {
+        #[command(subcommand)]
+        command: SubCommand,
     },
     /// Link (or with --remove unlink) a worker thread or a build.
     Link {
@@ -48,7 +59,7 @@ pub(super) enum TaskCommand {
         #[arg(long, help = "One line saying what it shows")]
         caption: Option<String>,
     },
-    /// The app's tasks, open first; --all adds done ones and History, newest first, a page at a time.
+    /// The app's work items with their sub-tasks, open ones only; --all adds closed ones and History, newest first, a page at a time.
     List {
         #[arg(long, help = "Your thread ID (the app is taken from it)")]
         thread: Option<String>,
@@ -63,8 +74,25 @@ pub(super) enum TaskCommand {
         )]
         history_before: Option<String>,
     },
-    /// One task with its linked threads, builds, media and history.
+    /// One task (a work item with its sub-tasks) with linked threads, builds, media and history.
     Show { id: String },
+}
+
+#[derive(Subcommand)]
+pub(super) enum SubCommand {
+    /// Add a sub-task to a work item; update, link, attach and show take its ID like any task's.
+    Add {
+        /// The work item's ID.
+        item: String,
+        #[arg(long, help = "What it is, in the user's words when it is their ask")]
+        ask: String,
+        #[arg(long, value_enum)]
+        status: Option<squircle::tasks::Status>,
+        #[arg(long, help = "What it waits on, in a few words")]
+        note: Option<String>,
+        #[arg(long, help = "Your thread ID, to record the message it came from")]
+        thread: Option<String>,
+    },
 }
 
 pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value>> {
@@ -88,12 +116,18 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
                 note,
                 ask,
                 top,
+                under,
             } => {
+                let parent = match under.as_deref() {
+                    Some("none") => Some(String::new()),
+                    Some(item) => Some(task_id(item)?.to_string()),
+                    None => None,
+                };
                 request(
                     cli,
                     reqwest::Method::PATCH,
                     &format!("/v1/tasks/{}", task_id(id)?),
-                    Some(json!({"status":status,"note":note,"ask":ask,"to_top":top})),
+                    Some(json!({"status":status,"note":note,"ask":ask,"to_top":top,"parent":parent})),
                     false,
                 )
                 .await?
@@ -119,6 +153,23 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
                 )
                 .await?
             }
+            TaskCommand::Sub {
+                command:
+                    SubCommand::Add {
+                        item,
+                        ask,
+                        status,
+                        note,
+                        thread,
+                    },
+            } => {
+                post(
+                    cli,
+                    "/v1/tasks",
+                    json!({"parent":task_id(item)?,"thread":thread,"ask":ask,"status":status,"note":note}),
+                )
+                .await?
+            }
             TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,
             TaskCommand::List {
                 thread,
@@ -141,7 +192,13 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
                 if !*all && value["ok"] == true {
                     let data = &mut value["data"];
                     if let Some(tasks) = data["tasks"].as_array_mut() {
-                        tasks.retain(|t| !matches!(t["status"].as_str(), Some("done" | "dropped")));
+                        let open = |t: &Value| !matches!(t["status"].as_str(), Some("done" | "dropped"));
+                        tasks.retain(open);
+                        for task in tasks.iter_mut() {
+                            if let Some(subtasks) = task["subtasks"].as_array_mut() {
+                                subtasks.retain(open);
+                            }
+                        }
                     }
                     if let Some(object) = data.as_object_mut() {
                         object.remove("history");

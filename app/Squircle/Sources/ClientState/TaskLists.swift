@@ -38,15 +38,23 @@ struct TaskLists: Equatable {
         pages.tasks += page.history; pages.next = page.historyNext
         older[app] = pages
     }
-    /// The app whose list holds `task`.
+    /// The app whose list holds `task`, a sub-task included.
     func app(containing task: String) -> String? {
-        observed.first { _, list in (list.tasks + list.history).contains { $0.id == task } }?.key
+        observed.first { _, list in list.everyTask.contains { $0.id == task } }?.key
     }
     static func apply(_ edit: Edit, in list: AppTasks) -> AppTasks {
         var list = list
-        guard let index = list.tasks.firstIndex(where: { $0.id == edit.id }) else { return list }
-        if let status = edit.status { list.tasks[index].status = status }
-        if edit.toTop { list.tasks.insert(list.tasks.remove(at: index), at: 0) }
+        if let index = list.tasks.firstIndex(where: { $0.id == edit.id }) {
+            if let status = edit.status { list.tasks[index].status = status }
+            if edit.toTop { list.tasks.insert(list.tasks.remove(at: index), at: 0) }
+            return list
+        }
+        // A sub-task: ticked in place, under its work item.
+        for (item, task) in list.tasks.enumerated() {
+            guard let index = task.subtasks.firstIndex(where: { $0.id == edit.id }) else { continue }
+            if let status = edit.status { list.tasks[item].subtasks[index].status = status }
+            return list
+        }
         return list
     }
 }

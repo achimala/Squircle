@@ -1,10 +1,11 @@
 import UIKit
 
-/// The app's tasks beside its agent: what you asked for, grouped by what
-/// each needs, with its threads, builds and pictures a tap away. Done work
-/// ages into History; the Threads tab is every thread of the app.
+/// The app's tasks beside its agent, one page per open work item that you
+/// swipe through: your ask, where it stands, its sub-tasks as a checklist,
+/// and its threads, builds and pictures. The last page holds what's done and
+/// History; the Threads tab is every thread of the app.
 @MainActor
-final class TasksViewController: UIViewController, UITableViewDelegate {
+final class TasksViewController: UIViewController, UIScrollViewDelegate, UITableViewDelegate {
     /// A thread to open; nil starts a new one.
     var onOpen: ((String?) -> Void)?
     private let model: SquircleModel
@@ -12,62 +13,40 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
     private let tabs = UISegmentedControl(items: ["Tasks", "Threads"])
     private let close = Theme.glassButton(symbol: "xmark", identifier: "tasks.close", accessibilityLabel: "Close")
     private let header = UIView()
-    /// The switch sits on glass like the close button, so rows passing
+    /// The switch sits on glass like the close button, so pages passing
     /// under it don't show through.
     private let tabsGlass = Theme.glassSurface(cornerRadius: 20)
-    // Grouped, so the small group names scroll with their rows instead of
-    // sticking over them.
+    /// Pages side by side; native paging, so a page follows the finger.
+    private let pager = UIScrollView()
+    private let dots = UIPageControl()
+    private var pages: [String: WorkItemPage] = [:]
+    /// The pages in order: open work items, most urgent first, then Done.
+    private var order: [String] = []
+    /// The page you're on, by work item; the pager's offset follows it.
+    private var current: String?
+    // The last page: done today and History. Grouped, so the small group
+    // names scroll with their rows instead of sticking over them.
     private let table = UITableView(frame: .zero, style: .grouped)
     private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
     private lazy var threads = ThreadsViewController(model: model, project: project, embedded: true)
     private var dataSource: UITableViewDiffableDataSource<Group, String>!
     private var list = AppTasks()
-    private var showsHistory = false
     private var query = ""
     private var installing: String?
-    /// What each row shows. A row is drawn again only when this changes:
+    /// What each Done row shows. A row is drawn again only when this changes:
     /// the tasks also carry times and orders that tick without showing.
     private var rows: [String: TaskRow] = [:]
-    /// A row's swipe actions are open. The list holds still under the
-    /// finger and catches up when they close.
-    private var swiping = false
-    private var behind = false
-    /// Tasks ticked off here that haven't moved yet. The list holds still
-    /// while you tick down it; they go to Done together a beat after the last.
-    private var checking: [AppTask] = []
-    private var settle: Task<Void, Never>?
-    /// What the last ticks moved to Done, and what each was, for Undo.
-    private var undoable: [(task: AppTask, was: AppTask.Status)] = []
-    private var undoExpiry: Task<Void, Never>?
-    private let undo = UndoToast()
     private var observation: Task<Void, Never>?
     /// Keeps the app's tasks fresh while the sheet is up.
     private var freshness: RefreshLease?
     /// The next History page is on its way.
     private var loadingHistory = false
+    private static let donePage = "done"
 
-    /// Sections top to bottom; done and dropped tasks stay a day before History.
+    /// The Done page's sections; done and dropped work stays a day before History.
     enum Group: Hashable {
-        case status(AppTask.Status), finished, history
-        var title: String {
-            switch self {
-            case .status(.needsYou): "Needs you"
-            case .status(.inProgress): "In progress"
-            case .status(.readyToTry): "Ready to try"
-            case .status(.queued): "Queued"
-            case .status: ""
-            case .finished: "Done"
-            case .history: "History"
-            }
-        }
-        var color: UIColor {
-            switch self {
-            case .status(.needsYou): Theme.accent
-            case .status(.inProgress): Theme.warning
-            case .status(.readyToTry): Theme.success
-            default: .secondaryLabel
-            }
-        }
+        case finished, history
+        var title: String { self == .finished ? "Done" : "History" }
     }
     private static let searchRow = "search"
 
@@ -89,6 +68,17 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
         tabs.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.renderTab() }, for: .valueChanged)
+
+        pager.isPagingEnabled = true
+        pager.showsHorizontalScrollIndicator = false
+        pager.alwaysBounceVertical = false
+        pager.contentInsetAdjustmentBehavior = .never
+        pager.delegate = self
+        pager.accessibilityIdentifier = "tasks.pages"
+        dots.hidesForSinglePage = true
+        dots.currentPageIndicatorTintColor = Theme.accent
+        dots.pageIndicatorTintColor = .tertiaryLabel
+        dots.addAction(UIAction { [weak self] _ in self?.dotsChanged() }, for: .valueChanged)
 
         table.backgroundColor = .clear
         table.separatorStyle = .none
@@ -113,38 +103,23 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             guard let row = rows[id] else { return cell }
             cell.configure(row)
             cell.onThread = { [weak self] thread in self?.onOpen?(thread) }
-            cell.onCheck = { [weak self] in self?.toggleCheck(id) }
-            cell.onMedia = { [weak self] media in self?.task(id).map { self?.openMedia(media, of: $0) } }
-            cell.onInstall = { [weak self] in
-                guard let self, let task = task(id), let build = installable(task).build else { return }
-                install(build, for: task)
-            }
-            cell.loadThumbnail = { [weak self] media in
-                guard let self else { return nil }
-                let data: Data?
-                if media.kind == "video" {
-                    guard let url = await model.taskVideo(task: id, media: media.id) else { return nil }
-                    data = await ConversationMedia.poster(of: url)
-                } else {
-                    data = await model.taskMediaData(task: id, media: media.id)
-                }
-                // Enough pixels to fill a 96 × 72 point thumbnail.
-                guard let data else { return nil }
-                return await Downsample.image(data) { max(96 * 3 / $0.width, 72 * 3 / $0.height) }
-            }
+            cell.onCheck = { [weak self] in self?.task(id).map { self?.set($0, .done) } }
+            cell.onMedia = { [weak self] media in self?.task(id).map { self?.openMedia(media, of: $0.id, title: $0.ask) } }
+            cell.onInstall = { [weak self] in self?.task(id).map { self?.install($0) } }
+            cell.loadThumbnail = { [weak self] media in await self?.thumbnail(media, of: id, height: 72) }
             return cell
         }
         dataSource.defaultRowAnimation = .fade
 
         notice.textAlignment = .center
-        [table, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
-        undo.onUndo = { [weak self] in self?.undoLast() }
+        [pager, notice, dots].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        pager.addSubview(table)
         addChild(threads)
         threads.view.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(threads.view)
         threads.didMove(toParent: self)
-        // The lists run under the controls, which float on the sheet's own
-        // glass; rows fade softly beneath them.
+        // The pages run under the controls, which float on the sheet's own
+        // glass; content fades softly beneath them.
         header.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(header)
         [close, tabsGlass].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; header.addSubview($0) }
@@ -176,10 +151,12 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             tabs.bottomAnchor.constraint(equalTo: tabsGlass.contentView.bottomAnchor, constant: -3),
             tabs.leadingAnchor.constraint(equalTo: tabsGlass.contentView.leadingAnchor, constant: 3),
             tabs.trailingAnchor.constraint(equalTo: tabsGlass.contentView.trailingAnchor, constant: -3),
-            table.topAnchor.constraint(equalTo: view.topAnchor),
-            table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            pager.topAnchor.constraint(equalTo: view.topAnchor),
+            pager.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            pager.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            pager.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            dots.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            dots.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: 4),
             threads.view.topAnchor.constraint(equalTo: view.topAnchor),
             threads.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             threads.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -188,12 +165,6 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
             notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
             notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32)
         ])
-        undo.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(undo)
-        NSLayoutConstraint.activate([
-            undo.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            undo.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12)
-        ])
         // No pull to refresh: the lease keeps the list current while it's up,
         // so pulling down at the top dismisses the sheet like any other.
         observation = model.observe(by: self, after: .milliseconds(100)) { $0.render() }
@@ -201,36 +172,25 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         Task { await model.refreshTasks() }
         renderTab()
         render()
-        renderUndo(animated: false)
     }
 
     #if DEBUG
-    /// `SQUIRCLE_DEMO_TICKS=1`: presses the first five circles a fifth of a
-    /// second apart, then Undo, as a hurried thumb would.
+    /// `SQUIRCLE_DEMO_PAGES=1`: swipes through every page and back, as a
+    /// thumb would, for a recording.
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        guard ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_TICKS"] == "1" else { return }
+        guard ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_PAGES"] == "1" else { return }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
-            for row in 0..<5 {
+            guard let count = self?.order.count else { return }
+            for index in Array(1..<count) + Array((0..<(count - 1)).reversed()) {
                 guard let self else { return }
-                let cells = table.visibleCells.compactMap { $0 as? TaskCell }
-                guard row < cells.count else { return }
-                let cell = cells[row]
-                cell.debugPressCheck()
-                try? await Task.sleep(for: .milliseconds(200))
+                pager.setContentOffset(CGPoint(x: CGFloat(index) * pager.bounds.width, y: 0), animated: true)
+                try? await Task.sleep(for: .milliseconds(1300))
             }
-            try? await Task.sleep(for: .seconds(2))
-            self?.undo.debugPress()
         }
     }
     #endif
-
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        // Ticks still waiting for their beat are sent before the sheet goes.
-        finishChecks()
-    }
 
     override func accessibilityPerformEscape() -> Bool {
         dismiss(animated: true)
@@ -243,33 +203,55 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        // Both lists start just below the controls and scroll up under them.
-        let top = header.frame.maxY + 4
-        for scroll in [table, threads.scrollView] where scroll.contentInset.top != top {
+        layoutPages()
+        // Every list starts just below the controls and scrolls up under them.
+        let top = header.frame.maxY + 4, bottom = view.safeAreaInsets.bottom + 28
+        let scrolls = [table, threads.scrollView] + pages.values.map(\.scroll)
+        for scroll in scrolls where scroll.contentInset.top != top || scroll.contentInset.bottom != bottom {
             let atTop = scroll.contentOffset.y <= -scroll.contentInset.top
             scroll.contentInset.top = top
+            scroll.contentInset.bottom = bottom
             scroll.verticalScrollIndicatorInsets.top = top
             if atTop { scroll.contentOffset.y = -top }
         }
     }
 
+    /// Lays the pages out side by side and puts the pager on `current`,
+    /// unless a finger or a fling is moving it.
+    private func layoutPages() {
+        let size = pager.bounds.size
+        guard size.width > 0 else { return }
+        for (index, id) in order.enumerated() {
+            let frame = CGRect(x: CGFloat(index) * size.width, y: 0, width: size.width, height: size.height)
+            let page: UIView? = id == Self.donePage ? table : pages[id]
+            if page?.frame != frame { page?.frame = frame }
+        }
+        pager.contentSize = CGSize(width: size.width * CGFloat(order.count), height: size.height)
+        guard !pager.isTracking, !pager.isDecelerating, let current, let index = order.firstIndex(of: current) else { return }
+        let x = CGFloat(index) * size.width
+        if pager.contentOffset.x != x, !animatingPage { pager.contentOffset = CGPoint(x: x, y: 0) }
+        dots.currentPage = index
+    }
+
     private func renderTab() {
-        table.isHidden = !onTasks
+        pager.isHidden = !onTasks
+        dots.isHidden = !onTasks
         threads.view.isHidden = onTasks
         notice.isHidden = !onTasks || !list.tasks.isEmpty || !list.history.isEmpty
         if #available(iOS 26.0, *), let edge = edge as? UIScrollEdgeElementContainerInteraction {
-            edge.scrollView = onTasks ? table : threads.scrollView
+            edge.scrollView = !onTasks ? threads.scrollView : current.flatMap { pages[$0]?.scroll } ?? table
         }
     }
 
     private func task(_ id: String) -> AppTask? {
-        list.tasks.first { $0.id == id } ?? list.history.first { $0.id == id }
+        list.everyTask.first { $0.id == id }
     }
 
-    /// The build a task's row offers. Only the app's newest build installs
-    /// from here: an older one would take the app back. The others are named.
+    /// The build a task offers, its sub-tasks' included. Only the app's
+    /// newest build installs from here: an older one would take the app
+    /// back. The others are named.
     private func installable(_ task: AppTask) -> (build: AppBuild?, shipped: String?) {
-        let linked = task.builds.last(where: { $0.state == "succeeded" && $0.installable == true })
+        let linked = (task.builds + task.subtasks.flatMap(\.builds)).last(where: { $0.state == "succeeded" && $0.installable == true })
             .flatMap { b in model.builds.first { $0.id == b.id } }
         let newest = linked.flatMap { build in
             model.builds.filter { $0.bundleID == build.bundleID && $0.canInstall }.max { $0.date < $1.date }
@@ -280,49 +262,95 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     private func row(_ task: AppTask) -> TaskRow {
         let (build, shipped) = installable(task)
-        return TaskRow(ask: task.ask, status: task.status, checked: !task.status.open || checking.contains { $0.id == task.id },
-                       faded: task.archivedAt != nil, note: task.note, shipped: shipped,
-                       install: build.map { _ in installing == task.id ? "Opening…" : "Install" },
-                       // Archived threads can't be opened any more.
-                       threads: task.threads.filter { $0.state != "missing" }, media: task.media)
+        let steps = task.subtasks.isEmpty ? nil : "\(task.subtasks.filter { !$0.status.open }.count) of \(task.subtasks.count) done"
+        return TaskRow(ask: task.ask, status: task.status, checked: !task.status.open,
+                       faded: task.archivedAt != nil, note: [task.note, steps].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · "),
+                       shipped: shipped, install: build.map { _ in installing == task.id ? "Opening…" : "Install" },
+                       threads: task.allThreads.filter { $0.state != "missing" }, media: task.media)
     }
 
-    /// `now` is for the swipe actions themselves, which move their row
-    /// while UIKit closes the swipe.
-    private func render(now: Bool = false) {
-        guard now || (!swiping && checking.isEmpty) else { behind = true; return }
-        behind = false
+    private func page(_ task: AppTask) -> WorkItemPage.Content {
+        let (build, shipped) = installable(task)
+        return .init(ask: task.ask, status: task.status, note: task.note, shipped: shipped,
+                     install: build.map { _ in installing == task.id ? "Opening…" : "Install" },
+                     subtasks: task.subtasks.map { .init(id: $0.id, ask: $0.ask, note: $0.note, status: $0.status, opens: $0.mainThread != nil) },
+                     threads: task.allThreads.filter { $0.state != "missing" },
+                     media: ([task] + task.subtasks).flatMap { owner in owner.media.map { WorkItemPage.Picture(task: owner.id, media: $0) } })
+    }
+
+    private func render() {
         if let current = model.projects.first(where: { $0.id == project.id }) { project = current }
         list = model.tasks(for: project)
+        let rank: (AppTask.Status) -> Int = { [.needsYou, .inProgress, .readyToTry, .queued].firstIndex(of: $0) ?? 4 }
+        let open = list.tasks.filter(\.status.open).enumerated()
+            .sorted { (rank($0.element.status), $0.offset) < (rank($1.element.status), $1.offset) }.map(\.element)
+        let closed = list.tasks.filter { !$0.status.open }
+        let ids = open.map(\.id) + (closed.isEmpty && list.history.isEmpty ? [] : [Self.donePage])
+
+        // Pages for work items no longer open go; the rest are told what to show.
+        for (id, page) in pages where !ids.contains(id) { page.removeFromSuperview(); pages[id] = nil }
+        for task in open {
+            let page = pages[task.id] ?? makePage(task.id)
+            page.configure(self.page(task))
+        }
+        // A page that left (its work closed) hands over to its neighbour.
+        if let current, !ids.contains(current), let was = order.firstIndex(of: current) {
+            self.current = ids.isEmpty ? nil : ids[min(was, ids.count - 1)]
+        }
+        if current == nil { current = ids.first }
+        let reordered = ids != order
+        order = ids
+        dots.numberOfPages = ids.count
+        if reordered { view.setNeedsLayout() }
+        renderDone(closed: closed)
+        notice.text = model.error == nil ? "No tasks yet" : model.error
+        renderTab()
+    }
+
+    private func makePage(_ id: String) -> WorkItemPage {
+        let page = WorkItemPage()
+        page.scroll.contentInsetAdjustmentBehavior = .never
+        if #available(iOS 26.0, *) { page.scroll.topEdgeEffect.style = .soft }
+        page.onThread = { [weak self] thread in self?.onOpen?(thread) }
+        page.onSubtask = { [weak self] sub in self?.task(sub)?.mainThread.map { self?.onOpen?($0) } }
+        page.onTick = { [weak self] sub in
+            guard let self, let task = task(sub) else { return }
+            Theme.checkHaptic()
+            set(task, task.status.open ? .done : .queued, haptic: false)
+        }
+        page.onStatus = { [weak self] status in self?.task(id).map { self?.set($0, status) } }
+        page.onTop = { [weak self] in self?.task(id).map { self?.set($0, toTop: true) } }
+        page.onInstall = { [weak self] in self?.task(id).map { self?.install($0) } }
+        page.onMedia = { [weak self] picture in
+            guard let self, let item = task(id) else { return }
+            openMedia(picture.media, of: picture.task, title: item.ask)
+        }
+        page.loadThumbnail = { [weak self] picture in await self?.thumbnail(picture.media, of: picture.task, height: 220) }
+        pages[id] = page
+        pager.addSubview(page)
+        view.setNeedsLayout()
+        return page
+    }
+
+    /// The last page: done today, then History (searchable, a page at a time).
+    private func renderDone(closed: [AppTask]) {
         var snapshot = NSDiffableDataSourceSnapshot<Group, String>()
-        let groups: [Group] = [.status(.needsYou), .status(.inProgress), .status(.readyToTry), .status(.queued), .finished]
-        for group in groups {
-            let ids = list.tasks.filter { task in
-                switch group {
-                case .status(let status): task.status == status
-                default: !task.status.open
-                }
-            }.map(\.id)
-            guard !ids.isEmpty else { continue }
-            snapshot.appendSections([group])
-            snapshot.appendItems(ids, toSection: group)
+        if !closed.isEmpty {
+            snapshot.appendSections([.finished])
+            snapshot.appendItems(closed.map(\.id), toSection: .finished)
         }
         if !list.history.isEmpty {
             snapshot.appendSections([.history])
-            if showsHistory {
-                let words = query.lowercased().split(separator: " ")
-                let found = list.history.filter { task in
-                    let text = (task.ask + " " + task.note + " " + task.threads.compactMap(\.title).joined(separator: " ")).lowercased()
-                    return words.allSatisfy { text.contains($0) }
-                }
-                snapshot.appendItems([Self.searchRow] + found.map(\.id), toSection: .history)
+            let words = query.lowercased().split(separator: " ")
+            let found = list.history.filter { task in
+                let text = ([task.ask, task.note] + task.subtasks.map(\.ask) + task.allThreads.compactMap(\.title)).joined(separator: " ").lowercased()
+                return words.allSatisfy { text.contains($0) }
             }
+            snapshot.appendItems([Self.searchRow] + found.map(\.id), toSection: .history)
         }
         // Rows whose look changed are drawn again; the rest keep their place.
-        // The model changes every few seconds for unrelated reasons, and
-        // applying an unchanged list anyway resets an open swipe.
         let previous = rows
-        rows = Dictionary((list.tasks + list.history).map { ($0.id, row($0)) }, uniquingKeysWith: { first, _ in first })
+        rows = Dictionary((closed + list.history).map { ($0.id, row($0)) }, uniquingKeysWith: { first, _ in first })
         let changed = snapshot.itemIdentifiers.filter { previous[$0] != nil && previous[$0] != rows[$0] }
         let current = dataSource.snapshot()
         let moved = current.sectionIdentifiers != snapshot.sectionIdentifiers || snapshot.sectionIdentifiers.contains {
@@ -330,96 +358,55 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         }
         if moved || !changed.isEmpty {
             snapshot.reconfigureItems(changed)
-            // Only moves animate; a row whose text changed is just redrawn.
             dataSource.apply(snapshot, animatingDifferences: moved && !previous.isEmpty && view.window != nil)
         }
-        // Group headers aren't reloaded with their rows; their counts are kept here.
         for (index, group) in snapshot.sectionIdentifiers.enumerated() {
             (table.headerView(forSection: index) as? TaskGroupHeader).map { configure($0, group) }
         }
-        notice.text = model.error == nil ? "No tasks yet" : model.error
+    }
+
+    // MARK: Paging
+
+    /// Moving to a page from the dots: one interruptible animation.
+    private var animatingPage = false
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard scrollView === pager, pager.bounds.width > 0, !order.isEmpty else { return }
+        let index = min(max(Int((pager.contentOffset.x / pager.bounds.width).rounded()), 0), order.count - 1)
+        guard order[index] != current else { return }
+        current = order[index]
+        dots.currentPage = index
+        renderTab()
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        if scrollView === pager { animatingPage = false }
+    }
+
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        if scrollView === pager { animatingPage = false }
+    }
+
+    private func dotsChanged() {
+        guard order.indices.contains(dots.currentPage) else { return }
+        Theme.selectionHaptic()
+        current = order[dots.currentPage]
+        animatingPage = true
+        pager.setContentOffset(CGPoint(x: CGFloat(dots.currentPage) * pager.bounds.width, y: 0), animated: !Motion.reduced)
         renderTab()
     }
 
     // MARK: Actions
 
-    private func set(_ task: AppTask, _ status: AppTask.Status? = nil, toTop: Bool = false) {
-        Theme.selectionHaptic()
+    private func set(_ task: AppTask, _ status: AppTask.Status? = nil, toTop: Bool = false, haptic: Bool = true) {
+        if haptic { Theme.selectionHaptic() }
         model.markTask(task, status: status, toTop: toTop)
-        render(now: true)
+        render()
         Task { await model.updateTask(task, status: status, toTop: toTop) }
     }
 
-    /// One tap ticks an open task off (or back on before it moves). Rapid
-    /// ticks down the list all land: rows stay put until a beat after the
-    /// last, then move to Done together.
-    private func toggleCheck(_ id: String) {
-        guard let task = task(id), task.status.open else { return }
-        Theme.checkHaptic()
-        if let index = checking.firstIndex(where: { $0.id == id }) { checking.remove(at: index) } else { checking.append(task) }
-        let row = row(task)
-        rows[id] = row
-        if let path = dataSource.indexPath(for: id), let cell = table.cellForRow(at: path) as? TaskCell { cell.configure(row) }
-        settle?.cancel()
-        settle = nil
-        if checking.isEmpty {
-            if behind { render() }
-            return
-        }
-        settle = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(650))
-            guard !Task.isCancelled else { return }
-            self?.finishChecks()
-        }
-    }
-
-    private func finishChecks() {
-        settle?.cancel()
-        settle = nil
-        let batch = checking
-        guard !batch.isEmpty else { return }
-        checking = []
-        batch.forEach { model.markTask($0, status: .done) }
-        render(now: true)
-        for task in batch { Task { await model.updateTask(task, status: .done) } }
-        undoable += batch.map { ($0, $0.status) }
-        renderUndo(animated: true)
-        undoExpiry?.cancel()
-        undoExpiry = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(4))
-            guard !Task.isCancelled, let self else { return }
-            undoable = []
-            renderUndo(animated: true)
-        }
-    }
-
-    /// Puts the last ticked tasks back where they were.
-    private func undoLast() {
-        let batch = undoable
-        guard !batch.isEmpty else { return }
-        undoExpiry?.cancel()
-        undoable = []
-        renderUndo(animated: true)
-        Theme.selectionHaptic()
-        batch.forEach { model.markTask($0.task, status: $0.was) }
-        render(now: true)
-        for (task, was) in batch { Task { await model.updateTask(task, status: was) } }
-    }
-
-    private func renderUndo(animated: Bool) {
-        undo.configure(count: undoable.count)
-        let shown = !undoable.isEmpty
-        undo.isUserInteractionEnabled = shown
-        let apply = { [undo] in
-            undo.alpha = shown ? 1 : 0
-            undo.transform = shown ? .identity : CGAffineTransform(translationX: 0, y: 16).scaledBy(x: 0.9, y: 0.9)
-        }
-        guard animated, view.window != nil else { apply(); return }
-        UIView.animate(springDuration: 0.4, bounce: 0.2, options: [.beginFromCurrentState, .allowUserInteraction], animations: apply)
-    }
-
-    private func install(_ build: AppBuild, for task: AppTask) {
-        guard installing == nil else { return }
+    private func install(_ task: AppTask) {
+        guard installing == nil, let build = installable(task).build else { return }
         installing = task.id
         render()
         Task { [weak self] in
@@ -430,27 +417,33 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
         }
     }
 
-    private func openMedia(_ media: AppTask.Media, of task: AppTask) {
+    /// A picture or a clip's poster, with enough pixels for `height` points.
+    private func thumbnail(_ media: AppTask.Media, of task: String, height: CGFloat) async -> UIImage? {
+        let data: Data?
+        if media.kind == "video" {
+            guard let url = await model.taskVideo(task: task, media: media.id) else { return nil }
+            data = await ConversationMedia.poster(of: url)
+        } else {
+            data = await model.taskMediaData(task: task, media: media.id)
+        }
+        guard let data else { return nil }
+        return await Downsample.image(data) { height * 3 / max(1, $0.height) }
+    }
+
+    private func openMedia(_ media: AppTask.Media, of task: String, title: String) {
         guard presentedViewController == nil else { return }
         Task { [weak self] in
             guard let self else { return }
             if media.kind == "video" {
-                guard let url = await model.taskVideo(task: task.id, media: media.id) else { return }
+                guard let url = await model.taskVideo(task: task, media: media.id) else { return }
                 present(VideoPlayerViewController(url: url), animated: true)
-            } else if let data = await model.taskMediaData(task: task.id, media: media.id), let image = UIImage(data: data) {
-                present(ImageViewController(image: image, title: media.caption.isEmpty ? task.ask : media.caption), animated: true)
+            } else if let data = await model.taskMediaData(task: task, media: media.id), let image = UIImage(data: data) {
+                present(ImageViewController(image: image, title: media.caption.isEmpty ? title : media.caption), animated: true)
             }
         }
     }
 
-    /// The thread a task is about right now: one waiting on you, else one
-    /// working, else the newest.
-    private func mainThread(of task: AppTask) -> String? {
-        let threads = task.threads.filter { $0.state != "missing" }
-        return (threads.first { $0.state == "needs-you" } ?? threads.first { $0.state == "working" } ?? threads.last)?.id
-    }
-
-    // MARK: Table
+    // MARK: Done page
 
     func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
         guard let group = dataSource.sectionIdentifier(for: section) else { return nil }
@@ -461,22 +454,7 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     private func configure(_ header: TaskGroupHeader, _ group: Group) {
         let count = group == .history ? list.history.count : dataSource.snapshot().numberOfItems(inSection: group)
-        header.configure(group.title, count: count, color: group.color,
-                         chevron: group == .history ? (showsHistory ? "chevron.up" : "chevron.down") : nil)
-        header.onTap = group == .history ? { [weak self] in self?.toggleHistory() } : nil
-    }
-
-    private func toggleHistory() {
-        Theme.selectionHaptic()
-        showsHistory.toggle()
-        if !showsHistory { query = "" }
-        render()
-        var snapshot = dataSource.snapshot()
-        snapshot.reloadSections([.history])
-        dataSource.apply(snapshot, animatingDifferences: false)
-        if showsHistory, let section = snapshot.indexOfSection(.history) {
-            table.scrollToRow(at: IndexPath(row: 0, section: section), at: .top, animated: true)
-        }
+        header.configure(group.title, count: count, color: .secondaryLabel, chevron: nil)
     }
 
     /// History arrives a page at a time, the next as its last row shows.
@@ -496,50 +474,19 @@ final class TasksViewController: UIViewController, UITableViewDelegate {
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id), let thread = mainThread(of: task) else { return }
+        guard let id = dataSource.itemIdentifier(for: indexPath), let thread = task(id)?.mainThread else { return }
         onOpen?(thread)
     }
 
     func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
-        dataSource.itemIdentifier(for: indexPath).flatMap { self.task($0) }.flatMap { self.mainThread(of: $0) } != nil
+        dataSource.itemIdentifier(for: indexPath).flatMap { self.task($0) }?.mainThread != nil
     }
 
-    func tableView(_ tableView: UITableView, willBeginEditingRowAt indexPath: IndexPath) { swiping = true }
-
-    func tableView(_ tableView: UITableView, didEndEditingRowAt indexPath: IndexPath?) {
-        swiping = false
-        if behind { render() }
-    }
-
-    func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id) else { return nil }
-        let done = UIContextualAction(style: .normal, title: "Done") { [weak self] _, _, finish in self?.set(task, .done); finish(true) }
-        done.backgroundColor = Theme.success
-        let drop = UIContextualAction(style: .destructive, title: "Drop") { [weak self] _, _, finish in self?.set(task, .dropped); finish(true) }
-        drop.backgroundColor = Theme.failure
-        return UISwipeActionsConfiguration(actions: task.status.open ? [drop, done] : [])
-    }
-
-    func tableView(_ tableView: UITableView, leadingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id), task.status.open else { return nil }
-        let top = UIContextualAction(style: .normal, title: "Top") { [weak self] _, _, finish in self?.set(task, toTop: true); finish(true) }
-        top.backgroundColor = Theme.accent
-        return UISwipeActionsConfiguration(actions: [top])
-    }
-
+    /// Any status, to bring one back; no swipes, which the pager owns.
     func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id) else { return nil }
         return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
-            let statuses: [(AppTask.Status, String, String)] = [
-                (.needsYou, "Needs You", "hand.raised"), (.inProgress, "In Progress", "hammer"),
-                (.readyToTry, "Ready to Try", "shippingbox"), (.queued, "Queued", "tray"),
-                (.done, "Done", "checkmark"), (.dropped, "Drop", "xmark")]
-            let status = UIMenu(options: .displayInline, children: statuses.map { value, title, symbol in
-                UIAction(title: title, image: UIImage(systemName: symbol), attributes: value == .dropped ? .destructive : [],
-                         state: task.status == value ? .on : .off) { _ in self?.set(task, value) }
-            })
-            let top = UIAction(title: "Move to Top", image: UIImage(systemName: "arrow.up.to.line")) { _ in self?.set(task, toTop: true) }
-            return UIMenu(children: (task.status.open ? [top] : []) + [status])
+            UIMenu(children: [WorkItemPage.statusMenu(current: task.status) { self?.set(task, $0) }])
         })
     }
 }
@@ -768,12 +715,12 @@ private final class TaskCell: UITableViewCell {
         if row.threads != shown?.threads {
             chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
             crew.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            let alive = row.threads.filter { Self.mood($0) != nil }, rest = row.threads.filter { Self.mood($0) == nil }
+            let alive = row.threads.filter { TaskParts.mood($0) != nil }, rest = row.threads.filter { TaskParts.mood($0) == nil }
             for thread in alive {
-                crew.addArrangedSubview(member(thread))
+                crew.addArrangedSubview(TaskParts.member(thread) { [weak self] in self?.onThread?(thread.id) })
             }
             for thread in rest {
-                chips.addArrangedSubview(chip(thread))
+                chips.addArrangedSubview(TaskParts.chip(thread) { [weak self] in self?.onThread?(thread.id) })
             }
             crew.isHidden = alive.isEmpty
             chipScroll.isHidden = rest.isEmpty
@@ -791,14 +738,6 @@ private final class TaskCell: UITableViewCell {
         accessibilityLabel = [row.ask, note.text].compactMap { $0 }.joined(separator: ", ")
     }
 
-    #if DEBUG
-    func debugPressCheck() {
-        check.isHighlighted = true
-        check.sendActions(for: .touchUpInside)
-        check.isHighlighted = false
-    }
-    #endif
-
     private static func statusName(_ status: AppTask.Status) -> String {
         switch status {
         case .needsYou: "Needed you"
@@ -808,82 +747,6 @@ private final class TaskCell: UITableViewCell {
         case .done: "Done"
         case .dropped: "Dropped"
         }
-    }
-
-    /// A linked worker's jelly mood while it is alive; nil once it finished.
-    private static func mood(_ thread: AppTask.Thread) -> JellyLook.Mood? {
-        switch thread.state {
-        case "working": .working
-        case "needs-you": .needsYou
-        case "error": .failed
-        default: nil
-        }
-    }
-
-    /// A live worker: the worker itself (its jelly), its title and how it is
-    /// doing. Tapping it opens it.
-    private func member(_ thread: AppTask.Thread) -> UIView {
-        let mood = Self.mood(thread) ?? .working
-        let button = UIControl()
-        let jelly = JellyView(.worker(thread.id, mood), canvas: .roomy(22))
-        let title = Theme.label(thread.title ?? "Worker", Theme.font(.subheadline, 15, .semibold), lines: 1)
-        let (word, color): (String, UIColor) = switch mood {
-        case .needsYou: ("Needs you", Theme.warning)
-        case .failed: ("Stopped with an error", Theme.failure)
-        default: ("Working", .secondaryLabel)
-        }
-        let state = Theme.label(word, Theme.font(.footnote, 13), color: color, lines: 1)
-        let text = UIStackView(arrangedSubviews: [title, state])
-        text.axis = .vertical
-        text.spacing = 0
-        text.isUserInteractionEnabled = false
-        [jelly, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; button.addSubview($0) }
-        NSLayoutConstraint.activate([
-            jelly.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 1),
-            jelly.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: 1),
-            jelly.widthAnchor.constraint(equalToConstant: 22),
-            jelly.heightAnchor.constraint(equalToConstant: 22),
-            text.leadingAnchor.constraint(equalTo: jelly.trailingAnchor, constant: 11),
-            text.trailingAnchor.constraint(lessThanOrEqualTo: button.trailingAnchor),
-            text.topAnchor.constraint(equalTo: button.topAnchor, constant: 2),
-            text.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -2)
-        ])
-        button.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onThread?(thread.id) }, for: .touchUpInside)
-        button.isAccessibilityElement = true
-        button.accessibilityTraits = .button
-        button.accessibilityLabel = "Open thread \(thread.title ?? ""), \(word)"
-        return button
-    }
-
-    /// A linked thread: a dot for what it is doing and its title.
-    private func chip(_ thread: AppTask.Thread) -> UIView {
-        var config = UIButton.Configuration.plain()
-        config.title = thread.title ?? "Thread"
-        config.baseForegroundColor = .label
-        config.background.backgroundColor = Theme.codeFill
-        config.cornerStyle = .capsule
-        config.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 11)
-        config.imagePadding = 6
-        config.image = UIImage(systemName: "circle.fill")?.withConfiguration(UIImage.SymbolConfiguration(pointSize: 7))
-        config.imageColorTransformer = UIConfigurationColorTransformer { _ in
-            switch thread.state {
-            case "needs-you": Theme.accent
-            case "working": Theme.warning
-            case "error": Theme.failure
-            default: .tertiaryLabel
-            }
-        }
-        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes
-            attributes.font = Theme.font(.footnote, 13, .medium)
-            return attributes
-        }
-        config.titleLineBreakMode = .byTruncatingTail
-        let button = UIButton(configuration: config)
-        button.widthAnchor.constraint(lessThanOrEqualToConstant: 240).isActive = true
-        button.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onThread?(thread.id) }, for: .touchUpInside)
-        button.accessibilityLabel = "Open thread \(thread.title ?? "")"
-        return button
     }
 
     private func thumbnail(_ media: AppTask.Media) -> UIView {
@@ -919,49 +782,383 @@ private final class TaskCell: UITableViewCell {
     }
 }
 
-/// Undo for the last ticks: a small glass capsule at the sheet's foot.
-private final class UndoToast: UIView {
-    var onUndo: (() -> Void)?
-    private let surface = Theme.glassSurface(cornerRadius: 20, interactive: true)
-    private let text = Theme.label("", Theme.font(.subheadline, 15, .medium), color: .secondaryLabel)
-    private let button = UIButton(type: .system)
+/// One open work item, a page of the Tasks sheet: where it stands (tap
+/// for any status), your ask, its note, Install when a build is ready, its
+/// sub-tasks as a checklist, its threads and its pictures and clips.
+final class WorkItemPage: UIView {
+    struct Sub: Equatable { let id, ask, note: String; let status: AppTask.Status; let opens: Bool }
+    struct Picture: Equatable { let task: String; let media: AppTask.Media }
+    struct Content: Equatable {
+        let ask: String
+        let status: AppTask.Status
+        let note: String
+        let shipped: String?
+        let install: String?
+        let subtasks: [Sub]
+        let threads: [AppTask.Thread]
+        let media: [Picture]
+    }
+    var onThread: ((String) -> Void)?
+    var onSubtask: ((String) -> Void)?
+    var onTick: ((String) -> Void)?
+    var onStatus: ((AppTask.Status) -> Void)?
+    var onTop: (() -> Void)?
+    var onInstall: (() -> Void)?
+    var onMedia: ((Picture) -> Void)?
+    var loadThumbnail: ((Picture) async -> UIImage?)?
+    let scroll = UIScrollView()
+    private let stack = UIStackView()
+    private let status = UIButton(configuration: .plain())
+    private let ask = Theme.label("", Theme.font(.title2, 24, .semibold), lines: 0)
+    private let note = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel, lines: 0)
+    private let install = UIButton(configuration: .filled())
+    private let shipped = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel)
+    private let steps = UIStackView()
+    private let crew = UIStackView()
+    private let chips = UIStackView()
+    private let pictures = UIStackView()
+    private let pictureScroll = UIScrollView()
+    private var loads: [Task<Void, Never>] = []
+    private var shown: Content?
+    private static let pictureHeight: CGFloat = 220
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        button.setTitle("Undo", for: .normal)
-        button.titleLabel?.font = Theme.font(.subheadline, 15, .semibold)
-        button.tintColor = Theme.accent
-        button.addAction(UIAction { [weak self] _ in self?.onUndo?() }, for: .touchUpInside)
-        let line = UIStackView(arrangedSubviews: [text, button])
-        line.spacing = 14
-        line.alignment = .center
-        [surface, line].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
-        addSubview(surface)
-        surface.contentView.addSubview(line)
+        scroll.alwaysBounceVertical = true
+        scroll.showsHorizontalScrollIndicator = false
+        stack.axis = .vertical
+        stack.spacing = 14
+        stack.alignment = .fill
+        var config = UIButton.Configuration.plain()
+        config.contentInsets = .zero
+        config.imagePlacement = .trailing
+        config.imagePadding = 4
+        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+        config.image = UIImage(systemName: "chevron.down")
+        status.configuration = config
+        status.showsMenuAsPrimaryAction = true
+        status.contentHorizontalAlignment = .leading
+        status.accessibilityIdentifier = "task.status"
+
+        var fill = UIButton.Configuration.filled()
+        fill.cornerStyle = .capsule
+        fill.baseBackgroundColor = Theme.accent
+        fill.baseForegroundColor = Theme.onAccent
+        fill.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 18, bottom: 8, trailing: 18)
+        fill.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = Theme.font(.subheadline, 15, .semibold)
+            return attributes
+        }
+        install.configuration = fill
+        install.addAction(UIAction { [weak self] _ in self?.onInstall?() }, for: .touchUpInside)
+        let installRow = UIStackView(arrangedSubviews: [install, shipped, UIView()])
+        installRow.spacing = 12
+        installRow.alignment = .center
+
+        steps.axis = .vertical
+        steps.spacing = 0
+        crew.axis = .vertical
+        crew.spacing = 10
+        crew.alignment = .leading
+        chips.spacing = 8
+        chips.alignment = .leading
+        let chipScroll = UIScrollView()
+        chipScroll.showsHorizontalScrollIndicator = false
+        chipScroll.clipsToBounds = false
+        pictures.spacing = 10
+        pictures.alignment = .center
+        pictureScroll.showsHorizontalScrollIndicator = false
+        pictureScroll.clipsToBounds = false
+        for (inner, outer, height) in [(chips, chipScroll, 30.0), (pictures, pictureScroll, Self.pictureHeight)] {
+            inner.translatesAutoresizingMaskIntoConstraints = false
+            outer.addSubview(inner)
+            NSLayoutConstraint.activate([
+                inner.topAnchor.constraint(equalTo: outer.contentLayoutGuide.topAnchor),
+                inner.bottomAnchor.constraint(equalTo: outer.contentLayoutGuide.bottomAnchor),
+                inner.leadingAnchor.constraint(equalTo: outer.contentLayoutGuide.leadingAnchor),
+                inner.trailingAnchor.constraint(equalTo: outer.contentLayoutGuide.trailingAnchor),
+                inner.heightAnchor.constraint(equalTo: outer.frameLayoutGuide.heightAnchor),
+                outer.heightAnchor.constraint(equalToConstant: height)
+            ])
+        }
+        [status, ask, note, installRow, steps, crew, chipScroll, pictureScroll].forEach(stack.addArrangedSubview)
+        stack.setCustomSpacing(6, after: status)
+        stack.setCustomSpacing(6, after: ask)
+        stack.setCustomSpacing(20, after: installRow)
+        stack.setCustomSpacing(20, after: steps)
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+        scroll.addSubview(stack)
         NSLayoutConstraint.activate([
-            surface.topAnchor.constraint(equalTo: topAnchor),
-            surface.bottomAnchor.constraint(equalTo: bottomAnchor),
-            surface.leadingAnchor.constraint(equalTo: leadingAnchor),
-            surface.trailingAnchor.constraint(equalTo: trailingAnchor),
-            surface.heightAnchor.constraint(equalToConstant: 40),
-            line.centerYAnchor.constraint(equalTo: surface.contentView.centerYAnchor),
-            line.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: 18),
-            line.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -16)
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -12),
+            stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -24)
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(count: Int) {
-        // Keeps its words while fading out.
-        guard count > 0 else { return }
-        text.text = count == 1 ? "Marked done" : "\(count) marked done"
+    /// Every status, ticked at `current`, for a page's status and a Done row's menu.
+    static func statusMenu(current: AppTask.Status, set: @escaping (AppTask.Status) -> Void) -> UIMenu {
+        let statuses: [(AppTask.Status, String)] = [
+            (.needsYou, "hand.raised"), (.inProgress, "hammer"), (.readyToTry, "shippingbox"),
+            (.queued, "tray"), (.done, "checkmark"), (.dropped, "xmark")]
+        return UIMenu(options: .displayInline, children: statuses.map { value, symbol in
+            UIAction(title: value == .dropped ? "Drop" : name(value), image: UIImage(systemName: symbol),
+                     attributes: value == .dropped ? .destructive : [], state: current == value ? .on : .off) { _ in set(value) }
+        })
     }
 
-    #if DEBUG
-    func debugPress() { button.sendActions(for: .touchUpInside) }
-    #endif
+    static func name(_ status: AppTask.Status) -> String {
+        switch status {
+        case .needsYou: "Needs you"
+        case .inProgress: "In progress"
+        case .readyToTry: "Ready to try"
+        case .queued: "Queued"
+        case .done: "Done"
+        case .dropped: "Dropped"
+        }
+    }
+
+    static func color(_ status: AppTask.Status) -> UIColor {
+        switch status {
+        case .needsYou: Theme.accent
+        case .inProgress: Theme.warning
+        case .readyToTry: Theme.success
+        default: .secondaryLabel
+        }
+    }
+
+    func configure(_ content: Content) {
+        guard content != shown else { return }
+        let was = shown
+        shown = content
+        status.configuration?.attributedTitle = AttributedString(Self.name(content.status), attributes: AttributeContainer([
+            .font: Theme.font(.footnote, 13, .semibold), .foregroundColor: Self.color(content.status)]))
+        status.tintColor = Self.color(content.status)
+        status.menu = UIMenu(children: [
+            UIAction(title: "Move to Front", image: UIImage(systemName: "arrow.left.to.line")) { [weak self] _ in self?.onTop?() },
+            Self.statusMenu(current: content.status) { [weak self] in self?.onStatus?($0) }])
+        status.accessibilityLabel = "Status, \(Self.name(content.status))"
+        ask.text = content.ask
+        note.text = content.note
+        note.isHidden = content.note.isEmpty
+        install.configuration?.title = content.install
+        install.isHidden = content.install == nil
+        shipped.text = content.shipped
+        shipped.isHidden = content.shipped == nil
+        install.superview?.isHidden = install.isHidden && shipped.isHidden
+
+        if content.subtasks != was?.subtasks {
+            steps.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            for sub in content.subtasks {
+                let row = SubtaskRow(sub)
+                row.onTick = { [weak self] in self?.onTick?(sub.id) }
+                row.addAction(UIAction { [weak self] _ in self?.onSubtask?(sub.id) }, for: .touchUpInside)
+                steps.addArrangedSubview(row)
+            }
+            steps.isHidden = content.subtasks.isEmpty
+        }
+        if content.threads != was?.threads {
+            crew.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            let alive = content.threads.filter { TaskParts.mood($0) != nil }, rest = content.threads.filter { TaskParts.mood($0) == nil }
+            for thread in alive { crew.addArrangedSubview(TaskParts.member(thread) { [weak self] in self?.onThread?(thread.id) }) }
+            for thread in rest { chips.addArrangedSubview(TaskParts.chip(thread) { [weak self] in self?.onThread?(thread.id) }) }
+            crew.isHidden = alive.isEmpty
+            chips.superview?.isHidden = rest.isEmpty
+        }
+        if content.media != was?.media {
+            loads.forEach { $0.cancel() }
+            loads = []
+            pictures.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            content.media.forEach { pictures.addArrangedSubview(picture($0)) }
+            pictureScroll.isHidden = content.media.isEmpty
+        }
+    }
+
+    /// A screenshot or clip at a readable size; it takes its own shape once loaded.
+    private func picture(_ picture: Picture) -> UIView {
+        let button = UIButton(type: .custom)
+        button.backgroundColor = Theme.codeFill
+        button.layer.cornerRadius = 14
+        button.layer.cornerCurve = .continuous
+        button.clipsToBounds = true
+        button.imageView?.contentMode = .scaleAspectFill
+        button.contentHorizontalAlignment = .fill
+        button.contentVerticalAlignment = .fill
+        button.translatesAutoresizingMaskIntoConstraints = false
+        let width = button.widthAnchor.constraint(equalToConstant: picture.media.kind == "video" ? 300 : 102)
+        NSLayoutConstraint.activate([width, button.heightAnchor.constraint(equalToConstant: Self.pictureHeight)])
+        if picture.media.kind == "video" {
+            let play = UIImageView(image: UIImage(systemName: "play.fill"))
+            play.tintColor = .white
+            play.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 26)
+            play.layer.shadowOpacity = 0.4
+            play.layer.shadowRadius = 6
+            play.layer.shadowOffset = .zero
+            play.translatesAutoresizingMaskIntoConstraints = false
+            button.addSubview(play)
+            NSLayoutConstraint.activate([play.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+                                         play.centerYAnchor.constraint(equalTo: button.centerYAnchor)])
+        }
+        let media = picture.media
+        button.accessibilityLabel = media.caption.isEmpty ? (media.kind == "video" ? "Clip" : "Picture") : media.caption
+        button.addAction(UIAction { [weak self] _ in self?.onMedia?(picture) }, for: .touchUpInside)
+        loads.append(Task { [weak self, weak button] in
+            guard let image = await self?.loadThumbnail?(picture), !Task.isCancelled, image.size.height > 0 else { return }
+            width.constant = min(max(Self.pictureHeight * image.size.width / image.size.height, 90), 360)
+            button?.setImage(image, for: .normal)
+        })
+        return button
+    }
+}
+
+/// A sub-task in a work item's checklist: a round tick (tap to mark it
+/// done, again to reopen it), what it is, and how it stands when that's
+/// worth saying. Tapping the rest opens its thread.
+private final class SubtaskRow: UIControl {
+    var onTick: (() -> Void)?
+    private let check = UIButton(type: .custom)
+    private let opens: Bool
+
+    init(_ sub: WorkItemPage.Sub) {
+        opens = sub.opens
+        super.init(frame: .zero)
+        let closed = !sub.status.open
+        let mark = UIImageView(image: UIImage(systemName: sub.status == .dropped ? "xmark.circle.fill" : closed ? "checkmark.circle.fill" : "circle"))
+        mark.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 21, weight: .light)
+        mark.tintColor = sub.status == .done ? Theme.success : .tertiaryLabel
+        mark.isUserInteractionEnabled = false
+        let ask = Theme.label(sub.ask, Theme.font(.body, 17), color: closed ? .secondaryLabel : .label, lines: 0)
+        let words = [[.needsYou, .inProgress, .readyToTry].contains(sub.status) ? WorkItemPage.name(sub.status) : nil,
+                     sub.note.isEmpty ? nil : sub.note].compactMap { $0 }
+        let detail = Theme.label(words.joined(separator: " · "), Theme.font(.footnote, 13),
+                                 color: words.first == sub.note ? .secondaryLabel : WorkItemPage.color(sub.status), lines: 2)
+        detail.isHidden = words.isEmpty
+        let text = UIStackView(arrangedSubviews: [ask, detail])
+        text.axis = .vertical
+        text.spacing = 2
+        text.isUserInteractionEnabled = false
+        check.addAction(UIAction { [weak self] _ in self?.onTick?() }, for: .touchUpInside)
+        check.isEnabled = sub.status != .dropped
+        check.accessibilityLabel = closed ? "Done" : "Mark done"
+        check.accessibilityTraits = closed ? [.button, .selected] : .button
+        [check, mark, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
+        NSLayoutConstraint.activate([
+            check.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -11),
+            check.widthAnchor.constraint(equalToConstant: 44),
+            check.heightAnchor.constraint(equalToConstant: 44),
+            check.centerYAnchor.constraint(equalTo: ask.topAnchor, constant: 11),
+            mark.centerXAnchor.constraint(equalTo: check.centerXAnchor),
+            mark.centerYAnchor.constraint(equalTo: check.centerYAnchor),
+            text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 34),
+            text.trailingAnchor.constraint(equalTo: trailingAnchor),
+            text.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9)
+        ])
+        isAccessibilityElement = false
+        accessibilityElements = [check, text]
+        text.isAccessibilityElement = true
+        text.accessibilityLabel = ([sub.ask] + words).joined(separator: ", ")
+        text.accessibilityTraits = sub.opens ? .button : .staticText
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isHighlighted: Bool {
+        didSet { backgroundColor = isHighlighted && opens ? Theme.pressedFill : .clear }
+    }
+}
+
+/// Pieces a Done row and a work item's page share.
+@MainActor
+enum TaskParts {
+    /// A linked worker's jelly mood while it is alive; nil once it finished.
+    static func mood(_ thread: AppTask.Thread) -> JellyLook.Mood? {
+        switch thread.state {
+        case "working": .working
+        case "needs-you": .needsYou
+        case "error": .failed
+        default: nil
+        }
+    }
+
+    /// A live worker: the worker itself (its jelly), its title and how it is
+    /// doing. Tapping it opens it.
+    static func member(_ thread: AppTask.Thread, open: @escaping () -> Void) -> UIView {
+        let mood = mood(thread) ?? .working
+        let button = UIControl()
+        let jelly = JellyView(.worker(thread.id, mood), canvas: .roomy(22))
+        let title = Theme.label(thread.title ?? "Worker", Theme.font(.subheadline, 15, .semibold), lines: 1)
+        let (word, color): (String, UIColor) = switch mood {
+        case .needsYou: ("Needs you", Theme.warning)
+        case .failed: ("Stopped with an error", Theme.failure)
+        default: ("Working", .secondaryLabel)
+        }
+        let state = Theme.label(word, Theme.font(.footnote, 13), color: color, lines: 1)
+        let text = UIStackView(arrangedSubviews: [title, state])
+        text.axis = .vertical
+        text.spacing = 0
+        text.isUserInteractionEnabled = false
+        [jelly, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; button.addSubview($0) }
+        NSLayoutConstraint.activate([
+            jelly.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 1),
+            jelly.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: 1),
+            jelly.widthAnchor.constraint(equalToConstant: 22),
+            jelly.heightAnchor.constraint(equalToConstant: 22),
+            text.leadingAnchor.constraint(equalTo: jelly.trailingAnchor, constant: 11),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: button.trailingAnchor),
+            text.topAnchor.constraint(equalTo: button.topAnchor, constant: 2),
+            text.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -2)
+        ])
+        button.addAction(UIAction { _ in Theme.selectionHaptic(); open() }, for: .touchUpInside)
+        button.isAccessibilityElement = true
+        button.accessibilityTraits = .button
+        button.accessibilityLabel = "Open thread \(thread.title ?? ""), \(word)"
+        return button
+    }
+
+    /// A linked thread: a dot for what it is doing and its title.
+    static func chip(_ thread: AppTask.Thread, open: @escaping () -> Void) -> UIView {
+        var config = UIButton.Configuration.plain()
+        config.title = thread.title ?? "Thread"
+        config.baseForegroundColor = .label
+        config.background.backgroundColor = Theme.codeFill
+        config.cornerStyle = .capsule
+        config.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 11)
+        config.imagePadding = 6
+        config.image = UIImage(systemName: "circle.fill")?.withConfiguration(UIImage.SymbolConfiguration(pointSize: 7))
+        config.imageColorTransformer = UIConfigurationColorTransformer { _ in
+            switch thread.state {
+            case "needs-you": Theme.accent
+            case "working": Theme.warning
+            case "error": Theme.failure
+            default: .tertiaryLabel
+            }
+        }
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = Theme.font(.footnote, 13, .medium)
+            return attributes
+        }
+        config.titleLineBreakMode = .byTruncatingTail
+        let button = UIButton(configuration: config)
+        button.widthAnchor.constraint(lessThanOrEqualToConstant: 240).isActive = true
+        button.addAction(UIAction { _ in Theme.selectionHaptic(); open() }, for: .touchUpInside)
+        button.accessibilityLabel = "Open thread \(thread.title ?? "")"
+        return button
+    }
+
 }
 
 /// Open tasks at a glance: a small glass capsule of counts above the field,
@@ -1016,7 +1213,7 @@ final class TaskStrip: UIControl {
         func count(_ status: AppTask.Status) -> Int { open.filter { $0.status == status }.count }
         func crew(_ state: String, _ mood: JellyLook.Mood) -> [JellyLook] {
             var seen = Set<String>()
-            let threads = open.flatMap(\.threads).filter { $0.state == state && seen.insert($0.id).inserted }
+            let threads = open.flatMap(\.allThreads).filter { $0.state == state && seen.insert($0.id).inserted }
             // No worker on it: the app's agent is.
             return threads.isEmpty ? [.agent(mood)] : threads.prefix(3).map { .worker($0.id, mood) }
         }

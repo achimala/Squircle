@@ -720,6 +720,7 @@ async fn failed_builds_reach_their_agent_once() {
             crate::tasks::By::Agent,
             None,
             vec![],
+            None,
         )
         .await
         .unwrap();

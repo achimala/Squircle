@@ -372,7 +372,8 @@ struct BuildLogPage: Decodable {
 }
 
 /// One thing the user asked an app's agent for, and where it stands
-/// (`squircle task`). Linked threads and builds come with their state.
+/// (`squircle task`): a work item with its sub-tasks, or one sub-task.
+/// Linked threads and builds come with their state.
 struct AppTask: Decodable, Equatable, Identifiable {
     enum Status: String, Decodable, CaseIterable {
         case needsYou = "needs_you", inProgress = "in_progress", readyToTry = "ready_to_try", queued, done, dropped
@@ -399,10 +400,27 @@ struct AppTask: Decodable, Equatable, Identifiable {
     let threads: [Thread]
     let builds: [Build]
     let media: [Media]
+    private var subtaskList: [AppTask]?
+    /// A work item's sub-tasks, in order; none on a sub-task.
+    var subtasks: [AppTask] {
+        get { subtaskList ?? [] }
+        set { subtaskList = newValue }
+    }
+    /// The item's own threads, then its sub-tasks', each once.
+    var allThreads: [Thread] {
+        var seen = Set<String>()
+        return (threads + subtasks.flatMap(\.threads)).filter { seen.insert($0.id).inserted }
+    }
+    /// The thread it is about right now: one waiting on you, else one
+    /// working, else the newest. Archived threads can't be opened.
+    var mainThread: String? {
+        let threads = threads.filter { $0.state != "missing" }
+        return (threads.first { $0.state == "needs-you" } ?? threads.first { $0.state == "working" } ?? threads.last)?.id
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, ask, status, note, order, threads, builds, media, revision
-        case updatedAt = "updated_at", archivedAt = "archived_at"
+        case updatedAt = "updated_at", archivedAt = "archived_at", subtaskList = "subtasks"
     }
 }
 
@@ -414,5 +432,7 @@ struct AppTasks: Decodable, Equatable {
     var history: [AppTask] = []
     var historyNext: String?
     var hasMoreHistory: Bool { historyNext != nil }
+    /// Every work item and sub-task, active and History.
+    var everyTask: [AppTask] { (tasks + history).flatMap { [$0] + $0.subtasks } }
     enum CodingKeys: String, CodingKey { case tasks, history, historyNext = "history_next" }
 }
