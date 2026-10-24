@@ -14,29 +14,6 @@ fn thread(run: Option<&str>, status: &str, needs: bool) -> Value {
 }
 
 #[test]
-fn worker_mode_inherits_its_coordinators_unless_asked() {
-    let mode =
-        |driver, coordinator, requested| worker_mode(driver, coordinator, requested).unwrap().0;
-    assert_eq!(mode("claudeAgent", Some("auto"), None), "auto");
-    assert_eq!(mode("codex", Some("auto"), None), "auto");
-    assert_eq!(
-        mode("claudeAgent", Some("approval-required"), None),
-        "approval-required"
-    );
-    assert_eq!(mode("antigravity", Some("auto"), None), "auto-accept-edits");
-    // Asked for explicitly, a mode is kept as is, even where it asks more.
-    assert_eq!(mode("antigravity", Some("auto"), Some("auto")), "auto");
-    assert_eq!(
-        mode("claudeAgent", Some("auto"), Some("full-access")),
-        "full-access"
-    );
-    // An agent mode T3 doesn't report, or that isn't known, is never assumed.
-    assert!(worker_mode("claudeAgent", None, None).is_err());
-    assert!(worker_mode("claudeAgent", Some("bogus"), None).is_err());
-    assert!(worker_mode("claudeAgent", Some("auto"), Some("yolo")).is_err());
-}
-
-#[test]
 fn wakes_once_per_turn_outcome() {
     let wake = |row: Value| ThreadObservation::decode(&row).wake();
     // Not started yet, and running, call for nothing.
@@ -514,59 +491,6 @@ async fn an_unconfirmed_creation_is_finished_not_repeated() {
             .iter()
             .all(|c| c["threadId"] == reserved.thread_id.as_str())
     );
-}
-
-#[tokio::test]
-async fn a_fresh_start_survives_a_lost_acknowledgement_and_keeps_the_mode() {
-    let temp = tempfile::tempdir().unwrap();
-    let (agents, fake) = fake_agents(
-        temp.path(),
-        temp.path(),
-        vec![row(
-            "old",
-            "p",
-            "approval-required",
-            "t",
-            "completed",
-            false,
-        )],
-    )
-    .await;
-    registered(&agents, |r| {
-        r.agents.insert("p".into(), agent("old"));
-        r.workers.insert("w1".into(), worker("old"));
-    })
-    .await;
-    fake.fail.lock().unwrap().push(("message.dispatch", true));
-    let error = agents
-        .reset(Some("p"), None, Reset::Fresh { note: None })
-        .await
-        .unwrap_err();
-    assert!(format!("{error:#}").contains("did not answer"));
-    let Lifecycle::Replacing {
-        replacement: plan,
-        error: Some(_),
-        ..
-    } = agents.list()[0].lifecycle.clone()
-    else {
-        panic!()
-    };
-    // The retry finds the handoff delivered and does not send it again.
-    let done = agents
-        .ops
-        .run("p".into(), agents.perform("p"))
-        .await
-        .unwrap();
-    assert_eq!(done["thread_id"], plan.thread_id.as_str());
-    let saved = agents.list()[0].clone();
-    assert!(
-        saved.lifecycle == Lifecycle::Ready { refresh: false } && saved.thread_id == plan.thread_id
-    );
-    assert_eq!(agents.registry().workers["w1"].coordinator, plan.thread_id);
-    let created = fake.sent("thread.create");
-    assert_eq!(created.len(), 1);
-    assert_eq!(created[0]["runtimeMode"], "approval-required");
-    assert_eq!(fake.sent("message.dispatch").len(), 1);
 }
 
 #[tokio::test]

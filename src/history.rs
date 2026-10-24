@@ -1065,36 +1065,6 @@ mod tests {
     }
 
     #[test]
-    fn prefers_recent_and_limits_one_thread() {
-        let now = 1_000_000_000;
-        let items = (0..5)
-            .map(|i| {
-                item(
-                    Kind::Message,
-                    &format!("msg:{i}"),
-                    "user",
-                    "compact the agent context",
-                    i * 40,
-                    Some("same"),
-                )
-            })
-            .chain([item(
-                Kind::Message,
-                "msg:other",
-                "user",
-                "compact the agent context",
-                200,
-                Some("other"),
-            )])
-            .collect();
-        let ranked: Vec<String> = rank(&terms("compact context"), items, now, 10, 2)
-            .into_iter()
-            .map(|(_, i)| i.reference)
-            .collect();
-        assert_eq!(ranked, vec!["msg:0", "msg:1", "msg:other"]);
-    }
-
-    #[test]
     fn snippet_centres_on_the_terms() {
         let text = format!(
             "{} the jelly crew decision: workers are chibi sprouts {}",

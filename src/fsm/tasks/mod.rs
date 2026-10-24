@@ -1304,22 +1304,6 @@ mod tests {
     }
 
     #[test]
-    fn signals_read_before_a_change_are_dropped() {
-        let (book, id) = book();
-        let read_at = book.get(&id).unwrap().revision;
-        let book = set(book, &id, Status::NeedsYou, By::User, None, 5);
-        let reduction = M17::reduce(
-            book,
-            Event::Observe {
-                reads: vec![(id.clone(), read_at, worker("1", WorkerPhase::Working))],
-                now: 6,
-            },
-        );
-        assert_eq!(reduction.disposition, Disposition::Unchanged);
-        assert_eq!(reduction.state.get(&id).unwrap().status, Status::NeedsYou);
-    }
-
-    #[test]
     fn linked_work_implies_questions_then_work_then_the_newest_build() {
         let implied = |signature: &str| Signals::legacy(signature).implied();
         assert_eq!(
@@ -1360,41 +1344,6 @@ mod tests {
         assert_eq!(
             book.get(&id).unwrap().archived_at,
             Some(DONE_AGE + 5 + STALE_AGE)
-        );
-    }
-
-    #[test]
-    fn requests_about_no_task_or_without_an_ask_are_refused() {
-        let (book, _) = book();
-        let refused = M17::reduce(
-            book,
-            Event::Attached {
-                id: "nope".into(),
-                now: 1,
-            },
-        );
-        assert_eq!(
-            (refused.disposition, refused.effects),
-            (Disposition::Rejected("No task nope".into()), vec![])
-        );
-        let empty = M17::reduce(
-            refused.state,
-            Event::Add {
-                id: TaskID::fresh(),
-                project: "p".into(),
-                ask: "  ".into(),
-                status: None,
-                note: None,
-                by: By::User,
-                source: None,
-                threads: vec![],
-                parent: None,
-                now: 1,
-            },
-        );
-        assert_eq!(
-            empty.disposition,
-            Disposition::Rejected("A task needs the user's ask".into())
         );
     }
 

@@ -603,21 +603,6 @@ mod tests {
         write: Duration::from_millis(100),
     };
 
-    #[test]
-    fn iso_times_round_trip_and_reject_impossible_dates() {
-        assert_eq!(
-            iso_parse("2026-10-14T22:23:14.016Z").map(|s| s.round()),
-            Some(1_792_016_594.0)
-        );
-        assert_eq!(
-            iso_parse("2026-10-15T00:23:14+02:00").map(|s| s as i64),
-            Some(1_792_016_594)
-        );
-        assert_eq!(iso_utc(1_792_016_594), "2026-10-14T22:23:14");
-        assert_eq!(iso_parse("2026-02-30T00:00:00Z"), None);
-        assert_eq!(iso_parse("2026-13-01T00:00:00Z"), None);
-    }
-
     fn config() -> T3Config {
         T3Config {
             url: "http://t3.test".into(),

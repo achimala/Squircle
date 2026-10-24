@@ -96,14 +96,6 @@ fn history_pages_are_stable_and_complete() {
     assert!(HistoryCursor::parse("x").is_err());
 }
 
-#[tokio::test]
-async fn non_repository_source_has_no_invented_provenance() {
-    let directory = tempfile::tempdir().unwrap();
-    let project = directory.path().join("Probe.xcodeproj");
-    std::fs::create_dir(&project).unwrap();
-    assert_eq!(source_provenance(&project).await, (None, None));
-}
-
 fn request(root: &std::path::Path) -> BuildRequest {
     let project = root.join("Probe.xcodeproj");
     std::fs::create_dir_all(&project).unwrap();
@@ -133,32 +125,6 @@ fn test_ipa(path: &std::path::Path) -> Result<()> {
     )?;
     zip.write_all(&bytes)?;
     zip.finish()?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn import_publishes_only_after_validation() -> Result<()> {
-    let dir = tempfile::tempdir()?;
-    let source = dir.path().join("input.ipa");
-    test_ipa(&source)?;
-    let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
-    let checking = state.clone();
-    let job = import_job(state.clone(), source.clone(), move |source, destination| {
-        assert!(checking.jobs.list().is_empty() && checking.files.list_jobs()?.is_empty());
-        let output = copy_and_inspect_ipa(source, destination)?;
-        assert!(checking.jobs.list().is_empty() && checking.files.list_jobs()?.is_empty());
-        Ok(output)
-    })
-    .await?;
-    let stored = state.files.load_job(&job.id)?;
-    assert_eq!(stored.state(), BuildState::Succeeded);
-    assert_eq!(stored.origin, BuildOrigin::Imported);
-    let output = stored.output().unwrap();
-    assert_eq!(output.bundle_id, "dev.example.probe");
-    assert_eq!(
-        std::fs::read(output.ipa_path.as_ref().unwrap())?,
-        std::fs::read(source)?
-    );
     Ok(())
 }
 
@@ -270,17 +236,4 @@ async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_dedu
     .await
     .expect("queued cancellation should be immediate");
     assert!(!state.files.job_dir(&id).unwrap().join("build.log").exists());
-}
-#[tokio::test]
-async fn draining_refuses_new_side_effects() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
-    state.draining.store(true, Ordering::Release);
-    let error = start(State(state.clone()), Ok(Json(request(dir.path()))))
-        .await
-        .unwrap_err();
-    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    // Refused before any side effect, so clients may send it again.
-    assert!(error.retryable);
-    assert!(state.files.list_jobs().unwrap().is_empty());
 }

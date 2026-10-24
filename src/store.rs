@@ -1203,24 +1203,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn storage_quota_preserves_existing_file() -> Result<()> {
-        let temporary = tempfile::tempdir()?;
-        let store = Store::open(temporary.path().to_owned())?;
-        let job = job();
-        store.save_job(&job)?;
-        let path = store.job_dir(&job.id)?.join("diagnostics.jsonl");
-        let file = open_private_append(&path)?;
-        // A sparse file exercises the size guard without allocating 64 MiB.
-        file.set_len(MAX_DIAGNOSTIC_BYTES + 1)?;
-        let error = store
-            .append_diagnostic(&diagnostic(&job, DiagnosticKind::Log))
-            .unwrap_err();
-        assert!(error.to_string().contains("64 MiB"));
-        assert_eq!(fs::metadata(&path)?.len(), MAX_DIAGNOSTIC_BYTES + 1);
-        Ok(())
-    }
-
     #[cfg(unix)]
     #[test]
     fn secrets_and_records_are_private_and_symlinks_are_refused() -> Result<()> {

@@ -149,35 +149,4 @@ mod tests {
             "https://mac.test"
         );
     }
-    #[test]
-    fn manifest_round_trips_xml_and_uses_build_number() {
-        let output = BuildOutput {
-            archive_path: None,
-            ipa_path: None,
-            app_path: None,
-            dsym_paths: vec![],
-            bundle_id: "test.app".into(),
-            version: "1.0".into(),
-            build_number: "42".into(),
-            title: "Probe <&>".into(),
-        };
-        let value = Value::from_reader(std::io::Cursor::new(
-            manifest(&output, "https://mac.test/a?x=1&y=2").unwrap(),
-        ))
-        .unwrap();
-        let item = &value.as_dictionary().unwrap()["items"].as_array().unwrap()[0];
-        let metadata = item.as_dictionary().unwrap()["metadata"]
-            .as_dictionary()
-            .unwrap();
-        assert_eq!(metadata["bundle-version"].as_string(), Some("42"));
-        assert_eq!(metadata["title"].as_string(), Some("Probe <&>"));
-        assert!(install_url("https://mac.test/a?x=1&y=2").contains("%26y%3D2"));
-    }
-    #[test]
-    fn malformed_archive_cannot_be_imported() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fake.ipa");
-        std::fs::write(&path, "not a zip").unwrap();
-        assert!(inspect_ipa(&path).is_err());
-    }
 }

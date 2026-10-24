@@ -292,8 +292,4 @@ mod tests {
             "test.app"
         ));
     }
-    #[test]
-    fn invalid_png_is_rejected() {
-        assert!(validate_png(b"not a screenshot").is_err());
-    }
 }

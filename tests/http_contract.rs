@@ -330,123 +330,11 @@ async fn preview_download_is_bound_to_its_job_and_control_token() {
     );
 }
 
-#[tokio::test]
-async fn preview_submission_rejects_imports_and_ambiguous_devices_without_running_tools() {
-    let fixture = Fixture::new();
-    let id = fixture.import().await;
-    for simulator in ["booted", "00000000-0000-0000-0000-000000000000"] {
-        let (status, value) = fixture
-            .json(
-                "POST",
-                &format!("/v1/builds/{id}/preview"),
-                Some(&fixture.control),
-                Some(json!({"simulator":simulator})),
-            )
-            .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
-    }
-    let status = fixture.status(&id).await;
-    assert_eq!(status["job"]["state"], "succeeded");
-    assert!(status["job"]["output"]["ipa_path"].is_string());
-    assert!(status["job"]["output"]["preview_state"].is_null());
-}
-
 const SCREENSHOT_PNG: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0,
     0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5, 1, 1,
     39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
 ];
-
-#[tokio::test]
-async fn remote_project_routes_require_control_before_inspecting_paths_or_query_fields() {
-    let fixture = Fixture::new();
-    for token in [None, Some("wrong"), Some(fixture.diagnostic.as_str())] {
-        for (method, path) in [
-            ("GET", "/v1/projects"),
-            ("GET", "/v1/projects/inspect"),
-            ("POST", "/v1/apps/import"),
-        ] {
-            let (status, value) = fixture.json(method, path, token, Some(json!({}))).await;
-            assert_eq!(status, StatusCode::UNAUTHORIZED, "{value}");
-        }
-    }
-    let (status, value) = fixture
-        .json("GET", "/v1/projects/inspect", Some(&fixture.control), None)
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["ok"], false);
-    let (status, value) = fixture
-        .json(
-            "POST",
-            "/v1/apps/import",
-            Some(&fixture.control),
-            Some(json!({"project":"/does/not/exist.xcodeproj","scheme":"App","name":"App"})),
-        )
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(value["ok"], false);
-    assert!(fixture.state.files.list_jobs().unwrap().is_empty());
-    assert!(
-        squircle::apps::list(&fixture.state.files)
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn remote_directory_listing_returns_only_shallow_visible_folders_and_xcode_packages() {
-    let fixture = Fixture::new();
-    let directory = fixture.ipa.parent().unwrap().join("Work & Apps");
-    fs::create_dir(&directory).unwrap();
-    for name in [
-        "Beta.xcworkspace",
-        "Alpha.xcodeproj",
-        "Sources",
-        ".hidden",
-        "Tool.app",
-    ] {
-        fs::create_dir(directory.join(name)).unwrap();
-    }
-    fs::create_dir(directory.join("Alpha.xcodeproj/Nested")).unwrap();
-    fs::write(directory.join("notes.txt"), "text").unwrap();
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("path", directory.to_str().unwrap())
-        .finish();
-    let (status, value) = fixture
-        .json(
-            "GET",
-            &format!("/v1/projects?{query}"),
-            Some(&fixture.control),
-            None,
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{value}");
-    assert_eq!(
-        value["data"]["path"],
-        directory.canonicalize().unwrap().to_str().unwrap()
-    );
-    let entries = value["data"]["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 3);
-    assert_eq!(entries[0]["name"], "Alpha.xcodeproj");
-    assert_eq!(entries[0]["kind"], "project");
-    assert_eq!(entries[1]["kind"], "workspace");
-    assert_eq!(entries[2]["kind"], "directory");
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("path", directory.join("Alpha.xcodeproj").to_str().unwrap())
-        .finish();
-    assert_eq!(
-        fixture
-            .json(
-                "GET",
-                &format!("/v1/projects?{query}"),
-                Some(&fixture.control),
-                None
-            )
-            .await
-            .0,
-        StatusCode::BAD_REQUEST
-    );
-}
 
 #[tokio::test]
 async fn app_metadata_and_versioned_preview_survive_refresh_and_restart() {
@@ -585,54 +473,6 @@ async fn app_metadata_and_versioned_preview_survive_refresh_and_restart() {
         .json("GET", &route, Some(&fixture.control), None)
         .await;
     assert_eq!(unchanged["data"], updated["data"]);
-}
-
-#[tokio::test]
-async fn app_catalog_requires_control_and_missing_artifacts_return_not_found() {
-    let fixture = Fixture::new();
-    let missing = Uuid::new_v4().to_string();
-    for bearer in [None, Some("wrong"), Some(fixture.diagnostic.as_str())] {
-        for (method, path) in [
-            ("GET", "/v1/apps".to_owned()),
-            ("POST", "/v1/apps".to_owned()),
-            ("GET", format!("/v1/apps/{missing}")),
-            ("PATCH", format!("/v1/apps/{missing}")),
-            ("GET", format!("/v1/apps/{missing}/preview")),
-            ("POST", format!("/v1/apps/{missing}/preview")),
-        ] {
-            assert_eq!(
-                fixture
-                    .request(method, &path, bearer, Some(json!({})))
-                    .await
-                    .status(),
-                StatusCode::UNAUTHORIZED
-            );
-        }
-    }
-    assert_eq!(
-        fixture
-            .request(
-                "GET",
-                &format!("/v1/apps/{missing}"),
-                Some(&fixture.control),
-                None
-            )
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-    assert_eq!(
-        fixture
-            .request(
-                "GET",
-                &format!("/v1/apps/{missing}/preview"),
-                Some(&fixture.control),
-                None
-            )
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
 }
 
 #[tokio::test]

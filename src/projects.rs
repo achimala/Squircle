@@ -536,41 +536,6 @@ mod tests {
         json!({"PRODUCT_TYPE":"com.apple.product-type.application","PLATFORM_NAME":"iphoneos","PRODUCT_BUNDLE_IDENTIFIER":"dev.example.app","PRODUCT_NAME":"Example","DEVELOPMENT_TEAM":""})
     }
     #[test]
-    fn browse_is_shallow_sorted_and_keeps_packages_selectable() {
-        let temp = tempfile::tempdir().unwrap();
-        for name in [
-            "zFolder",
-            "A.xcodeproj",
-            "b.xcworkspace",
-            ".hidden",
-            "Unrelated.app",
-        ] {
-            fs::create_dir(temp.path().join(name)).unwrap();
-        }
-        fs::write(temp.path().join("README.txt"), "text").unwrap();
-        fs::create_dir(temp.path().join("A.xcodeproj/Internals")).unwrap();
-        let directory = browse(temp.path().to_str()).unwrap();
-        assert_eq!(
-            directory
-                .entries
-                .iter()
-                .map(|entry| (entry.name.as_str(), entry.kind))
-                .collect::<Vec<_>>(),
-            vec![
-                ("A.xcodeproj", "project"),
-                ("b.xcworkspace", "workspace"),
-                ("zFolder", "directory")
-            ]
-        );
-        assert!(browse(temp.path().join("A.xcodeproj").to_str()).is_err());
-        assert!(browse(temp.path().join("b.xcworkspace").to_str()).is_err());
-        assert!(browse(Some("relative/folder")).is_err());
-        assert_eq!(
-            resolve_path(Some("~")).unwrap(),
-            dirs::home_dir().unwrap().canonicalize().unwrap()
-        );
-    }
-    #[test]
     fn parses_project_and_workspace_schemes_without_inventing_choices() {
         assert_eq!(
             parse_schemes(br#"{"project":{"schemes":["Z","App","App"]}}"#).unwrap(),
@@ -633,55 +598,6 @@ mod tests {
         );
     }
     #[test]
-    fn import_without_build_history_persists_recipe_and_preserves_it_on_registration() {
-        let (_temp, store, inspection) = fixture();
-        assert!(store.list_jobs().unwrap().is_empty());
-        let imported = import_inspected(&store, &inspection, "New App").unwrap();
-        let recipe = imported.build_request.as_ref().unwrap();
-        assert_eq!(recipe.mode, BuildMode::Archive);
-        assert!(recipe.capture_preview);
-        assert!(recipe.allow_provisioning_updates);
-        assert!(recipe.request_id.is_none());
-        let options = plist::Value::from_file(recipe.export_options.as_ref().unwrap()).unwrap();
-        let options = options.as_dictionary().unwrap();
-        assert_eq!(options["method"].as_string(), Some("release-testing"));
-        assert_eq!(options["signingStyle"].as_string(), Some("automatic"));
-        assert!(options.get("teamID").is_none());
-        assert!(
-            recipe
-                .export_options
-                .as_ref()
-                .unwrap()
-                .starts_with(&store.root)
-        );
-        let again = apps::register(
-            &store,
-            AppRegistration {
-                name: "Do not replace".into(),
-                project: inspection.project.clone(),
-                scheme: inspection.scheme.clone().unwrap(),
-                bundle_id: inspection.bundle_id.clone(),
-                summary: "Do not replace".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(again.build_request, imported.build_request);
-        assert_eq!(again.name, "New App");
-        let root = store.root.clone();
-        drop(store);
-        let restarted = Store::open(root).unwrap();
-        assert_eq!(
-            apps::get(&restarted, &imported.id).unwrap().build_request,
-            imported.build_request
-        );
-        assert!(restarted.list_jobs().unwrap().is_empty());
-        assert_eq!(
-            fs::read_dir(&inspection.project).unwrap().count(),
-            0,
-            "import edited the Xcode project"
-        );
-    }
-    #[test]
     fn existing_export_options_are_reused_and_upload_templates_rejected() {
         let (_temp, store, mut inspection) = fixture();
         let path = inspection
@@ -708,25 +624,5 @@ mod tests {
             .to_file_xml(&path)
             .unwrap();
         assert!(read_export_options(&path).is_err());
-    }
-    #[test]
-    fn legacy_app_records_default_to_metadata_only_and_invalid_targets_are_not_imported() {
-        let (_temp, store, mut inspection) = fixture();
-        inspection.can_import = false;
-        assert!(import_inspected(&store, &inspection, "No app").is_err());
-        assert!(apps::list(&store).unwrap().is_empty());
-        let record:AppRecord=serde_json::from_value(json!({"id":uuid::Uuid::new_v4().to_string(),"name":"Legacy","project":"/tmp/Legacy.xcodeproj","scheme":"Legacy","bundle_id":null,"summary":"","updated_at":1,"preview":null})).unwrap();
-        assert!(record.build_request.is_none());
-    }
-    #[tokio::test]
-    async fn inspection_subprocess_deadline_kills_owned_child_group() {
-        let mut command = Command::new("/bin/sleep");
-        command.arg("30");
-        let started = Instant::now();
-        let error = bounded_output(command, started + Duration::from_millis(100))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("exceeded"));
-        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

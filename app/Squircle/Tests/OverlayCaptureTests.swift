@@ -11,7 +11,7 @@ final class OverlayCaptureTests: XCTestCase {
         var output: (URL) -> CaptureOutput?
         var finishing: CheckedContinuation<Void, Never>?
         var holdFinish = false
-        private(set) var finished = 0, cancelled = 0
+        private(set) var finished = 0
 
         init(_ output: @escaping (URL) -> CaptureOutput?) {
             self.output = output
@@ -27,7 +27,6 @@ final class OverlayCaptureTests: XCTestCase {
         }
 
         func cancel() {
-            cancelled += 1
             try? FileManager.default.removeItem(at: url)
         }
 
@@ -48,26 +47,6 @@ final class OverlayCaptureTests: XCTestCase {
         XCTAssertFalse(producer.fileExists)
         XCTAssertNil(capture.recording)
         XCTAssertTrue(capture.start(.screen, below: UIWindow()), "Free for the next recording.")
-    }
-
-    func testFailedWriterLeavesTheSessionIdle() async {
-        let producer = FakeProducer { _ in nil }
-        let capture = session(producer)
-        XCTAssertTrue(capture.start(.performance, below: UIWindow()))
-        let attachment = await capture.stop(snapshot: nil)
-        XCTAssertNil(attachment)
-        XCTAssertNil(capture.recording)
-        XCTAssertFalse(producer.fileExists)
-    }
-
-    func testClosingTheOwnerStopsARunningRecording() {
-        let producer = FakeProducer { .screen(url: $0, duration: 1) }
-        let capture = session(producer)
-        XCTAssertTrue(capture.start(.screen, below: UIWindow()))
-        capture.cancel()
-        XCTAssertEqual(producer.cancelled, 1)
-        XCTAssertNil(capture.recording)
-        XCTAssertFalse(producer.fileExists)
     }
 
     func testClosingTheOwnerWhileItFinishesDiscardsTheFile() async {

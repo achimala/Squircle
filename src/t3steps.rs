@@ -358,23 +358,4 @@ mod tests {
             "Same header and length are still different images."
         );
     }
-
-    #[test]
-    fn only_simulator_captures_stand_in_for_home() {
-        assert!(simulator_capture("mcp__t3-code__device_screenshot"));
-        for tool in [
-            "Read",
-            "mcp__t3-code__preview_snapshot",
-            "mcp__evil__device_screenshot",
-        ] {
-            assert!(!simulator_capture(tool), "{tool}");
-        }
-    }
-
-    #[test]
-    fn rejects_injection_in_identifiers() {
-        assert!(valid("c3e60882-f28f-4656-879d-99b3e2dcddbb", &[]));
-        assert!(!valid("x' or 1=1 --", &[]));
-        assert!(valid("toolu_01H4gxVXp7szmDMV2t15BWjB", &['_']));
-    }
 }

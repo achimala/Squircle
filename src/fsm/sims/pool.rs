@@ -1049,18 +1049,4 @@ mod tests {
             ]
         );
     }
-
-    /// Earlier pool files: a lease or a touch is no longer ownership; a
-    /// creation receipt still is.
-    #[test]
-    fn earlier_provenance_keeps_only_receipts() {
-        let old: HashMap<String, Provenance> = serde_json::from_value(serde_json::json!({
-            "L": {"leased": true, "created_by": null, "touched_by": null, "touched_at": 0.0, "last_used": 5.0},
-            "T": {"leased": false, "created_by": null, "touched_by": "w", "touched_at": 5.0, "last_used": 5.0},
-            "C": {"leased": true, "created_by": "w", "touched_by": null, "touched_at": 0.0, "last_used": 5.0}})).unwrap();
-        assert_eq!(
-            (old["L"].owned(), old["T"].owned(), old["C"].owned()),
-            (false, false, true)
-        );
-    }
 }

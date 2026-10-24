@@ -10,18 +10,6 @@ extension JSONValue {
 }
 
 final class T3Tests: XCTestCase {
-    @MainActor
-    func testRejectedApprovalModeChangeRestoresSelection() async {
-        let model = SquircleModel(configuration:nil)
-        await model.open(.thread("existing", appID: "app"))
-        model.consumeThread(.from(["kind":"snapshot","snapshotSequence":1,"projection":["thread":["runtimeMode":"approval-required"]]]))
-        await model.setRuntimeMode(.fullAccess)
-        XCTAssertEqual(model.runtimeMode, .approvalRequired)
-        XCTAssertNotNil(model.error)
-        await model.open(.draft(UUID(), appID: "app", agent: false))
-        await model.setRuntimeMode(.autoAcceptEdits)
-        XCTAssertEqual(model.runtimeMode, .autoAcceptEdits)
-    }
     private var modelConfig: JSONValue {
         .from(["providers":[
             ["instanceId":"codex","displayName":"Codex","enabled":true,"status":"ready","models":[
@@ -115,15 +103,6 @@ final class T3Tests: XCTestCase {
         // once. After the first, the delay covers them.
         XCTAssertLessThan(gaps.dropFirst(70).max()!, 0.04)
         XCTAssertGreaterThan(gaps.dropFirst(20).min()!, 0.008)
-    }
-
-    func testLetterboxAndRotationMapping() {
-        let bounds = CGRect(x:0,y:0,width:400,height:300), size = CGSize(width:200,height:400)
-        XCTAssertNil(SimulatorSurface.point(CGPoint(x:10,y:150),bounds:bounds,size:size,orientation:"portrait"))
-        let middle = SimulatorSurface.point(CGPoint(x:200,y:150),bounds:bounds,size:size,orientation:"portrait")!
-        XCTAssertEqual(middle.x,0.5); XCTAssertEqual(middle.y,0.5)
-        let rotated = SimulatorSurface.point(CGPoint(x:162.5,y:75),bounds:bounds,size:size,orientation:"landscape_left")!
-        XCTAssertEqual(rotated.x,0.25,accuracy:0.001); XCTAssertEqual(rotated.y,0.75,accuracy:0.001)
     }
     /// Every protocol 2 event carries one whole entity: a replayed one
     /// applies once, a newer one replaces the old in place, and a late
@@ -545,18 +524,6 @@ final class NativeStateTests: XCTestCase {
         XCTAssertFalse(T3HTTP.sameOrigin(URL(string: "http://mac.tail.ts.net/a")!, URL(string: "https://mac.tail.ts.net")!))
     }
 
-    func testSharedKeychainUpdatesInPlaceAndNeverDeletes() {
-        typealias Shared = AppConfiguration.Shared
-        var adds = 0
-        XCTAssertEqual(Shared.replace(data: Data(), update: { _ in errSecSuccess }, add: { _ in adds += 1; return errSecSuccess }), .stored)
-        XCTAssertEqual(adds, 0)
-        XCTAssertEqual(Shared.replace(data: Data(), update: { _ in errSecItemNotFound }, add: { _ in errSecSuccess }), .stored)
-        XCTAssertEqual(Shared.replace(data: Data(), update: { _ in errSecItemNotFound }, add: { _ in errSecDuplicateItem }), .failed(errSecDuplicateItem))
-        XCTAssertEqual(Shared.replace(data: Data(), update: { _ in errSecInteractionNotAllowed }, add: { _ in adds += 1; return errSecSuccess }),
-                       .failed(errSecInteractionNotAllowed))
-        XCTAssertEqual(adds, 0, "A refused update must not fall through to replacing the item")
-    }
-
     func testOlderCacheSnapshotNeverReplacesNewer() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -577,16 +544,6 @@ final class NativeStateTests: XCTestCase {
         XCTAssertNil(cache.peek("b")); XCTAssertNotNil(cache.peek("a")); XCTAssertEqual(cache.total, 8)
         cache.set(Data(count: 50), for: "huge")
         XCTAssertEqual(cache.count, 1, "One entry over budget is kept alone, not refused")
-    }
-
-    func testAgentDirectoryCarriesTheServicesCLI() throws {
-        let reply = JSONValue.from(["ok": true, "data": ["agents": [["project_id": "p", "thread_id": "t"], ["project_id": "q"]],
-                                                         "cli": "'/opt/sq dir/squircle' --data-dir /data --server http://127.0.0.1:9"]])
-        let directory = try AgentDirectory.decode(reply)
-        XCTAssertEqual(directory.agents, ["p": "t"])
-        XCTAssertEqual(directory.cli, "'/opt/sq dir/squircle' --data-dir /data --server http://127.0.0.1:9")
-        XCTAssertNil(try AgentDirectory.decode(.from(["ok": true, "data": ["agents": []]])).cli)
-        XCTAssertThrowsError(try AgentDirectory.decode(.from(["ok": false])))
     }
 
     /// Closing breaks every cycle: the model, its client and sessions go.

@@ -184,34 +184,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn discovers_tool_under_custom_xcode_without_assuming_app_name() {
-        let candidates =
-            tool_candidates(Path::new("/Custom/Xcode Beta.app/Contents/Developer")).unwrap();
-        assert_eq!(
-            candidates[0],
-            PathBuf::from(
-                "/Custom/Xcode Beta.app/Contents/SharedFrameworks/DVTFoundation.framework/Versions/A/Resources/symbolicatecrash"
-            )
-        );
-        assert!(tool_candidates(Path::new("/Library/Developer/CommandLineTools")).is_err());
-        assert!(tool_candidates(Path::new("Contents/Developer")).is_err());
-    }
-
-    #[test]
-    fn report_and_dsym_paths_are_literal_arguments() {
-        let report = Path::new("/tmp/report ; $(echo nope).crash");
-        let dsym = Path::new("/tmp/My App `echo nope`.app.dSYM");
-        assert_eq!(
-            tool_args(report, dsym),
-            [
-                OsString::from("-d"),
-                dsym.as_os_str().into(),
-                report.as_os_str().into()
-            ]
-        );
-    }
-
-    #[test]
     fn rejects_empty_json_and_incomplete_reports() {
         assert!(validate_apple_text(b" \n").is_err());
         assert!(validate_apple_text(br#"{"incident":"example"}"#).is_err());

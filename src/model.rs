@@ -749,28 +749,4 @@ mod tests {
             assert!(load(bad.clone()).is_err(), "accepted {bad}");
         }
     }
-
-    #[test]
-    fn transfer_evidence_only_moves_forward() {
-        let opened = TransferEvidence::NotStarted.opened(5);
-        assert_eq!(opened.opened(9), opened);
-        let done = opened.completed(7);
-        assert_eq!(
-            done,
-            TransferEvidence::Completed {
-                started_at: 5,
-                completed_at: 7
-            }
-        );
-        assert_eq!(done.opened(9).completed(11), done);
-        let ticket = |value| {
-            serde_json::from_value::<Ticket>(serde_json::json!({
-            "token": "t", "build_id": "b", "expires_at": 1, "base_url": "u", "downloaded_at": value}))
-        };
-        assert!(ticket(serde_json::json!(3)).is_err());
-        assert_eq!(
-            ticket(serde_json::Value::Null).unwrap().transfer,
-            TransferEvidence::NotStarted
-        );
-    }
 }

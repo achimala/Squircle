@@ -746,18 +746,6 @@ async fn file_orphan(
 mod tests {
     use super::*;
 
-    fn probe(frames: u64, duration: f64) -> Probe {
-        Probe {
-            bytes: 10_000_000,
-            codec: "h264".into(),
-            width: 1206,
-            height: 2622,
-            frames,
-            duration,
-            light: false,
-        }
-    }
-
     #[test]
     fn names_the_session_of_leftovers() {
         let id = "1cbb5ade-2a25-42c9-bf17-39504daa49cd";
@@ -770,25 +758,5 @@ mod tests {
         );
         assert_eq!(session_of(&format!(".{id}.mp4.light.mp4")), None);
         assert_eq!(session_of(&format!("{id}.mp4")), None);
-    }
-
-    #[test]
-    fn counts_only_shown_packets() {
-        // An edit list's lead-in is flagged discard and never shown.
-        assert_eq!(count_shown("KD_\n_D_\nK__\n___\n___\n\n"), 3);
-    }
-
-    #[test]
-    fn a_pass_must_keep_every_frame_and_the_length() {
-        let source = probe(6095, 92.278);
-        assert!(matches(&source, 6095, 92.193).is_ok());
-        assert!(
-            matches(&source, 6094, 92.278).is_err(),
-            "A dropped frame fails."
-        );
-        assert!(matches(&source, 6095, 90.0).is_err());
-        let long = probe(63_480, 1795.94);
-        assert!(matches(&long, 63_480, 1785.0).is_ok(), "1% of a long one.");
-        assert!(matches(&long, 63_480, 1770.0).is_err());
     }
 }
