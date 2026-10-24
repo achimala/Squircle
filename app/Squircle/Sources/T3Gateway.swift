@@ -115,10 +115,10 @@ final class T3HTTP {
     /// socket write still queued after 45 s (a Ping behind a picture on a
     /// slow uplink); the gateway's heartbeat judges the socket instead.
     let socketSession: URLSession
-    init(configuration: AppConfiguration) {
+    init(configuration: AppConfiguration, transport: Transport = .network) {
         self.configuration = configuration
         token = configuration.t3Token
-        let c = URLSessionConfiguration.ephemeral
+        let c = transport.sessionConfiguration()
         c.httpShouldSetCookies = false; c.urlCredentialStorage = nil; c.urlCache = nil
         c.timeoutIntervalForRequest = 45
         #if DEBUG
@@ -260,11 +260,16 @@ final class T3Gateway {
     /// Why T3 refused the last socket's upgrade, if it did.
     private(set) var rejection: Error?
     var isOpen: Bool { socket != nil }
-    init(configuration: AppConfiguration) { http = T3HTTP(configuration: configuration) }
+    private let transport: Transport
+    init(configuration: AppConfiguration, transport: Transport = .network) {
+        http = T3HTTP(configuration: configuration, transport: transport)
+        self.transport = transport
+    }
     /// Closes the socket and the HTTP session for good.
     func close() { onDisconnect = nil; disconnect(notify: false); http.invalidate() }
     func connect() async throws {
         disconnect(notify: false)
+        guard transport == .network else { throw ClientError.connection("T3") }
         ConnectionTrace.mark("socket.start")
         let ws = http.socketSession.webSocketTask(with: try http.bearerSocketRequest("/ws"))
         disconnect(notify: false); rejection = nil
@@ -275,6 +280,7 @@ final class T3Gateway {
                 while !Task.isCancelled {
                     let message = try await ws.receive()
                     self?.lastFrame = .now
+                    self?.frameArrived()
                     let data: Data
                     switch message { case .data(let d): data = d; case .string(let s): data = Data(s.utf8); @unknown default: continue }
                     if ConnectionTrace.enabled, first { ConnectionTrace.mark("socket.firstFrame"); first = false }
@@ -307,17 +313,28 @@ final class T3Gateway {
         }
     }
     /// Whether T3 still answers on this socket, within `timeout`.
+    /// T3 answers the Ping, so the next frame says the socket lives; it
+    /// going says it doesn't. A half-open socket does neither, so silence
+    /// past `timeout` (the heartbeat's rule) drops it.
     func probe(timeout: Duration = .seconds(8)) async -> Bool {
         guard let ws = socket else { return false }
         let asked = ContinuousClock.now
         Task { try? await ping() }
-        while !silent(beyond: timeout, since: asked) {
-            if lastFrame > asked { return true }
-            guard socket === ws else { return false }
-            try? await Task.sleep(for: .milliseconds(100))
+        let limit = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: timeout)
+                guard !Task.isCancelled, let self, socket === ws else { return }
+                if silent(beyond: timeout, since: asked) { drop(ws); return }
+            }
         }
-        drop(ws)
-        return false
+        defer { limit.cancel() }
+        return await withCheckedContinuation { frameWaiters.append($0) }
+    }
+    /// Probes waiting for T3's next frame (true) or the socket going (false).
+    private var frameWaiters: [CheckedContinuation<Bool, Never>] = []
+    private func frameArrived() {
+        let waiting = frameWaiters; frameWaiters.removeAll()
+        for waiter in waiting { waiter.resume(returning: true) }
     }
     private func drop(_ ws: URLSessionWebSocketTask, error: Error? = nil) {
         guard socket === ws else { return }
@@ -329,6 +346,8 @@ final class T3Gateway {
         queuedBytes = 0; readBytes = 0; pings.removeAll()
         let waiting = pending; pending.removeAll(); subscriptions.removeAll()
         for p in waiting.values { p.resume(returning: .lost(error ?? ClientError.connection("T3"))) }
+        let probes = frameWaiters; frameWaiters.removeAll()
+        for probe in probes { probe.resume(returning: false) }
         if notify { onDisconnect?() }
     }
     #if DEBUG
