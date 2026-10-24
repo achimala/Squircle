@@ -54,7 +54,6 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::process::{Child, Command};
 use tokio::sync::Notify;
@@ -99,12 +98,7 @@ pub struct Sims {
     poke: Arc<Notify>,
 }
 
-fn now() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
+use crate::clock::now;
 
 #[cfg(test)]
 mod tests;

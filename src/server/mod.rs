@@ -37,10 +37,9 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
-use tokio::sync::Semaphore;
 use tokio_util::io::ReaderStream;
 
 mod http;
@@ -85,8 +84,10 @@ pub struct AppState {
     diagnostics: Arc<Lane>,
     /// Build jobs: records, unpersisted results and live operations.
     jobs: Arc<Jobs>,
-    slots: Arc<Semaphore>,
-    inspection_slots: Arc<Semaphore>,
+    /// Builds and previews, one at a time.
+    builds: Arc<Lane>,
+    /// Xcode inspections running now; more than two are refused, not queued.
+    inspections: Arc<AtomicUsize>,
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
     agents: Option<Arc<Agents>>,
@@ -96,7 +97,27 @@ pub struct AppState {
     tasks: Option<Arc<Tasks>>,
 }
 
+/// One of at most two Xcode inspections at once: a third is refused,
+/// never queued. Dropping it frees its place.
+pub(super) struct Inspection(Arc<AtomicUsize>);
+
+impl Drop for Inspection {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 impl AppState {
+    /// A place for one Xcode inspection, if one is free now.
+    pub(super) fn inspection(&self) -> Option<Inspection> {
+        self.inspections
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < 2).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Inspection(self.inspections.clone()))
+    }
+
     /// Loads the job index; work a previous service left unfinished is
     /// recorded as interrupted. Call inside the runtime.
     pub fn new(store: Store, public_url: Option<String>) -> Result<Self> {
@@ -106,8 +127,8 @@ impl AppState {
             tickets: Owner::spawn("install tickets", store),
             catalog: Arc::new(Lane::new(Rank::Catalog)),
             diagnostics: Arc::new(Lane::new(Rank::Diagnostics)),
-            slots: Arc::new(Semaphore::new(1)),
-            inspection_slots: Arc::new(Semaphore::new(2)),
+            builds: Arc::new(Lane::new(Rank::Build)),
+            inspections: Arc::new(AtomicUsize::new(0)),
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
             agents: None,

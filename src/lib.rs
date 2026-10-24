@@ -11,6 +11,7 @@ pub mod agents;
 pub mod apps;
 pub mod artifact;
 pub mod buildlog;
+pub mod clock;
 pub mod fsm;
 pub mod git;
 pub mod guard;

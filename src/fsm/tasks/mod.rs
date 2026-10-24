@@ -586,15 +586,22 @@ impl Record {
     }
 
     fn ages(&self, now: u64) -> bool {
-        if self.parent.is_some() {
-            return false;
+        self.ages_at().is_some_and(|at| now >= at)
+    }
+
+    /// When an untouched task goes to History: a day after it closed,
+    /// three after it was last touched while open. Sub-tasks go with their
+    /// work item.
+    fn ages_at(&self) -> Option<u64> {
+        if self.parent.is_some() || self.placement != Placement::Active {
+            return None;
         }
         let limit = if self.status.open() {
             STALE_AGE
         } else {
             DONE_AGE
         };
-        self.placement == Placement::Active && now.saturating_sub(self.updated_at) >= limit
+        Some(self.updated_at.saturating_add(limit))
     }
 
     /// Whether linked work can still say anything: History tasks are skipped
@@ -654,6 +661,11 @@ impl Book {
     /// Every task, sub-tasks as their own entries.
     pub fn all(&self) -> Vec<Task> {
         self.tasks.values().map(Record::publish).collect()
+    }
+
+    /// When the next task ages into History if nothing touches it.
+    pub fn next_age(&self) -> Option<u64> {
+        self.tasks.values().filter_map(Record::ages_at).min()
     }
 
     /// Tasks whose linked work a tick should read, sub-tasks included (they

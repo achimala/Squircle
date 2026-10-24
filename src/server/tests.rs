@@ -202,7 +202,17 @@ async fn unauthorized_or_invalid_imports_publish_no_record() -> Result<()> {
 async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_deduplicate() {
     let dir = tempfile::tempdir().unwrap();
     let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
-    let _active = state.slots.clone().acquire_owned().await.unwrap();
+    // A build holds the lane until the test ends.
+    let (entered, holding) = tokio::sync::oneshot::channel();
+    let lane = state.builds.clone();
+    tokio::spawn(async move {
+        lane.run(async {
+            let _ = entered.send(());
+            std::future::pending::<()>().await
+        })
+        .await
+    });
+    holding.await.unwrap();
     let request = request(dir.path());
     let Json(first) = start(State(state.clone()), Ok(Json(request.clone())))
         .await
@@ -222,18 +232,13 @@ async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_dedu
             .status,
         StatusCode::CONFLICT
     );
+    let mut changes = state.jobs.changes();
     let _ = cancel(State(state.clone()), Path(id.clone()))
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if state.files.load_job(&id).unwrap().state() == BuildState::Cancelled {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("queued cancellation should be immediate");
+    // Recorded without the lane: the active build never lets it go.
+    while state.files.load_job(&id).unwrap().state() != BuildState::Cancelled {
+        futures_util::StreamExt::next(&mut changes).await.unwrap();
+    }
     assert!(!state.files.job_dir(&id).unwrap().join("build.log").exists());
 }

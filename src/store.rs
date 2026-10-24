@@ -496,6 +496,17 @@ impl Jobs {
     }
 
     /// Builds and previews queued or running.
+    /// One item each time a job, or the live operations, change.
+    pub fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        self.views.changes().boxed()
+    }
+
+    /// Resolves once no build or preview is running.
+    pub async fn idle(&self) {
+        self.views.wait_for(|views| views.operations == 0).await;
+    }
+
     pub fn operations(&self) -> usize {
         self.views.get().operations
     }

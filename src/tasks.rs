@@ -232,6 +232,18 @@ impl Tasks {
             .unwrap_or_default()
     }
 
+    /// One item each time the book is saved.
+    pub fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        self.book.changes().boxed()
+    }
+
+    /// When the next task ages into History if nothing touches it (seconds
+    /// since 1970).
+    pub fn next_age(&self) -> Option<u64> {
+        self.book.get().next_age()
+    }
+
     /// Applies what linked workers and builds say, History tasks included,
     /// and ages tasks into History.
     pub async fn tick(&self, signals: impl Fn(&Task) -> Signals) -> Result<()> {

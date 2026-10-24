@@ -195,6 +195,8 @@ impl<R: Clone, A, S: Storage<R>> Saved<R, A, S> {
 /// never wait, so anyone may ask any owner at any time.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Rank {
+    /// One build or preview at a time.
+    Build,
     /// `thread spawn` asked again for the same agent and branch.
     AgentSpawn,
     /// An app's agent (create, reset) or one worker (bootstrap, archive).

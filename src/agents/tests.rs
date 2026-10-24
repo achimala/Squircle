@@ -4,6 +4,7 @@
 
 use super::*;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
 /// A protocol 2 shell row: `status` is `idle` or the latest run's.
 fn thread(run: Option<&str>, status: &str, needs: bool) -> Value {
@@ -227,8 +228,9 @@ fn context_goes_to_the_deepest_project() {
 type DispatchHook = Box<dyn Fn(&Value) + Send>;
 type DetailHook = Box<dyn Fn(&str) -> Option<Value> + Send>;
 
-/// T3 as the agents see it: records commands, creates thread rows in
-/// the shell after a delay, and remembers the messages it accepted. Like
+/// T3 as the agents see it: records commands, shows created threads in
+/// the shell (held back while `held` is set, until `release`), and
+/// remembers the messages it accepted. Like
 /// T3, it keeps a receipt per command ID: an accepted ID sent again is
 /// answered from it and changes nothing.
 #[derive(Default)]
@@ -244,7 +246,10 @@ struct Fake {
     detached: Mutex<std::collections::HashSet<String>>,
     /// The next dispatch of this type fails; `true` if T3 applied it anyway (a lost acknowledgement).
     fail: Mutex<Vec<(&'static str, bool)>>,
-    shell_delay: Mutex<Duration>,
+    /// Created thread rows not shown yet; None shows them at once.
+    held: Mutex<Option<Vec<Value>>>,
+    /// Told when a thread is created.
+    created: tokio::sync::Notify,
     on_dispatch: Mutex<Option<DispatchHook>>,
     /// A shell item T3 sends while a thread's detail is read.
     on_detail: Mutex<Option<DetailHook>>,
@@ -253,6 +258,17 @@ struct Fake {
 impl Fake {
     fn agents(&self) -> Arc<Agents> {
         self.agents.lock().unwrap().upgrade().unwrap()
+    }
+    /// Shows the held thread rows, and those created from now on at once.
+    async fn release(&self) {
+        let rows = self.held.lock().unwrap().take().unwrap_or_default();
+        for row in rows {
+            self.agents()
+                .consume_shell(
+                    &json!({"kind": "thread.updated", "location": "active", "thread": row}),
+                )
+                .await;
+        }
     }
     fn sent(&self, kind: &str) -> Vec<Value> {
         self.log
@@ -333,7 +349,6 @@ impl Peer for Fake {
     fn dispatch<'a>(&'a self, command: &'a Command) -> crate::push::BoxFuture<'a, Dispatched> {
         Box::pin(async move {
             let command = command.body().clone();
-            tokio::time::sleep(Duration::from_millis(20)).await;
             let id = command["commandId"]
                 .as_str()
                 .expect("every command has its identity")
@@ -370,13 +385,22 @@ impl Peer for Fake {
                     let row = json!({"id": command["threadId"], "projectId": command["projectId"], "runtimeMode": command["runtimeMode"],
                                      "modelSelection": command["modelSelection"], "status": "idle", "latestRunId": null,
                                      "pendingRuntimeRequest": null, "archivedAt": null});
-                    let (agents, delay) = (self.agents(), *self.shell_delay.lock().unwrap());
-                    tokio::spawn(async move {
-                        tokio::time::sleep(delay).await;
-                        agents
-                            .consume_shell(&json!({"kind": "thread.updated", "location": "active", "thread": row}))
-                            .await;
-                    });
+                    let shown = match &mut *self.held.lock().unwrap() {
+                        Some(held) => {
+                            held.push(row);
+                            None
+                        }
+                        None => Some(row),
+                    };
+                    if let Some(row) = shown {
+                        let agents = self.agents();
+                        tokio::spawn(async move {
+                            agents
+                                .consume_shell(&json!({"kind": "thread.updated", "location": "active", "thread": row}))
+                                .await;
+                        });
+                    }
+                    self.created.notify_one();
                 }
                 Some("message.dispatch") => {
                     self.message(&command["threadId"], &command["messageId"])
@@ -457,12 +481,20 @@ fn agent(thread: &str) -> Agent {
 async fn first_use_creates_one_agent_in_the_chosen_mode() {
     let temp = tempfile::tempdir().unwrap();
     let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![]).await;
-    // The shell shows the new thread only after both requests have asked.
-    *fake.shell_delay.lock().unwrap() = Duration::from_millis(300);
-    let (a, b) = tokio::join!(
+    // The shell shows the new thread only once both requests have asked
+    // and the thread was created.
+    *fake.held.lock().unwrap() = Some(vec![]);
+    let both = futures_util::future::join(
         agents.ensure("p", None, None, Some("approval-required")),
-        agents.ensure("p", None, None, Some("approval-required"))
+        agents.ensure("p", None, None, Some("approval-required")),
     );
+    tokio::pin!(both);
+    tokio::select! {
+        _ = &mut both => panic!("ensured before T3 showed the thread"),
+        _ = fake.created.notified() => {}
+    }
+    fake.release().await;
+    let (a, b) = both.await;
     assert_eq!(a.unwrap().thread_id, b.unwrap().thread_id);
     let created = fake.sent("thread.create");
     assert_eq!(created.len(), 1);
@@ -922,19 +954,26 @@ async fn discarding_stops_a_worker_waiting_on_the_user_before_removing_its_files
         "{refused:#}"
     );
     let (weak, checked) = (Arc::downgrade(&agents), tree.clone());
+    let early = Arc::new(AtomicBool::new(false));
+    let seen_early = early.clone();
     *fake.on_dispatch.lock().unwrap() = Some(Box::new(move |command| {
+        let early = &seen_early;
         if command["type"] == "run.interrupt" {
             // T3 first re-sends the waiting row, and only later the stop.
             let (agents, checked, asking) =
                 (weak.upgrade().unwrap(), checked.clone(), asking.clone());
+            let early = early.clone();
             tokio::spawn(async move {
                 agents
                     .consume_shell(
                         &json!({"kind": "thread.updated", "location": "active", "thread": asking}),
                     )
                     .await;
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                assert!(checked.exists(), "files removed before the worker stopped");
+                // The archive waits on exactly this: the waiting row is no
+                // stop, and nothing is removed while it shows.
+                if agents.stopped("w1").is_some() || !checked.exists() {
+                    early.store(true, SeqCst);
+                }
                 let mut stopped = asking.clone();
                 stopped["status"] = json!("interrupted");
                 stopped["pendingRuntimeRequest"] = Value::Null;
@@ -949,6 +988,7 @@ async fn discarding_stops_a_worker_waiting_on_the_user_before_removing_its_files
         }
     }));
     let result = agents.archive("w1", true).await.unwrap();
+    assert!(!early.load(SeqCst), "removed before the worker stopped");
     assert_eq!(result["stopped"], true);
     let order: Vec<Value> = fake
         .log
@@ -1327,25 +1367,14 @@ async fn an_archive_resumes_after_lost_answers_and_a_restart() {
         r.workers.insert("w1".into(), worker("agent"));
     })
     .await;
-    let (weak, checked, stopped) = (Arc::downgrade(&agents), tree.clone(), {
+    let (checked, stopped) = (tree.clone(), {
         let mut stopped = idle.clone();
         stopped["status"] = json!("interrupted");
         stopped
     });
-    let shown = stopped.clone();
     *fake.on_dispatch.lock().unwrap() = Some(Box::new(move |command| {
         if command["type"] == "run.interrupt" {
             assert!(checked.exists());
-            // T3 shows the stop only after the (lost) answer.
-            let (agents, stopped) = (weak.upgrade().unwrap(), shown.clone());
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                agents
-                    .consume_shell(
-                        &json!({"kind": "thread.updated", "location": "active", "thread": stopped}),
-                    )
-                    .await;
-            });
         }
     }));
     fake.fail.lock().unwrap().push(("run.interrupt", true));
@@ -1361,7 +1390,10 @@ async fn an_archive_resumes_after_lost_answers_and_a_restart() {
                 Stage::Archiving(ArchiveStep::Stopping { .. })
             )
     );
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // T3 shows the stop only after the (lost) answer.
+    agents
+        .consume_shell(&json!({"kind": "thread.updated", "location": "active", "thread": stopped}))
+        .await;
     fake.fail.lock().unwrap().push(("thread.archive", true));
     assert!(agents.archive("w1", true).await.is_err());
     assert!(

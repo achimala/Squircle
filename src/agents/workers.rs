@@ -203,11 +203,10 @@ impl Agents {
         self.owner.ask(move |s| s.reduce_boot(&id, event)).await
     }
 
-    /// A thread from the live shell; one just created takes a moment to arrive.
+    /// A thread from the live shell; one just created arrives with T3's
+    /// next shell event.
     pub(super) async fn wait_thread(&self, id: &str) -> Result<Value> {
-        let view = self
-            .view_when(Duration::from_secs(5), |v| v.shell.threads.contains_key(id))
-            .await;
+        let view = self.view_when(|v| v.shell.threads.contains_key(id)).await;
         view.and_then(|v| v.shell.thread(id))
             .with_context(|| format!("T3 has no thread {id}"))
     }
@@ -377,15 +376,12 @@ impl Agents {
     }
 
     /// Waits for T3 to report a stopped worker's session stopped. A thread
-    /// still waiting on the user, or a disconnected shell, does not count.
+    /// still waiting on the user, or a disconnected shell, does not count:
+    /// a connection that goes down first ends the wait.
     pub(super) async fn wait_stopped(&self, id: &str) -> Result<StopReceipt> {
-        let view = self
-            .view_when(Duration::from_secs(30), |v| {
-                stopped_in(&v.shell, id).is_some()
-            })
-            .await;
+        let view = self.view_when(|v| stopped_in(&v.shell, id).is_some()).await;
         view.and_then(|v| stopped_in(&v.shell, id))
-            .context("The worker did not stop within 30 seconds; nothing was removed")
+            .context("T3 disconnected before the worker stopped; nothing was removed")
     }
 
     /// Archives the coordinator's finished workers whose work is merged,

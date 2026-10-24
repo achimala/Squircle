@@ -41,7 +41,7 @@ impl T3Config {
 fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
+        .tcp_keepalive(KEEPALIVE)
         .build()?)
 }
 
@@ -135,34 +135,19 @@ enum Reply {
     /// The frame never left: the connection was closed or stopped draining.
     NotSent(anyhow::Error),
     /// It went out (or may have), and no answer will come: the connection
-    /// closed, or the caller's budget ran out.
+    /// closed.
     Lost(String),
 }
 
-/// The caller's budget for one request. Running out of it says nothing
-/// about what T3 did.
-const CALL_BUDGET: Duration = Duration::from_secs(45);
-
-/// How long the connection may take or stay quiet before it counts as dead.
-#[derive(Clone, Copy)]
-struct Timing {
-    /// A Ping goes out this often.
-    heartbeat: Duration,
-    /// Nothing heard from T3 for this long (not even a Pong) closes the socket.
-    silence: Duration,
-    /// One frame that cannot be written within this closes the socket.
-    write: Duration,
-}
-
-const TIMING: Timing = Timing {
-    heartbeat: Duration::from_secs(20),
-    silence: Duration::from_secs(45),
-    write: Duration::from_secs(10),
-};
+/// TCP keepalive on T3's socket. On this Mac's loopback a T3 that stops or
+/// restarts closes the socket at once; over Tailscale a peer that vanished
+/// without closing (sleep, a network change) is found by the kernel's
+/// probes, which fail the socket like any other error. Either way the
+/// close is an event this connection already ends on.
+const KEEPALIVE: Duration = Duration::from_secs(30);
 /// The orchestration protocol this client speaks (T3 0.1.0's "V2": runs,
 /// runtime requests and turn items instead of 0.0.45's turns and activities).
 pub const ORCHESTRATION_PROTOCOL: &str = "2";
-const OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Frames waiting for the socket. A full queue means the writer is stuck, so
 /// the connection is closed rather than allowed to grow without bound.
 const OUTBOX: usize = 1024;
@@ -182,7 +167,7 @@ enum Outbound {
         chunks: mpsc::UnboundedSender<Value>,
         frame: Message,
     },
-    /// A call that ended without its answer (out of budget, or dropped).
+    /// A call that ended without its answer (its caller dropped it).
     Forget(String),
     Unsubscribe(String),
     /// How many calls and subscriptions the task holds, for tests.
@@ -210,10 +195,10 @@ impl Link {
     }
 }
 
-/// One live socket, owned by a single task that reads, writes and sends
-/// heartbeats. When the socket fails, goes quiet or the last `Arc<T3>` drops,
-/// that task ends: every waiting call fails and every subscription ends; the
-/// owner reconnects with a fresh client.
+/// One live socket, owned by a single task that reads and writes. When the
+/// socket fails or closes, or the last `Arc<T3>` drops, that task ends:
+/// every waiting call fails and every subscription ends; the owner
+/// reconnects with a fresh client.
 pub struct T3 {
     pub config: T3Config,
     link: Arc<Link>,
@@ -227,7 +212,7 @@ impl Drop for T3 {
 }
 
 /// Tells the connection task to forget a call's waiter however the call
-/// ends (answer, budget, or the caller dropping the future). It only queues.
+/// ends (an answer, or the caller dropping the future). It only queues.
 struct PendingGuard<'a> {
     link: &'a Link,
     id: &'a str,
@@ -267,16 +252,20 @@ impl T3 {
         ws.query_pairs_mut()
             .append_pair("wsTicket", ticket)
             .append_pair("orchestrationProtocol", ORCHESTRATION_PROTOCOL);
-        let (socket, _) =
-            tokio::time::timeout(OPEN_TIMEOUT, tokio_tungstenite::connect_async(ws.as_str()))
-                .await
-                .context("T3's WebSocket did not open within 15 seconds")?
-                .context("Cannot open T3's WebSocket")?;
+        let host = ws.host_str().context("T3's URL has no host")?.to_string();
+        let port = ws.port_or_known_default().context("T3's URL has no port")?;
+        let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
+            .await
+            .context("Cannot reach T3's WebSocket")?;
+        keepalive(&tcp)?;
+        let (socket, _) = tokio_tungstenite::client_async(ws.as_str(), tcp)
+            .await
+            .context("Cannot open T3's WebSocket")?;
         let (sink, stream) = socket.split();
-        Ok(Self::start(config, sink, stream, TIMING))
+        Ok(Self::start(config, sink, stream))
     }
 
-    fn start<W, R, E>(config: T3Config, sink: W, stream: R, timing: Timing) -> Arc<Self>
+    fn start<W, R, E>(config: T3Config, sink: W, stream: R) -> Arc<Self>
     where
         W: Sink<Message> + Unpin + Send + 'static,
         W::Error: Send,
@@ -289,7 +278,7 @@ impl T3 {
             stop: CancellationToken::new(),
         });
         let (closed_tx, closed) = watch::channel(false);
-        tokio::spawn(run(link.clone(), sink, stream, outgoing, closed_tx, timing));
+        tokio::spawn(run(link.clone(), sink, stream, outgoing, closed_tx));
         Arc::new(Self {
             config,
             link,
@@ -317,14 +306,12 @@ impl T3 {
         }) {
             return Reply::NotSent(error);
         }
-        match tokio::time::timeout(CALL_BUDGET, rx).await {
-            Ok(Ok(Ok(value))) => Reply::Answered(Ok(value)),
-            Ok(Ok(Err(Ended::Failed(cause)))) => Reply::Answered(Err(cause)),
-            Ok(Ok(Err(Ended::Closed)) | Err(_)) => Reply::Lost("T3 connection closed".into()),
-            Err(_) => Reply::Lost(format!(
-                "T3 did not answer {tag} within {} seconds",
-                CALL_BUDGET.as_secs()
-            )),
+        // T3's answer, or the connection's end: the task fails every waiter
+        // as it closes, so this can't outlive the socket.
+        match rx.await {
+            Ok(Ok(value)) => Reply::Answered(Ok(value)),
+            Ok(Err(Ended::Failed(cause))) => Reply::Answered(Err(cause)),
+            Ok(Err(Ended::Closed)) | Err(_) => Reply::Lost("T3 connection closed".into()),
         }
     }
 
@@ -364,13 +351,9 @@ impl T3 {
     /// The first chunk of a subscription (T3 sends a snapshot first).
     pub async fn snapshot(&self, tag: &str, payload: Value) -> Result<Value> {
         let (id, mut rx) = self.subscribe(tag, payload)?;
-        let first = tokio::time::timeout(Duration::from_secs(30), rx.recv()).await;
+        let first = rx.recv().await;
         self.unsubscribe(&id);
-        match first {
-            Ok(Some(value)) => Ok(value),
-            Ok(None) => bail!("T3 closed {tag} before sending a snapshot"),
-            Err(_) => bail!("T3 sent no snapshot for {tag} within 30 seconds"),
-        }
+        first.with_context(|| format!("T3 closed {tag} before sending a snapshot"))
     }
 
     /// An orchestration command, sent exactly as given: its identity was
@@ -436,47 +419,65 @@ fn interrupt(id: &str) -> Message {
     Message::text(json!({"_tag":"Interrupt","requestId":id}).to_string())
 }
 
-/// The connection's whole lifetime: reads, writes and heartbeats in one task,
-/// so a failure of either half, silence or cancellation ends all of it.
+/// Keepalive probes on `tcp` (see [`KEEPALIVE`]): after that long without
+/// traffic, a probe every 10 s, and the socket fails after 3 unanswered.
+fn keepalive(tcp: &tokio::net::TcpStream) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = tcp.as_raw_fd();
+    let set = |level: libc::c_int, name: libc::c_int, value: libc::c_int| {
+        let done = unsafe {
+            libc::setsockopt(
+                fd,
+                level,
+                name,
+                (&value as *const libc::c_int).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if done == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+    set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, 1)?;
+    set(
+        libc::IPPROTO_TCP,
+        libc::TCP_KEEPALIVE,
+        KEEPALIVE.as_secs() as libc::c_int,
+    )?;
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, 10)?;
+    set(libc::IPPROTO_TCP, libc::TCP_KEEPCNT, 3)?;
+    Ok(())
+}
+
+/// The connection's whole lifetime: reads and writes in one task, so a
+/// failure of either half or cancellation ends all of it.
 async fn run<W, R, E>(
     link: Arc<Link>,
     mut sink: W,
     mut stream: R,
     mut outgoing: mpsc::Receiver<Outbound>,
     closed: watch::Sender<bool>,
-    timing: Timing,
 ) where
     W: Sink<Message> + Unpin,
     R: Stream<Item = Result<Message, E>> + Unpin,
 {
-    let start = tokio::time::Instant::now();
-    let mut heartbeat = tokio::time::interval_at(start + timing.heartbeat, timing.heartbeat);
-    let mut heard = start;
     let mut open = Open::default();
     loop {
         tokio::select! {
             _ = link.stop.cancelled() => {
-                let _ = tokio::time::timeout(timing.write, sink.send(Message::Close(None))).await;
+                let _ = sink.send(Message::Close(None)).await;
                 break;
             }
             Some(outbound) = outgoing.recv() => {
                 let Some(message) = open.take(outbound) else { continue };
-                if !matches!(tokio::time::timeout(timing.write, sink.send(message)).await, Ok(Ok(()))) {
-                    break;
-                }
-            }
-            _ = heartbeat.tick() => {
-                if heard.elapsed() >= timing.silence {
-                    break;
-                }
-                let ping = Message::text(json!({"_tag":"Ping"}).to_string());
-                if !matches!(tokio::time::timeout(timing.write, sink.send(ping)).await, Ok(Ok(()))) {
+                if sink.send(message).await.is_err() {
                     break;
                 }
             }
             incoming = stream.next() => {
                 let Some(Ok(message)) = incoming else { break };
-                heard = tokio::time::Instant::now();
                 let text = match message {
                     Message::Text(text) => text.to_string(),
                     Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -597,12 +598,6 @@ mod tests {
     use tokio::io::DuplexStream;
     use tokio_tungstenite::WebSocketStream;
 
-    const FAST: Timing = Timing {
-        heartbeat: Duration::from_millis(40),
-        silence: Duration::from_millis(100),
-        write: Duration::from_millis(100),
-    };
-
     fn config() -> T3Config {
         T3Config {
             url: "http://t3.test".into(),
@@ -612,14 +607,14 @@ mod tests {
     }
 
     /// A client wired to an in-memory WebSocket peer the test controls.
-    async fn peer(timing: Timing) -> (Arc<T3>, WebSocketStream<DuplexStream>) {
+    async fn peer() -> (Arc<T3>, WebSocketStream<DuplexStream>) {
         let (client_io, server_io) = tokio::io::duplex(1 << 16);
         let (client, server) = tokio::join!(
             tokio_tungstenite::client_async("ws://t3.test/ws", client_io),
             tokio_tungstenite::accept_async(server_io),
         );
         let (sink, stream) = client.unwrap().0.split();
-        (T3::start(config(), sink, stream, timing), server.unwrap())
+        (T3::start(config(), sink, stream), server.unwrap())
     }
 
     async fn next_request(server: &mut WebSocketStream<DuplexStream>) -> Value {
@@ -636,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn multibyte_error_past_the_limit_fails_one_call_only() {
-        let (client, mut server) = peer(TIMING).await;
+        let (client, mut server) = peer().await;
         let answers = tokio::spawn(async move {
             let first = next_request(&mut server).await;
             let cause = json!({"_tag":"Die","message":"é".repeat(400)});
@@ -658,7 +653,7 @@ mod tests {
     async fn a_dispatch_keeps_its_identity_and_only_a_typed_failure_is_a_refusal() {
         use crate::fsm::coordinator::Identity;
         use crate::fsm::core::CommandID;
-        let (client, mut server) = peer(TIMING).await;
+        let (client, mut server) = peer().await;
         let identity = Identity {
             id: CommandID::fresh(),
             created_at: "2026-10-16T00:00:00.000Z".into(),
@@ -714,7 +709,7 @@ mod tests {
         .unwrap();
         let cases = fixture["cases"].as_array().unwrap().clone();
         assert!(!cases.is_empty());
-        let (client, mut server) = peer(TIMING).await;
+        let (client, mut server) = peer().await;
         let exits: Vec<Value> = cases.iter().map(|c| c["exit"].clone()).collect();
         let answers = tokio::spawn(async move {
             for exit in exits {
@@ -743,56 +738,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn silent_peer_closes_the_connection_and_fails_calls() {
-        let (client, server) = peer(FAST).await;
-        let error = tokio::time::timeout(Duration::from_secs(2), client.call("a", json!({})))
-            .await
-            .unwrap();
-        assert_eq!(error.unwrap_err().to_string(), "T3 connection closed");
-        tokio::time::timeout(Duration::from_secs(1), client.closed())
-            .await
-            .unwrap();
-        drop(server);
-    }
-
-    #[tokio::test]
     async fn write_failure_closes_the_connection() {
         let sink = Box::pin(futures_util::sink::unfold((), |_, _: Message| async {
             Err::<(), _>(std::io::Error::other("broken pipe"))
         }));
         let stream = futures_util::stream::pending::<Result<Message, std::io::Error>>();
-        let client = T3::start(config(), sink, stream, TIMING);
-        let result = tokio::time::timeout(Duration::from_secs(1), client.call("a", json!({})))
-            .await
-            .unwrap();
-        assert!(result.is_err());
-        tokio::time::timeout(Duration::from_secs(1), client.closed())
-            .await
-            .unwrap();
+        let client = T3::start(config(), sink, stream);
+        assert!(client.call("a", json!({})).await.is_err());
+        client.closed().await;
     }
 
     #[tokio::test]
     async fn dropping_the_client_closes_the_socket() {
-        let (client, mut server) = peer(TIMING).await;
+        let (client, mut server) = peer().await;
         drop(client);
-        let ended = tokio::time::timeout(Duration::from_secs(1), async {
-            while let Some(Ok(message)) = server.next().await {
-                if message.is_close() {
-                    break;
-                }
+        while let Some(Ok(message)) = server.next().await {
+            if message.is_close() {
+                break;
             }
-        });
-        ended.await.unwrap();
+        }
     }
 
     #[tokio::test]
     async fn abandoned_call_forgets_its_waiter() {
-        let (client, server) = peer(TIMING).await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), client.call("a", json!({})))
-                .await
-                .is_err()
-        );
+        let (client, server) = peer().await;
+        // Sent (the first poll queues it), then dropped unanswered.
+        let mut call = Box::pin(client.call("a", json!({})));
+        assert!(futures_util::poll!(call.as_mut()).is_pending());
+        drop(call);
         let (reply, count) = oneshot::channel();
         client.link.send(Outbound::Count(reply)).unwrap();
         assert_eq!(count.await.unwrap(), (0, 0));

@@ -33,7 +33,7 @@ impl Sims {
                 _ = &mut saved => {}
                 _ = self.poke.notified() => {}
                 Some(()) = threads.next() => {}
-                _ = until(due) => {}
+                _ = crate::clock::until(due) => {}
             }
             if *draining.borrow() {
                 return;
@@ -207,17 +207,6 @@ impl Sims {
         if let Err(error) = self.owner.ask(|s| s.ledger.resolve()).await {
             eprintln!("Simulator session ledger not saved: {error}");
         }
-    }
-}
-
-/// Resolves at wall-clock time `at` (Unix seconds); never without one.
-async fn until(at: Option<f64>) {
-    match at {
-        Some(at) => {
-            let wait = (at - now()).max(0.0);
-            tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await
-        }
-        None => std::future::pending().await,
     }
 }
 
