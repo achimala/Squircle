@@ -22,7 +22,7 @@ final class T3Tests: XCTestCase {
     }
     @MainActor
     func testExistingThreadOnlyAllowsItsProviderAndPreservesModelChoice() async {
-        let model = SquircleModel(configuration:nil, preferences:UserDefaults(suiteName:UUID().uuidString)!)
+        let model = SquircleModel.hermetic()
         model.consumeConfig(modelConfig)
         let codex: JSONValue = ["instanceId":"codex","model":"sol"]
         let astra: JSONValue = ["instanceId":"codex","model":"astra"]
@@ -230,24 +230,23 @@ final class T3Tests: XCTestCase {
     /// a removal; a row's status and pending request say what it is doing.
     @MainActor
     func testShellKeepsThreadsThroughRefreshesAndDropsArchived() async {
-        let model = SquircleModel(configuration: nil)
+        let model = SquircleModel.hermetic()
         func row(_ id: String, status: String = "idle", pending: Bool = false) -> [String: Any] {
             ["id": id, "projectId": "p", "title": id, "status": status, "latestRunId": "run-\(id)", "updatedAt": "2026-10-19T10:00:00.000Z",
              "archivedAt": NSNull(), "deletedAt": NSNull(), "pendingRuntimeRequest": pending ? ["id": "q", "kind": "user_input"] : NSNull()]
         }
-        func settle() async { for _ in 0..<20 { await Task.yield() } }
         model.linkReceived(shell: .from(["kind": "snapshot", "snapshot": ["snapshotSequence": 5, "projects": [["id": "p", "title": "Old"]],
             "threads": [row("a", status: "running"), row("b", pending: true), row("c", status: "failed")], "archivedThreads": []]]))
         model.linkReceived(shell: .from(["kind": "snapshot", "resolvedRepositoryIdentityRoots": ["/x"],
             "snapshot": ["snapshotSequence": 6, "projects": [["id": "p", "title": "New"]], "threads": [], "archivedThreads": []]]))
-        await settle()
+        await model.shellApplied()
         XCTAssertEqual(Set(model.sessions.map(\.id)), ["a", "b", "c"])
         let phases = Dictionary(uniqueKeysWithValues: model.sessions.map { ($0.id, $0.phase) })
         XCTAssertEqual(phases, ["a": .working, "b": .needsYou, "c": .idle])
         XCTAssertEqual(model.sessions.first { $0.id == "c" }?.latestTurn?.completion?.outcome, .failed)
         model.linkReceived(shell: .from(["kind": "thread.updated", "sequence": 7, "location": "archive", "thread": row("a")]))
         model.linkReceived(shell: .from(["kind": "thread.removed", "sequence": 8, "location": "archive", "threadId": "b"]))
-        await settle()
+        await model.shellApplied()
         XCTAssertEqual(Set(model.sessions.map(\.id)), ["b", "c"])
     }
 
@@ -349,17 +348,50 @@ final class T3Tests: XCTestCase {
 
 // MARK: Native state, transport and caches (W5)
 
+extension SquircleModel {
+    /// A model that keeps nothing in the app's own places and never reaches
+    /// the network: throwaway preferences, caches and journal, an offline transport.
+    static func hermetic(configuration: AppConfiguration? = nil,
+                         commandDispatch: ((JSONValue) async throws -> JSONValue)? = nil,
+                         upload: ((URL, String) async throws -> String)? = nil,
+                         journal: PendingJournal? = nil) -> SquircleModel {
+        let suite = "squircle-tests-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        preferences.removePersistentDomain(forName: suite)
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(suite, isDirectory: true)
+        let journal = journal ?? (configuration == nil ? nil : PendingJournal(directory: scratch.appendingPathComponent("journal")))
+        return SquircleModel(configuration: configuration, preferences: preferences, commandDispatch: commandDispatch,
+                             upload: upload, journal: .some(journal), cache: DiskCache(root: scratch),
+                             transport: .offline, sharesMedia: false)
+    }
+
+    /// Returns once `condition` holds, checking after each change the model reports.
+    func until(_ condition: () -> Bool) async {
+        if condition() { return }
+        for await _ in updates where condition() { return }
+    }
+}
+
 /// A command dispatch that holds each command until the test releases it.
 @MainActor
 private final class GatedDispatch {
     private(set) var commands: [JSONValue] = []
     private var waiting: [CheckedContinuation<Void, Error>] = []
+    private var counted: [(count: Int, arrived: CheckedContinuation<Void, Never>)] = []
     var dispatch: (JSONValue) async throws -> JSONValue {
         { [unowned self] command in
             commands.append(command)
+            let reached = counted.filter { $0.count <= commands.count }
+            counted.removeAll { $0.count <= commands.count }
+            for waiter in reached { waiter.arrived.resume() }
             try await withCheckedThrowingContinuation { waiting.append($0) }
             return .object([:])
         }
+    }
+    /// Resumes once `count` commands have arrived.
+    func until(_ count: Int) async {
+        guard commands.count < count else { return }
+        await withCheckedContinuation { counted.append((count, $0)) }
     }
     /// `failing`: T3 refuses the command. `lost`: the answer never comes back.
     func release(failing: Bool = false, lost: Bool = false) {
@@ -368,7 +400,6 @@ private final class GatedDispatch {
         else if lost { next.resume(throwing: ClientError.connection("T3")) }
         else { next.resume() }
     }
-    func until(_ count: Int) async { while commands.count < count { await Task.yield() } }
 }
 
 final class NativeStateTests: XCTestCase {
@@ -379,8 +410,7 @@ final class NativeStateTests: XCTestCase {
     @MainActor
     private func draftWithPicture(_ gate: GatedDispatch, upload: ((URL, String) async throws -> String)? = nil)
         async -> (SquircleModel, ConversationID) {
-        let model = SquircleModel(configuration: nil, preferences: UserDefaults(suiteName: UUID().uuidString)!,
-                                  commandDispatch: gate.dispatch, upload: upload)
+        let model = SquircleModel.hermetic(commandDispatch: gate.dispatch, upload: upload)
         model.consumeConfig(config)
         let draft = ConversationID.draft(UUID(), appID: project.id, agent: false)
         await model.open(draft)
@@ -551,7 +581,7 @@ final class NativeStateTests: XCTestCase {
     func testClosedModelIsReleased() throws {
         weak var released: SquircleModel?
         try autoreleasepool {
-            let model = SquircleModel(configuration: try Self.configuration(), preferences: UserDefaults(suiteName: UUID().uuidString)!)
+            let model = SquircleModel.hermetic(configuration: try Self.configuration())
             model.startMetadataUpdates()
             let updates = model.updates
             released = model
@@ -922,15 +952,23 @@ final class CommandMachineTests: XCTestCase {
 private final class HeldT3 {
     private(set) var commands: [JSONValue] = []
     private var waiting: [CheckedContinuation<Void, Error>] = []
+    private var counted: [(count: Int, arrived: CheckedContinuation<Void, Never>)] = []
     var dispatch: (JSONValue) async throws -> JSONValue {
         { [unowned self] command in
             commands.append(command)
+            let reached = counted.filter { $0.count <= commands.count }
+            counted.removeAll { $0.count <= commands.count }
+            for waiter in reached { waiter.arrived.resume() }
             try await withCheckedThrowingContinuation { waiting.append($0) }
             return .object([:])
         }
     }
+    /// Resumes once `count` commands have arrived.
+    func until(_ count: Int) async {
+        guard commands.count < count else { return }
+        await withCheckedContinuation { counted.append((count, $0)) }
+    }
     func answer() { waiting.removeFirst().resume() }
-    func until(_ count: Int) async { while commands.count < count { await Task.yield() } }
 }
 
 final class PendingJournalTests: XCTestCase {
@@ -945,8 +983,7 @@ final class PendingJournalTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         func launch(_ t3: HeldT3) async -> SquircleModel {
-            let model = SquircleModel(configuration: nil, preferences: UserDefaults(suiteName: UUID().uuidString)!,
-                                      commandDispatch: t3.dispatch, journal: PendingJournal(directory: root))
+            let model = SquircleModel.hermetic(commandDispatch: t3.dispatch, journal: PendingJournal(directory: root))
             model.consumeConfig(config)
             return model
         }
@@ -969,15 +1006,15 @@ final class PendingJournalTests: XCTestCase {
         XCTAssertEqual(after.pendingSend(for: thread)?.phase, .awaitingAcceptance)
         XCTAssertEqual(after.pendingSend(for: thread)?.images, 1)
         second.answer()
-        while after.pendingSend(for: thread)?.phase == .awaitingAcceptance { await Task.yield() }
+        await after.until { after.pendingSend(for: thread)?.phase != .awaitingAcceptance }
+        await after.journalWritten()
         // Forgotten on disk: a third run sends nothing.
-        var left: [String] = []
-        for _ in 0..<200 { left = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []; if left.isEmpty { break }; await Task.yield() }
-        XCTAssertEqual(left, [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
         let third = HeldT3()
-        _ = await launch(third)
-        for _ in 0..<50 { await Task.yield() }
+        let restarted = await launch(third)
+        await restarted.journalWritten()
         XCTAssertTrue(third.commands.isEmpty)
+        restarted.close()
         after.close()
     }
 

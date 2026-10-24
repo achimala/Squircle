@@ -150,6 +150,15 @@ final class SquircleModel {
     private var delivery = Delivery.State() { didSet { changed() } }
     private let journal: PendingJournal?
     private var journalSequence: UInt64 = 0
+    /// The journal's writes, in the order they were asked for.
+    private var journalWork: Task<Void, Never>?
+    /// Returns once every journal write asked for so far is done.
+    func journalWritten() async {
+        while let work = journalWork {
+            await work.value
+            if journalWork == work { return }
+        }
+    }
     /// The fields messages were sent with, to put back if T3 refuses one.
     private var sentFields: [String: [ImageAttachment]] = [:]
     private var sendWaiters: [String: AsyncStream<SendOutcome>.Continuation] = [:]
@@ -186,7 +195,7 @@ final class SquircleModel {
     /// Threads seen this session, so returning to one shows it at once.
     private var threadCache = BoundedCache<String, Transcript>(budget: 12)
     private var cacheWrite: Task<Void, Never>?
-    private let disk = DiskCache()
+    private let disk: DiskCache
     private var diskGeneration: UInt64 = 0
     /// Rebuilds the transcript off the main actor; `conversationDirty` asks
     /// for another pass once the one under way is done.
@@ -305,18 +314,20 @@ final class SquircleModel {
     init(configuration: AppConfiguration? = try? AppConfiguration.load(), preferences: UserDefaults = .standard,
          commandDispatch: ((JSONValue) async throws -> JSONValue)? = nil,
          upload: ((URL, String) async throws -> String)? = nil, scopeBundleID: String? = nil,
-         journal: PendingJournal?? = nil) {
+         journal: PendingJournal?? = nil, cache: DiskCache = DiskCache(), transport: Transport = .network,
+         sharesMedia: Bool = true) {
         self.preferences = preferences
+        disk = cache
         self.scopeBundleID = scopeBundleID
         self.commandDispatch = commandDispatch
         self.upload = upload
         self.configuration = configuration
-        client = configuration.map { SquircleClient(configuration:$0) }
-        gateway = configuration.map(T3Gateway.init(configuration:))
+        client = configuration.map { SquircleClient(configuration: $0, sessionConfiguration: transport.sessionConfiguration()) }
+        gateway = configuration.map { T3Gateway(configuration: $0, transport: transport) }
         link = gateway.map(LinkRuntime.init(gateway:))
         self.journal = journal ?? (configuration == nil ? nil : PendingJournal())
         preferredModel = preferences.data(forKey: Self.preferredModelKey).flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) }
-        selectedProjectID = UserDefaults.standard.string(forKey:"squircle.t3.selectedProject")
+        selectedProjectID = preferences.string(forKey:"squircle.t3.selectedProject")
         if case .failed(let status) = AppConfiguration.Shared.lastStore.withLock({ $0 }) {
             error = "Squircle couldn’t share its Mac connection with app overlays (Keychain error \(status)). Apps you build may show as unpaired."
         }
@@ -326,7 +337,7 @@ final class SquircleModel {
                 guard let home = await disk.loadHome(), let self, shell == .null else { return }
                 shell = home.shell; if appMetadata.isEmpty { appMetadata = home.metadata }; shellChanged()
             }
-            Task { await StepVideos.list() }
+            if sharesMedia { Task { await StepVideos.list() } }
         }
         #if DEBUG
         seedSentDemo()
@@ -339,7 +350,7 @@ final class SquircleModel {
         }
         if let journal = self.journal {
             // Messages that were on their way when the app last quit go again, as themselves.
-            Task { [weak self] in
+            journalWork = Task { [weak self] in
                 let contents = await journal.load()
                 guard let self, !closed else { return }
                 #if DEBUG
@@ -553,14 +564,16 @@ final class SquircleModel {
         guard batched else { shellChanged(); scheduleHomeWrite(); return }
         // A resumed shell arrives as many events at once: Home follows
         // once they're all in.
-        guard !shellPending else { return }
-        shellPending = true
-        Task { [weak self] in
-            guard let self, shellPending else { return }
-            shellPending = false; shellChanged(); scheduleHomeWrite()
+        guard shellApply == nil else { return }
+        shellApply = Task { [weak self] in
+            guard let self, shellApply != nil else { return }
+            shellApply = nil; shellChanged(); scheduleHomeWrite()
         }
     }
-    private var shellPending = false
+    /// The pending application of a burst of shell events, if one is queued.
+    private var shellApply: Task<Void, Never>?
+    /// Returns once the shell events received so far show on Home.
+    func shellApplied() async { await shellApply?.value }
     private func shellChanged() {
         sessions = shell["threads"].array.filter { $0["deletedAt"] == .null && $0["archivedAt"] == .null }.map { t in
             if let id = t["id"].string { sessionProjects[id] = t["projectId"].string }
@@ -616,7 +629,7 @@ final class SquircleModel {
         } : nil
     #endif
     func selectProject(_ project: AppProject) {
-        selectedProjectID = project.id; UserDefaults.standard.set(project.id,forKey:"squircle.t3.selectedProject")
+        selectedProjectID = project.id; preferences.set(project.id,forKey:"squircle.t3.selectedProject")
     }
     /// An app's threads; its agent's own thread only when asked for.
     func sessions(for project: AppProject, includingAgent: Bool = false) -> [ChatSession] {
@@ -1075,7 +1088,8 @@ final class SquircleModel {
             guard let journal else { continue }
             journalSequence += 1
             let sequence = journalSequence, after = rest
-            Task { [weak self] in
+            journalWork = Task { [weak self, previous = journalWork] in
+                await previous?.value
                 do {
                     try await journal.save(.init(intent: entry.intent, stage: entry.stage), sequence: sequence)
                     self?.run(after)
@@ -1092,7 +1106,12 @@ final class SquircleModel {
         case .forget(let id):
             journalSequence += 1
             let sequence = journalSequence
-            if let journal { Task { await journal.forget(id, sequence: sequence) } }
+            if let journal {
+                journalWork = Task { [previous = journalWork] in
+                    await previous?.value
+                    await journal.forget(id, sequence: sequence)
+                }
+            }
         case .prepare(let intent):
             let field = sentFields[intent.messageID] ?? intent.recordings.map(Self.attachment)
             Task { [weak self] in

@@ -1,6 +1,28 @@
 import Foundation
 import os
 
+/// How a model's sessions reach the network. `.offline` never does: every
+/// request fails at once as if there were no network and T3's socket never
+/// opens. For tests, which must not touch the network.
+enum Transport {
+    case network, offline
+
+    /// A fresh ephemeral session configuration that goes through this transport.
+    func sessionConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        if self == .offline { configuration.protocolClasses = [Offline.self] }
+        return configuration
+    }
+
+    /// Answers every request with "not connected", without opening a socket.
+    private final class Offline: URLProtocol {
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() { client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)) }
+        override func stopLoading() {}
+    }
+}
+
 final class SquircleClient {
     let configuration: AppConfiguration
     private let session: URLSession

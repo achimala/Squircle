@@ -115,10 +115,10 @@ final class T3HTTP {
     /// socket write still queued after 45 s (a Ping behind a picture on a
     /// slow uplink); the gateway's heartbeat judges the socket instead.
     let socketSession: URLSession
-    init(configuration: AppConfiguration) {
+    init(configuration: AppConfiguration, transport: Transport = .network) {
         self.configuration = configuration
         token = configuration.t3Token
-        let c = URLSessionConfiguration.ephemeral
+        let c = transport.sessionConfiguration()
         c.httpShouldSetCookies = false; c.urlCredentialStorage = nil; c.urlCache = nil
         c.timeoutIntervalForRequest = 45
         #if DEBUG
@@ -260,11 +260,16 @@ final class T3Gateway {
     /// Why T3 refused the last socket's upgrade, if it did.
     private(set) var rejection: Error?
     var isOpen: Bool { socket != nil }
-    init(configuration: AppConfiguration) { http = T3HTTP(configuration: configuration) }
+    private let transport: Transport
+    init(configuration: AppConfiguration, transport: Transport = .network) {
+        http = T3HTTP(configuration: configuration, transport: transport)
+        self.transport = transport
+    }
     /// Closes the socket and the HTTP session for good.
     func close() { onDisconnect = nil; disconnect(notify: false); http.invalidate() }
     func connect() async throws {
         disconnect(notify: false)
+        guard transport == .network else { throw ClientError.connection("T3") }
         ConnectionTrace.mark("socket.start")
         let ws = http.socketSession.webSocketTask(with: try http.bearerSocketRequest("/ws"))
         disconnect(notify: false); rejection = nil

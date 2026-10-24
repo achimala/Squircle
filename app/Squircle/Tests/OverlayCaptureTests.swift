@@ -20,7 +20,12 @@ final class OverlayCaptureTests: XCTestCase {
 
         func finish() async -> CaptureOutput? {
             finished += 1
-            if holdFinish { await withCheckedContinuation { finishing = $0 } }
+            if holdFinish {
+                await withCheckedContinuation {
+                    finishing = $0
+                    held?.resume(); held = nil
+                }
+            }
             let result = output(url)
             if result == nil { try? FileManager.default.removeItem(at: url) }
             return result
@@ -31,6 +36,13 @@ final class OverlayCaptureTests: XCTestCase {
         }
 
         var fileExists: Bool { FileManager.default.fileExists(atPath: url.path) }
+
+        private var held: CheckedContinuation<Void, Never>?
+        /// Returns once `finish` is being held.
+        func finishHeld() async {
+            guard finishing == nil else { return }
+            await withCheckedContinuation { held = $0 }
+        }
     }
 
     private func session(_ producer: FakeProducer) -> CaptureSession {
@@ -55,7 +67,7 @@ final class OverlayCaptureTests: XCTestCase {
         let capture = session(producer)
         XCTAssertTrue(capture.start(.performance, below: UIWindow()))
         let stopping = Task { await capture.stop(snapshot: nil) }
-        while producer.finishing == nil { await Task.yield() }
+        await producer.finishHeld()
         XCTAssertTrue(capture.isStopping)
         capture.cancel()
         producer.finishing?.resume()
