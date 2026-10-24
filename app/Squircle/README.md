@@ -38,11 +38,22 @@ supplies these keys:
 }
 ```
 
-Use T3's ordinary pairing CLI/token exchange, scoped to `orchestration:read
-orchestration:operate`. Do not borrow the desktop's session or mutate T3's
-SQLite store. The current paired session expires after 30 days; when it expires,
-create a new standard pairing and rebuild the personal client. Self-service
-pairing/refresh UI is not implemented yet.
+Issue the session with T3's own CLI, scoped to `orchestration:read
+orchestration:operate filesystem:read` (T3 0.1.0 signs URLs for Mac files the
+agent's Markdown shows only for `filesystem:read`; without it those pictures
+fail to load):
+
+```sh
+ELECTRON_RUN_AS_NODE=1 "/Applications/T3 Code (Beta).app/Contents/MacOS/T3 Code (Beta)" \
+  "/Applications/T3 Code (Beta).app/Contents/Resources/app.asar/apps/server/dist/bin.mjs" \
+  auth session issue --scope orchestration:read --scope orchestration:operate \
+  --scope filesystem:read --ttl 30d --label "Squircle native client" --json
+```
+
+Put its `token` in `t3_token`. Do not borrow the desktop's session or mutate
+T3's SQLite store. When the session expires, issue a new one and rebuild the
+personal client (`t3 auth session revoke ID` retires the old one once the new
+build is installed). Self-service pairing/refresh UI is not implemented yet.
 
 The app embeds it as `client.json` only when `Config/Local.xcconfig` sets
 `SQUIRCLE_EMBED_CONNECTION` to its path; the build fails if that file is

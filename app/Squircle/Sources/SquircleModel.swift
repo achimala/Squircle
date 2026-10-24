@@ -1599,7 +1599,8 @@ final class SquircleModel {
     #if DEBUG
     /// `SQUIRCLE_DEMO_SENT=1` with no Mac connection: a made-up app "Demo"
     /// whose agent sent work to two workers and heard back from one, so its
-    /// "Sent to" and "From" lines can be tapped on a simulator.
+    /// "Sent to" and "From" lines can be tapped on a simulator. Its picture
+    /// can't load (no Mac), so it shows as failed.
     private func seedSentDemo() {
         guard configuration == nil, ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_SENT"] == "1" else { return }
         let agent = "0d3a1c52-6c7e-4c38-9d8e-2f0a5b6e7a10", dark = "4b8e9f21-3c5d-4e6f-8a7b-9c0d1e2f3a41", deck = "7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e52"
@@ -1626,7 +1627,7 @@ final class SquircleModel {
                 ["id": "a1", "role": "assistant", "text": "Both are on it.", "runId": "r1", "createdAt": at(9)],
                 ["id": "m1", "role": "user", "text": "Dark mode is in. The sheet follows the system appearance now; want me to build it?", "createdAt": at(20),
                  "context": ["version": 1, "records": [["kind": "squircle-agent-message", "label": "Message", "payload": ["from": dark]]]]],
-                ["id": "a2", "role": "assistant", "text": "Dark mode is ready to try.", "runId": "r2", "createdAt": at(25)]],
+                ["id": "a2", "role": "assistant", "text": "Dark mode is ready to try.\n\n![The dark build sheet](/demo/dark-sheet.png)", "runId": "r2", "createdAt": at(25)]],
             "turnItems": [send("t1", to: dark, "Make the build sheet follow dark mode.", 3), send("t2", to: deck, "Stack two or more sims into one deck.", 5)]]])
         let workerState = json(["kind": "snapshot", "snapshotSequence": 1, "projection": ["thread": ["id": dark, "title": "Dark mode"],
             "runs": [["id": "w1", "status": "completed"]],

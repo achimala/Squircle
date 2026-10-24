@@ -969,7 +969,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
         case .figure(_, let shots):
             guard let cell = cell as? FigureCell else { return }
-            cell.configure(shots, width: table.bounds.width)
+            cell.configure(shots, width: table.bounds.width, failed: Set(shots.map(\.step).filter { media.failed("figure:" + $0) }))
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
         case .table(let id, let table, let quiet):
             (cell as? MarkdownTableCell)?.configure(tableLayout(id, table, quiet: quiet), id: id)
@@ -1001,7 +1001,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// The conversation's downloads, nearest what shows first.
     private lazy var media: MediaQueue = {
         let queue = MediaQueue()
-        queue.onEnded = { [weak self] in self?.setNeedsMediaPass() }
+        queue.onEnded = { [weak self] key, loaded in
+            // A picture that couldn't load shows as failed, not as loading.
+            if !loaded, key.hasPrefix("figure:") { self?.reconfigureFigures() }
+            self?.setNeedsMediaPass()
+        }
         return queue
     }()
     private var mediaPassPending = false
@@ -1263,6 +1267,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index) != nil, await FigureCell.prepare(shot) != nil else { return false }
         await reconfigure(item)
         return true
+    }
+
+    private func reconfigureFigures() {
+        var snapshot = dataSource.snapshot()
+        let figures = snapshot.itemIdentifiers.filter { if case .figure = itemsByID[$0] { true } else { false } }
+        guard !figures.isEmpty else { return }
+        snapshot.reconfigureItems(figures)
+        dataSource.apply(snapshot, animatingDifferences: false)
     }
 
     private func reconfigure(_ item: String) async {

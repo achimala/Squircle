@@ -10,8 +10,9 @@ final class MediaQueue {
         /// Loads it into the cache and shows it; true if it's there now.
         let load: () async -> Bool
     }
-    /// After a load ends: what's missing may have changed.
-    var onEnded: (() -> Void)?
+    /// After a load ends, with its key and whether it's in the cache now:
+    /// what's missing may have changed.
+    var onEnded: ((_ key: String, _ loaded: Bool) -> Void)?
     private var state: MediaLoads.State
     private var jobs: [String: () async -> Bool] = [:]
     private var tasks: [Int: Task<Void, Never>] = [:]
@@ -20,6 +21,9 @@ final class MediaQueue {
     /// sooner than with a whole screen's worth sharing the link.
     init(limit: Int = 3) { state = MediaLoads.State(limit: limit) }
     deinit { tasks.values.forEach { $0.cancel() } }
+
+    /// It failed and isn't asked again until it leaves sight and comes back.
+    func failed(_ key: String) -> Bool { state.failed.contains(key) }
 
     func seen(_ wants: [String: Want]) {
         for (key, want) in wants { jobs[key] = want.load }
@@ -53,7 +57,7 @@ final class MediaQueue {
                 if ProcessInfo.processInfo.environment["SQUIRCLE_MEDIA_LOG"] != nil { NSLog("SQUIRCLE-MEDIA end %@ loaded=%d", key, loaded ? 1 : 0) }
                 #endif
                 send(.ended(key: key, op: op, loaded: loaded))
-                onEnded?()
+                onEnded?(key, loaded)
             }
         case .cancel(_, let op):
             tasks[op]?.cancel()

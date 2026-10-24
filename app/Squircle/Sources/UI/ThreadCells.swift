@@ -641,7 +641,8 @@ final class FigureCell: TimelineCell {
     }
     private static let cache = NSCache<NSString, UIImage>()
 
-    func configure(_ shots: [Shot], width: CGFloat) {
+    /// `failed`: the steps whose pictures couldn't be loaded.
+    func configure(_ shots: [Shot], width: CGFloat, failed: Set<String> = []) {
         if shots != self.shots {
             self.shots = shots
             tiles.forEach { $0.removeFromSuperview() }
@@ -653,7 +654,7 @@ final class FigureCell: TimelineCell {
         }
         available = width - 40
         height.constant = Self.layout(shots, width: available).map(\.maxY).max() ?? 0
-        tiles.forEach { $0.update() }
+        tiles.forEach { $0.update(failed: failed.contains($0.shot.step)) }
         setNeedsLayout()
     }
 
@@ -673,6 +674,8 @@ final class FigureTile: UIControl {
     private let image = UIImageView()
     private let playerLayer = AVPlayerLayer()
     private let badge = UIImageView(image: UIImage(systemName: "play.fill"))
+    /// Shown instead of the picture when it couldn't be loaded.
+    private let broken = UIImageView(image: UIImage(systemName: "photo.badge.exclamationmark"))
     private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
 
@@ -693,8 +696,13 @@ final class FigureTile: UIControl {
         badge.layer.cornerRadius = 12
         badge.isUserInteractionEnabled = false
         badge.isHidden = !shot.video
+        broken.tintColor = .tertiaryLabel
+        broken.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
+        broken.contentMode = .center
+        broken.isHidden = true
         addSubview(image)
         addSubview(badge)
+        addSubview(broken)
         addAction(UIAction { [weak self] _ in
             guard let self else { return }
             Theme.selectionHaptic()
@@ -711,7 +719,9 @@ final class FigureTile: UIControl {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func update() {
+    func update(failed: Bool = false) {
+        broken.isHidden = !failed || image.image != nil || FigureCell.image(for: shot) != nil
+        accessibilityLabel = shot.video ? "Recording" : broken.isHidden ? "Image" : "Image couldn't load"
         if let picture = FigureCell.image(for: shot), image.image !== picture {
             if window != nil, image.image == nil {
                 UIView.transition(with: image, duration: 0.3, options: [.transitionCrossDissolve, .allowUserInteraction]) { self.image.image = picture }
@@ -727,6 +737,7 @@ final class FigureTile: UIControl {
         // Phone screenshots read as phones; everything else as a picture.
         layer.cornerRadius = bounds.width / max(1, bounds.height) < 0.7 ? min(22, bounds.width * 0.1) : 12
         image.frame = bounds
+        broken.frame = bounds
         badge.frame = CGRect(x: bounds.maxX - 32, y: bounds.maxY - 32, width: 24, height: 24)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         playerLayer.frame = image.bounds

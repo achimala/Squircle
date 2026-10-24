@@ -1682,6 +1682,9 @@ absolute Mac paths (`![after](/Users/…/cmp-after.png)`,
   `media-file` resource for the thread and path), as T3's web client does; T3
   serves only previewable media types. Its `imageDimensions` reserve each
   picture's box before the bytes arrive. No Squircle service change.
+  **2026-10-24:** T3 0.1.0 signs `media-file` (and workspace-file) URLs only
+  for sessions with `filesystem:read`; see
+  [phone session scope](#2026-10-24-phone-session-needs-filesystemread).
 
 Checked in the simulator on the Squircle agent thread and a worker thread over
 it: before, "before", "after" and "drag" showed as words; after, the composites,
@@ -2875,3 +2878,26 @@ in its place and none is held off Home: settled, `violations=0`. The service
 side by `apps::tests::home_order_holds_and_new_apps_join_at_the_end`; the
 round trip from a paired phone to the Mac was not exercised (the simulator copy
 can't pair).
+
+## 2026-10-24 phone session needs filesystem:read
+
+Pictures the agent's Markdown embeds (`![..](/absolute/path)`) showed on the
+phone as an empty gray box. T3 0.1.0's `assets.createUrl` requires
+`filesystem:read` for `media-file`, `workspace-file` and
+`draft-workspace-file` resources (attachments and the rest still need only
+`orchestration:read`); 0.0.45 had no such check. The phone's session, paired
+2026-10-05, held only `orchestration:read orchestration:operate`, so every
+such request failed with `EnvironmentAuthorizationError: missing required
+scope: filesystem:read` (T3's server trace), and the tile stayed a loading
+box. With the user's approval the phone's session is now issued by `t3 auth
+session issue` with `filesystem:read` added (see the
+[app guide](../app/Squircle/README.md#personal-connection)); the next
+personal build embeds it. Checked on the Mac with a short-lived session of
+those scopes (revoked afterwards): `assets.createUrl` for the LA agent's
+1800×1304 PNG returned its dimensions and the signed URL served all
+2,045,742 bytes; the phone's old session is refused.
+
+A picture whose load fails now shows a broken-picture mark in its box instead
+of a box that looks like it is still loading. The download queue (M06)
+already never re-asks a failed load until it leaves sight and returns; the
+tile reads that failure.
