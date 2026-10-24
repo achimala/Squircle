@@ -121,16 +121,15 @@ struct AppProject: Identifiable, Equatable, Codable {
     let subtitle: String
     let bundleID: String?
     let canBuild: Bool
-    let updatedAt: Date
     let buildRequest: AppBuildRequest?
     let metadataID: String?
     let metadataPreview: AppMetadata.Preview?
 
     init(id: String, name: String, subtitle: String, bundleID: String?, canBuild: Bool,
-         updatedAt: Date, buildRequest: AppBuildRequest? = nil, metadataID: String? = nil,
+         buildRequest: AppBuildRequest? = nil, metadataID: String? = nil,
          metadataPreview: AppMetadata.Preview? = nil) {
         self.id = id; self.name = name; self.subtitle = subtitle; self.bundleID = bundleID
-        self.canBuild = canBuild; self.updatedAt = updatedAt; self.buildRequest = buildRequest
+        self.canBuild = canBuild; self.buildRequest = buildRequest
         self.metadataID = metadataID; self.metadataPreview = metadataPreview
     }
 
@@ -194,14 +193,11 @@ enum T3AppCatalog {
     }
 
     /// Only apps in Squircle's Mac catalog appear; a T3 project nobody
-    /// imported is not a Squircle app. Newest thread activity first.
+    /// imported is not a Squircle app. In the catalog's order, which is
+    /// Home's: where the user dragged each app, new ones last.
     static func projects(shell:JSONValue,metadata:[AppMetadata],builds:[AppBuild]) -> [AppProject] {
         let projects = shell["projects"].array.filter { $0["deletedAt"] == .null }
-        var active: [String: Date] = [:]
-        for t in shell["threads"].array where t["deletedAt"] == .null && t["archivedAt"] == .null {
-            guard let id = t["projectId"].string else { continue }
-            active[id] = max(active[id] ?? .distantPast, t["updatedAt"].date)
-        }
+        let place = Dictionary(metadata.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
         func owner(_ path:String) -> String? { Self.owner(of: path, projects: projects) }
         return projects.compactMap { p -> AppProject? in
             let id = p["id"].string ?? ""
@@ -209,10 +205,31 @@ enum T3AppCatalog {
             let related = builds.filter { $0.appProject.map { owner($0) == id } ?? false }
             let request = record.buildRequest ?? related.filter { $0.request?.mode == "archive" }.sorted { $0.date > $1.date }.first?.request
             return AppProject(id:id,name:record.name,subtitle:"",
-                bundleID:record.bundleID,canBuild:request?.canSubmit ?? false,updatedAt:max(active[id] ?? .distantPast, p["updatedAt"].date),
+                bundleID:record.bundleID,canBuild:request?.canSubmit ?? false,
                 buildRequest:request,metadataID:record.id,metadataPreview:record.preview)
-        }.enumerated().sorted { a, b in
-            a.element.updatedAt != b.element.updatedAt ? a.element.updatedAt > b.element.updatedAt : a.offset < b.offset
+        }.sorted { place[$0.metadataID ?? ""] ?? .max < place[$1.metadataID ?? ""] ?? .max }
+    }
+}
+
+/// Home's order of the Mac's catalog records.
+enum AppOrder {
+    /// The whole catalog's order after Home shows `visible` (some of its
+    /// records, newly arranged): they take the places Home's apps held, in
+    /// their new order, and records Home doesn't show keep theirs.
+    static func arranged(_ all: [String], showing visible: [String]) -> [String] {
+        let shown = Set(visible).intersection(all)
+        let moved = visible.filter(shown.contains)
+        var result = all, next = moved.makeIterator()
+        for (index, id) in all.enumerated() where shown.contains(id) { result[index] = next.next() ?? id }
+        return result
+    }
+    /// `records` with those `order` names first, in its order; the rest
+    /// after them as they were.
+    static func apply(_ order: [String], to records: [AppMetadata]) -> [AppMetadata] {
+        let place = Dictionary(order.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { a, _ in a })
+        return records.enumerated().sorted { a, b in
+            let x = place[a.element.id] ?? order.count + a.offset, y = place[b.element.id] ?? order.count + b.offset
+            return x < y
         }.map(\.element)
     }
 }

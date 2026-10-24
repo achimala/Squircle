@@ -16,7 +16,7 @@ signed builds it makes, over cellular if your Mac is reachable.
 ## What works today
 
 - **Home:** a grid of your apps as device portraits made from real simulator
-  screenshots. Tapping one opens that app's agent.
+  screenshots, in the order you drag them into. Tapping one opens that app's agent.
 - **One agent per app:** a T3 thread on a Claude instance with Squircle's
   plugin. It answers you, runs ordinary T3 worker threads in their own
   worktrees, and is woken when they finish. You tell it how to work.

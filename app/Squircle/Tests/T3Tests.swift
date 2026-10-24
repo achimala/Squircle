@@ -387,7 +387,7 @@ private final class GatedDispatch {
 final class NativeStateTests: XCTestCase {
     private let config = JSONValue.from(["providers":[["instanceId":"codex","displayName":"Codex","enabled":true,"status":"ready",
                                                         "models":[["slug":"sol","name":"Sol","isDefault":true]]]]])
-    private let project = AppProject(id: "app", name: "App", subtitle: "", bundleID: nil, canBuild: false, updatedAt: .now)
+    private let project = AppProject(id: "app", name: "App", subtitle: "", bundleID: nil, canBuild: false)
 
     @MainActor
     private func draftWithPicture(_ gate: GatedDispatch, upload: ((URL, String) async throws -> String)? = nil)
@@ -971,7 +971,7 @@ private final class HeldT3 {
 final class PendingJournalTests: XCTestCase {
     private let config = JSONValue.from(["providers":[["instanceId":"codex","displayName":"Codex","enabled":true,"status":"ready",
                                                         "models":[["slug":"sol","name":"Sol","isDefault":true]]]]])
-    private let project = AppProject(id: "app", name: "App", subtitle: "", bundleID: nil, canBuild: false, updatedAt: .now)
+    private let project = AppProject(id: "app", name: "App", subtitle: "", bundleID: nil, canBuild: false)
 
     /// Killed while T3 hasn't answered: the next run sends the very same
     /// command (IDs, text, pictures) once, and forgets it once T3 has it.

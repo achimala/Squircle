@@ -328,6 +328,9 @@ final class SquircleModel {
             }
             Task { await StepVideos.list() }
         }
+        #if DEBUG
+        if demoApps != nil { reconcileProjects() }
+        #endif
         link?.host = self
         if link == nil {
             // No socket (an injected dispatch, or no configuration): nothing to wait for.
@@ -578,9 +581,39 @@ final class SquircleModel {
     }
     private var tracedHome = false, liveShell = false
     private func reconcileProjects() {
-        projects = T3AppCatalog.projects(shell:shell,metadata:appMetadata,builds:builds)
+        #if DEBUG
+        if let demoApps { projects = demoApps; return }
+        #endif
+        // An order you gave Home shows at once, until the Mac shows it.
+        let metadata = commands.appOrder.map { AppOrder.apply($0, to: appMetadata) } ?? appMetadata
+        projects = T3AppCatalog.projects(shell:shell,metadata:metadata,builds:builds)
             .filter { scopeBundleID == nil || $0.bundleID == scopeBundleID }
     }
+    /// Home's apps, as the user just arranged them: shown at once, sent
+    /// once (M04), and kept on the Mac.
+    func arrangeApps(_ ids: [String]) {
+        #if DEBUG
+        if let demo = demoApps {
+            demoApps = ids.compactMap { id in demo.first { $0.id == id } } + demo.filter { !ids.contains($0.id) }
+            reconcileProjects(); return
+        }
+        #endif
+        guard client != nil else { return }
+        let visible = ids.compactMap { id in projects.first { $0.id == id }?.metadataID }
+        let order = AppOrder.arranged(AppOrder.apply(commands.appOrder ?? [], to: appMetadata).map(\.id), showing: visible)
+        startCommand(.appOrder(order), command: nil)
+    }
+    /// Bumped when Home's order is adopted from the Mac's reply, so a list
+    /// read before it can't put the old order back.
+    private var catalogGeneration = 0
+    #if DEBUG
+    /// `SQUIRCLE_DEMO_APPS=1`: made-up apps kept on the phone, so arranging
+    /// Home on a simulator touches nobody's real catalog.
+    private var demoApps: [AppProject]? = ProcessInfo.processInfo.environment["SQUIRCLE_DEMO_APPS"] == "1"
+        ? ["Squircle", "Weather", "Recipes", "Habits", "Budget", "Trails", "Notes", "Sketch"].enumerated().map {
+            AppProject(id: "demo-app-\($0.offset)", name: $0.element, subtitle: "", bundleID: nil, canBuild: false)
+        } : nil
+    #endif
     func selectProject(_ project: AppProject) {
         selectedProjectID = project.id; UserDefaults.standard.set(project.id,forKey:"squircle.t3.selectedProject")
     }
@@ -1178,7 +1211,9 @@ final class SquircleModel {
         for violation in Commands.violations(in: reduction.state) { NSLog("SQUIRCLE-FSM M04 %@", violation) }
         if case .protocolFault(let fault) = reduction.disposition { NSLog("SQUIRCLE-FSM M04 fault %@", fault) }
         #endif
+        let order = commands.appOrder
         commands = reduction.state
+        if commands.appOrder != order { reconcileProjects() }
         for effect in reduction.effects { perform(effect) }
         return reduction.disposition
     }
@@ -1198,6 +1233,17 @@ final class SquircleModel {
                     command(.answered(id: id, attempt: 0, .accepted(.object(revision.map { ["revision": .number(Double($0))] } ?? [:]))))
                 } catch { command(.answered(id: id, attempt: 0, .service(error))) }
                 await readTasks(containing: task)
+            }
+        case .orderApps(let id, let ids):
+            Task { [weak self] in
+                guard let self else { return }
+                guard let client else { command(.answered(id: id, attempt: 0, .refused(ClientError.configuration.localizedDescription))); return }
+                do {
+                    let catalog = try await client.orderApps(ids)
+                    catalogGeneration += 1
+                    if catalog != appMetadata { appMetadata = catalog }
+                    command(.answered(id: id, attempt: 0, .accepted(.null)))
+                } catch { command(.answered(id: id, attempt: 0, .service(error))) }
             }
         case .readTasks(let task):
             Task { [weak self] in await self?.readTasks(containing: task) }
@@ -1462,6 +1508,7 @@ final class SquircleModel {
         let thread = selectedSessionID.flatMap { id in
             needs.contains { if case .conversation(let c) = $0 { return c.threadID == id }; return false } ? id : nil
         }
+        let generation = catalogGeneration
         async let b = client.builds(); async let m = client.fetchAppMetadata(); async let a = try? client.agents()
         async let sims = try? client.simulatorSessions()
         async let lists: [(String, AppTasks)] = withTaskGroup(of: (String, AppTasks)?.self) { group in
@@ -1475,8 +1522,9 @@ final class SquircleModel {
         do {
             let (newBuilds, newMetadata) = try await (b, m)
             if newBuilds != builds { builds = newBuilds }
-            if newMetadata != appMetadata { appMetadata = newMetadata }
+            if newMetadata != appMetadata, generation == catalogGeneration { appMetadata = newMetadata }
             reconcileProjects()
+            if commands.appOrder != nil { command(.appsObserved(order: appMetadata.map(\.id))) }
             failure = nil
         } catch { failure = error }  // T3 chat remains usable if the build service is temporarily offline.
         if let known = await a { adopt(known) }

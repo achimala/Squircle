@@ -73,6 +73,11 @@ final class SquircleClient {
         return try await call(request, exposeAPIError: true)
     }
 
+    /// Home's order of the catalog's records; the reply is the catalog in it.
+    func orderApps(_ ids: [String]) async throws -> [AppMetadata] {
+        try await call(request(["v1", "apps", "order"], method: "PUT", body: JSONEncoder().encode(["ids": ids])), exposeAPIError: true)
+    }
+
     /// Each app's agent thread on the Mac, and how to run its CLI.
     func agents() async throws -> AgentDirectory {
         do {

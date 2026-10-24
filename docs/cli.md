@@ -122,7 +122,8 @@ Inspection accepts optional `--scheme` and `--configuration`; import defaults to
 The authenticated APIs are `GET /v1/projects?path=…`,
 `GET /v1/projects/inspect?project=…&scheme=…&configuration=…` and
 `POST /v1/apps/import` with `project`, `scheme`, `name` and optional
-`configuration`. Responses use the ordinary `ok`/`data` envelope.
+`configuration`. `GET /v1/apps` lists apps in Home's order; the phone sets it
+with `PUT /v1/apps/order` and `{"ids": [...]}`. Responses use the ordinary `ok`/`data` envelope.
 
 Import inspects the project and persists a `build_request` in its app record.
 The client prefers that recipe over historical jobs, enabling the first build
