@@ -867,7 +867,12 @@ pub async fn show(
                 text += &format!("Sub-task of task:{parent}\n");
             }
             for sub in &task.subtasks {
-                text += &format!("Sub-task task:{} ({}): {}\n", sub.id, sub.status.label(), sub.ask);
+                text += &format!(
+                    "Sub-task task:{} ({}): {}\n",
+                    sub.id,
+                    sub.status.label(),
+                    sub.ask
+                );
             }
             for thread in &task.threads {
                 text += &format!("Worker: thread:{thread}\n");

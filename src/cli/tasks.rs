@@ -96,117 +96,117 @@ pub(super) enum SubCommand {
 }
 
 pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value>> {
-    let data =
-        match command {
-            TaskCommand::Add {
-                thread,
-                project,
-                ask,
-                status,
-                note,
-            } => post(
+    let data = match command {
+        TaskCommand::Add {
+            thread,
+            project,
+            ask,
+            status,
+            note,
+        } => {
+            post(
                 cli,
                 "/v1/tasks",
                 json!({"thread":thread,"project":project,"ask":ask,"status":status,"note":note}),
             )
-            .await?,
-            TaskCommand::Update {
-                id,
-                status,
-                note,
-                ask,
-                top,
-                under,
-            } => {
-                let parent = match under.as_deref() {
-                    Some("none") => Some(String::new()),
-                    Some(item) => Some(task_id(item)?.to_string()),
-                    None => None,
-                };
-                request(
-                    cli,
-                    reqwest::Method::PATCH,
-                    &format!("/v1/tasks/{}", task_id(id)?),
-                    Some(json!({"status":status,"note":note,"ask":ask,"to_top":top,"parent":parent})),
-                    false,
+            .await?
+        }
+        TaskCommand::Update {
+            id,
+            status,
+            note,
+            ask,
+            top,
+            under,
+        } => {
+            let parent = match under.as_deref() {
+                Some("none") => Some(String::new()),
+                Some(item) => Some(task_id(item)?.to_string()),
+                None => None,
+            };
+            request(
+                cli,
+                reqwest::Method::PATCH,
+                &format!("/v1/tasks/{}", task_id(id)?),
+                Some(json!({"status":status,"note":note,"ask":ask,"to_top":top,"parent":parent})),
+                false,
+            )
+            .await?
+        }
+        TaskCommand::Link {
+            id,
+            thread,
+            build,
+            remove,
+        } => {
+            post(
+                cli,
+                &format!("/v1/tasks/{}/link", task_id(id)?),
+                json!({"thread":thread,"build":build,"remove":remove}),
+            )
+            .await?
+        }
+        TaskCommand::Attach { id, file, caption } => {
+            post(
+                cli,
+                &format!("/v1/tasks/{}/media", task_id(id)?),
+                json!({"file":std::path::absolute(file)?,"caption":caption}),
+            )
+            .await?
+        }
+        TaskCommand::Sub {
+            command:
+                SubCommand::Add {
+                    item,
+                    ask,
+                    status,
+                    note,
+                    thread,
+                },
+        } => post(
+            cli,
+            "/v1/tasks",
+            json!({"parent":task_id(item)?,"thread":thread,"ask":ask,"status":status,"note":note}),
+        )
+        .await?,
+        TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,
+        TaskCommand::List {
+            thread,
+            project,
+            all,
+            history_before,
+        } => {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(thread.as_ref().map(|t| ("thread", t.as_str())))
+                .extend_pairs(project.as_ref().map(|p| ("project", p.as_str())))
+                .extend_pairs(
+                    history_before
+                        .as_ref()
+                        .map(|c| ("history_before", c.as_str())),
                 )
-                .await?
-            }
-            TaskCommand::Link {
-                id,
-                thread,
-                build,
-                remove,
-            } => {
-                post(
-                    cli,
-                    &format!("/v1/tasks/{}/link", task_id(id)?),
-                    json!({"thread":thread,"build":build,"remove":remove}),
-                )
-                .await?
-            }
-            TaskCommand::Attach { id, file, caption } => {
-                post(
-                    cli,
-                    &format!("/v1/tasks/{}/media", task_id(id)?),
-                    json!({"file":std::path::absolute(file)?,"caption":caption}),
-                )
-                .await?
-            }
-            TaskCommand::Sub {
-                command:
-                    SubCommand::Add {
-                        item,
-                        ask,
-                        status,
-                        note,
-                        thread,
-                    },
-            } => {
-                post(
-                    cli,
-                    "/v1/tasks",
-                    json!({"parent":task_id(item)?,"thread":thread,"ask":ask,"status":status,"note":note}),
-                )
-                .await?
-            }
-            TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,
-            TaskCommand::List {
-                thread,
-                project,
-                all,
-                history_before,
-            } => {
-                let query = url::form_urlencoded::Serializer::new(String::new())
-                    .extend_pairs(thread.as_ref().map(|t| ("thread", t.as_str())))
-                    .extend_pairs(project.as_ref().map(|p| ("project", p.as_str())))
-                    .extend_pairs(
-                        history_before
-                            .as_ref()
-                            .map(|c| ("history_before", c.as_str())),
-                    )
-                    // Without --all History is dropped anyway; don't expand it.
-                    .extend_pairs((!*all).then_some(("history_limit", "1")))
-                    .finish();
-                let mut value = get(cli, &format!("/v1/tasks?{query}")).await?;
-                if !*all && value["ok"] == true {
-                    let data = &mut value["data"];
-                    if let Some(tasks) = data["tasks"].as_array_mut() {
-                        let open = |t: &Value| !matches!(t["status"].as_str(), Some("done" | "dropped"));
-                        tasks.retain(open);
-                        for task in tasks.iter_mut() {
-                            if let Some(subtasks) = task["subtasks"].as_array_mut() {
-                                subtasks.retain(open);
-                            }
+                // Without --all History is dropped anyway; don't expand it.
+                .extend_pairs((!*all).then_some(("history_limit", "1")))
+                .finish();
+            let mut value = get(cli, &format!("/v1/tasks?{query}")).await?;
+            if !*all && value["ok"] == true {
+                let data = &mut value["data"];
+                if let Some(tasks) = data["tasks"].as_array_mut() {
+                    let open =
+                        |t: &Value| !matches!(t["status"].as_str(), Some("done" | "dropped"));
+                    tasks.retain(open);
+                    for task in tasks.iter_mut() {
+                        if let Some(subtasks) = task["subtasks"].as_array_mut() {
+                            subtasks.retain(open);
                         }
                     }
-                    if let Some(object) = data.as_object_mut() {
-                        object.remove("history");
-                        object.remove("history_next");
-                    }
                 }
-                value
+                if let Some(object) = data.as_object_mut() {
+                    object.remove("history");
+                    object.remove("history_next");
+                }
             }
-        };
+            value
+        }
+    };
     Ok(Some(data))
 }

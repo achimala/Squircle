@@ -266,7 +266,16 @@ mod tests {
         assert!(valid_thread(
             "thread:delegated-task:command%3Amcp%3A905fabf1-5ccb-4435-a444-2ba6c234d315%3Adelegate-task%3Aagent-device-e2e-1"
         ));
-        for bad in ["", "..", ".", "a/b", "../x", "a\\b", "a b", &"x".repeat(201)] {
+        for bad in [
+            "",
+            "..",
+            ".",
+            "a/b",
+            "../x",
+            "a\\b",
+            "a b",
+            &"x".repeat(201),
+        ] {
             assert!(!valid_thread(bad), "{bad}");
         }
     }

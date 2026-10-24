@@ -68,12 +68,7 @@ pub(super) enum KeepCommand {
 pub(super) async fn run(cli: &Cli, command: &SimCommand) -> Result<Option<Value>> {
     let data = match command {
         SimCommand::Start { thread, device } => {
-            post(
-                cli,
-                "/v1/sims",
-                json!({"thread_id":thread,"device":device}),
-            )
-            .await?
+            post(cli, "/v1/sims", json!({"thread_id":thread,"device":device})).await?
         }
         SimCommand::Stop { thread, id } => {
             if thread.is_none() && id.is_none() {
