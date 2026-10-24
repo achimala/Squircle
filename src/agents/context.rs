@@ -112,9 +112,12 @@ pub(super) fn deliver(thread: &str, message: Value) -> Value {
     command
 }
 
-/// Whether the user wrote this T3 message: a user message no note marks.
+/// Whether the user wrote this T3 message: a user message no note marks
+/// and no agent wrote (T3 marks background-work notices and other agents'
+/// messages `createdBy` an agent).
 pub(super) fn users_own(message: &Value) -> bool {
     message["role"] == "user"
+        && message["createdBy"].as_str().is_none_or(|by| by == "user")
         && !message["context"]["records"]
             .as_array()
             .into_iter()

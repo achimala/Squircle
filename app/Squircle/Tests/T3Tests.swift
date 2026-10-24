@@ -184,7 +184,13 @@ final class T3Tests: XCTestCase {
         let rows: [[String: Any]] = marked.map { id, extra in
             let text = id == "old" ? "[worker update]\n- \"Dark mode\" (\(build), dark) finished its turn.\nRun it." : "[x] instructions for the agent"
             return ["id": id, "role": "user", "text": text, "createdAt": "2026-10-15T10:00:00.000Z"].merging(extra) { a, _ in a }
-        } + [["id": "you", "role": "user", "text": "Make it blue", "createdAt": "2026-10-15T10:00:00.000Z"]]
+        } + [["id": "you", "role": "user", "text": "Make it blue", "createdBy": "user", "createdAt": "2026-10-15T10:00:00.000Z"],
+              // T3's own: background work finishing, and another agent's message.
+              ["id": "command", "role": "user", "text": "Background command \"Build\" completed (exit code 0)", "createdBy": "agent",
+               "notification": ["source": ["kind": "background_command"], "outcome": "completed", "summary": "Command \"Build\" finished"],
+               "createdAt": "2026-10-15T10:00:00.000Z"],
+              ["id": "peer", "role": "user", "text": "Check the sheet", "createdBy": "agent", "senderThreadId": "other",
+               "createdAt": "2026-10-15T10:00:00.000Z"]]
         var state = T3ThreadState()
         state.consume(.from(["kind": "snapshot", "snapshotSequence": 1, "projection": ["thread": ["id": "t"], "messages": rows]]))
         let messages = Dictionary(uniqueKeysWithValues: state.messages.map { ($0.id, $0) })
@@ -198,6 +204,8 @@ final class T3Tests: XCTestCase {
         XCTAssertEqual(messages["workers"]?.news.first?.state, .needsYou)
         XCTAssertEqual(messages["old"]?.news.first?.title, "Dark mode")
         XCTAssertEqual(messages["later"]?.content, "Later news")
+        XCTAssertTrue(messages["command"]!.isUpdate); XCTAssertEqual(messages["command"]?.content, "Command \"Build\" finished")
+        XCTAssertEqual(messages["peer"]?.agent, AgentAuthor(kind: .message, from: "other"))
         XCTAssertFalse(messages["you"]!.isUpdate); XCTAssertNil(messages["you"]!.agent)
     }
     /// A question or approval shows only while it is pending in the run

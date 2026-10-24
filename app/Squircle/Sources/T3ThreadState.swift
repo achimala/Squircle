@@ -124,6 +124,8 @@ struct T3ThreadState: Codable {
                 message.agent = author; message.content = Self.task(message.content)
             case .other(let label):
                 message.isUpdate = true; message.content = label
+            case .background(let summary, let symbol):
+                message.isUpdate = true; message.content = summary; message.symbol = symbol
             }
             return (m["createdAt"].string ?? "", message)
         }
@@ -289,12 +291,15 @@ struct ToolCall {
     }
 }
 
-/// A message Squircle sent in the user's place: T3 sends every message as
-/// the user's, so the service marks each with a context record whose kind
-/// starts with `squircle-`. Any marked message is Squircle's, whatever its
-/// kind, so one this build doesn't know still never shows as yours or shows
-/// the agent's instructions. Worker updates and tasks from before the marks
-/// are known by their text.
+/// A user-role message nobody typed. Squircle's own go as the user's, so
+/// the service marks each with a context record whose kind starts with
+/// `squircle-`; any marked message is Squircle's, whatever its kind, so one
+/// this build doesn't know still never shows as yours or shows the agent's
+/// instructions. T3 marks the rest itself: a background command, monitor,
+/// subagent or delegated task finishing carries a `notification` (shown as
+/// its summary line), and another agent's message (`thread send`, a
+/// delegated task's brief) is `createdBy` an agent. Worker updates and tasks
+/// from before the marks are known by their text.
 enum ServiceNote: Equatable {
     case build(BuildNews)
     case workers([WorkerNews])
@@ -304,6 +309,8 @@ enum ServiceNote: Equatable {
     case agent(AgentAuthor)
     /// A kind this build doesn't know: Squircle's line, with its label.
     case other(String)
+    /// T3's word that background work finished: its summary and symbol.
+    case background(String, symbol: String)
 
     static let prefix = "squircle-"
 
@@ -311,6 +318,20 @@ enum ServiceNote: Equatable {
         guard message["role"].string == "user" else { return nil }
         let text = message["text"].string ?? ""
         guard let record = message["context"]["records"].array.first(where: { ($0["kind"].string ?? "").hasPrefix(Self.prefix) }) else {
+            let notification = message["notification"]
+            if notification != .null {
+                let symbol = switch notification["source"]["kind"].string {
+                case "background_command": "terminal"
+                case "monitor": "eye"
+                case "delegated_task": "person.2"
+                case "background_task" where notification["source"]["work"].string == "subagent": "person.2"
+                default: "gearshape"
+                }
+                self = .background(notification["summary"].string ?? "Background work finished", symbol: symbol); return
+            }
+            if let author = message["createdBy"].string, author != "user" {
+                self = .agent(AgentAuthor(kind: .message, from: message["senderThreadId"].string)); return
+            }
             if text.hasPrefix("[worker update]") { self = .workers(Self.workers(text: text)) }
             else if text.contains(T3ThreadState.workerMarker) { self = .agent(AgentAuthor(kind: .task, from: nil)) }
             else { return nil }
