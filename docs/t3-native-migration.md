@@ -490,6 +490,13 @@ service therefore adds `GET /v1/t3/threads/{id}/steps` (and
 validated before interpolation. T3 itself is unmodified. During a running
 command its description is not yet stored, so the live line shows the
 humanised command until the step completes.
+**2026-10-24:** T3 0.1.0 keeps only the path and size of an image a Claude
+agent opens with Read (`viewedImagePath`), not its bytes. The service takes
+them read-only from Claude's own session transcript
+(`~/.claude/projects/*/<nativeThreadRef>.jsonl`, the exact picture the agent
+saw, still there after a `/tmp` file is gone or overwritten), else from the
+file if it still exists, and counts the picture only when one of those is
+there, so the step's gallery never shows an empty frame.
 
 **Timeline.** Turns split at your messages. While running: the latest note,
 the newest four steps on a rail (the running one is the live pill's headline),

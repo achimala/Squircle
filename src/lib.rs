@@ -39,4 +39,5 @@ mod t3db;
 pub mod t3steps;
 pub mod tasks;
 pub mod upkeep;
+mod viewed;
 pub mod xcode;

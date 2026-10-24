@@ -168,6 +168,7 @@ pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
     let rows = query(sql::STEPS, params![thread, since], DETAIL_READ).await?;
     let mut order: Vec<String> = Vec::new();
     let mut steps: std::collections::HashMap<String, Map<String, Value>> = Default::default();
+    let mut viewable = std::collections::HashMap::new();
     for row in rows {
         let Some(id) = row["id"].as_str().map(str::to_owned) else {
             continue;
@@ -190,7 +191,17 @@ pub async fn steps(thread: &str, since: Option<&str>) -> Result<Value> {
                 entry.insert("input".into(), trimmed);
             }
         }
-        let images = row["images"].as_u64().unwrap_or(0);
+        let mut images = row["images"].as_u64().unwrap_or(0);
+        if images == 0 && row["viewed"].is_string() {
+            let session = row["session"].as_str();
+            let seen = *viewable
+                .entry((
+                    session.map(str::to_owned),
+                    row["viewed"].as_str().map(str::to_owned),
+                ))
+                .or_insert_with(|| crate::viewed::available(session, row["viewed"].as_str()));
+            images = u64::from(seen);
+        }
         if images > entry.get("images").and_then(Value::as_u64).unwrap_or(0) {
             entry.insert("images".into(), json!(images));
         }
@@ -226,12 +237,25 @@ pub async fn image(thread: &str, call: &str, index: usize) -> Result<Option<Valu
         bail!("invalid identifier");
     }
     let rows = query(sql::IMAGES, params![thread, call], DETAIL_READ).await?;
-    Ok(distinct(rows).into_iter().nth(index).map(|row| {
-        json!({
+    if let Some(row) = distinct(rows).into_iter().nth(index) {
+        return Ok(Some(json!({
             "media_type": row["media_type"].as_str().unwrap_or("image/png"),
             "data": row["data"],
-        })
-    }))
+        })));
+    }
+    if index > 0 {
+        return Ok(None);
+    }
+    let viewed = query(sql::VIEWED, params![thread, call], DETAIL_READ).await?;
+    let Some(row) = viewed.first().filter(|r| r["viewed"].is_string()) else {
+        return Ok(None);
+    };
+    Ok(crate::viewed::image(
+        row["session"].as_str().map(str::to_owned),
+        row["call"].as_str().unwrap_or(call).to_owned(),
+        row["viewed"].as_str().map(str::to_owned),
+    )
+    .await)
 }
 
 /// Rows whose image data differs, first occurrence kept: one image can recur

@@ -36,6 +36,19 @@ macro_rules! output_blocks {
     };
 }
 
+/// An image a Claude agent looked at with Read: T3 keeps its path and size
+/// but not its bytes. `session` is the Claude session whose transcript has
+/// them.
+macro_rules! viewed_columns {
+    () => {
+        "case when json_extract(i.payload_json,'$.toolName')='Read' and json_extract(i.payload_json,'$.output.type')='image'
+              then json_extract(i.payload_json,'$.viewedImagePath') end as viewed,
+         case when json_extract(i.payload_json,'$.viewedImagePath') is not null
+              then (select json_extract(p.payload_json,'$.nativeThreadRef.nativeId') from orchestration_v2_projection_provider_threads p
+                    where p.provider_thread_id=i.provider_thread_id and p.driver='claudeAgent') end as session"
+    };
+}
+
 pub(crate) const CURRENT_STEP: &str = concat!(
     "select ",
     tool_columns!(),
@@ -63,8 +76,9 @@ pub(crate) const STEPS: &str = concat!(
     output_blocks!(),
     " where (case when b.type='object' then json_extract(b.value,'$.type') end)='image'
            and coalesce(json_extract(b.value,'$.source.data'), json_extract(b.value,'$.data')) is not null) as images,
-       coalesce(json_extract(i.payload_json,'$.startedAt'), i.updated_at) as created_at, i.run_id as turn_id,
-       case when i.status in ('completed','failed') then 'tool.completed' else 'tool.updated' end as kind,
+       coalesce(json_extract(i.payload_json,'$.startedAt'), i.updated_at) as created_at, i.run_id as turn_id, ",
+    viewed_columns!(),
+    ", case when i.status in ('completed','failed') then 'tool.completed' else 'tool.updated' end as kind,
        case when i.status='failed' then 'error' end as tone, i.status as status,
        case when i.type='command_execution' and instr(json_extract(i.payload_json,'$.input'),'squircle') > 0
             then substr(json_extract(i.payload_json,'$.output'),1,4000) end as result
@@ -91,6 +105,16 @@ pub(crate) const IMAGES: &str = concat!(
      where thread_id=?1 and json_extract(payload_json,'$.toolCallId')=?2
        and (case when type='object' then json_extract(value,'$.type') end)='image'
      order by created_at desc, activity_id, json_each.key)"
+);
+
+/// The image a Read call looked at, by call or item ID.
+pub(crate) const VIEWED: &str = concat!(
+    "select ",
+    viewed_columns!(),
+    ", json_extract(i.payload_json,'$.nativeItemRef.nativeId') as call
+     from orchestration_v2_projection_turn_items i
+     where i.thread_id=?1 and (i.turn_item_id=?2 or json_extract(i.payload_json,'$.nativeItemRef.nativeId')=?2)
+       and i.type='dynamic_tool' limit 1"
 );
 
 /// T3's simulator screenshots in a project's threads, newest first: `src`
