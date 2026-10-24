@@ -168,6 +168,12 @@ impl Agents {
         self.shell().observe(id)
     }
 
+    /// One item each time what `observe` reads may have changed.
+    pub fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        self.view.changes().boxed()
+    }
+
     /// Notifications and Live Activities follow the agents from here on.
     pub fn attach_push(self: &Arc<Self>, push: Arc<crate::push::Push>) {
         push.set_threads(self.clone());

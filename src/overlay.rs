@@ -14,8 +14,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{process::Command, sync::watch, time::Instant};
+use tokio::{process::Command, sync::watch};
 
+use crate::actor::{Lane, Rank};
 use crate::process::{Finished, RunError, Sink, cancelled, run_bounded};
 use crate::xcode::run_command;
 
@@ -195,8 +196,7 @@ fn publish(cache: &Path, key: &str, toolchain: &str, built: &Path) -> Result<Pat
 
 /// What selects the compiler and SDK: the Xcode build, the iOS SDK build and
 /// any toolchain override in the service's environment.
-async fn toolchain(deadline: Instant, cancel: &watch::Receiver<bool>) -> Result<String> {
-    let deadline = deadline.min(Instant::now() + std::time::Duration::from_secs(60));
+async fn toolchain(cancel: &watch::Receiver<bool>) -> Result<String> {
     let mut identity = String::new();
     for args in [
         &["xcodebuild", "-version"][..],
@@ -209,7 +209,6 @@ async fn toolchain(deadline: Instant, cancel: &watch::Receiver<bool>) -> Result<
                 command,
                 Sink::Capture(64 * 1024),
                 Sink::Discard,
-                deadline,
                 Some(cancel.clone()),
             )
             .await,
@@ -232,34 +231,14 @@ async fn toolchain(deadline: Instant, cancel: &watch::Receiver<bool>) -> Result<
     Ok(identity)
 }
 
-/// The overlay cache lock, waited for without blocking a thread or outliving
-/// the build's cancellation and deadline.
-async fn lock(path: &Path, deadline: Instant, cancel: &watch::Receiver<bool>) -> Result<fs::File> {
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)?;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Ok(file),
-            Err(fs::TryLockError::WouldBlock) => {}
-            Err(fs::TryLockError::Error(error)) => {
-                return Err(error).context("cannot lock the overlay cache");
-            }
-        }
-        tokio::select! {
-            _ = cancelled(Some(cancel.clone())) => bail!("build cancelled while waiting for the overlay cache"),
-            _ = tokio::time::sleep_until(deadline) => bail!("build exceeded the 30-minute timeout waiting for the overlay cache"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
-        }
-    }
-}
+/// One overlay build at a time. Only the one service that owns a data
+/// directory builds into its cache, so builds in that process are all that
+/// can meet there.
+static CACHE: Lane = Lane::new(Rank::OverlayCache);
 
 fn finished(result: Result<Finished, RunError>, tool: &str) -> Result<Finished> {
     result.map_err(|error| match error {
         RunError::Cancelled => anyhow!("build cancelled while running {tool}"),
-        RunError::TimedOut => anyhow!("build exceeded its timeout while running {tool}"),
         RunError::Failed(error) => error.context(format!("{tool} did not complete")),
     })
 }
@@ -269,7 +248,6 @@ fn finished(result: Result<Finished, RunError>, tool: &str) -> Result<Finished> 
 pub async fn framework(
     data_root: &Path,
     log: &Path,
-    deadline: Instant,
     cancel: watch::Receiver<bool>,
 ) -> Result<PathBuf> {
     let project = overlay_project();
@@ -280,8 +258,19 @@ pub async fn framework(
     );
     let cache = data_root.join("overlay");
     fs::create_dir_all(&cache)?;
-    let _lock = lock(&cache.join(".lock"), deadline, &cancel).await?;
-    let toolchain = toolchain(deadline, &cancel).await?;
+    tokio::select! {
+        _ = cancelled(Some(cancel.clone())) => bail!("build cancelled while waiting for the overlay cache"),
+        built = CACHE.run(build_framework(project, &cache, log, cancel.clone())) => built,
+    }
+}
+
+async fn build_framework(
+    project: PathBuf,
+    cache: &Path,
+    log: &Path,
+    cancel: watch::Receiver<bool>,
+) -> Result<PathBuf> {
+    let toolchain = toolchain(&cancel).await?;
     let key = cache_key(&project, &toolchain)?;
     if let Some(product) = cached(&cache.join(&key), &key) {
         return Ok(product);
@@ -295,7 +284,7 @@ pub async fn framework(
     let mut args: Vec<OsString> = vec!["-project".into(), project.into_os_string()];
     args.extend(BUILD_SETTINGS.map(OsString::from));
     args.extend([symroot, objroot, "build".into()]);
-    run_command(&args, log, None, deadline, cancel).await?;
+    run_command(&args, log, None, cancel).await?;
     let built = scratch.join("Release-iphoneos").join(FRAMEWORK);
     ensure!(
         built.join("SquircleOverlay").is_file(),
@@ -303,7 +292,7 @@ pub async fn framework(
     );
     // Module interfaces are for compilers, not for the device.
     let _ = fs::remove_dir_all(built.join("Modules"));
-    let product = publish(&cache, &key, &toolchain, &built)?;
+    let product = publish(cache, &key, &toolchain, &built)?;
     let _ = fs::remove_dir_all(&scratch);
     Ok(product)
 }
@@ -315,7 +304,6 @@ pub async fn inject(
     framework: &Path,
     build_id: &str,
     log_path: &Path,
-    deadline: Instant,
     cancel: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut log = fs::OpenOptions::new()
@@ -376,10 +364,7 @@ pub async fn inject(
         fs::write(&binary, &bytes)?;
     }
 
-    let signer = Signer {
-        deadline,
-        cancel: &cancel,
-    };
+    let signer = Signer { cancel: &cancel };
     let identity = signer.identity(app, &mut log).await?;
     let mut entitlements = signer.entitlements(app, &mut log).await?;
     let team = entitlements
@@ -437,9 +422,8 @@ pub async fn inject(
     Ok(())
 }
 
-/// Runs `codesign` within the build's deadline and cancellation.
+/// Runs `codesign` under the build's cancellation.
 struct Signer<'a> {
-    deadline: Instant,
     cancel: &'a watch::Receiver<bool>,
 }
 
@@ -458,7 +442,6 @@ impl Signer<'_> {
                 command,
                 Sink::Capture(4 * 1024 * 1024),
                 Sink::Capture(1024 * 1024),
-                self.deadline,
                 Some(self.cancel.clone()),
             )
             .await,

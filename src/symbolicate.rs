@@ -4,14 +4,12 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::{Context, Result, ensure};
-use tokio::{io::AsyncReadExt, process::Command, time::Instant};
+use tokio::{io::AsyncReadExt, process::Command};
 
 const MAX_BYTES: usize = 2 * 1024 * 1024;
-const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Return the tool's stdout followed by any stderr warnings, without claiming
 /// that symbolication succeeded. symbolicatecrash itself matches binary UUIDs;
@@ -51,10 +49,9 @@ pub async fn run(report: &Path, dsym: &Path) -> Result<String> {
     );
     validate_apple_text(&bytes)?;
 
-    let deadline = Instant::now() + TIMEOUT;
     let mut select = Command::new("/usr/bin/xcode-select");
     select.arg("-p");
-    let selected = capture(select, "xcode-select", deadline, 8192).await?;
+    let selected = capture(select, "xcode-select", 8192).await?;
     ensure!(
         selected.status.success(),
         "xcode-select could not locate the active Xcode"
@@ -72,7 +69,7 @@ pub async fn run(report: &Path, dsym: &Path) -> Result<String> {
     command
         .args(tool_args(&report, &dsym))
         .env("DEVELOPER_DIR", &developer);
-    let output = capture(command, "symbolicatecrash", deadline, MAX_BYTES).await?;
+    let output = capture(command, "symbolicatecrash", MAX_BYTES).await?;
     ensure!(
         output.status.success(),
         "symbolicatecrash failed ({}); verify the Apple-text report and selected Xcode",
@@ -148,26 +145,18 @@ fn tool_args(report: &Path, dsym: &Path) -> [OsString; 3] {
     ]
 }
 
-async fn capture(
-    command: Command,
-    label: &str,
-    deadline: Instant,
-    limit: usize,
-) -> Result<crate::process::Finished> {
-    // The group is killed on timeout or when the containing server task is
-    // dropped: symbolicatecrash can launch its own dwarfdump/atos subprocesses.
+async fn capture(command: Command, label: &str, limit: usize) -> Result<crate::process::Finished> {
+    // The group is killed when the request that wanted it is dropped:
+    // symbolicatecrash can launch its own dwarfdump/atos subprocesses.
     let output = crate::process::run_bounded(
         command,
         crate::process::Sink::Capture(limit),
         crate::process::Sink::Capture(limit),
-        deadline,
         None,
     )
     .await
     .map_err(|error| match error {
-        crate::process::RunError::TimedOut | crate::process::RunError::Cancelled => {
-            anyhow::anyhow!("{label}: symbolication exceeded its 60-second timeout")
-        }
+        crate::process::RunError::Cancelled => anyhow::anyhow!("{label}: cancelled"),
         crate::process::RunError::Failed(error) => {
             error.context(format!("{label} did not complete"))
         }

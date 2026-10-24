@@ -12,7 +12,7 @@ use std::{
     fs,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -272,10 +272,10 @@ fn app_image(image: &Image) -> bool {
         || (image.path.contains(".app/") && !image.path.contains("SquircleOverlay.framework"))
 }
 
-/// Runs a symbol tool under `crate::process::run_bounded`, so a wedged `atos` or
-/// `dwarfdump` cannot hang `perf show` and nothing it started outlives it; its
-/// stdout, or nothing if it failed, timed out or wrote more than 16 MiB.
-async fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> Option<Vec<u8>> {
+/// Runs a symbol tool under `crate::process::run_bounded`, so nothing it
+/// started outlives it (stopping `perf show` stops it); its stdout, or
+/// nothing if it failed or wrote more than 16 MiB.
+async fn run(command: &mut Command, input: Option<Vec<u8>>) -> Option<Vec<u8>> {
     // Callers build it in place; run_bounded takes it whole.
     let command = std::mem::replace(command, Command::new("/usr/bin/false"));
     let finished = crate::process::run_bounded_with_input(
@@ -283,7 +283,6 @@ async fn run(command: &mut Command, input: Option<Vec<u8>>, limit: Duration) -> 
         input,
         crate::process::Sink::Capture(16 * 1024 * 1024),
         crate::process::Sink::Discard,
-        tokio::time::Instant::now() + limit,
         None,
     )
     .await
@@ -303,7 +302,6 @@ async fn dwarf_uuids(path: &Path) -> Vec<(String, String)> {
             .arg("--uuid")
             .arg(path),
         None,
-        Duration::from_secs(30),
     )
     .await
     .map(|out| parse_uuids(&String::from_utf8_lossy(&out)))
@@ -383,7 +381,6 @@ async fn symbol_file(
     let spotlight = run(
         Command::new("mdfind").arg(format!("com_apple_xcode_dsym_uuids == {uuid}")),
         None,
-        Duration::from_secs(15),
     )
     .await;
     for line in String::from_utf8_lossy(&spotlight.unwrap_or_default()).lines() {
@@ -453,7 +450,6 @@ async fn atos((file, arch): &Symbols, load: &str, addresses: &[u64]) -> Vec<Opti
                 .args(["-l", load])
                 .args(chunk.iter().map(|a| format!("{a:#x}"))),
             None,
-            Duration::from_secs(60),
         )
         .await;
         let lines: Vec<String> = output
@@ -589,7 +585,6 @@ async fn demangle(frames: &mut HashMap<u64, Frame>) {
         let Some(output) = run(
             Command::new("xcrun").arg(tool).args(&args),
             Some(input.into_bytes()),
-            Duration::from_secs(30),
         )
         .await
         else {

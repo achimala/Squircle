@@ -288,7 +288,8 @@ impl Sims {
         self.host.quiet(&session.device_id).await;
 
         let path = media::recording_path(&self.root, &session.thread_id, &session.id)?;
-        let log = std::fs::File::create(path.with_extension("log"))?;
+        let log_path = path.with_extension("log");
+        let log = std::fs::File::create(&log_path)?;
         let recorder = startup
             .child
             .insert(self.host.record(&session.device_id, &path, log)?);
@@ -301,16 +302,14 @@ impl Sims {
             }),
         )
         .await?;
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-        if let Some(status) = startup
+        let recorder = startup
             .child
             .as_mut()
-            .and_then(|c| c.try_wait().transpose())
-            .transpose()?
-        {
-            let detail = std::fs::read_to_string(path.with_extension("log")).unwrap_or_default();
-            bail!("Recording {name} failed ({status}): {}", detail.trim());
-        }
+            .context("The recorder exited at once")?;
+        recording(recorder, &log_path)
+            .await
+            .with_context(|| format!("Recording {name} failed"))?;
+        watch_exit(pid, &self.poke);
         // In one letter with shutdown's collection of the sessions it ends:
         // either shutdown sees this recording, or this sees shutdown.
         let (id, child) = (session.id.clone(), startup.child.take());

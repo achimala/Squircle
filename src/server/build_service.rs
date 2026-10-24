@@ -320,14 +320,8 @@ pub(super) async fn source_provenance(project: &std::path::Path) -> (Option<Stri
     let Some(directory) = project.parent() else {
         return (None, None);
     };
-    let limit = std::time::Duration::from_secs(5);
-    let Ok(revision) = crate::git::run(
-        directory,
-        &["rev-parse", "--verify", "HEAD^{commit}"],
-        limit,
-        128,
-    )
-    .await
+    let Ok(revision) =
+        crate::git::run(directory, &["rev-parse", "--verify", "HEAD^{commit}"], 128).await
     else {
         return (None, None);
     };
@@ -345,7 +339,7 @@ pub(super) async fn source_provenance(project: &std::path::Path) -> (Option<Stri
         "--untracked-files=normal",
         "--ignore-submodules=none",
     ];
-    let dirty = crate::git::run(directory, &status, limit, 1024 * 1024)
+    let dirty = crate::git::run(directory, &status, 1024 * 1024)
         .await
         .ok()
         .map(|output| !output.is_empty());

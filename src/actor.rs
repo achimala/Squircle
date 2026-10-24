@@ -116,6 +116,20 @@ impl<T> Snapshot<T> {
         self.0.borrow().clone()
     }
 
+    /// One item for each publication after this call (several published
+    /// between two reads are one item); ends when the owner has stopped.
+    pub fn changes(&self) -> impl futures_util::Stream<Item = ()> + Send + 'static
+    where
+        T: Send + Sync + 'static,
+    {
+        let mut receiver = self.0.clone();
+        receiver.mark_unchanged();
+        futures_util::stream::unfold(receiver, |mut receiver| async move {
+            receiver.changed().await.ok()?;
+            Some(((), receiver))
+        })
+    }
+
     /// The first published value, the current one included, for which
     /// `ready` holds; `None` once the owner has stopped without one.
     pub async fn wait_for(&self, mut ready: impl FnMut(&T) -> bool) -> Option<Arc<T>> {
@@ -195,6 +209,8 @@ pub enum Rank {
     Catalog,
     /// One append to, or read of, a build's diagnostics.
     Diagnostics,
+    /// One overlay framework build into the data directory's cache.
+    OverlayCache,
 }
 
 tokio::task_local! {
@@ -230,10 +246,10 @@ pub struct Lane {
 }
 
 impl Lane {
-    pub fn new(rank: Rank) -> Self {
+    pub const fn new(rank: Rank) -> Self {
         Self {
             rank,
-            turn: Turn::new(()),
+            turn: Turn::const_new(()),
         }
     }
 

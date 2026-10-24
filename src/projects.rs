@@ -13,9 +13,8 @@ use std::{
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    time::Duration,
 };
-use tokio::{process::Command, time::Instant};
+use tokio::process::Command;
 
 #[derive(Serialize)]
 pub struct Directory {
@@ -200,10 +199,9 @@ pub async fn inspect(
         issue: None,
         can_import: false,
     };
-    let deadline = Instant::now() + Duration::from_secs(45);
     let mut list_args = args(&project);
     list_args.extend(["-list".into(), "-json".into()]);
-    let list = match xcode_json(&list_args, deadline)
+    let list = match xcode_json(&list_args)
         .await
         .and_then(|bytes| parse_schemes(&bytes))
     {
@@ -247,7 +245,7 @@ pub async fn inspect(
         "-showBuildSettings".into(),
         "-json".into(),
     ]);
-    match xcode_json(&settings_args, deadline)
+    match xcode_json(&settings_args)
         .await
         .and_then(|bytes| parse_app_settings(&bytes))
     {
@@ -471,27 +469,24 @@ pub fn import_inspected(store: &Store, inspection: &Inspection, name: &str) -> R
     )
 }
 
-async fn xcode_json(args: &[OsString], deadline: Instant) -> Result<Vec<u8>> {
+/// xcodebuild's JSON answer; dropping this (the request that asked is
+/// gone) stops it and whatever it started.
+async fn xcode_json(args: &[OsString]) -> Result<Vec<u8>> {
     let mut command = Command::new("/usr/bin/xcodebuild");
     command.args(args);
-    bounded_output(command, deadline).await
+    bounded_output(command).await
 }
 
-async fn bounded_output(command: Command, deadline: Instant) -> Result<Vec<u8>> {
+async fn bounded_output(command: Command) -> Result<Vec<u8>> {
     let finished = crate::process::run_bounded(
         command,
         crate::process::Sink::Capture(8 * 1024 * 1024),
         crate::process::Sink::Capture(1024 * 1024),
-        deadline,
         None,
     )
     .await
     .map_err(|error| match error {
-        crate::process::RunError::TimedOut | crate::process::RunError::Cancelled => {
-            anyhow::anyhow!(
-                "Xcode inspection exceeded 45 seconds; resolve packages/setup in Xcode, then retry"
-            )
-        }
+        crate::process::RunError::Cancelled => anyhow::anyhow!("Xcode inspection cancelled"),
         crate::process::RunError::Failed(error) => {
             error.context("Cannot run xcodebuild; select an installed Xcode on the Mac")
         }

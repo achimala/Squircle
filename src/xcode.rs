@@ -5,19 +5,16 @@ use std::{
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
-use tokio::{process::Command, sync::watch, time::Instant};
+use tokio::{process::Command, sync::watch};
 
 use crate::{
     model::{BuildMode, BuildOutput, BuildRequest},
     overlay,
 };
-
-const BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The app's own identity, read from the built product.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,7 +117,6 @@ pub async fn build(
         .canonicalize()
         .context("job directory does not exist")?;
     ensure!(job_dir.is_dir(), "job directory must be a directory");
-    let deadline = Instant::now() + BUILD_TIMEOUT;
     let log = job_dir.join("build.log");
 
     match &request.mode {
@@ -143,7 +139,7 @@ pub async fn build(
                 "job directory already contains archive/export output"
             );
             let args = build_args(request, &project, &job_dir)?;
-            run_command(&args, &log, None, deadline, cancel.clone()).await?;
+            run_command(&args, &log, None, cancel.clone()).await?;
             let archived = exactly_one(
                 children_with_extension(&archive.join("Products/Applications"), "app", true)?,
                 "archived application",
@@ -156,21 +152,12 @@ pub async fn build(
                     .parent()
                     .and_then(Path::parent)
                     .context("job directory is not inside a Squircle data directory")?;
-                let framework =
-                    overlay::framework(data_root, &log, deadline, cancel.clone()).await?;
+                let framework = overlay::framework(data_root, &log, cancel.clone()).await?;
                 let build_id = job_dir
                     .file_name()
                     .and_then(|n| n.to_str())
                     .context("job directory must have a build ID as its final component")?;
-                overlay::inject(
-                    &archived,
-                    &framework,
-                    build_id,
-                    &log,
-                    deadline,
-                    cancel.clone(),
-                )
-                .await?;
+                overlay::inject(&archived, &framework, build_id, &log, cancel.clone()).await?;
             }
             let args = export_args(
                 &archive,
@@ -178,7 +165,7 @@ pub async fn build(
                 &options,
                 request.allow_provisioning_updates,
             );
-            run_command(&args, &log, None, deadline, cancel).await?;
+            run_command(&args, &log, None, cancel).await?;
             let ipa = exactly_one(
                 children_with_extension(&export, "ipa", false)?,
                 "exported IPA",
@@ -197,7 +184,7 @@ pub async fn build(
         }
         BuildMode::Simulator => {
             let args = build_args(request, &project, &job_dir)?;
-            run_command(&args, &log, None, deadline, cancel.clone()).await?;
+            run_command(&args, &log, None, cancel.clone()).await?;
             // Query the resolved product path: projects can override build output
             // directories, so guessing inside DerivedData can report a stale app.
             let settings_path = job_dir.join("build-settings.json");
@@ -212,7 +199,7 @@ pub async fn build(
                 ]
                 .map(OsString::from),
             );
-            run_command(&args, &log, Some(&settings_path), deadline, cancel).await?;
+            run_command(&args, &log, Some(&settings_path), cancel).await?;
             let settings: Vec<TargetSettings> =
                 serde_json::from_reader(File::open(&settings_path)?)
                     .context("xcodebuild did not return valid build settings JSON")?;
@@ -418,7 +405,6 @@ pub(crate) async fn run_command(
     args: &[OsString],
     log_path: &Path,
     stdout_path: Option<&Path>,
-    deadline: Instant,
     cancel: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut log = OpenOptions::new()
@@ -436,7 +422,6 @@ pub(crate) async fn run_command(
         command,
         Sink::File(stdout),
         Sink::File(log.try_clone()?),
-        deadline,
         Some(cancel),
     )
     .await;
@@ -458,7 +443,6 @@ pub(crate) async fn run_command(
             return Err(error.context("cannot run /usr/bin/xcodebuild; check Xcode installation"));
         }
         Err(RunError::Cancelled) => "build cancelled",
-        Err(RunError::TimedOut) => "build exceeded the 30-minute timeout",
     };
     let _ = writeln!(log, "\n{reason}; terminated xcodebuild process group");
     bail!("{reason}; see {}", log_path.display())
@@ -581,19 +565,18 @@ mod tests {
 
     #[test]
     fn export_options_reject_pipes_and_oversized_files_without_blocking() {
+        // Opening the pipe without O_NONBLOCK would wait for a writer forever.
         use std::os::unix::ffi::OsStrExt;
         let directory = tempfile::tempdir().unwrap();
         let pipe = directory.path().join("options.plist");
         let name = std::ffi::CString::new(pipe.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        let started = std::time::Instant::now();
         assert!(
             validate_export_options(&pipe)
                 .unwrap_err()
                 .to_string()
                 .contains("regular file")
         );
-        assert!(started.elapsed() < Duration::from_secs(1));
         let file = tempfile::NamedTempFile::new().unwrap();
         file.as_file().set_len(1024 * 1024 + 1).unwrap();
         assert!(

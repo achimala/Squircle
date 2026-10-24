@@ -15,6 +15,7 @@ pub mod fsm;
 pub mod git;
 pub mod guard;
 pub mod history;
+mod kq;
 pub mod media;
 pub mod model;
 pub mod notes;

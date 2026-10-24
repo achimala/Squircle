@@ -11,6 +11,11 @@ const B: &str = "0e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
 const C: &str = "1e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
 const D: &str = "2e7c4a1d-5f0b-4c8e-9a51-2b6f1c3d4e5f";
 
+/// simctl's recorder: says it is recording, then idles until SIGINT, when
+/// it writes its movie (`$1`) and exits. `wait` returns at the signal.
+const RECORDER: &str = "trap 'kill $idle; printf movie > \"$1\"; exit 0' INT; \
+    echo 'Recording started' >&2; sleep 86400 & idle=$!; wait $idle";
+
 /// T3 and simctl stand-ins: two simulators, a recorder that writes its
 /// movie on SIGINT like simctl, closes and releases that fail on request,
 /// and T3's list of open device sessions.
@@ -22,6 +27,8 @@ struct Fake {
     lists_open: AtomicBool,
     release_fails: AtomicBool,
     boot: Mutex<Option<std::result::Result<(), ()>>>,
+    /// Told when a boot that never ends (`boot` None) has begun.
+    booting: tokio::sync::Notify,
     seen: Mutex<Option<Seen>>,
     /// Per-thread T3 state, over `seen`.
     threads: Mutex<HashMap<String, Seen>>,
@@ -90,7 +97,10 @@ impl Host for Fake {
         let outcome = *self.boot.lock().unwrap();
         Box::pin(async move {
             match outcome {
-                None => std::future::pending().await,
+                None => {
+                    self.booting.notify_one();
+                    std::future::pending().await
+                }
                 Some(Ok(())) => Ok(()),
                 Some(Err(())) => bail!("boot failed"),
             }
@@ -98,13 +108,10 @@ impl Host for Fake {
     }
     fn record(&self, _: &str, path: &Path, log: std::fs::File) -> Result<Child> {
         Ok(Command::new("/bin/sh")
-            .args([
-                "-c",
-                "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done",
-                "sh",
-            ])
+            .args(["-c", RECORDER, "sh"])
             .arg(path)
             .stderr(log)
+            .process_group(0)
             .spawn()?)
     }
     fn shrink<'a>(&'a self, _: &'a Path) -> Pending<'a, ()> {
@@ -314,12 +321,12 @@ async fn failed_or_cancelled_start_rolls_back() {
     );
     assert_eq!((fake.closes(), fake.count("release SIM1")), (1, 1));
 
+    // Cancelled while it boots.
     *fake.boot.lock().unwrap() = None;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), sims.start(THREAD, None))
-            .await
-            .is_err()
-    );
+    tokio::select! {
+        _ = sims.start(THREAD, None) => panic!("a boot that never ends ended"),
+        _ = fake.booting.notified() => {}
+    }
     settled(&sims).await;
     let session = only(&sims);
     assert!(
@@ -448,10 +455,10 @@ async fn handover_keeps_recording_into_the_next_run() {
         "a recorder stopped with the old run"
     );
     // The second session's recorder dies between the runs.
-    unsafe { libc::kill(recorders[1].pid as i32, libc::SIGKILL) };
-    while is_recorder(recorders[1], &ids[1]) {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    let exit = crate::kq::Exit::watch(recorders[1].pid).unwrap();
+    // Its group: the recorder and what it idles on.
+    unsafe { libc::kill(-(recorders[1].pid as i32), libc::SIGKILL) };
+    exit.exited().await.unwrap();
 
     let reopened = Sims::with_host(dir.path(), fake.clone()).unwrap();
     let orphans = reopened.owner.ask(|s| s.orphans.clone()).await;
@@ -482,12 +489,9 @@ async fn an_earlier_ledger_is_migrated_with_its_sessions_and_line() {
     std::fs::create_dir_all(dir.path().join("media")).unwrap();
     let path = media::recording_path(dir.path(), THREAD, &id).unwrap();
     let mut recorder = Command::new("/bin/sh")
-        .args([
-            "-c",
-            "trap 'printf movie > \"$1\"; exit 0' INT; while :; do sleep 0.05; done",
-            "sh",
-        ])
+        .args(["-c", RECORDER, "sh"])
         .arg(&path)
+        .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
     let pid = recorder.id().unwrap();

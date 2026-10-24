@@ -2,8 +2,8 @@
 //! Killing the group before reaping its leader preserves process identity.
 use anyhow::{Result, ensure};
 use std::os::unix::process::CommandExt;
-use std::{fs::File, path::Path, process::Stdio, time::Duration};
-use tokio::{process::Command, sync::watch, time::Instant};
+use std::{fs::File, path::Path, process::Stdio};
+use tokio::{process::Command, sync::watch};
 
 /// Resolves when the build is cancelled or its supervisor is gone; never
 /// without a receiver.
@@ -24,23 +24,6 @@ pub(crate) async fn cancelled(cancel: Option<watch::Receiver<bool>>) {
 
 fn is_cancelled(cancel: &watch::Receiver<bool>) -> bool {
     *cancel.borrow() || cancel.has_changed().is_err()
-}
-
-/// Whether a helper's leader has exited, without reaping it. Until it is
-/// reaped, even as a zombie, its pid stays reserved, and with it the id of the
-/// group it leads.
-fn leader_exited(pid: libc::pid_t) -> bool {
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    let found = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid as libc::id_t,
-            &mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    // An error means no such child to wait for; nothing is left to watch.
-    found != 0 || unsafe { info.si_pid() } == pid
 }
 
 /// Kills every process left in a group whose leader is not yet reaped. The
@@ -78,17 +61,11 @@ impl OwnedGroup {
         })
     }
 
-    /// Resolves once the leader has exited; it stays unreaped. `sigchld` was
-    /// registered before the spawn, so no exit is missed between checks.
-    async fn leader_exit(&self, sigchld: &mut Option<tokio::signal::unix::Signal>) {
-        while !leader_exited(self.pid) {
-            match sigchld {
-                Some(signal) => {
-                    let _ = tokio::time::timeout(Duration::from_secs(1), signal.recv()).await;
-                }
-                None => tokio::time::sleep(Duration::from_millis(20)).await,
-            }
-        }
+    /// Resolves once the leader has exited; it stays unreaped, so its pid
+    /// can't be reused meanwhile. The kernel reports the exit, also one that
+    /// came before this was called.
+    async fn leader_exit(&self) -> std::io::Result<()> {
+        crate::kq::exited(self.pid as u32).await
     }
 
     fn kill(&self) {
@@ -98,10 +75,8 @@ impl OwnedGroup {
     async fn reap(mut self) -> std::io::Result<std::process::ExitStatus> {
         self.kill();
         let mut leader = self.leader.take().expect("an owned group holds its leader");
-        match tokio::time::timeout(Duration::from_secs(5), leader.wait()).await {
-            Ok(status) => status,
-            Err(_) => Err(std::io::Error::other("helper did not exit after SIGKILL")),
-        }
+        // SIGKILL can't be caught or ignored: the leader's exit follows it.
+        leader.wait().await
     }
 }
 
@@ -141,7 +116,6 @@ pub(crate) struct Finished {
 #[derive(Debug)]
 pub(crate) enum RunError {
     Cancelled,
-    TimedOut,
     Failed(anyhow::Error),
 }
 
@@ -149,7 +123,6 @@ impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RunError::Cancelled => write!(f, "cancelled"),
-            RunError::TimedOut => write!(f, "exceeded its deadline"),
             RunError::Failed(error) => write!(f, "{error:#}"),
         }
     }
@@ -171,17 +144,17 @@ async fn read_limited(
     Ok(bytes)
 }
 
-/// Runs one helper in its own process group, bounded by `deadline`, `cancel`
-/// and output limits. Whatever stops it early, including dropping this future,
-/// kills the whole group. A nonzero exit is returned, not an error.
+/// Runs one helper in its own process group until it ends, bounded by
+/// `cancel` and output limits. Whatever stops it early, including dropping
+/// this future (the request or job that wanted it is gone), kills the whole
+/// group. A nonzero exit is returned, not an error.
 pub(crate) async fn run_bounded(
     command: Command,
     stdout: Sink,
     stderr: Sink,
-    deadline: Instant,
     cancel: Option<watch::Receiver<bool>>,
 ) -> Result<Finished, RunError> {
-    run_bounded_with_input(command, None, stdout, stderr, deadline, cancel).await
+    run_bounded_with_input(command, None, stdout, stderr, cancel).await
 }
 
 /// [`run_bounded`], writing `input` to the helper's stdin (then closing it)
@@ -192,14 +165,10 @@ pub(crate) async fn run_bounded_with_input(
     input: Option<Vec<u8>>,
     stdout: Sink,
     stderr: Sink,
-    deadline: Instant,
     cancel: Option<watch::Receiver<bool>>,
 ) -> Result<Finished, RunError> {
     if cancel.as_ref().is_some_and(is_cancelled) {
         return Err(RunError::Cancelled);
-    }
-    if Instant::now() >= deadline {
-        return Err(RunError::TimedOut);
     }
     let program = command.as_std().get_program().to_owned();
     let failed = |error: std::io::Error| RunError::Failed(error.into());
@@ -211,8 +180,6 @@ pub(crate) async fn run_bounded_with_input(
         Stdio::null()
     };
     command.stdin(stdin).stdout(out).stderr(err);
-    // Registered before the spawn so the leader's exit cannot be missed.
-    let mut sigchld = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child()).ok();
     let mut group = OwnedGroup::spawn(&mut command).map_err(|error| {
         RunError::Failed(
             anyhow::Error::new(error)
@@ -237,7 +204,7 @@ pub(crate) async fn run_bounded_with_input(
             Ok(())
         };
         let ended = async {
-            group.leader_exit(&mut sigchld).await;
+            group.leader_exit().await?;
             // Descendants still holding the pipes would otherwise outlive it.
             group.kill();
             Ok(())
@@ -253,7 +220,6 @@ pub(crate) async fn run_bounded_with_input(
     let result = tokio::select! {
         biased;
         _ = cancelled(cancel) => Err(RunError::Cancelled),
-        _ = tokio::time::sleep_until(deadline) => Err(RunError::TimedOut),
         result = work => result.map_err(RunError::Failed),
     };
     let status = group.reap().await;
@@ -269,60 +235,71 @@ pub(crate) async fn run_bounded_with_input(
 mod tests {
     use super::*;
     use std::fs;
+
     #[tokio::test]
     async fn cancellation_wakes_when_supervisor_closes() {
         let (sender, receiver) = watch::channel(false);
         drop(sender);
-        tokio::time::timeout(Duration::from_secs(1), cancelled(Some(receiver)))
-            .await
-            .unwrap();
+        cancelled(Some(receiver)).await;
+    }
+
+    /// A shell that writes `$!` (the background job it leaves) to a marker
+    /// file, and the pid once the shell has written it: the file's own
+    /// change wakes the wait.
+    struct Marker(tempfile::NamedTempFile);
+
+    impl Marker {
+        fn new() -> Self {
+            Self(tempfile::NamedTempFile::new().unwrap())
+        }
+
+        fn shell(&self, script: &str) -> Command {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]).arg(self.0.path());
+            command
+        }
+
+        async fn pid(&self) -> u32 {
+            let changes = crate::kq::Changes::watch(self.0.path()).unwrap();
+            loop {
+                let text = fs::read_to_string(self.0.path()).unwrap();
+                if let Some(pid) = text.strip_suffix('\n').and_then(|t| t.parse().ok()) {
+                    return pid;
+                }
+                changes.next().await.unwrap();
+            }
+        }
     }
 
     #[tokio::test]
     async fn bounded_helpers_stop_on_cancellation_and_output_limits() {
         let (sender, cancel) = watch::channel(false);
-        let started = Instant::now();
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "sleep 30 & wait"]);
-        let run = tokio::spawn(run_bounded(
-            command,
+        let marker = Marker::new();
+        let run = run_bounded(
+            marker.shell("sleep 30 & echo $! > \"$0\"; wait"),
             Sink::Capture(1024),
             Sink::Discard,
-            started + Duration::from_secs(30),
             Some(cancel),
-        ));
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        );
+        tokio::pin!(run);
+        let left = tokio::select! {
+            _ = &mut run => panic!("ended before it was cancelled"),
+            pid = marker.pid() => pid,
+        };
         sender.send(true).unwrap();
-        let result = tokio::time::timeout(Duration::from_secs(5), run)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(result, Err(RunError::Cancelled)));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(matches!(run.await, Err(RunError::Cancelled)));
+        crate::kq::exited(left).await.unwrap();
 
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "yes | head -c 4096"]);
-        let result = run_bounded(
-            command,
-            Sink::Capture(1024),
-            Sink::Discard,
-            Instant::now() + Duration::from_secs(10),
-            None,
-        )
-        .await;
+        let result = run_bounded(command, Sink::Capture(1024), Sink::Discard, None).await;
         assert!(matches!(result, Err(RunError::Failed(_))));
 
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "echo out; echo err >&2; exit 3"]);
-        let finished = run_bounded(
-            command,
-            Sink::Capture(1024),
-            Sink::Capture(1024),
-            Instant::now() + Duration::from_secs(10),
-            None,
-        )
-        .await
-        .unwrap();
+        let finished = run_bounded(command, Sink::Capture(1024), Sink::Capture(1024), None)
+            .await
+            .unwrap();
         assert_eq!(finished.status.code(), Some(3));
         assert_eq!(finished.stdout, b"out\n");
         assert_eq!(finished.stderr, b"err\n");
@@ -336,7 +313,6 @@ mod tests {
                 Some(input),
                 Sink::Capture(1024),
                 Sink::Discard,
-                Instant::now() + Duration::from_secs(5),
                 None,
             )
         };
@@ -351,87 +327,49 @@ mod tests {
         );
     }
 
-    fn gone(pid: libc::pid_t) -> bool {
-        let started = std::time::Instant::now();
-        while started.elapsed() < Duration::from_secs(3) {
-            if unsafe { libc::kill(pid, 0) } != 0 {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        false
-    }
-
     #[tokio::test]
     async fn leader_exit_kills_what_it_left_running() {
         // The background sleep keeps stdout open after the shell exits.
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "sleep 30 & echo $!"]);
-        let started = Instant::now();
+        let finished = run_bounded(command, Sink::Capture(1024), Sink::Discard, None)
+            .await
+            .unwrap();
+        assert!(finished.status.success());
+        let left: u32 = String::from_utf8(finished.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        crate::kq::exited(left).await.unwrap();
+
+        // Also when nothing holds a pipe.
+        let marker = Marker::new();
         let finished = run_bounded(
-            command,
-            Sink::Capture(1024),
+            marker.shell("sleep 30 >/dev/null 2>&1 & echo $! > \"$0\""),
             Sink::Discard,
-            started + Duration::from_secs(10),
+            Sink::Discard,
             None,
         )
         .await
         .unwrap();
         assert!(finished.status.success());
-        assert!(started.elapsed() < Duration::from_secs(5));
-        let left: libc::pid_t = String::from_utf8(finished.stdout)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert!(gone(left));
-
-        // Also when nothing holds a pipe, and when the deadline ends it first.
-        let marker = tempfile::NamedTempFile::new().unwrap();
-        let mut command = Command::new("/bin/sh");
-        command
-            .args([
-                "-c",
-                "sleep 30 >/dev/null 2>&1 & echo $! > \"$0\"; sleep 30",
-            ])
-            .arg(marker.path());
-        let result = run_bounded(
-            command,
-            Sink::Discard,
-            Sink::Discard,
-            Instant::now() + Duration::from_millis(500),
-            None,
-        )
-        .await;
-        assert!(matches!(result, Err(RunError::TimedOut)));
-        let left: libc::pid_t = fs::read_to_string(marker.path())
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert!(gone(left));
+        crate::kq::exited(marker.pid().await).await.unwrap();
     }
 
     #[tokio::test]
     async fn dropping_a_run_kills_its_group() {
-        let marker = tempfile::NamedTempFile::new().unwrap();
-        let mut command = Command::new("/bin/sh");
-        command
-            .args(["-c", "sleep 30 & echo $! > \"$0\"; wait"])
-            .arg(marker.path());
+        let marker = Marker::new();
         let run = run_bounded(
-            command,
+            marker.shell("sleep 30 & echo $! > \"$0\"; wait"),
             Sink::Discard,
             Sink::Discard,
-            Instant::now() + Duration::from_secs(30),
             None,
         );
-        let _ = tokio::time::timeout(Duration::from_millis(300), run).await;
-        let left: libc::pid_t = fs::read_to_string(marker.path())
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        assert!(gone(left));
+        let left = tokio::select! {
+            _ = run => panic!("ended on its own"),
+            pid = marker.pid() => pid,
+        };
+        crate::kq::exited(left).await.unwrap();
     }
 }

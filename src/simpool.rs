@@ -966,19 +966,16 @@ pub fn default_model(runtimes: &Value) -> Option<(String, String, String)> {
 /// The real simctl and ps.
 pub struct Xcrun;
 
+/// simctl's answer; dropping this (its caller is gone) stops it.
 async fn simctl(args: &[&str]) -> Result<Vec<u8>> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(120),
-        Command::new("xcrun")
-            .arg("simctl")
-            .args(args)
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .context("simctl timed out")?
-    .context("Cannot run xcrun simctl")?;
+    let output = Command::new("xcrun")
+        .arg("simctl")
+        .args(args)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("Cannot run xcrun simctl")?;
     ensure!(
         output.status.success(),
         "simctl {} failed: {}",

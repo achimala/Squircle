@@ -76,6 +76,45 @@ pub(super) fn is_recorder(recorder: RecorderID, session: &str) -> bool {
             .is_none_or(|start| process_start(recorder.pid) == Some(start))
 }
 
+/// Pokes the watchdog once `pid` has exited, so a recorder that dies is
+/// noticed when it does. The pid must still be the recorder's (an unreaped
+/// child, or one whose identity was just checked).
+pub(super) fn watch_exit(pid: u32, poke: &Arc<Notify>) {
+    let poke = poke.clone();
+    match crate::kq::Exit::watch(pid) {
+        Ok(exit) => {
+            tokio::spawn(async move {
+                let _ = exit.exited().await;
+                poke.notify_one();
+            });
+        }
+        Err(error) => {
+            eprintln!("Cannot watch recorder {pid}: {error}");
+            poke.notify_one();
+        }
+    }
+}
+
+/// simctl's line once the movie has its first frame.
+const RECORDING_STARTED: &str = "Recording started";
+
+/// Resolves once the recorder whose stderr is `log` says it is recording,
+/// or fails with what it said if it exits first. The log's own writes wake
+/// this; nothing is read on a timer.
+pub(super) async fn recording(recorder: &mut Child, log: &Path) -> Result<()> {
+    let changes = crate::kq::Changes::watch(log)?;
+    let said = || std::fs::read_to_string(log).unwrap_or_default();
+    loop {
+        if said().lines().any(|line| line.trim() == RECORDING_STARTED) {
+            return Ok(());
+        }
+        tokio::select! {
+            status = recorder.wait() => bail!("it exited ({}): {}", status?, said().trim()),
+            changed = changes.next() => changed?,
+        }
+    }
+}
+
 /// Asks a recorder to finish: simctl writes the movie's index on SIGINT.
 pub(super) fn interrupt(pid: u32) {
     unsafe { libc::kill(pid as i32, libc::SIGINT) };
@@ -90,8 +129,14 @@ pub(super) async fn finished(recorder: Recorder, session: &str) {
             let _ = child.wait().await;
         }
         Recorder::Recovered(recorder) => {
-            while is_recorder(recorder, session) {
-                tokio::time::sleep(Duration::from_millis(250)).await;
+            // Watched before its identity is checked: once it is proven
+            // the session's, its exit can't be missed or be another's.
+            match crate::kq::Exit::watch(recorder.pid) {
+                Ok(exit) if is_recorder(recorder, session) => {
+                    let _ = exit.exited().await;
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("Cannot watch recorder {}: {error}", recorder.pid),
             }
         }
     }

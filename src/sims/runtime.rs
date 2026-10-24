@@ -81,6 +81,13 @@ impl Sims {
             .filter(|s| !s.ended() && !(s.active() && recorders.contains_key(&s.id)))
             .map(|s| s.id.clone())
             .collect();
+        let watched: Vec<(String, u32)> = recorders
+            .iter()
+            .filter_map(|(id, recorder)| match recorder {
+                Recorder::Recovered(r) => Some((id.clone(), r.pid)),
+                Recorder::Owned(_) => None,
+            })
+            .collect();
         let (ledger, snapshot) = Saved::new(gate);
         let saved = Arc::new(Notify::new());
         let state = State {
@@ -102,7 +109,16 @@ impl Sims {
             starts: Lane::new(Rank::SimStart),
             draining: tokio::sync::watch::channel(false).0,
             saved,
+            poke: Arc::new(Notify::new()),
         });
+        for (id, pid) in watched {
+            watch_exit(pid, &sims.poke);
+            // Checked again now that it is watched: had it exited and its
+            // pid been reused just before, the session's end is not missed.
+            if !is_recorder(RecorderID { pid, start: None }, &id) {
+                sims.poke.notify_one();
+            }
+        }
         sims.announce_waiting();
         Ok(sims)
     }

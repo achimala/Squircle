@@ -613,6 +613,27 @@ pub fn watch(
     (clock, due)
 }
 
+/// The times `watch`, `close_due` and `release_due` would next decide
+/// differently with nothing else changing: the policy's own clocks.
+pub fn due_at(session: &Session, clock: IdleClock) -> Vec<f64> {
+    let mut due = vec![];
+    if session.active() {
+        due.push(session.started_at + MAX_SECONDS);
+        due.extend(clock.since.map(|since| since + IDLE_GRACE));
+    }
+    if !session.holds_device() {
+        if let DeviceLease::CloseOwed(retry) = &session.device {
+            due.push(retry.retry_at);
+        }
+        if let Release::Owed(retry) = &session.release
+            && !session.device.owed()
+        {
+            due.push(retry.retry_at);
+        }
+    }
+    due
+}
+
 pub fn violations(session: &Session) -> Vec<Violation> {
     let mut found = vec![];
     if session.holds_device() && session.release != Release::NotDue {
