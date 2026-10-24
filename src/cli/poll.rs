@@ -70,31 +70,76 @@ pub(super) fn deadline(seconds: u64) -> Result<tokio::time::Instant> {
     Ok(tokio::time::Instant::now() + Duration::from_secs(seconds))
 }
 
-/// One fetch/sleep deadline mechanism. Completion and failure policy stay
-/// distinct; submission is outside this loop and is never repeated.
+/// Follows the build until `policy` says it is done: each request is
+/// answered by the service once the build's status changes, so nothing is
+/// fetched on a timer. The caller's `--timeout` bounds the whole wait,
+/// requests included. Completion and failure policy stay distinct;
+/// submission is outside this loop and is never repeated.
 pub(super) async fn poll(
     cli: &Cli,
     build_id: &str,
     deadline: tokio::time::Instant,
     policy: WaitFor,
 ) -> Result<Value> {
+    let path = format!("/v1/builds/{build_id}");
+    follow(build_id, deadline, policy, |held| {
+        let path = &path;
+        async move { get_changed(cli, path, held.as_deref()).await }
+    })
+    .await
+}
+
+/// `poll` over any `fetch` (given the ETag it holds, the next status and
+/// its ETag).
+async fn follow<F, Fut>(
+    build_id: &str,
+    deadline: tokio::time::Instant,
+    policy: WaitFor,
+    mut fetch: F,
+) -> Result<Value>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<(Value, Option<String>)>>,
+{
+    let mut held = None;
     loop {
-        let response =
-            match tokio::time::timeout_at(deadline, get(cli, &format!("/v1/builds/{build_id}")))
-                .await
-            {
-                Ok(response) => response?,
-                Err(_) => return Ok(policy.timeout()),
-            };
+        let (response, etag) = match tokio::time::timeout_at(deadline, fetch(held.take())).await {
+            Ok(response) => response?,
+            Err(_) => return Ok(policy.timeout()),
+        };
         if let Some(done) = policy.terminal(response, build_id) {
             return Ok(done);
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(policy.timeout());
-        }
-        tokio::time::sleep_until(
-            (tokio::time::Instant::now() + Duration::from_millis(500)).min(deadline),
-        )
-        .await;
+        held = Some(etag.context("The service's build status has no ETag")?);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The caller's deadline ends the wait even while a request hangs, and
+    /// each request after the first holds the status it already has. On
+    /// tokio's paused clock: the minute passes without waiting.
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_ends_a_wait_whose_request_hangs() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut asked = vec![];
+        let result = follow("b", deadline, WaitFor::Build, |held| {
+            asked.push(held.clone());
+            async move {
+                match held {
+                    None => Ok((
+                        serde_json::json!({"ok": true, "data": {"job": {"state": "running"}}}),
+                        Some("\"running\"".to_string()),
+                    )),
+                    Some(_) => std::future::pending().await,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["error"]["code"], "wait_timeout");
+        assert_eq!(asked, [None, Some("\"running\"".to_string())]);
     }
 }

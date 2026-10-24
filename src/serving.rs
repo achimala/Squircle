@@ -132,15 +132,21 @@ impl http_body::Body for Closing {
 mod tests {
     use super::*;
     use axum::routing::{get, post};
-    use std::time::Duration;
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// A client that never reads a long download, and one that never finishes
-    /// an upload, cannot keep a stopped service running; a request already
-    /// being handled still gets its answer.
+    /// A client that never reads a long download, one that never finishes
+    /// an upload and one idle between requests cannot keep a stopped service
+    /// running; a request already being handled still gets its answer.
     #[tokio::test]
     async fn shutdown_ends_with_stalled_clients() {
+        use tokio::sync::{Notify, mpsc};
         let movie = Bytes::from(vec![7u8; 64 * 1024 * 1024]);
+        // Each handler says when it runs; the slow one answers when told.
+        let (entered, mut handling) = mpsc::unbounded_channel::<&str>();
+        let release = Arc::new(Notify::new());
+        let (upload_entered, slow_entered, slow_release) =
+            (entered.clone(), entered.clone(), release.clone());
         let app = Router::new()
             .route(
                 "/movie",
@@ -150,23 +156,34 @@ mod tests {
             )
             .route(
                 "/upload",
-                post(|body: Bytes| async move { body.len().to_string() }),
+                post(move |body: Body| async move {
+                    let _ = upload_entered.send("upload");
+                    match axum::body::to_bytes(body, usize::MAX).await {
+                        Ok(bytes) => bytes.len().to_string(),
+                        Err(_) => "cut".to_string(),
+                    }
+                }),
             )
             .route(
                 "/slow",
-                get(|| async {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                get(move || async move {
+                    let _ = slow_entered.send("slow");
+                    slow_release.notified().await;
                     "done"
                 }),
-            );
+            )
+            .route("/ping", get(|| async { "pong" }));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let stop = CancellationToken::new();
+        let (wound, winding) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(serve(
             listener,
             app,
             stop.clone().cancelled_owned(),
-            |()| async {},
+            move |()| async move {
+                let _ = wound.send(());
+            },
         ));
 
         let mut download = tokio::net::TcpStream::connect(address).await.unwrap();
@@ -186,14 +203,26 @@ mod tests {
         slow.write_all(b"GET /slow HTTP/1.1\r\nhost: x\r\n\r\n")
             .await
             .unwrap();
-        let _idle = tokio::net::TcpStream::connect(address).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut seen = vec![
+            handling.recv().await.unwrap(),
+            handling.recv().await.unwrap(),
+        ];
+        seen.sort();
+        assert_eq!(seen, ["slow", "upload"]);
+        // Answered once, then idle on its kept-alive connection.
+        let mut idle = tokio::net::TcpStream::connect(address).await.unwrap();
+        idle.write_all(b"GET /ping HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut pong = [0u8; 12];
+        idle.read_exact(&mut pong).await.unwrap();
+        assert_eq!(&pong, b"HTTP/1.1 200");
 
         stop.cancel();
-        tokio::time::timeout(Duration::from_secs(5), server)
-            .await
-            .expect("shutdown waited on a client")
-            .unwrap();
+        // Shutdown has begun; the request in flight still finishes.
+        winding.await.unwrap();
+        release.notify_one();
+        server.await.unwrap();
         let mut answer = String::new();
         slow.read_to_string(&mut answer).await.unwrap();
         assert!(

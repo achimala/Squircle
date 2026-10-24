@@ -33,9 +33,9 @@ use serde_json::{Value, json};
 use std::{
     ffi::{CStr, OsString},
     fs::{File, OpenOptions},
-    os::unix::{ffi::OsStringExt, process::CommandExt},
+    os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     time::Duration,
 };
 
@@ -110,7 +110,8 @@ pub async fn restart(root: &Path, server: &str) -> Result<Value> {
 
     signal(old, libc::SIGTERM)?;
     exited(old).await;
-    let mut child = Command::new(&program)
+    let from = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+    let mut child = tokio::process::Command::new(&program)
         .args(&invocation.argv[1..])
         .env_clear()
         .envs(invocation.env.iter().map(|(k, v)| (k, v)))
@@ -122,31 +123,24 @@ pub async fn restart(root: &Path, server: &str) -> Result<Value> {
         .process_group(0)
         .spawn()
         .with_context(|| format!("Cannot start {}", program.display()))?;
-    let new = child.id();
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let health = format!("{}/health", server.trim_end_matches('/'));
-    loop {
-        if let Some(status) = child.try_wait()? {
+    let new = child.id().context("The new service exited at once")?;
+    // It announces itself once it holds the lock and listens, or exits.
+    tokio::select! {
+        status = child.wait() => {
             let log = std::fs::read_to_string(&log_path).unwrap_or_default();
             let tail: Vec<&str> = log.lines().rev().take(15).collect();
             bail!(
-                "The new service exited ({status}); simulator sessions stay in the ledger for the next start. Log:\n{}",
+                "The new service exited ({}); simulator sessions stay in the ledger for the next start. Log:\n{}",
+                status?,
                 tail.into_iter().rev().collect::<Vec<_>>().join("\n")
             );
         }
-        if holder(root).ok().flatten() == Some(new)
-            && client
-                .get(&health)
-                .send()
-                .await
-                .is_ok_and(|r| r.status().is_success())
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        listening = announced(&log_path, from) => listening?,
     }
+    ensure!(
+        holder(root)? == Some(new),
+        "Another process took the service lock from the new service ({new})"
+    );
     Ok(
         json!({"previous_pid": old, "pid": new, "program": program, "log": log_path,
               "next": "Simulator sessions were handed over; squircle sim status shows them."}),
@@ -737,10 +731,31 @@ fn signal(pid: u32, signal: libc::c_int) -> Result<()> {
     Ok(())
 }
 
-/// Waits for `pid` to exit; the service bounds its own wind-down.
+/// Waits for `pid` to exit, as the kernel reports it; the service bounds
+/// its own wind-down.
 async fn exited(pid: u32) {
-    while unsafe { libc::kill(pid as i32, 0) } == 0 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    if let Err(error) = crate::kq::exited(pid).await {
+        eprintln!("Cannot watch process {pid}: {error}");
+    }
+}
+
+/// Resolves once `log` has, past its first `from` bytes, the line the
+/// service prints when it listens. The log's own writes wake this.
+async fn announced(log: &Path, from: u64) -> Result<()> {
+    use std::io::{Read, Seek};
+    let changes = crate::kq::Changes::watch(log)?;
+    let mut file = File::open(log)?;
+    file.seek(std::io::SeekFrom::Start(from))?;
+    let mut said = Vec::new();
+    loop {
+        file.read_to_end(&mut said)?;
+        if String::from_utf8_lossy(&said)
+            .lines()
+            .any(|line| line.starts_with(crate::server::LISTENING))
+        {
+            return Ok(());
+        }
+        changes.next().await?;
     }
 }
 

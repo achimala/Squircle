@@ -19,10 +19,33 @@ pub(super) async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>
     Ok(Json(success(views)))
 }
 
+/// A build's status. Asked to wait past the ETag the client holds
+/// (`waits_past`), it answers once the status differs, as the job, its
+/// launch evidence or its agent change.
 pub(super) async fn status(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> ApiResult<Json<Value>> {
+    use futures_util::StreamExt;
+    let Some(known) = waits_past(&headers) else {
+        return status_now(&state, &id).await.map(Json);
+    };
+    // Listening before looking, so a change in between is not missed.
+    let mut changes = state.build_changes();
+    loop {
+        let reply = status_now(&state, &id).await?;
+        if !unchanged(&reply, &known) {
+            return Ok(Json(reply));
+        }
+        if changes.next().await.is_none() {
+            return Ok(Json(reply));
+        }
+    }
+}
+
+async fn status_now(state: &AppState, id: &str) -> ApiResult<Value> {
+    let id = id.to_string();
     let view = state
         .jobs
         .get(&id)
@@ -69,9 +92,9 @@ pub(super) async fn status(
     {
         view["agent_thread"] = json!(owner.thread_id);
     }
-    Ok(Json(success(
+    Ok(success(
         json!({"job":view,"launch_observed":launches["events"].as_array().is_some_and(|a| !a.is_empty()),"failure":failure}),
-    )))
+    ))
 }
 
 /// Failure summaries come from the end of a build log; logs can be very large.

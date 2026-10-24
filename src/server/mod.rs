@@ -47,7 +47,8 @@ use http::*;
 mod router;
 pub use router::router;
 mod runtime;
-pub use runtime::serve;
+pub use http::WAIT_FOR_CHANGE;
+pub use runtime::{LISTENING, serve};
 mod build_routes;
 use build_routes::*;
 mod build_service;
@@ -88,6 +89,9 @@ pub struct AppState {
     builds: Arc<Lane>,
     /// Xcode inspections running now; more than two are refused, not queued.
     inspections: Arc<AtomicUsize>,
+    /// Counts stored diagnostics, so a build's status waiting for a change
+    /// hears of new launch evidence.
+    diagnosed: Arc<tokio::sync::watch::Sender<u64>>,
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
     agents: Option<Arc<Agents>>,
@@ -108,6 +112,22 @@ impl Drop for Inspection {
 }
 
 impl AppState {
+    /// One item each time something a build's status shows may have
+    /// changed: its job, its launch diagnostics, the agent that owns it.
+    pub(super) fn build_changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        let mut diagnosed = self.diagnosed.subscribe();
+        diagnosed.mark_unchanged();
+        let diagnosed = futures_util::stream::unfold(diagnosed, |mut d| async move {
+            d.changed().await.ok()?;
+            Some(((), d))
+        })
+        .boxed();
+        let mut sources = vec![self.jobs.changes(), diagnosed];
+        sources.extend(self.agents.as_ref().map(|a| a.changes()));
+        futures_util::stream::select_all(sources).boxed()
+    }
+
     /// A place for one Xcode inspection, if one is free now.
     pub(super) fn inspection(&self) -> Option<Inspection> {
         self.inspections
@@ -129,6 +149,7 @@ impl AppState {
             diagnostics: Arc::new(Lane::new(Rank::Diagnostics)),
             builds: Arc::new(Lane::new(Rank::Build)),
             inspections: Arc::new(AtomicUsize::new(0)),
+            diagnosed: Arc::new(tokio::sync::watch::channel(0).0),
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
             agents: None,

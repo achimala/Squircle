@@ -1,5 +1,9 @@
 use super::*;
 
+/// How the service's announcement begins: printed once it listens, the
+/// first line supervisors (and `service restart`) read.
+pub const LISTENING: &str = "Squircle listening on ";
+
 pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>) -> Result<()> {
     let mut store = Store::open(root)?;
     let lock = OpenOptions::new()
@@ -76,7 +80,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         }));
     }
     eprintln!(
-        "Squircle listening on {}. Keep this process running; HTTPS/Tailscale is managed separately.",
+        "{LISTENING}{}. Keep this process running; HTTPS/Tailscale is managed separately.",
         listener.local_addr()?
     );
     // After the announcement, which is the first line supervisors read.

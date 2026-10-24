@@ -855,15 +855,25 @@ async fn install_evidence_requires_a_complete_transfer() {
         }
     };
     assert_eq!(&received[head_end..], fixture.ipa_bytes.as_slice());
-    // The connection stays open (keep-alive); the finish is already on record.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    while evidence(complete.clone()).await.1.is_null() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "downloaded_at never recorded"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    // The connection stays open (keep-alive). HTTP/1.1 answers in order, so
+    // a second request answered on it means the first response's body was
+    // let go, and with it the finish told to the tickets owner, which
+    // `evidence` asks after.
+    socket
+        .write_all(b"GET /health HTTP/1.1\r\nHost: mac.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = Vec::new();
+    while !answer.windows(4).any(|w| w == b"\r\n\r\n") {
+        let read = socket.read(&mut buffer).await.unwrap();
+        assert!(read > 0, "connection closed early");
+        answer.extend_from_slice(&buffer[..read]);
     }
+    assert!(answer.starts_with(b"HTTP/1.1 200"));
+    assert!(
+        !evidence(complete.clone()).await.1.is_null(),
+        "downloaded_at not recorded while the connection stays open"
+    );
     drop(socket);
     server.abort();
 
@@ -886,14 +896,20 @@ async fn install_evidence_requires_a_complete_transfer() {
 async fn a_stalled_capture_upload_does_not_hold_up_the_next() {
     let fixture = Fixture::new();
     // The phone's app suspended mid-send: headers came, the body never does.
+    // The body says when the service first reads it, then stalls.
+    let (reading, read) = tokio::sync::oneshot::channel::<()>();
+    let body = futures_util::stream::unfold(Some(reading), |reading| async move {
+        if let Some(reading) = reading {
+            let _ = reading.send(());
+        }
+        std::future::pending::<Option<(Result<Vec<u8>, std::io::Error>, _)>>().await
+    });
     let stalled = Request::post("/v1/captures?kind=performance")
         .header(header::AUTHORIZATION, format!("Bearer {}", fixture.control))
-        .body(Body::from_stream(futures_util::stream::pending::<
-            Result<Vec<u8>, std::io::Error>,
-        >()))
+        .body(Body::from_stream(body))
         .unwrap();
     let hung = tokio::spawn(fixture.app.clone().oneshot(stalled));
-    tokio::task::yield_now().await;
+    read.await.unwrap();
 
     // A real recording is megabytes, over the service's 1 MB JSON limit.
     let frames: Vec<f64> = (0..200_000).map(|i| i as f64 / 120.0).collect();

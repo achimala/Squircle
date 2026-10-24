@@ -123,6 +123,9 @@ pub(super) async fn ingest(
         .await
         .map_err(ApiError::internal)?
         .map_err(ApiError::bad)?;
+    if inserted {
+        state.diagnosed.send_modify(|n| *n += 1);
+    }
     Ok(Json(success(
         json!({"event_id":event.event_id,"stored":inserted,"duplicate":!inserted}),
     )))
