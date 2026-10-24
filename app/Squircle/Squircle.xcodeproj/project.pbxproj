@@ -17,6 +17,7 @@
 		137F5D691337ACCA68558014 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
 		150D982A0801A3F17A5C0630 /* PushCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF7A7F6D85D75DFF1BED9836 /* PushCenter.swift */; };
 		1A1F76ACC686D7EF0C0FF6DA /* RequestCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5386BA2E356615AB102C8F0 /* RequestCard.swift */; };
+		1EC7617E1A70663D0CDE0026 /* TouchDown.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB8383CEBB56E7E25EDC6AB7 /* TouchDown.swift */; };
 		2125A73985C581677F3AD6D5 /* OverlayLoader.c in Sources */ = {isa = PBXBuildFile; fileRef = 27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */; };
 		22CAD50EF60BBEF3BB22B919 /* StageLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5F85DA67966D2090740EE5 /* StageLayout.swift */; };
 		258C14855DE02293731178F2 /* TaskLists.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4320E3594CE4CB732C719D2 /* TaskLists.swift */; };
@@ -123,6 +124,7 @@
 		C99A9FA4CDC0B9B423585681 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7CA4496328C7FF8D8B604A0A /* Assets.xcassets */; };
 		CB3B7947C642FB450BF2C93F /* SquircleOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC31297102176DC07450ECF1 /* SquircleOverlay.swift */; };
 		CD226037FA13D2D06431D81D /* LinkRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42E355291AFF2203E6E4CEAE /* LinkRuntime.swift */; };
+		CD46EA542DFBCC043591FFEF /* TouchDown.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB8383CEBB56E7E25EDC6AB7 /* TouchDown.swift */; };
 		D0653E9C771D6F1905EA9729 /* TaskLists.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4320E3594CE4CB732C719D2 /* TaskLists.swift */; };
 		D3823161D75D25966F363568 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
 		D6A02AFEF384A1D3B5DBC0D8 /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD9D79E5C23223D44EB56B4B /* Link.swift */; };
@@ -232,6 +234,7 @@
 		E51B1927FA5562FDD8F56D9E /* PendingJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingJournal.swift; sourceTree = "<group>"; };
 		E82DFCDDC8D37D4A8C1B776F /* Reduction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Reduction.swift; sourceTree = "<group>"; };
 		EA2E84E9C7DE96C2CE9C6F5E /* SquircleActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleActivity.swift; sourceTree = "<group>"; };
+		EB8383CEBB56E7E25EDC6AB7 /* TouchDown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchDown.swift; sourceTree = "<group>"; };
 		EBD483A8574350974655CD0C /* T3ThreadState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3ThreadState.swift; sourceTree = "<group>"; };
 		ECF9B7F12CB789D728A8DA96 /* Caches.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Caches.swift; sourceTree = "<group>"; };
 		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
@@ -364,6 +367,7 @@
 				A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */,
 				2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */,
 				4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */,
+				EB8383CEBB56E7E25EDC6AB7 /* TouchDown.swift */,
 				48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */,
 			);
 			path = UI;
@@ -684,6 +688,7 @@
 				FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */,
 				A48E1FCA693DC85CC567D780 /* ThreadViews.swift in Sources */,
 				3814E7D8EC5D2C43775913BD /* ThreadsViewController.swift in Sources */,
+				1EC7617E1A70663D0CDE0026 /* TouchDown.swift in Sources */,
 				97C1E54012EDF05F226B3682 /* UpdateCurtain.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -777,6 +782,7 @@
 				4D5A0C54F52464D0DC7E6B0B /* ThreadViewController.swift in Sources */,
 				8561E88460F96DCD4AB29DB4 /* ThreadViews.swift in Sources */,
 				3C7DE78ED76461B8ADDDA8AE /* ThreadsViewController.swift in Sources */,
+				CD46EA542DFBCC043591FFEF /* TouchDown.swift in Sources */,
 				41B1C50BF1A995CD85DD2FFC /* UpdateCurtain.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

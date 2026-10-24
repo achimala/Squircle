@@ -171,12 +171,14 @@ enum ThreadItem: Equatable {
 
     /// Everything one turn's own rows depend on.
     private struct TurnInputs: Equatable {
-        let user: ChatMessage?, rest: [ChatMessage], live: Bool, expanded: Bool, simulators: [SimulatorUse]
+        let user: ChatMessage?, rest: [ChatMessage], live: Bool, expanded: Bool
     }
     /// One turn's rows up to its answer, plus what the rest of the
     /// conversation's state is matched against.
     private struct TurnRows {
-        let body: [ThreadItem]
+        /// The turn's rows before the simulators it used (added per
+        /// conversation, so they never decide whether a turn is rebuilt) and after.
+        let head: [ThreadItem], tail: [ThreadItem]
         let turnIDs: Set<String>
         let answerID: String?
         /// Build IDs the turn's messages name, in order.
@@ -195,7 +197,7 @@ enum ThreadItem: Equatable {
         let turns = self.turns(messages)
         for (index, turn) in turns.enumerated() {
             _ = rows(TurnInputs(user: turn.user, rest: turn.rest, live: running && index == turns.count - 1,
-                                expanded: false, simulators: []))
+                                expanded: false))
         }
     }
 
@@ -243,7 +245,7 @@ enum ThreadItem: Equatable {
         for (index, turn) in turns.enumerated() {
             let id = turn.user?.id ?? "start"
             made.append(rows(TurnInputs(user: turn.user, rest: turn.rest, live: running && index == turns.count - 1,
-                                        expanded: expanded.contains(id), simulators: used[index] ?? [])))
+                                        expanded: expanded.contains(id))))
         }
         // A build's card sits where it was last mentioned (Squircle's update,
         // the agent's words or its start) or where it finished, whichever is
@@ -269,7 +271,8 @@ enum ThreadItem: Equatable {
         var items: [ThreadItem] = []
         for (index, rows) in made.enumerated() {
             let id = turns[index].user?.id ?? "start"
-            items += rows.body.compactMap { item in
+            let body = rows.head + (used[index] ?? []).map { ThreadItem.simulator($0) } + rows.tail
+            items += body.compactMap { item in
                 guard case .action(var line) = item else { return item }
                 switch line.kind {
                 // Squircle's news of a build is its card; the line stands in
@@ -348,9 +351,9 @@ enum ThreadItem: Equatable {
             // Squircle actions stay in view when the work folds.
             items += turn.expanded ? allRows(work) : gallery("gallery:" + id, work) + steps.flatMap(actionRows)
         }
-        items += turn.simulators.map { .simulator($0) }
-        if let answer { items += withMedia(answer, ThreadItem.answer) }
-        return TurnRows(body: items, turnIDs: Set(([turn.user] + rest).compactMap { $0?.turnID }), answerID: answer?.id,
+        let head = items
+        items = answer.map { withMedia($0, ThreadItem.answer) } ?? []
+        return TurnRows(head: head, tail: items, turnIDs: Set(([turn.user] + rest).compactMap { $0?.turnID }), answerID: answer?.id,
                         buildIDs: (turn.user?.build.map { [$0.id] } ?? []) + mentionedBuildIDs(in: rest),
                         startedIDs: Set(rest.flatMap { $0.step?.actions.compactMap(\.build?.raw) ?? [] }),
                         live: live ? LiveStatus(headline: headline(work: work, answer: answer), started: turn.user.flatMap { date($0.createdAt) }) : nil)

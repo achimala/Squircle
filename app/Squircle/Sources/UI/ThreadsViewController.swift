@@ -93,6 +93,8 @@ final class ThreadsViewController: UIViewController {
         if let current = model.projects.first(where: { $0.id == project.id }) { project = current }
         let sessions = model.sessions(for: project)
         let ids = sessions.map(\.id)
+        // Ready before a row is tapped.
+        model.prefetch(threads: ids)
         for id in Array(rowViews.keys) where !ids.contains(id) { rowViews.removeValue(forKey: id)?.removeFromSuperview() }
         for session in sessions {
             let row = rowViews[session.id] ?? {

@@ -104,6 +104,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// of the model, so going back to one puts it back as it was instead of
     /// building its page and every row again.
     private var parked: [Mounted<ThreadDestination>] = []
+    /// Making a thread's page ahead of its push (`prepareThread`), into `parked`.
+    private var preparing: (key: ThreadDestination, task: Task<Void, Never>)?
     private var selectedID: String? { mountedApp?.key }
     private var agent: ThreadViewController? { mountedApp?.controller }
     private var thread: ThreadViewController? { mountedThread?.controller }
@@ -175,6 +177,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         arrange.minimumPressDuration = 0.35
         arrange.delegate = self
         grid.addGestureRecognizer(arrange)
+        // A finger down on an app: its agent's page can start being made; a scroll stops that.
+        grid.addGestureRecognizer(TouchDown { [weak self] point in
+            guard let self, let index = app(at: point) else { return }
+            prepareApp(shown[index].id)
+        })
+        grid.panGestureRecognizer.addTarget(self, action: #selector(gridPanned(_:)))
         liftSpring.parameters = .init(response: 0.32, damping: 0.78)
         liftSpring.onChange = { [weak self] _ in self?.applyScene() }
         liftSpring.onRest = { [weak self] value in
@@ -234,6 +242,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // The window's keyboard guide (and the text window behind it) is made
+        // the first time a view asks for it: here, at launch, rather than by
+        // the first conversation page put in place.
+        _ = view.keyboardLayoutGuide
+        // The first text view made pays for setting text views up; the first page made ahead uses this one.
+        if spareComposer == nil, !madeComposer { madeComposer = true; spareComposer = Composer(placeholder: "Message") }
         #if DEBUG
         #if !SQUIRCLE_OVERLAY
         MotionAudit.shared.note("gallery.visible", values: ["since_launch_ms": (CACurrentMediaTime() - SquircleApp.launchedAt) * 1000])
@@ -425,21 +439,34 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         try? await Task.sleep(for: .seconds(3))
         guard let project = projects.first(where: { $0.name == name }) else { return }
         var total = (frames: 0, hitches: 0, ms: 0.0)
+        var total120 = (0, 0.0)
         func measured(_ label: String, seconds: Double, _ action: () async -> Void) async {
             var stamps: [(CFTimeInterval, CFTimeInterval)] = []
             let link = CADisplayLink(target: DisplayLinkProxy { stamps.append(($0.timestamp, $0.duration)) },
                                      selector: #selector(DisplayLinkProxy.tick(_:)))
             link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
             link.add(to: .main, forMode: .common)
+            // Each pass of the main run loop: one longer than 8.3 ms misses a 120 Hz frame.
+            var passes: [Double] = []
+            var woke = CACurrentMediaTime()
+            let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue | CFRunLoopActivity.beforeWaiting.rawValue, true, 0) { _, activity in
+                let now = CACurrentMediaTime()
+                if activity == .afterWaiting { woke = now } else { passes.append((now - woke) * 1000) }
+            }
+            CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
             let end = ContinuousClock.now + .seconds(seconds)
             await action()
             try? await Task.sleep(until: end)
             link.invalidate()
+            CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes)
             let gaps = zip(stamps.dropFirst(), stamps).map { ($0.0 - $1.0, $1.1) }
             let late = gaps.filter { $0.0 > 1.5 * $0.1 }
             let ms = late.reduce(0) { $0 + ($1.0 - $1.1) * 1000 }
+            let long = passes.filter { $0 > 8.3 }
             total = (total.frames + stamps.count, total.hitches + late.count, total.ms + ms)
-            NSLog("NAV %@ frames=%d hitches=%d hitch_ms=%.0f worst_ms=%.1f", label, stamps.count, late.count, ms, (gaps.map(\.0).max() ?? 0) * 1000)
+            total120 = (total120.0 + long.count, total120.1 + long.reduce(0) { $0 + $1 - 8.3 })
+            NSLog("NAV %@ frames=%d hitches=%d hitch_ms=%.0f worst_ms=%.1f over8=%d main_max=%.1f", label, stamps.count, late.count, ms,
+                  (gaps.map(\.0).max() ?? 0) * 1000, long.count, passes.max() ?? 0)
         }
         func swipeBack() async {
             beginBack()
@@ -450,16 +477,31 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             endBack(velocity: 2, closing: true)
         }
         for _ in 0..<rounds {
+            if ProcessInfo.processInfo.environment["SQUIRCLE_NAV_NOHEAD"] == nil {
+                await measured("touch-app", seconds: 0) {
+                    prepareApp(project.id)
+                    for _ in 0..<12 { await DisplayFrame.next() }
+                }
+            }
             await measured("open-app", seconds: 1.2) { openApp(project.id) }
             let named = ProcessInfo.processInfo.environment["SQUIRCLE_NAV_THREADS"]?.split(separator: ",").map(String.init)
             let threads = named ?? model.sessions(for: project).filter { $0.id != model.agentThreadID(for: project) }.prefix(3).map(\.id)
+            // As the agent's lines or Tasks listing them would.
+            model.prefetch(threads: Array(threads))
             for id in threads {
+                // A tap: the finger is down about a tenth of a second before it lifts.
+                if ProcessInfo.processInfo.environment["SQUIRCLE_NAV_NOHEAD"] == nil {
+                    await measured("touch", seconds: 0) {
+                        prepareThread(id)
+                        for _ in 0..<12 { await DisplayFrame.next() }
+                    }
+                }
                 await measured("push", seconds: 1.0) { openThread(id) }
                 await measured("back", seconds: 1.0) { await swipeBack() }
             }
             await measured("back-home", seconds: 1.2) { await swipeBack() }
         }
-        NSLog("NAV total frames=%d hitches=%d hitch_ms=%.0f", total.frames, total.hitches, total.ms)
+        NSLog("NAV total frames=%d hitches=%d hitch_ms=%.0f over8=%d over8_ms=%.0f", total.frames, total.hitches, total.ms, total120.0, total120.1)
     }
 
     /// Verification only: taps and back swipes as fast as a hurried person,
@@ -583,6 +625,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private func render() {
         projects = model.projects
+        // On Home, the first apps' agents are read ahead, ready for a finger to come down on one.
+        if route == .grid { model.prefetch(threads: projects.prefix(6).compactMap(model.agentThreadID)) }
         let ids = Set(projects.map(\.id))
         // An app that disappeared from the Mac takes its route, or the finger's hold, with it.
         if let app = route.app, !ids.contains(app) { route = .grid }
@@ -831,29 +875,113 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private func mountApp(_ id: String) {
         guard let project = projects.first(where: { $0.id == id }) else { return }
         model.selectProject(project)
-        let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true)
+        if let prepared = preparedApp, prepared.key == id {
+            // Made since a finger went down on it: put in place, the rest built now.
+            preparedApp = nil
+            preparingApp?.cancel(); preparingApp = nil
+            prepared.controller.loadViewIfNeeded()
+            attach(prepared.controller, in: agentHost)
+            reveal(prepared.controller)
+            prepared.controller.resume()
+            mountedApp = prepared
+            return
+        }
+        let controller = agentPage(for: project, ahead: false)
+        host(controller, in: agentHost)
+        mountedApp = Mounted(key: id, controller: controller)
+    }
+
+    private func agentPage(for project: AppProject, ahead: Bool, composer: Composer? = nil) -> ThreadViewController {
+        let controller = ThreadViewController(model: model, project: project, sessionID: model.agentThreadID(for: project), agent: true,
+                                              ahead: ahead, composer: composer)
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
+        controller.onPrepareThread = { [weak self] id in self?.prepareThread(id) }
+        controller.onScrollBegan = { [weak self] in self?.stopPreparing() }
         controller.onTasks = { [weak self] in self?.presentTasks() }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
-        host(controller, in: agentHost)
         controller.onBack = { [weak self] in self?.closeApp() }
-        mountedApp = Mounted(key: id, controller: controller)
+        return controller
+    }
+
+    /// An app's agent page made off screen since a finger went down on the
+    /// app on Home (`prepareApp`), until it opens or another is made.
+    private var preparedApp: Mounted<String>?
+    /// A composer made at launch for the first page made ahead.
+    private var spareComposer: Composer?
+    private var madeComposer = false
+    private func takeComposer() -> Composer {
+        defer { spareComposer = nil }
+        return spareComposer ?? Composer(placeholder: "Message")
+    }
+    private var preparingApp: Task<Void, Never>?
+
+    /// The finger is down on an app on Home: its agent's page is made ahead
+    /// from its copy, one step a frame, as a thread's is (`prepareThread`).
+    func prepareApp(_ id: String) {
+        guard route == .grid, id != selectedID, preparedApp?.key != id, let project = projects.first(where: { $0.id == id }),
+              let agentID = model.agentThreadID(for: project) else { return }
+        preparingApp?.cancel()
+        if let stale = preparedApp { dismount(stale.controller) }
+        preparedApp = nil
+        model.prefetch(threads: [agentID])
+        preparingApp = Task { [weak self] in
+            guard let self else { return }
+            let composer = takeComposer()
+            await DisplayFrame.next()
+            guard !Task.isCancelled else { return }
+            let controller = agentPage(for: project, ahead: true, composer: composer)
+            preparedApp = Mounted(key: id, controller: controller)
+            await DisplayFrame.next()
+            guard !Task.isCancelled else { return }
+            controller.loadViewIfNeeded()
+            await DisplayFrame.next()
+            guard !Task.isCancelled else { return }
+            attach(controller, in: agentHost)
+            await buildAhead(controller, conversation: .thread(agentID, appID: project.id))
+        }
+    }
+
+    /// A page made ahead gets its rows, once its conversation's copy is at
+    /// hand, an eighth of a screen at a time, as many as fit in a few
+    /// milliseconds a frame.
+    private func buildAhead(_ controller: ThreadViewController, conversation: ConversationID) async {
+        if model.content(of: conversation) == nil {
+            for await _ in model.updates where model.content(of: conversation) != nil || Task.isCancelled { break }
+        }
+        var done = false
+        while !done {
+            await DisplayFrame.next()
+            guard !Task.isCancelled else { return }
+            // Another step only if one like the last still fits.
+            let frame = CACurrentMediaTime()
+            var last: CFTimeInterval = 0
+            repeat {
+                let started = CACurrentMediaTime()
+                done = controller.prepareRows()
+                last = CACurrentMediaTime() - started
+            } while !done && CACurrentMediaTime() - frame + last < 0.004
+        }
     }
 
     private func unmountAgent() {
         guard let mounted = mountedApp else { return }
         mountedApp = nil
+        dock.docked = []
         dismount(mounted.controller)
         dropParked()
     }
 
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
+        preparingApp?.cancel(); preparingApp = nil
+        if let stale = preparedApp { dismount(stale.controller); preparedApp = nil }
         dropParked()
     }
 
     /// Threads kept for the app left behind, or for memory, go for good.
     private func dropParked() {
+        preparing?.task.cancel()
+        preparing = nil
         parked.forEach { dismount($0.controller) }
         parked = []
     }
@@ -861,31 +989,121 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Adds a conversation as an opaque page that covers what is beneath it
     /// as it slides in, never text over text.
     private func host(_ controller: ThreadViewController, in host: UIView) {
+        attach(controller, in: host)
+        reveal(controller)
+        controller.view.layoutIfNeeded()
+    }
+
+    /// Into the hierarchy, off screen at the right; parked pages stay there.
+    private func attach(_ controller: ThreadViewController, in host: UIView) {
+        guard controller.parent == nil else { return }
         controller.host = self
         addChild(controller)
         controller.view.frame = view.bounds
         controller.view.backgroundColor = Theme.paper
         controller.view.layer.shadowColor = UIColor.black.cgColor
-        controller.view.layer.shadowOpacity = 0.14
         controller.view.layer.shadowRadius = 18
         controller.view.layer.shadowOffset = CGSize(width: -6, height: 0)
         controller.view.layer.shadowPath = UIBezierPath(rect: view.bounds).cgPath
-        controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
+        conceal(controller)
         host.addSubview(controller.view)
         controller.didMove(toParent: self)
-        controller.view.layoutIfNeeded()
+    }
+
+    /// The page about to slide in (`applyScene` moves it and gives it touches).
+    private func reveal(_ controller: ThreadViewController) {
+        controller.view.superview?.bringSubviewToFront(controller.view)
+        controller.view.layer.shadowOpacity = 0.14
+    }
+
+    /// A page off screen at the right, out of reach: its shadow would show at the edge.
+    private func conceal(_ controller: ThreadViewController) {
+        controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
+        controller.view.layer.shadowOpacity = 0
+        controller.view.isUserInteractionEnabled = false
+        controller.view.accessibilityElementsHidden = true
     }
 
     private func dismount(_ controller: ThreadViewController) {
         controller.tearDown()
-        detach(controller)
-    }
-
-    private func detach(_ controller: ThreadViewController) {
-        dock.docked = []
         controller.willMove(toParent: nil)
         controller.view.removeFromSuperview()
         controller.removeFromParent()
+    }
+
+    /// The page for a thread of the app's that is likely to open next (a
+    /// finger is down on the line that opens it, or its row in Tasks was
+    /// tapped and the sheet is leaving), made off screen a few milliseconds
+    /// per frame. Its push takes it as it is and builds whatever is left.
+    func prepareThread(_ id: String) {
+        guard let project = selectedProject, route == .app(project.id) else { return }
+        let key = ThreadDestination.existing(id)
+        guard preparing?.key != key, !parked.contains(where: { $0.key == key }) else { return }
+        preparing?.task.cancel()
+        preparing = (key, Task { [weak self] in
+            guard let self else { return }
+            // One step a frame: its field, the page (or a parked one put to
+            // use), its view, putting it in place off screen, then its rows.
+            let controller: ThreadViewController
+            if let kept = reusablePage() {
+                kept.retarget(to: id)
+                controller = kept
+            } else {
+                let composer = takeComposer()
+                await DisplayFrame.next()
+                guard !Task.isCancelled else { return }
+                controller = ThreadViewController(model: model, project: project, sessionID: id, ahead: true, composer: composer)
+                controller.onBack = { [weak self] in self?.closeThread() }
+            }
+            park(Mounted(key: key, controller: controller))
+            await DisplayFrame.next()
+            guard !Task.isCancelled else { return }
+            controller.loadViewIfNeeded()
+            await DisplayFrame.next()
+            guard !Task.isCancelled else { return }
+            attach(controller, in: threadHost)
+            await buildAhead(controller, conversation: .thread(id, appID: project.id))
+            if !Task.isCancelled, preparing?.key == key { preparing = nil }
+        })
+    }
+
+    /// A page for a thread with none parked: once a few are kept, the
+    /// oldest is put to use for it (its view and cells are already made);
+    /// else a new one, made ahead (inactive until `resume`).
+    private func page(for id: String, project: AppProject) -> ThreadViewController {
+        if let kept = reusablePage() {
+            kept.retarget(to: id)
+            return kept
+        }
+        let controller = ThreadViewController(model: model, project: project, sessionID: id, ahead: true)
+        controller.onBack = { [weak self] in self?.closeThread() }
+        return controller
+    }
+
+    /// The oldest parked page, taken out to be put to use, once a few are kept.
+    private func reusablePage() -> ThreadViewController? {
+        guard parked.count >= 3, let oldest = parked.last, oldest.controller.isViewLoaded else { return nil }
+        parked.removeLast()
+        return oldest.controller
+    }
+
+    @objc private func gridPanned(_ pan: UIPanGestureRecognizer) {
+        if pan.state == .began { stopPreparing() }
+    }
+
+    /// A finger began scrolling instead of tapping: making pages ahead stops
+    /// (what is made so far is kept) and leaves the frames to the scroll.
+    private func stopPreparing() {
+        preparing?.task.cancel()
+        preparing = nil
+        preparingApp?.cancel()
+        preparingApp = nil
+    }
+
+    /// Keeps a page off screen to come back to; the oldest go.
+    private func park(_ page: Mounted<ThreadDestination>) {
+        parked.insert(page, at: 0)
+        while parked.count > 5 { dismount(parked.removeLast().controller) }
     }
 
     private func mountThread(_ key: ThreadDestination) {
@@ -893,9 +1111,21 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         agent?.deactivate()
         if let index = parked.firstIndex(where: { $0.key == key }) {
             let kept = parked.remove(at: index)
-            host(kept.controller, in: threadHost)
+            if preparing?.key == key { preparing?.task.cancel(); preparing = nil }
+            kept.controller.loadViewIfNeeded()
+            attach(kept.controller, in: threadHost)
+            reveal(kept.controller)
             kept.controller.resume()
             mountedThread = kept
+            return
+        }
+        if case .existing(let id) = key, parked.count >= 3 {
+            // No head start: a parked page put to use builds its rows now.
+            let controller = page(for: id, project: project)
+            attach(controller, in: threadHost)
+            reveal(controller)
+            controller.resume()
+            mountedThread = Mounted(key: key, controller: controller)
             return
         }
         let controller = ThreadViewController(model: model, project: project, sessionID: key.threadID)
@@ -907,12 +1137,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private func unmountThread() {
         guard let mounted = mountedThread else { return }
         mountedThread = nil
+        dock.docked = []
         // A draft has nothing to come back to; a thread is kept a while.
         if case .existing = mounted.key {
             mounted.controller.park()
-            detach(mounted.controller)
-            parked.insert(mounted, at: 0)
-            while parked.count > 5 { dismount(parked.removeLast().controller) }
+            conceal(mounted.controller)
+            park(mounted)
         } else {
             dismount(mounted.controller)
         }
@@ -1179,6 +1409,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         agent?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - a) - (layout.reducedMotion ? 0 : width * 0.3 * t), y: 0))
         thread?.setTransitionProgress(t)
         thread?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - t), y: 0))
+        // The agent, fully covered and still, may change unseen.
+        agent?.outOfSight = thread != nil && t >= 1 && !spring.isAnimating && dragging == nil
 
         // Touches go to the screen the route names, from the first frame of its
         // transition. A conversation on its way out still covers the one
@@ -1221,6 +1453,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         Theme.selectionHaptic()
         let controller = TasksViewController(model: model, project: project, threads: threads)
         controller.onOpen = { [weak self, weak controller] id in
+            // Made while the sheet leaves.
+            if let id { self?.prepareThread(id) }
             controller?.dismiss(animated: true) { self?.openThread(id) }
         }
         controller.modalPresentationStyle = .pageSheet

@@ -143,25 +143,20 @@ final class MessageCell: TimelineCell {
     /// glass is costly to create and most rows never show it.
     private(set) lazy var bubble: UIVisualEffectView = {
         let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
-        bubble.translatesAutoresizingMaskIntoConstraints = false
         contentView.insertSubview(bubble, at: 0)
-        NSLayoutConstraint.activate([
-            bubble.topAnchor.constraint(equalTo: text.topAnchor),
-            bubble.bottomAnchor.constraint(equalTo: text.bottomAnchor),
-            bubble.leadingAnchor.constraint(equalTo: text.leadingAnchor, constant: -15),
-            bubble.trailingAnchor.constraint(equalTo: text.trailingAnchor, constant: 15)
-        ])
         hasBubble = true
+        setNeedsLayout()
         return bubble
     }()
     private var hasBubble = false
     /// What an agent sent hangs off a thin rule, like a quotation.
     private let rule = UIView()
     let text = UITextView()
-    private var leading: NSLayoutConstraint!
-    private var trailing: NSLayoutConstraint!
-    private var minimumLeading: NSLayoutConstraint!
-    private var top: NSLayoutConstraint!
+    private var style = Style.answer
+    /// The text's distance from the row's top; 8 points of row follow it.
+    private var top: CGFloat = 6
+    /// The text's frame for the last width it was laid out at.
+    private var measured: (width: CGFloat, frame: CGRect)?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -169,24 +164,53 @@ final class MessageCell: TimelineCell {
         text.isScrollEnabled = false
         text.backgroundColor = .clear
         text.textContainer.lineFragmentPadding = 0
+        // Most rows have none; set once here, not again for every row it shows.
+        text.textContainerInset = .zero
         text.adjustsFontForContentSizeCategory = true
         text.linkTextAttributes = [.foregroundColor: Theme.accent]
         rule.backgroundColor = Theme.accent.withAlphaComponent(0.45)
         rule.layer.cornerRadius = 1
-        [rule, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
-        leading = text.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20)
-        trailing = text.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
-        minimumLeading = text.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 76)
-        top = text.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8)
-        NSLayoutConstraint.activate([
-            top,
-            text.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            trailing,
-            rule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            rule.widthAnchor.constraint(equalToConstant: 2),
-            rule.topAnchor.constraint(equalTo: text.topAnchor, constant: 2),
-            rule.bottomAnchor.constraint(equalTo: text.bottomAnchor, constant: -2)
-        ])
+        [rule, text].forEach(contentView.addSubview)
+    }
+
+    /// Laid out by hand: the most common row, measured and placed without
+    /// solving constraints (sizing it through Auto Layout laid its text out
+    /// twice more).
+    private func textFrame(width: CGFloat) -> CGRect {
+        if let measured, measured.width == width { return measured.frame }
+        let frame: CGRect
+        if style == .user {
+            // Your words hug their text at the trailing edge, wrapping 76 points from the leading one.
+            let available = max(0, width - 76 - 35)
+            let size = text.sizeThatFits(CGSize(width: available, height: .greatestFiniteMagnitude))
+            let used = min(available, size.width)
+            frame = CGRect(x: width - 35 - used, y: top, width: used, height: size.height)
+        } else {
+            let x: CGFloat = style == .agent ? 34 : 20
+            let used = max(0, width - x - 20)
+            frame = CGRect(x: x, y: top, width: used, height: text.sizeThatFits(CGSize(width: used, height: .greatestFiniteMagnitude)).height)
+        }
+        measured = (width, frame)
+        return frame
+    }
+
+    override func systemLayoutSizeFitting(_ targetSize: CGSize, withHorizontalFittingPriority horizontalFittingPriority: UILayoutPriority,
+                                          verticalFittingPriority: UILayoutPriority) -> CGSize {
+        CGSize(width: targetSize.width, height: textFrame(width: targetSize.width).maxY + 8)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        var frame = textFrame(width: contentView.bounds.width)
+        frame.size.height = max(0, contentView.bounds.height - top - 8)
+        text.frame = frame
+        if hasBubble { bubble.frame = frame.insetBy(dx: -15, dy: 0) }
+        rule.frame = CGRect(x: 20, y: frame.minY + 2, width: 2, height: max(0, frame.height - 4))
+    }
+
+    override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        super.traitCollectionDidChange(previous)
+        if previous?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory { measured = nil }
     }
 
     /// Where the last touch went down, so a row can tell its first line
@@ -208,21 +232,21 @@ final class MessageCell: TimelineCell {
 
     func configure(_ message: ChatMessage, style: Style, rendered: NSAttributedString, expanded: Bool) {
         let user = style == .user
-        text.attributedText = rendered
-        text.textContainerInset = user ? UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0) : .zero
+        self.style = style
+        measured = nil
+        // The text last, so it is laid out once, in its final container.
+        text.update(\.textContainerInset, to: user ? UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0) : .zero)
         // Reasoning reads in full; long notes and agents' messages fold until tapped.
         let folded = [.note, .action, .agent].contains(style) && !expanded
-        text.textContainer.maximumNumberOfLines = folded ? [.action: 2, .agent: 9][style] ?? 4 : 0
-        text.textContainer.lineBreakMode = folded ? .byTruncatingTail : .byWordWrapping
+        text.textContainer.update(\.maximumNumberOfLines, to: folded ? [.action: 2, .agent: 9][style] ?? 4 : 0)
+        text.textContainer.update(\.lineBreakMode, to: folded ? .byTruncatingTail : .byWordWrapping)
+        text.attributedText = rendered
         // Selecting text matters for answers; quieter rows are tapped to unfold.
         text.isUserInteractionEnabled = style == .answer || style == .user
         if user || hasBubble { bubble.isHidden = !user }
         rule.isHidden = style != .agent
-        leading.isActive = !user
-        leading.constant = style == .agent ? 34 : 20
-        minimumLeading.isActive = user
-        trailing.constant = user ? -35 : -20
-        top.constant = user || style == .update || style == .agent ? 14 : style == .answer ? 10 : 6
+        top = user || style == .update || style == .agent ? 14 : style == .answer ? 10 : 6
+        setNeedsLayout()
         accessibilityIdentifier = "thread.message.\(message.role)"
     }
 }
@@ -464,7 +488,13 @@ final class ShotView: UIControl {
     /// Recordings play inline, muted and looping, inside the frame.
     private var player: AVQueuePlayer?
     private var looper: AVPlayerLooper?
-    private let playerLayer = AVPlayerLayer()
+    /// Only recordings have one: making it is costly, and most shots are pictures.
+    private lazy var playerLayer: AVPlayerLayer = {
+        let layer = AVPlayerLayer()
+        layer.videoGravity = .resizeAspectFill
+        image.layer.addSublayer(layer)
+        return layer
+    }()
     private let badge = UIImageView(image: UIImage(systemName: "play.fill"))
 
     init(shot: Shot, action: @escaping (Shot) -> Void) {
@@ -483,8 +513,6 @@ final class ShotView: UIControl {
         shadow.layer.shadowOpacity = 0.16
         shadow.layer.shadowRadius = 12
         shadow.layer.shadowOffset = CGSize(width: 0, height: 7)
-        playerLayer.videoGravity = .resizeAspectFill
-        image.layer.addSublayer(playerLayer)
         badge.tintColor = .white
         badge.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
         badge.contentMode = .center
@@ -544,7 +572,7 @@ final class ShotView: UIControl {
         super.layoutSubviews()
         shadow.layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: image.layer.cornerRadius).cgPath
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        playerLayer.frame = image.bounds
+        if shot.video { playerLayer.frame = image.bounds }
         CATransaction.commit()
     }
 
@@ -692,7 +720,13 @@ final class FigureCell: TimelineCell {
 final class FigureTile: UIControl {
     let shot: Shot
     private let image = UIImageView()
-    private let playerLayer = AVPlayerLayer()
+    /// Only recordings have one: making it is costly, and most shots are pictures.
+    private lazy var playerLayer: AVPlayerLayer = {
+        let layer = AVPlayerLayer()
+        layer.videoGravity = .resizeAspectFill
+        image.layer.addSublayer(layer)
+        return layer
+    }()
     private let badge = UIImageView(image: UIImage(systemName: "play.fill"))
     /// Shown instead of the picture when it couldn't be loaded.
     private let broken = UIImageView(image: UIImage(systemName: "photo.badge.exclamationmark"))
@@ -707,8 +741,6 @@ final class FigureTile: UIControl {
         backgroundColor = .secondarySystemFill
         image.contentMode = .scaleAspectFill
         image.isUserInteractionEnabled = false
-        image.layer.addSublayer(playerLayer)
-        playerLayer.videoGravity = .resizeAspectFill
         badge.tintColor = .white
         badge.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
         badge.contentMode = .center
@@ -766,7 +798,7 @@ final class FigureTile: UIControl {
         broken.frame = bounds
         badge.frame = CGRect(x: bounds.maxX - 32, y: bounds.maxY - 32, width: 24, height: 24)
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        playerLayer.frame = image.bounds
+        if shot.video { playerLayer.frame = image.bounds }
         CATransaction.commit()
     }
 
