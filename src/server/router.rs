@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/sims/keep", get(sim_keep).post(change_sim_keep))
         .route("/v1/agents", get(list_agents).post(ensure_agent))
         .route("/v1/agents/context", get(agent_context))
+        .route("/v1/agents/heard", post(agent_heard))
         .route("/v1/t3/providers", get(t3_providers))
         .route("/v1/agents/restart", post(restart_agent))
         .route("/v1/agents/fresh", post(fresh_agent))

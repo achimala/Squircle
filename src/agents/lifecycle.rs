@@ -89,6 +89,7 @@ impl Agents {
             thread_id: uuid::Uuid::new_v4().to_string(),
             created_at: crate::model::now(),
             lifecycle: Lifecycle::Creating { command: None },
+            heard: None,
         };
         let reserved = agent.clone();
         self.change(move |registry| {

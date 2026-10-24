@@ -4,7 +4,10 @@ use super::*;
 pub(super) enum TaskCommand {
     /// Record a new work item: an ask in the user's words, before any work on it; it starts queued unless you say otherwise.
     Add {
-        #[arg(long, help = "Your thread ID (the app is taken from it)")]
+        #[arg(
+            long,
+            help = "Your thread ID (the app is taken from it, and the message it came from is recorded)"
+        )]
         thread: Option<String>,
         #[arg(long, help = "T3 project ID instead of a thread")]
         project: Option<String>,
@@ -76,6 +79,11 @@ pub(super) enum TaskCommand {
     },
     /// One task (a work item with its sub-tasks) with linked threads, builds, media and history.
     Show { id: String },
+    /// Mark the user's messages so far as asking for nothing to track (a thanks, a question you answered). Until each of their messages is recorded (task add / sub add --thread) or marked, thread spawn, send and answer refuse.
+    Heard {
+        #[arg(long, help = "Your (the app agent's) thread ID")]
+        thread: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -90,7 +98,10 @@ pub(super) enum SubCommand {
         status: Option<squircle::tasks::Status>,
         #[arg(long, help = "What it waits on, in a few words")]
         note: Option<String>,
-        #[arg(long, help = "Your thread ID, to record the message it came from")]
+        #[arg(
+            long,
+            help = "Your thread ID, to record the message it came from (an app agent's unrecorded messages block spawn and send)"
+        )]
         thread: Option<String>,
     },
 }
@@ -170,6 +181,9 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
         )
         .await?,
         TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,
+        TaskCommand::Heard { thread } => {
+            post(cli, "/v1/agents/heard", json!({"thread": thread})).await?
+        }
         TaskCommand::List {
             thread,
             project,

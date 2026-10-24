@@ -448,6 +448,16 @@ impl Agents {
                 .collect()
         };
         let tasks = self.open_tasks(&agent.project_id, false);
+        let unheard = match self.unheard(&agent.thread_id).await {
+            Ok(unheard) => super::demands::listed(&unheard).map(|list| format!(
+                "\nThe user's messages not in the tracker yet; record each demand in them (`task sub add ITEM --thread {id} --ask` in their words, \
+                 corrections and details like \"from bottom\" included) or run `task heard --thread {id}` if they ask for nothing, \
+                 before anything else: thread spawn, send and answer refuse until then:{list}",
+                id = agent.thread_id,
+            )),
+            Err(_) => None,
+        }
+        .unwrap_or_default();
         let notes = match crate::notes::load(&self.root, &agent.project_id) {
             Ok(notes) if notes.notes.is_empty() => {
                 " none yet; add the user's preferences, decisions and gotchas as you learn them"
@@ -467,12 +477,15 @@ impl Agents {
              or claude CLIs yourself or through subagents or workflows, so the user can see it; the one subagent is `squircle:history`, \
              cheap and read-only: ask it, in the foreground, before answering anything about past work or decisions. Archive a worker once its work is merged or abandoned, \
              so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
-             Your work items and their open sub-tasks, the user's open asks (`{cli} task --help`):{tasks}\n\
+             Your work items and their open sub-tasks, the user's open asks (`{cli} task --help`):{tasks}{unheard}\n\
              Your notes (`{cli} notes --help`; keep them current):{notes}\n\
              Before any work on something the user asks, put it in the tracker in their words: a sub-task (`task sub add ITEM`) of the work item it clearly belongs to, \
              otherwise a new work item (`task add`); never under an unrelated one. Track your own breakdown as sub-tasks; link workers (`thread spawn --task`) \
              and builds (`build start --task`) to the sub-task or item they serve, attach screenshots or clips worth seeing, and set status and note when that changes \
-             (linked workers and builds move them too; an item follows its sub-tasks).\n\
+             (linked workers and builds move them too; an item follows its sub-tasks). A worker's brief (`thread spawn --task`, `thread send`) ends with its work item's asks \
+             from the tracker, so a correction you don't record never reaches it. Never tell the user something works or is done until you or a worker \
+             has looked at it (screenshots or a recording) against every one of its asks; say what is still wrong. Don't promise check-ins at times: \
+             you can't keep time, [worker update]s wake you.\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
              copied out of /tmp into ~/.t3/userdata/attachments. Builds you or your workers start (`build start --thread {id}`) appear in the chat \
              by themselves when they finish, with Install or why they failed: don't promise otherwise or paste build IDs. \

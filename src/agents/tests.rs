@@ -338,6 +338,7 @@ fn agent(thread: &str) -> Agent {
         thread_id: thread.into(),
         created_at: 0,
         lifecycle: Lifecycle::Ready { refresh: false },
+        heard: None,
     }
 }
 

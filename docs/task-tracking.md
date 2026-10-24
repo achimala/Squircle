@@ -43,6 +43,35 @@ lines). A fresh agent's handoff lists every open work item and sub-task,
 History's open ones included, uncapped (after an ask filed under an
 unrelated task was lost across a fresh start).
 
+## Demands reach the tracker and every worker (2026-10-24)
+
+User: "It needs to be writing the task with my demands and then doing
+them." The Letters Abroad agent passed "Fold from bottom same as the
+folder" on to a worker in a message but never recorded it; two hours later
+it re-briefed the worker from a newer message alone, "bottom" was dropped,
+and the worker went back to a top fold. It also reported visibly broken work
+as done and promised to "check every ~20 min". So:
+
+- **Every user message is accounted for before work is handed on.** A
+  message is accounted for once a task records it, or a later one, as its
+  `source` (`task add` / `task sub add` with `--thread`), or the agent marks
+  it as asking for nothing (`task heard --thread ID`: a thanks, a question it
+  answered; saved as the agent's `heard` message). `thread spawn`, `thread
+  send` and `thread answer` from an app agent refuse while any of the user's
+  messages after the last accounted one is not, quoting them
+  (`src/agents/demands.rs`); the per-turn note lists them too. No timer: it
+  is checked when the agent tries to hand work on.
+- **Briefs carry the asks.** `thread spawn` requires `--task`. Its prompt,
+  and every `thread send` to a worker linked to a task, ends with the
+  work item's ask and every sub-task's ask (dropped ones left out, done ones
+  marked "still holds") in the user's words, so a re-brief can't drop a
+  correction the tracker has.
+- **Instructions.** The plugin prompt and the per-turn note: one sub-task per
+  demand, corrections and details ("from bottom") included, in the user's
+  words, before acting; never present work as done without having looked at
+  it (screenshots or a recording) against every ask of its work item; never
+  promise timed check-ins (`[worker update]`s wake the agent).
+
 ## Model
 
 Kept per app (T3 project) in `<data>/tasks.json`; attachments in
@@ -104,8 +133,9 @@ is not fetched.
 
 ## Agent
 
-`squircle task add|sub add|update|link|attach|list|show` (`--help`, `--json`);
-`thread spawn --task` and `build start --task` link as they start. The
+`squircle task add|sub add|update|link|attach|list|show|heard` (`--help`,
+`--json`); `thread spawn --task` (required) and `build start --task` link as
+they start. The
 per-turn `[squircle]` note lists the open tasks (also after compaction) and
 asks the agent to add one per new ask, link workers and builds, attach
 pictures worth seeing and keep status and note current. The plugin's
