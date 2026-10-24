@@ -6,7 +6,7 @@ pub(super) enum WaitFor {
     Preview,
 }
 impl WaitFor {
-    pub(super) fn timeout(self) -> Value {
+    pub(super) fn timed_out(self) -> Value {
         match self {
             Self::Build => failure(
                 "wait_timeout",
@@ -105,7 +105,7 @@ where
     loop {
         let (response, etag) = match tokio::time::timeout_at(deadline, fetch(held.take())).await {
             Ok(response) => response?,
-            Err(_) => return Ok(policy.timeout()),
+            Err(_) => return Ok(policy.timed_out()),
         };
         if let Some(done) = policy.terminal(response, build_id) {
             return Ok(done);

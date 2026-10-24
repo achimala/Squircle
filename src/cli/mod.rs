@@ -33,7 +33,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
 use squircle::{model::*, store::Store};
-use std::{net::SocketAddr, path::PathBuf, process::Command, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 /// Whether `server` is a service on this Mac, which local-only commands
 /// (`media`) can stand in for by writing its data directory.
@@ -139,7 +139,7 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
                 "invocation":squircle::agents::cli_invocation(&std::path::absolute(root(cli)?)?, &cli.server)}),
         ),
         Commands::App { command } => return apps::run(cli, command).await,
-        Commands::Doctor => doctor(cli),
+        Commands::Doctor => doctor(cli).await,
         Commands::Help { topic } => {
             if topic.as_deref() == Some("workflow") {
                 println!("{}", include_str!("../../docs/verification.md"));

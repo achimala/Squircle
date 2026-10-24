@@ -38,10 +38,13 @@ url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
+[build-dependencies]
+# build.rs checks the no-locks, no-waits rules on every build.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit"] }
+
 [dev-dependencies]
 # Tests run timed policy on tokio's paused clock instead of waiting.
 tokio = { version = "1", features = ["test-util"] }
-proc-macro2 = { version = "1", features = ["span-locations"] }
-syn = { version = "2", features = ["full", "visit"] }
 http-body-util = "0.1"
 tempfile = "3"

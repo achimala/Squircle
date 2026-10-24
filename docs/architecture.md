@@ -92,8 +92,10 @@ has no merge commits, and only at the tip it inspected. Files are removed
 only after T3 confirms the session stopped (review B below). Context goes to
 the deepest matching project root.
 
-**T3 connection (Rust).** One supervised task per connection with
-connect/liveness deadlines; either half failing closes it; dropping the client
+**T3 connection (Rust).** One supervised task per connection, with no
+time limits (2026-10-24): a call ends with T3's answer or the socket closing,
+which a stopped T3 does at once on loopback and TCP keepalive makes happen for
+a vanished remote peer; either half failing closes it; dropping the client
 cancels it; pending requests are removed on every exit path; the outbox is
 bounded; error text is clipped on character boundaries. A command goes out
 exactly as its intent saved it (ID and time included); a typed T3 failure is
@@ -104,11 +106,14 @@ leaves the outcome unknown.
 that kills the recorder and owes the device close. Recovery signals a saved
 recorder PID only while its command line names that session's file. Device
 closes are retried with backoff. On service shutdown `Sims::shutdown` refuses
-new starts, stops and files recordings and closes T3 device sessions within
-ten seconds; anything cut off is recovered from the ledger at the next start.
+new starts, stops and files recordings and closes T3 device sessions; anything a
+supervisor cuts off is recovered from the ledger at the next start. The
+watchdog looks again when T3's thread states change, a recorder exits (a
+kernel event) or the ledger is saved, and otherwise only at the policy's next
+due time; a start waits for simctl's own "Recording started" line.
 
-**Builds and media.** One process-group runner (deadline, cancellation,
-output limits) runs xcodebuild, codesign, simctl, inspection and
+**Builds and media.** One process-group runner (cancellation, its caller
+going away, output limits; no deadline) runs xcodebuild, codesign, simctl, inspection and
 symbolication, including overlay signing. The Mach-O editor range-checks
 every structure before changing a byte. The overlay cache key includes the
 Xcode/SDK build and settings, and entries are reused only when their manifest
@@ -213,10 +218,10 @@ dsyms}`), adapted to the saved `BuildOutput`.
 
 **Helper processes (W5).** `run_bounded` keeps the helper's leader
 unreaped (`waitid(WNOWAIT)`) so its process group ID can't be reused, and
-kills the whole group on leader exit, timeout, cancellation or drop before
-reaping. T3 database reads go through it read-only with deadlines (3 s for
-the current step, 15 s for details) and a 64 MiB output cap. The symbol
-tool runner follows the same order within its deadline.
+kills the whole group on leader exit (reported by the kernel, `src/kq.rs`),
+cancellation or drop before reaping. T3 database reads run read-only until
+they end or their caller drops them (which interrupts SQLite), with a 64 MiB
+output cap. The symbol tool runner follows the same order.
 
 **Build notification app identity (W3/W4).** When a build finishes the
 service resolves its catalog app (project + scheme, or an import's bundle
