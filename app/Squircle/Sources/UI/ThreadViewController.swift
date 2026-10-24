@@ -1,3 +1,4 @@
+import AVFoundation
 import UIKit
 
 /// What a conversation needs from whatever shows it (the app or the debug
@@ -1078,17 +1079,28 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return true
     }
 
-    /// Live: large over the conversation. Recorded: the recording, full screen.
+    /// Live: large and touchable, through the host. Recorded: the
+    /// recording, carrying on from where it plays in place.
     private func openSimulator(_ use: SimulatorUse) {
         if use.live {
             if let host, host.expandsSimulators { host.expandSimulator(use) }
             return
         }
-        guard let id = use.recordingID, presentedViewController == nil else { return }
-        Task { [weak self] in
-            guard let self, let url = await model.conversationMedia.loadVideo("media:" + id) else { return }
-            present(VideoPlayerViewController(url: url), animated: true)
-        }
+        guard let id = use.recordingID, let window = view.window, let cell = simulatorCell(use.id) else { return }
+        let origin = MediaOrigin { [weak self] in self?.simulatorCell(use.id)?.spot }
+        MediaViewer.open(.video(poster: cell.poster, size: nil, player: cell.recordingPlayer, url: { [weak self] in
+            await self?.model.conversationMedia.loadVideo("media:" + id)
+        }), from: origin, in: window)
+    }
+
+    private func simulatorCell(_ id: String) -> SimulatorCell? {
+        table.visibleCells.lazy.compactMap { $0 as? SimulatorCell }.first { $0.use?.id == id }
+    }
+
+    /// The turn's block showing simulator `id`, while it is on screen.
+    func simulatorSpot(_ id: String) -> MediaSpot? {
+        guard onScreen else { return nil }
+        return simulatorCell(id)?.spot
     }
 
     /// Live simulator blocks at least half on screen.
@@ -1285,17 +1297,30 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if pinToBottom { scrollToBottom(animated: true) }
     }
 
+    /// A screenshot, picture or clip, flown up from where it shows.
     private func showImage(_ shot: Shot) {
-        guard presentedViewController == nil else { return }
+        guard let window = view.window, let found = mediaView(shot) else { return }
+        let origin = MediaOrigin { [weak self] in self?.mediaView(shot)?.spot }
         if shot.video {
-            Task { [weak self] in
-                guard let self, let url = await model.conversationMedia.loadVideo(shot.step) else { return }
-                present(VideoPlayerViewController(url: url), animated: true)
-            }
+            MediaViewer.open(.video(poster: found.picture, size: MediaFiles.sizes[shot.step], player: found.player, url: { [weak self] in
+                await self?.model.conversationMedia.loadVideo(shot.step)
+            }), from: origin, in: window)
             return
         }
-        guard let data = StepImages.data(for: shot.step, index: shot.index), let image = UIImage(data: data) else { return }
-        present(ImageViewController(image: image, title: shot.title), animated: true)
+        guard let picture = found.picture else { return }
+        MediaViewer.open(.image(picture, full: { pixels in
+            guard let data = StepImages.data(for: shot.step, index: shot.index) else { return nil }
+            return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
+        }), from: origin, in: window)
+    }
+
+    /// The gallery frame or figure tile showing `shot`, if one is on screen.
+    private func mediaView(_ shot: Shot) -> (spot: MediaSpot, picture: UIImage?, player: AVPlayer?)? {
+        for cell in table.visibleCells {
+            if let view = (cell as? GalleryCell)?.view(for: shot) { return (view.spot, view.picture, view.inlinePlayer) }
+            if let tile = (cell as? FigureCell)?.tile(for: shot) { return (tile.spot, tile.picture, tile.inlinePlayer) }
+        }
+        return nil
     }
 
     // MARK: Composer and requests
@@ -1421,6 +1446,33 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             ["id": "media", "header": "Media", "question": "What should appear inline?", "multiSelect": true, "options": [
                 ["label": "Screenshots"], ["label": "Recordings"], ["label": "Diffs"]]]]])
         renderRequest()
+    }
+    /// Verification only: `SQUIRCLE_MEDIA=N` scrolls to the Nth newest row
+    /// of pictures or clips (`SQUIRCLE_MEDIA_KIND=figure|gallery` for one kind).
+    func debugScrollToMedia(_ n: Int, kind: String?) {
+        let rows = dataSource.snapshot().itemIdentifiers.filter { id in
+            switch itemsByID[id] {
+            case .gallery: kind != "figure" && kind != "simulator"
+            case .figure: kind != "gallery" && kind != "simulator"
+            case .simulator(let use): kind == "simulator" && !use.live
+            default: false
+            }
+        }
+        guard rows.count >= n, let path = dataSource.indexPath(for: rows[rows.count - n]) else { return }
+        table.scrollToRow(at: path, at: .middle, animated: false)
+        // `SQUIRCLE_MEDIA_OPEN=SECONDS`: then opens its first picture, as a tap does.
+        guard let delay = ProcessInfo.processInfo.environment["SQUIRCLE_MEDIA_OPEN"].flatMap(Double.init),
+              let item = itemsByID[rows[rows.count - n]] else { return }
+        pinToBottom = false
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            switch item {
+            case .gallery(_, let shots), .figure(_, let shots): if let shot = shots.first { self?.showImage(shot) }
+            case .simulator(let use): self?.openSimulator(use)
+            default: return
+            }
+            await MediaViewer.debugDrags(in: self?.view.window)
+        }
     }
     /// Verification only: types and sends a real message, as the composer does.
     func debugSend(_ text: String) {

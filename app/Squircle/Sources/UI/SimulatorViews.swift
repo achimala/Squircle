@@ -119,8 +119,20 @@ final class SimulatorFeeds {
     private enum OwnerState { case foreground, background, closed }
     private var owner = OwnerState.foreground
     private var observers: [Task<Void, Never>] = []
-    /// A feed's interactivity changed (input became ready or was lost).
-    var onInteractive: (() -> Void)?
+    /// Told when a feed's interactivity changes (input became ready or was
+    /// lost), for as long as the returned observer lives.
+    func observeInteractive(_ handler: @escaping () -> Void) -> Observer {
+        let observer = Observer()
+        interactiveObservers.append((WeakObserver(observer), handler))
+        return observer
+    }
+    final class Observer {}
+    private struct WeakObserver { weak var observer: Observer?; init(_ observer: Observer) { self.observer = observer } }
+    private var interactiveObservers: [(WeakObserver, () -> Void)] = []
+    private func interactiveChanged() {
+        interactiveObservers.removeAll { $0.0.observer == nil }
+        interactiveObservers.forEach { $0.1() }
+    }
 
     init(model: SquircleModel) {
         self.model = model
@@ -195,7 +207,7 @@ final class SimulatorFeeds {
             if feed.screens.contains(where: { $0.screen == nil }) { self?.release(target) }
         }
         feed.stream.onScreen = { [weak feed] in feed?.orientation = $0["orientation"].string ?? "portrait" }
-        feed.stream.onInteractive = { [weak self] _ in self?.onInteractive?() }
+        feed.stream.onInteractive = { [weak self] _ in self?.interactiveChanged() }
         feeds[target] = feed
         if owner == .foreground { feed.stream.start() }
         return feed
@@ -224,18 +236,20 @@ final class SimulatorFeeds {
 /// now. One sits small in a corner the person drags it to; two or more
 /// collapse there into a deck (the most recently started on top, the rest
 /// peeking behind it, a count badge) that fans out into a labelled row when
-/// tapped. Tapping a picture brings it large and touchable; it shrinks back
-/// with a swipe down or a tap outside. Only pictures that can be seen
-/// decode, and one still waiting for its first.
-/// Everything shown is derived from `uses`, the corner, and four springs.
+/// tapped. Tapping a picture asks for it large (`onExpand`, the media
+/// viewer); while it is lent out its place stays empty. Only pictures that
+/// can be seen decode, and one still waiting for its first.
+/// Everything shown is derived from `uses`, the corner, and three springs.
 @MainActor
 final class SimulatorDock: UIView {
     enum Corner: String { case topLeft, topRight, bottomLeft, bottomRight }
 
-    var onOpenThread: ((String) -> Void)?
+    var onExpand: ((SimulatorUse) -> Void)?
     /// Uses whose own block in the conversation is on screen show there instead.
     var docked = Set<String>() { didSet { if docked != oldValue { animateLayout() } } }
     var bottomInset: CGFloat = 120 { didSet { if bottomInset != oldValue { setNeedsLayout() } } }
+    /// The picture the viewer shows large: its place is kept, empty.
+    var lent = Set<String>() { didSet { if lent != oldValue { layoutDock() } } }
     private(set) var uses: [SimulatorUse] = []
     private var currentThread: String?
     private var titles: [String: String] = [:]
@@ -252,30 +266,17 @@ final class SimulatorDock: UIView {
     private let originY = SpringDriver()
     private var dragging = false
     private var dragStart = CGPoint.zero
-    /// Where the person sent the dock. It alone owns input: the picture it
-    /// expands takes touches from the first frame.
-    enum Route: Equatable {
-        case collapsed, fanned, expanded(String)
-        var expanded: String? { if case .expanded(let id) = self { id } else { nil } }
-    }
+    /// Where the person sent the dock.
+    enum Route: Equatable { case collapsed, fanned }
     private var route = Route.collapsed
     /// 0 = in the deck, 1 = fanned out in a row.
     private let fan = SpringDriver()
-    /// 0 = in the deck or row, 1 = large.
-    private let expansion = SpringDriver()
-    /// The picture drawn large (or growing, or shrinking back). It becomes
-    /// the route's only once the previous one is back in the deck.
-    private var presented: String?
-    private var collapseStart: CGFloat = 0
     #if DEBUG
     private var loggedDock = ""
     #endif
 
     private let backdrop = UIView()
     private let badge = Theme.label("", Theme.font(.caption2, 11, .bold), color: .white)
-    private let home = Theme.glassButton(symbol: "house", identifier: "simulator.home", accessibilityLabel: "Simulator Home")
-    private let open = Theme.glassButton(symbol: "bubble.left.and.text.bubble.right", identifier: "simulator.thread", accessibilityLabel: "Open thread")
-    private let shrink = Theme.glassButton(symbol: "chevron.down", identifier: "simulator.shrink", accessibilityLabel: "Shrink simulator")
 
     init(feeds: SimulatorFeeds) {
         self.feeds = feeds
@@ -283,8 +284,8 @@ final class SimulatorDock: UIView {
         super.init(frame: .zero)
         backdrop.backgroundColor = UIColor.black
         backdrop.alpha = 0
-        backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(backdropTapped)))
-        backdrop.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(collapsePanned(_:))))
+        backdrop.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(gather)))
+        backdrop.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(backdropPanned(_:))))
         addSubview(backdrop)
         badge.backgroundColor = Theme.accent
         badge.textAlignment = .center
@@ -294,28 +295,13 @@ final class SimulatorDock: UIView {
         badge.isUserInteractionEnabled = false
         badge.alpha = 0
         addSubview(badge)
-        for button in [home, open, shrink] { addSubview(button) }
-        home.addAction(UIAction { [weak self] _ in
-            guard let self, let use = uses.first(where: { $0.id == self.route.expanded }), let target = use.target else { return }
-            Theme.selectionHaptic()
-            feeds.home(target)
-        }, for: .touchUpInside)
-        open.addAction(UIAction { [weak self] _ in
-            guard let self, let use = uses.first(where: { $0.id == self.route.expanded }) else { return }
-            Theme.selectionHaptic()
-            collapse()
-            onOpenThread?(use.threadID)
-        }, for: .touchUpInside)
-        shrink.addAction(UIAction { [weak self] _ in self?.collapse() }, for: .touchUpInside)
-        expansion.parameters = SpringDriver.Parameters(response: 0.42, damping: 0.86)
         fan.parameters = SpringDriver.Parameters(response: 0.4, damping: 0.8)
         originX.parameters = SpringDriver.Parameters(response: 0.38, damping: 0.8)
         originY.parameters = originX.parameters
-        for driver in [expansion, fan, originX, originY] {
+        for driver in [fan, originX, originY] {
             driver.onChange = { [weak self] _ in self?.layoutDock() }
             driver.onRest = { [weak self] _ in self?.sync() }
         }
-        feeds.onInteractive = { [weak self] in self?.layoutDock() }
         #if DEBUG
         if ProcessInfo.processInfo.environment["SQUIRCLE_SIM_FAN"] == "1" { Task { [weak self] in await self?.demoFan() } }
         #endif
@@ -323,17 +309,13 @@ final class SimulatorDock: UIView {
 
     #if DEBUG
     /// `SQUIRCLE_SIM_FAN=1`: fans the deck out, opens the oldest picture,
-    /// shrinks it and reopens it mid-shrink, shrinks it, fans again and
-    /// gathers, through the same paths as taps.
+    /// fans again and gathers, through the same paths as taps.
     private func demoFan() async {
         let steps: [(Double, (SimulatorDock) -> Void)] = [
             (8, { dock in dock.deck.first.map { dock.tapped($0.id) } }),
             (3, { dock in dock.deck.last.map { dock.tapped($0.id) } }),
-            (3, { $0.collapse() }),
-            (0.15, { dock in dock.deck.last.map { dock.tapped($0.id) } }),
-            (3, { $0.collapse() }),
-            (2, { dock in dock.deck.first.map { dock.tapped($0.id) } }),
-            (2, { $0.backdropTapped() }),
+            (5, { dock in dock.deck.first.map { dock.tapped($0.id) } }),
+            (2, { $0.gather() }),
         ]
         for (delay, step) in steps {
             try? await Task.sleep(for: .seconds(delay))
@@ -373,74 +355,50 @@ final class SimulatorDock: UIView {
             pip.screen.onPictureSize = { [weak self] in self?.animateLayout() }
             pip.onTap = { [weak self] in self?.tapped(use.id) }
             pip.onPan = { [weak self] gesture in self?.panned(gesture) }
-            pip.onTouch = { [weak self, weak pip] phase, point in
-                // An end always reaches the simulator, even once input moved on.
-                guard let self, let pip, phase == "end" || route.expanded == pip.use.id else { return false }
-                return feeds.touch(phase, at: point, on: pip.screen)
-            }
             insertSubview(pip, belowSubview: badge)
             pips[use.id] = pip
             pip.alpha = 0
             pip.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
         }
         order = ids
-        if let wanted = route.expanded, !ids.contains(wanted) { route = .collapsed }
         sync()
         animateLayout()
     }
 
-    // MARK: State
-
-    /// Brings a simulator large (from its PiP or its block in the conversation).
-    func expand(_ id: String) {
-        if let current = route.expanded, current != id { return }
-        Theme.openHaptic()
-        route = .expanded(id)
-        sync()
+    /// The picture showing `id` while it is in the dock, for the viewer to
+    /// fly from and back to.
+    func spot(_ id: String) -> MediaSpot? {
+        guard deck.contains(where: { $0.id == id }), let pip = pips[id] else { return nil }
+        return MediaSpot(pip, style: pip.screen.layer)
     }
 
-    /// A tap on a picture: the deck fans out; a single picture, one in the
-    /// row, or one still shrinking back comes large.
+    // MARK: State
+
+    /// A tap on a picture: the deck fans out; a single picture or one in
+    /// the row comes large (the row gathers behind it).
     private func tapped(_ id: String) {
-        if deck.count > 1, route == .collapsed, id != presented {
+        guard let use = uses.first(where: { $0.id == id }) else { return }
+        if deck.count > 1, route == .collapsed {
             Theme.openHaptic()
             route = .fanned
             sync()
         } else {
-            expand(id)
+            route = .collapsed
+            sync()
+            onExpand?(use)
         }
     }
 
-    @objc private func collapse() {
-        guard route.expanded != nil else { return }
-        Theme.selectionHaptic()
-        route = .collapsed
-        sync()
-    }
-
-    private func gather() {
+    @objc private func gather() {
         guard route == .fanned else { return }
         Theme.selectionHaptic()
         route = .collapsed
         sync()
     }
 
-    @objc private func backdropTapped() {
-        if route.expanded != nil { collapse() } else { gather() }
-    }
-
-    /// The presented picture changes only while nothing is large; the
-    /// springs head to whatever the route implies.
+    /// The springs head to whatever the route implies.
     private func sync() {
-        if expansion.value <= 0.001, !expansion.isAnimating, presented != route.expanded {
-            presented = route.expanded
-            restack()
-        }
         if deck.count < 2, route == .fanned { route = .collapsed }
-        let target: CGFloat = presented != nil && presented == route.expanded ? 1 : 0
-        if expansion.target != target || (!expansion.isAnimating && expansion.value != target) {
-            expansion.redirect(to: target)
-        }
         let fanTarget: CGFloat = route == .fanned ? 1 : 0
         if fan.target != fanTarget || (!fan.isAnimating && fan.value != fanTarget) {
             fan.redirect(to: fanTarget)
@@ -450,13 +408,13 @@ final class SimulatorDock: UIView {
             originX.set(rest.x)
             originY.set(rest.y)
         }
+        restack()
         layoutDock()
     }
 
-    /// The deck's top picture above the rest, the large one above all.
+    /// The deck's top picture above the rest.
     private func restack() {
         for use in deck.reversed() { if let pip = pips[use.id] { insertSubview(pip, belowSubview: badge) } }
-        if let id = presented, let pip = pips[id] { insertSubview(pip, belowSubview: badge) }
     }
 
     // MARK: Geometry
@@ -468,7 +426,7 @@ final class SimulatorDock: UIView {
 
     /// Only a simulator whose feed has drawn a picture joins the dock: a
     /// session whose video never starts would be an empty black card.
-    private var shown: [SimulatorUse] { uses.filter { $0.id == presented || (!docked.contains($0.id) && pictured($0)) } }
+    private var shown: [SimulatorUse] { uses.filter { !docked.contains($0.id) && pictured($0) } }
     private func pictured(_ use: SimulatorUse) -> Bool { (pips[use.id]?.screen.pictureSize.width ?? 0) > 0 }
     /// Most recently started first: the deck's top picture and the row's corner end.
     private var deck: [SimulatorUse] { shown.reversed() }
@@ -520,15 +478,6 @@ final class SimulatorDock: UIView {
         return CGPoint(x: x, y: y)
     }
 
-    private var bigFrame: CGRect {
-        let top = safeAreaInsets.top + 12
-        let available = CGRect(x: 16, y: top, width: bounds.width - 32, height: bounds.height - top - safeAreaInsets.bottom - 84)
-        let aspect = presented.flatMap { pips[$0]?.screen.aspect } ?? 2.17
-        let height = min(available.height, available.width * aspect)
-        let width = height / aspect
-        return CGRect(x: available.midX - width / 2, y: available.minY, width: width, height: height)
-    }
-
     override func layoutSubviews() {
         super.layoutSubviews()
         backdrop.frame = bounds
@@ -543,24 +492,20 @@ final class SimulatorDock: UIView {
     }
 
     /// Everything one picture is, derived at once from the route and the
-    /// springs: where it is drawn, whether it can be seen, who takes its
-    /// touches and whether it decodes. Only a picture that can be seen holds
-    /// a feed; the route's large picture owns input from the first frame.
+    /// springs: where it is drawn, whether it can be seen, whether it takes
+    /// taps and whether it decodes. Only a picture that can be seen holds a
+    /// feed; one lent to the viewer keeps its place and its feed, unseen.
     private struct FrameProjection {
         var frame: CGRect
         var alpha: CGFloat
         var shade: CGFloat
-        var cornerRadius: CGFloat
         var caption: CGFloat
-        /// Takes taps and drags (as a PiP) or, owning input, raw touches.
         var touchable: Bool
-        var ownsInput: Bool
         var feed: SimulatorTarget?
     }
 
-    private func projection(_ use: SimulatorUse, deck: [SimulatorUse], e: CGFloat, f: CGFloat) -> FrameProjection {
+    private func projection(_ use: SimulatorUse, deck: [SimulatorUse], f: CGFloat) -> FrameProjection {
         let index = deck.firstIndex(of: use)
-        let isPresented = use.id == presented
         var frame: CGRect, alpha: CGFloat, shade: CGFloat = 0
         if let index {
             frame = .lerp(deckFrame(index, top: deck.first), fanFrame(index, of: deck.count, use: use), f)
@@ -570,50 +515,45 @@ final class SimulatorDock: UIView {
             frame = deckFrame(0, top: deck.first)
             alpha = 0
         }
-        if isPresented { frame = .lerp(frame, bigFrame, e) }
-        alpha = isPresented ? 1 : alpha * (1 - e)
-        let caption: CGFloat = isPresented && e > 0.05 ? 0 : deck.count > 1 ? f : (showsCaption(use) ? 1 : 0)
-        let ownsInput = route.expanded == use.id
+        let lent = self.lent.contains(use.id)
+        let caption: CGFloat = deck.count > 1 ? f : (showsCaption(use) ? 1 : 0)
         let reachable = index == 0 || (index != nil && route == .fanned)
         // Behind the deck's top only an edge peeks out: it keeps its last picture.
         let spread = route == .fanned || f > 0.001
         // One not yet pictured streams unseen until its first picture.
-        let decodes = alpha > 0.001 && (isPresented || ownsInput || index == 0 || (index != nil && spread))
+        let decodes = alpha > 0.001 && (lent || index == 0 || (index != nil && spread))
             || (!pictured(use) && !docked.contains(use.id))
-        return FrameProjection(frame: frame, alpha: alpha, shade: shade, cornerRadius: .lerp(12, 30, isPresented ? e : 0),
-                               caption: caption, touchable: ownsInput || (isPresented && e > 0.01) || (reachable && e < 0.01 && route.expanded == nil),
-                               ownsInput: ownsInput, feed: decodes ? use.target : nil)
+        return FrameProjection(frame: frame, alpha: lent ? 0 : alpha, shade: shade, caption: caption,
+                               touchable: reachable && !lent, feed: decodes ? use.target : nil)
     }
 
-    /// Every PiP's frame, feed, the badge, backdrop and controls, from the state alone.
+    /// Every PiP's frame, feed, the badge and backdrop, from the state alone.
     private func layoutDock() {
         guard bounds.width > 0 else { return }
-        let e = expansion.value.clamped(), f = fan.value.clamped()
+        let f = fan.value.clamped()
         let deck = self.deck
         let fanned = route == .fanned
         #if DEBUG
         var decoding = Set<String>()
         defer {
-            let state = "\(route) input \(uses.filter { pips[$0.id]?.interactive == true }.map { $0.id.suffix(2) }) decoding \(uses.filter { decoding.contains($0.id) }.map { $0.id.suffix(2) }) shown \(deck.map { $0.id.suffix(2) })"
+            let state = "\(route) lent \(lent.map { $0.suffix(2) }) decoding \(uses.filter { decoding.contains($0.id) }.map { $0.id.suffix(2) }) shown \(deck.map { $0.id.suffix(2) })"
             if state != loggedDock {
                 loggedDock = state
-                print("Simulator dock: e=\(String(format: "%.2f", e)) " + state)
+                print("Simulator dock: " + state)
             }
         }
         #endif
         for use in uses {
             guard let pip = pips[use.id] else { continue }
-            let p = projection(use, deck: deck, e: e, f: f)
+            let p = projection(use, deck: deck, f: f)
             pip.transform = .identity
             pip.frame = p.frame
             pip.alpha = p.alpha
             pip.shade.alpha = p.shade
-            pip.cornerRadius = p.cornerRadius
             pip.label(titles[use.threadID] ?? "Thread",
                       jelly: use.threadID == agentThread ? .agent(.working) : .worker(use.threadID, .working))
             pip.caption.alpha = p.caption
             pip.isUserInteractionEnabled = p.touchable
-            pip.interactive = p.ownsInput
             feeds.attach(pip.screen, to: p.feed)
             #if DEBUG
             if p.feed != nil { decoding.insert(use.id) }
@@ -627,28 +567,10 @@ final class SimulatorDock: UIView {
         let badgeWidth = max(18, badge.intrinsicContentSize.width + 10)
         badge.frame = CGRect(x: top.maxX - badgeWidth / 2 - 4, y: top.minY - 5,
                              width: badgeWidth, height: 18)
-        badge.alpha = deck.count > 1 ? (1 - f) * (1 - e) : 0
-        backdrop.alpha = max(0.42 * e, 0.2 * f)
-        backdrop.isUserInteractionEnabled = route != .collapsed
-        let big = bigFrame
-        let buttonY = big.maxY + 16
-        let showsOpen = route.expanded.flatMap { id in uses.first { $0.id == id } }.map { $0.threadID != currentThread } ?? false
-        let buttons = [home] + (showsOpen ? [open] : []) + [shrink]
-        let total = CGFloat(buttons.count) * 48 + CGFloat(buttons.count - 1) * 16
-        for (index, button) in [home, open, shrink].enumerated() {
-            let slot = buttons.firstIndex(of: button)
-            button.isHidden = slot == nil
-            let left = bounds.midX - total / 2 + CGFloat(slot ?? index) * 64
-            button.transform = .identity
-            button.frame = CGRect(x: left, y: buttonY, width: 48, height: 48)
-            button.alpha = e
-            button.transform = CGAffineTransform(translationX: 0, y: (1 - e) * 24)
-            button.isUserInteractionEnabled = route.expanded != nil
-        }
-        if let target = uses.first(where: { $0.id == route.expanded })?.target { home.isEnabled = feeds.isInteractive(target) }
-        accessibilityElements = route.expanded != nil
-            ? [route.expanded.flatMap { pips[$0] }, home, showsOpen ? open : nil, shrink].compactMap { $0 }
-            : deck.prefix(fanned ? deck.count : 1).compactMap { pips[$0.id] }
+        badge.alpha = deck.count > 1 && lent.isEmpty ? 1 - f : 0
+        backdrop.alpha = 0.2 * f
+        backdrop.isUserInteractionEnabled = fanned
+        accessibilityElements = deck.prefix(fanned ? deck.count : 1).compactMap { pips[$0.id] }
     }
 
     // MARK: Gestures
@@ -656,7 +578,6 @@ final class SimulatorDock: UIView {
     /// In the deck: the whole deck follows the finger, then springs to the
     /// corner it was thrown toward. Fanned out: a drag gathers the row.
     private func panned(_ gesture: UIPanGestureRecognizer) {
-        guard route.expanded == nil else { return }
         if route == .fanned {
             if gesture.state == .began { gather() }
             return
@@ -689,30 +610,9 @@ final class SimulatorDock: UIView {
         }
     }
 
-    /// Expanded: dragging down outside the picture shrinks it with the finger.
     /// Fanned out: any drag outside gathers the row.
-    @objc private func collapsePanned(_ gesture: UIPanGestureRecognizer) {
-        guard let id = presented ?? route.expanded else {
-            if gesture.state == .began { gather() }
-            return
-        }
-        let span = max(1, bounds.height * 0.5)
-        switch gesture.state {
-        case .began:
-            expansion.stop()
-            collapseStart = expansion.value
-        case .changed:
-            expansion.set((collapseStart - gesture.translation(in: self).y / span).clamped())
-        case .ended, .cancelled, .failed:
-            let velocity = -gesture.velocity(in: self).y / span
-            let closing = expansion.value + velocity * 0.2 < 0.6
-            if closing, route.expanded != nil { Theme.selectionHaptic() }
-            // Either way the route decides; held back open, it is this picture's again.
-            route = closing ? .collapsed : .expanded(id)
-            expansion.animate(to: closing ? 0 : 1, initialVelocity: velocity)
-            layoutDock()
-        default: break
-        }
+    @objc private func backdropPanned(_ gesture: UIPanGestureRecognizer) {
+        if gesture.state == .began { gather() }
     }
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -733,38 +633,25 @@ private final class PiP: UIView {
     private let dot = UIView()
     var onTap: (() -> Void)?
     var onPan: ((UIPanGestureRecognizer) -> Void)?
-    var onTouch: ((_ phase: String, _ point: CGPoint) -> Bool)?
-    /// Owning input: raw touches go to the simulator instead of moving the
-    /// PiP. Losing it mid-touch ends that touch on the simulator.
-    var interactive = false {
-        didSet {
-            guard interactive != oldValue else { return }
-            tap.isEnabled = !interactive; pan.isEnabled = !interactive
-            if !interactive, let last = tracking { _ = onTouch?("end", last); tracking = nil }
-        }
-    }
-    var cornerRadius: CGFloat = 12 {
-        didSet { frameView.layer.cornerRadius = cornerRadius; screen.layer.cornerRadius = cornerRadius; shade.layer.cornerRadius = cornerRadius }
-    }
-    private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
-    private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-    /// Where the touch the simulator is following last was, if any.
-    private var tracking: CGPoint?
+    private static let cornerRadius: CGFloat = 12
 
     init(use: SimulatorUse) {
         self.use = use
         super.init(frame: .zero)
         frameView.layer.cornerCurve = .continuous
+        frameView.layer.cornerRadius = Self.cornerRadius
         frameView.layer.shadowColor = UIColor.black.cgColor
         frameView.layer.shadowOpacity = 0.22
         frameView.layer.shadowRadius = 14
         frameView.layer.shadowOffset = CGSize(width: 0, height: 6)
         frameView.isUserInteractionEnabled = false
         screen.layer.cornerCurve = .continuous
+        screen.layer.cornerRadius = Self.cornerRadius
         screen.clipsToBounds = true
         shade.backgroundColor = .black
         shade.alpha = 0
         shade.layer.cornerCurve = .continuous
+        shade.layer.cornerRadius = Self.cornerRadius
         shade.isUserInteractionEnabled = false
         dot.backgroundColor = .systemRed
         dot.layer.cornerRadius = 3.5
@@ -772,12 +659,11 @@ private final class PiP: UIView {
         caption.textAlignment = .center
         caption.lineBreakMode = .byTruncatingTail
         [frameView, screen, shade, dot, caption].forEach(addSubview)
-        addGestureRecognizer(tap)
-        addGestureRecognizer(pan)
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+        addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(panned(_:))))
         isAccessibilityElement = true
-        accessibilityTraits = [.button, .allowsDirectInteraction]
+        accessibilityTraits = .button
         accessibilityIdentifier = "simulator.pip"
-        isMultipleTouchEnabled = false
     }
 
     @available(*, unavailable)
@@ -787,7 +673,7 @@ private final class PiP: UIView {
         super.layoutSubviews()
         let picture = CGRect(origin: .zero, size: CGSize(width: bounds.width, height: bounds.height))
         frameView.frame = picture
-        frameView.layer.shadowPath = UIBezierPath(roundedRect: picture, cornerRadius: cornerRadius).cgPath
+        frameView.layer.shadowPath = UIBezierPath(roundedRect: picture, cornerRadius: Self.cornerRadius).cgPath
         screen.frame = picture
         shade.frame = picture
         dot.frame = CGRect(x: 8, y: 8, width: 7, height: 7)
@@ -817,17 +703,6 @@ private final class PiP: UIView {
 
     @objc private func tapped() { onTap?() }
     @objc private func panned(_ gesture: UIPanGestureRecognizer) { onPan?(gesture) }
-
-    private func forward(_ touches: Set<UITouch>, _ phase: String) {
-        guard interactive, let touch = touches.first else { return }
-        let point = touch.location(in: screen)
-        if phase == "begin" { tracking = onTouch?(phase, point) == true ? point : nil }
-        else if tracking != nil { _ = onTouch?(phase, point); tracking = phase == "end" ? nil : point }
-    }
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "begin"); super.touchesBegan(touches, with: event) }
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "move"); super.touchesMoved(touches, with: event) }
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "end"); super.touchesEnded(touches, with: event) }
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { forward(touches, "end"); super.touchesCancelled(touches, with: event) }
 }
 
 /// The simulator a turn used: live while the agent uses it, then the
@@ -933,8 +808,15 @@ final class SimulatorCell: TimelineCell {
         if window != nil, showing { recorded.player.play() } else { recorded.player.pause() }
     }
 
+    /// Where the media viewer flies from and back to.
+    var spot: MediaSpot { MediaSpot(button, style: frameView.layer) }
+    /// The recording playing in place, for the viewer to carry on with.
+    var recordingPlayer: AVPlayer? { if case .recorded(let recorded) = playback { recorded.player } else { nil } }
+    var poster: UIImage? { posterView.image }
+
     override func prepareForReuse() {
         super.prepareForReuse()
+        button.alpha = 1
         if case .recorded(let recorded) = playback { recorded.player.pause() }
         feeds?.attach(screen, to: nil)
     }

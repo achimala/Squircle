@@ -305,13 +305,26 @@ is left unknown. `StudioViewController`'s route is `grid / app(id) /
 thread(app, existing(id) | draft(UUID))`, each mount one `Mounted<Key>`.
 
 **Simulator dock (W8).** `SimulatorDock` has one `Route` (`collapsed /
-fanned / expanded(id)`) and a separately presented picture that changes only
-when the expansion is at rest. One `FrameProjection` per picture derives its
-frame, visibility, touchability, input owner and feed: the route's picture
-owns input from the first frame, an occluded deck picture stops decoding at
-full expansion, a tap on a shrinking picture reverses it, and losing input
-mid-touch ends that touch. A use's content is `live / recording /
-unavailable`.
+fanned`) and the set of pictures lent to the media viewer. One
+`FrameProjection` per picture derives its frame, visibility, touchability and
+feed; a lent picture keeps its place and feed, unseen. Tapping a picture asks
+the host to bring it large (`onExpand`). A use's content is `live /
+recording / unavailable`.
+
+**Media viewer.** `MediaViewer` brings every inline picture, clip and live
+simulator large (conversation galleries and figures, recordings, Tasks
+media, the dock). It is a view over the window, not a presented controller.
+The picture's frame is one spring (centre and size with velocity); the route
+(`open / closed`) and the zoom pick its target every frame, and a closed
+viewer's target is its inline spot found again each frame (`MediaOrigin`),
+or off screen in the direction it was thrown when that can't be seen. A
+finger holds the spring (drag, zoomed pan, pinch) and letting go hands it
+back with the finger's velocity. Backdrop, corners, border, controls and who
+takes touches are derived from that frame and the route. Flying home, only
+the picture can be caught; the rest of the screen is the conversation's. A
+live simulator takes touches on its picture from the first frame; it is
+dismissed by dragging from its grabber or anywhere outside the picture, a
+tap outside, or the shrink button.
 
 **Phone files.** Caches directory: `squircle-home.json`,
 `squircle-threads/<thread>.json` (a `T3ThreadState` with `provenance`; files

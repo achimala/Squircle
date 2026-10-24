@@ -2901,3 +2901,31 @@ A picture whose load fails now shows a broken-picture mark in its box instead
 of a box that looks like it is still loading. The download queue (M06)
 already never re-asks a failed load until it leaves sight and returns; the
 tile reads that failure.
+
+## 2026-10-24 one media viewer
+
+User: inline photos, videos and simulators "feel bad"; they should fly up
+and be flicked away, as in Messages. Pictures opened as a sheet, clips in
+`AVPlayerViewController`, and the dock grew a simulator large with its own
+spring. Now one `MediaViewer` does all of them (see
+[architecture](architecture.md)): the picture flies up from its exact inline
+frame (corners, border and crop morph with it) over a black backdrop, follows
+the finger 1:1 shrinking a little as the backdrop fades, and a flick or a
+drag past about 130 pt (projected) throws it back into wherever its inline
+frame is now, keeping the velocity; otherwise it springs back. A tap or drag
+mid-flight takes over. Pictures pinch and double-tap zoom (up to 4×), and
+panning a zoomed picture pans; pinching below about 70% sends it home. Clips
+carry on from the player looping in place (same frame, no restart) with
+play, scrub, time and mute; the audio rules of 2026-10-18 hold. A live
+simulator stays touchable large: dismissal is a drag from the grabber under
+it or anywhere outside it, a tap outside, or the shrink button. A sharper
+decode of a picture is swapped in only while it rests.
+
+Checked in the simulator (iPhone 18 Pro, iOS 27.0, 60 Hz) on the LanguageApp
+agent and its "Letter fold" worker: a 1200-px figure, gallery screenshots, a
+filed recording and a live simulator from the dock. Every flight logged
+`hitches=0` (display-link gaps over 1.5 frames), except one before the
+sharper swap was deferred to rest. Not yet looked at on a phone, and Tasks
+media was compiled but not opened on screen (the test runner could not tap
+inside the Tasks sheet).
+
