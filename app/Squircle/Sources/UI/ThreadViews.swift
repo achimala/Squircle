@@ -5,10 +5,10 @@ import UIKit
 final class Composer: UIView, UITextViewDelegate {
     var onSend: (() -> Void)?
     var onChange: (() -> Void)?
-    /// Pictures pasted or dropped into the field; nil leaves both to text.
-    var onImages: (([UIImage]) -> Void)? {
-        get { input.onImages }
-        set { input.onImages = newValue }
+    /// Pictures and videos pasted or dropped into the field; nil leaves both to text.
+    var onAttachments: (([ImageAttachment]) -> Void)? {
+        get { input.onAttachments }
+        set { input.onAttachments = newValue }
     }
     let input = ComposerInput()
     /// The field is the glass; its buttons have none of their own.
@@ -212,11 +212,11 @@ final class Composer: UIView, UITextViewDelegate {
     }
 }
 
-/// The message field's text view: pasting or dropping pictures attaches them
-/// (text alongside them is still inserted) instead of doing nothing.
+/// The message field's text view: pasting or dropping pictures or videos
+/// attaches them (text alongside them is still inserted) instead of doing nothing.
 @MainActor
 final class ComposerInput: UITextView, UITextDropDelegate {
-    var onImages: (([UIImage]) -> Void)?
+    var onAttachments: (([ImageAttachment]) -> Void)?
 
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
@@ -227,24 +227,25 @@ final class ComposerInput: UITextView, UITextDropDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        // A plain text view offers Paste only for text; a picture alone hides it.
-        if action == #selector(paste(_:)), onImages != nil, UIPasteboard.general.hasImages { return isEditable }
+        // A plain text view offers Paste only for text; a picture or video alone hides it.
+        // (The types alone, so asking doesn't read the pasteboard.)
+        if action == #selector(paste(_:)), onAttachments != nil, AttachmentPicker.holdsMedia(UIPasteboard.general.types) { return isEditable }
         return super.canPerformAction(action, withSender: sender)
     }
 
     override func paste(_ sender: Any?) {
         let board = UIPasteboard.general
-        guard let onImages, board.hasImages else { return super.paste(sender) }
+        guard let onAttachments, AttachmentPicker.holdsMedia(board.types) else { return super.paste(sender) }
         // Item by item, so a picture's own text form (a link to it) isn't pasted too.
         let providers = board.itemProviders
         Task {
-            var images: [UIImage] = [], texts: [String] = []
+            var attachments: [ImageAttachment] = [], texts: [String] = []
             for provider in providers {
-                if let image = await AttachmentPicker.image(from: provider) { images.append(image) }
+                if let attachment = await AttachmentPicker.attachment(from: provider) { attachments.append(attachment) }
                 else if let text = await Self.text(from: provider) { texts.append(text) }
             }
             if !texts.isEmpty { insertText(texts.joined(separator: "\n")) }
-            if !images.isEmpty { onImages(images) }
+            if !attachments.isEmpty { onAttachments(attachments) }
         }
     }
 
@@ -256,18 +257,19 @@ final class ComposerInput: UITextView, UITextDropDelegate {
     }
 
     func textDroppableView(_ textDroppableView: UIView & UITextDroppable, proposalForDrop drop: UITextDropRequest) -> UITextDropProposal {
-        guard onImages != nil, drop.dropSession.canLoadObjects(ofClass: UIImage.self) else { return drop.suggestedProposal }
+        guard onAttachments != nil, drop.dropSession.items.contains(where: { AttachmentPicker.holdsMedia($0.itemProvider.registeredTypeIdentifiers) })
+        else { return drop.suggestedProposal }
         return UITextDropProposal(operation: .copy)
     }
 
     func textDroppableView(_ textDroppableView: UIView & UITextDroppable, willPerformDrop drop: UITextDropRequest) {
-        guard let onImages else { return }
-        let providers = drop.dropSession.items.map(\.itemProvider).filter { $0.canLoadObject(ofClass: UIImage.self) }
+        guard let onAttachments else { return }
+        let providers = drop.dropSession.items.map(\.itemProvider).filter { AttachmentPicker.holdsMedia($0.registeredTypeIdentifiers) }
         guard !providers.isEmpty else { return }
         Task {
-            var images: [UIImage] = []
-            for provider in providers { if let image = await AttachmentPicker.image(from: provider) { images.append(image) } }
-            if !images.isEmpty { onImages(images) }
+            var attachments: [ImageAttachment] = []
+            for provider in providers { if let attachment = await AttachmentPicker.attachment(from: provider) { attachments.append(attachment) } }
+            if !attachments.isEmpty { onAttachments(attachments) }
         }
     }
 }

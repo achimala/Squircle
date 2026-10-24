@@ -77,9 +77,14 @@ pub fn store_file(root: &Path, kind: &str, staged: &Path) -> Result<PathBuf> {
             let read = fs::File::open(staged)?.read(&mut head)?;
             ensure!(
                 size > 12 && read == 12 && &head[4..8] == b"ftyp",
-                "A screen recording must be an MP4 file"
+                "A video must be an MP4 or QuickTime file"
             );
-            "mp4"
+            // A video picked on the phone is often QuickTime; it keeps its kind.
+            if &head[8..12] == b"qt  " {
+                "mov"
+            } else {
+                "mp4"
+            }
         }
         "performance" => {
             ensure!(
@@ -146,8 +151,11 @@ pub fn list(root: &Path) -> Result<Vec<Value>> {
             out.push(json!({"id":name.trim_end_matches(".perf.json"),"kind":"performance","path":path,"created_at":modified,
                 "app":capture.app.name,"bundle_id":capture.app.bundle_id,"duration":round(capture.duration, 1),
                 "hitches":capture.hitches.len()}));
-        } else if name.ends_with(".mp4") {
-            out.push(json!({"id":name.trim_end_matches(".mp4"),"kind":"video","path":path,"created_at":modified}));
+        } else if let Some(id) = name
+            .strip_suffix(".mp4")
+            .or_else(|| name.strip_suffix(".mov"))
+        {
+            out.push(json!({"id":id,"kind":"video","path":path,"created_at":modified}));
         }
     }
     out.sort_by_key(|v| std::cmp::Reverse(v["created_at"].as_u64().unwrap_or(0)));

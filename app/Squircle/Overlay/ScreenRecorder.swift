@@ -3,15 +3,16 @@ import AVFoundation
 import Metal
 import UIKit
 
-/// Records the screen from inside the app: everything on the display but
-/// the overlay (the app, its keyboard, alerts, the status bar), at most 30
-/// times a second, with a dot where each finger is. There is no system prompt.
+/// Records the screen from inside the app: the app's own windows below the
+/// overlay, at most 30 times a second, with a dot where each finger is. There
+/// is no system prompt. The keyboard (another process since iOS 27) and the
+/// status bar are not in it: on the phone the render server draws an app only
+/// its own layers, and a whole-display snapshot came back black there.
 ///
-/// No pixel touches the CPU. Each frame is one render-server pass over the
-/// display without the overlay's context into a BGRA surface, then one Metal
-/// pass that draws the finger dots and writes the 4:2:0 video-range frame
-/// H.264 takes, so the encoder converts nothing. The main thread only names
-/// the overlay's context. (`drawHierarchy` cost 55 ms of main thread a frame
+/// No pixel touches the CPU. Each frame is one render-server pass per window
+/// into a BGRA surface, then one Metal pass that stacks them, draws the finger
+/// dots and writes the 4:2:0 video-range frame H.264 takes, so the encoder
+/// converts nothing. The main thread only names the windows. (`drawHierarchy` cost 55 ms of main thread a frame
 /// in the simulator. Snapshotting window by window, blending with vImage and
 /// handing the encoder BGRA, which it converted with vImage, cost about 9% of
 /// a core there besides encoding; this costs about 1%.)
@@ -60,13 +61,24 @@ final class ScreenRecorder: CaptureProducer {
 
     private func tick() {
         let now = CACurrentMediaTime() - started
-        guard drawing == nil, now - lastTick >= 1.0 / 30 * 0.9, let overlay, let screen,
-              let context = RenderServer.contextID(of: overlay) else { return }
-        lastTick = now
-        let fingers = touches.live.values.map {
-            screen.coordinateSpace.convert($0, to: screen.fixedCoordinateSpace).applying(.init(scaleX: scale, y: scale))
+        guard drawing == nil, now - lastTick >= 1.0 / 30 * 0.9, let overlay, let screen else { return }
+        // Each window's points to the recording's pixels, in the display's orientation.
+        let interface = screen.coordinateSpace, space = screen.fixedCoordinateSpace
+        let origin = interface.convert(CGPoint.zero, to: space)
+        let x = interface.convert(CGPoint(x: 1, y: 0), to: space), y = interface.convert(CGPoint(x: 0, y: 1), to: space)
+        let toPixels = CGAffineTransform(a: x.x - origin.x, b: x.y - origin.y, c: y.x - origin.x, d: y.y - origin.y,
+                                         tx: origin.x, ty: origin.y)
+            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        let layers = HostCapture.windows(below: overlay).prefix(ScreenEncoder.maxLayers).compactMap { window -> ScreenEncoder.Layer? in
+            guard let context = RenderServer.contextID(of: window) else { return nil }
+            let placed = CGAffineTransform(translationX: window.frame.minX, y: window.frame.minY).concatenating(toPixels)
+            return .init(context: context, layer: UInt64(UInt(bitPattern: Unmanaged.passUnretained(window.layer).toOpaque())),
+                         transform: CATransform3DMakeAffineTransform(placed))
         }
-        let frame = ScreenEncoder.Frame(time: now, display: display, overlay: context, touches: fingers)
+        guard !layers.isEmpty else { return }
+        lastTick = now
+        let fingers = touches.live.values.map { interface.convert($0, to: space).applying(.init(scaleX: scale, y: scale)) }
+        let frame = ScreenEncoder.Frame(time: now, display: display, layers: layers, touches: fingers)
         drawing = Task { [weak self, encoder] in
             await encoder.draw(frame)
             self?.drawing = nil
@@ -106,14 +118,23 @@ final class ScreenRecorder: CaptureProducer {
 
 /// Owns the file: draws, encodes and finishes frames away from the main thread.
 private actor ScreenEncoder {
+    /// One window: its render-server context and root layer, and its
+    /// points to the recording's pixels.
+    struct Layer {
+        let context: UInt32
+        let layer: UInt64
+        let transform: CATransform3D
+    }
     struct Frame {
         let time: Double
         let display: NSString
-        /// The overlay's render-server context: everything else on the display is drawn.
-        let overlay: UInt32
+        /// The app's windows below the overlay, bottom first.
+        let layers: [Layer]
         /// Fingers, in the recording's pixels.
         let touches: [CGPoint]
     }
+    /// Windows stacked per frame (the converter's texture slots); an app rarely has more than three.
+    static let maxLayers = 8
     private enum State { case writing, finishing, handedOver, discarded }
 
     private let writer: AVAssetWriter
@@ -121,11 +142,12 @@ private actor ScreenEncoder {
     private let adaptor: AVAssetWriterInputPixelBufferAdaptor
     private let server: RenderServer
     private let converter: FrameConverter
-    /// What the render server draws into; the converter reads it into each frame.
-    private let snapshot: CVPixelBuffer
+    /// What the render server draws each window into (each render clears
+    /// its destination); the converter stacks them into each frame. Made as
+    /// windows appear.
+    private var snapshots: [CVPixelBuffer] = []
+    private let size: CGSize
     private let url: URL
-    /// From the display's points to the recording's pixels.
-    private let display: CATransform3D
     /// The recording's pixels per point.
     private let scale: CGFloat
     private var state = State.writing
@@ -133,11 +155,7 @@ private actor ScreenEncoder {
 
     init?(size: CGSize, scale: CGFloat, upright: CGAffineTransform, server: RenderServer) {
         guard let converter = FrameConverter.shared else { return nil }
-        let surface: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
-                                      kCVPixelBufferMetalCompatibilityKey as String: true]
-        var snapshot: CVPixelBuffer?
-        CVPixelBufferCreate(nil, Int(size.width), Int(size.height), kCVPixelFormatType_32BGRA, surface as CFDictionary, &snapshot)
-        guard let snapshot else { return nil }
+        let surface = Self.surface
         url = FileManager.default.temporaryDirectory.appendingPathComponent("screen-\(UUID().uuidString).mp4")
         guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return nil }
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
@@ -172,16 +190,35 @@ private actor ScreenEncoder {
         self.input = input
         self.server = server
         self.converter = converter
-        self.snapshot = snapshot
-        display = CATransform3DMakeScale(scale, scale, 1)
+        self.size = size
         self.scale = scale
     }
 
+    private static let surface: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+                                                 kCVPixelBufferMetalCompatibilityKey as String: true]
+
+    /// The surface the render server draws window `index` into.
+    private func snapshot(_ index: Int) -> CVPixelBuffer? {
+        while snapshots.count <= index {
+            var made: CVPixelBuffer?
+            CVPixelBufferCreate(nil, Int(size.width), Int(size.height), kCVPixelFormatType_32BGRA, Self.surface as CFDictionary, &made)
+            guard let made else { return nil }
+            snapshots.append(made)
+        }
+        return snapshots[index]
+    }
+
     func draw(_ frame: Frame) async {
-        guard state == .writing, input.isReadyForMoreMediaData, let pool = adaptor.pixelBufferPool,
-              let surface = CVPixelBufferGetIOSurface(snapshot)?.takeUnretainedValue(),
-              server.render(excluding: frame.overlay, display: frame.display, transform: display, into: surface)
-        else { return }
+        guard state == .writing, input.isReadyForMoreMediaData, let pool = adaptor.pixelBufferPool else { return }
+        var drawn: [CVPixelBuffer] = []
+        for layer in frame.layers {
+            guard let snapshot = snapshot(drawn.count), let surface = CVPixelBufferGetIOSurface(snapshot)?.takeUnretainedValue(),
+                  server.render(context: layer.context, layer: layer.layer, transform: layer.transform,
+                                display: frame.display, into: surface)
+            else { continue }
+            drawn.append(snapshot)
+        }
+        guard !drawn.isEmpty else { return }
         var created: CVPixelBuffer?
         CVPixelBufferPoolCreatePixelBuffer(nil, pool, &created)
         guard let buffer = created else { return }
@@ -189,7 +226,7 @@ private actor ScreenEncoder {
         CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, .shouldPropagate)
         CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
         let dots = frame.touches.map { SIMD2(Float($0.x), Float($0.y)) }
-        guard await converter.convert(snapshot, into: buffer, dots: dots, radius: Float(18 * scale), ring: Float(0.75 * scale)),
+        guard await converter.convert(drawn, into: buffer, dots: dots, radius: Float(18 * scale), ring: Float(0.75 * scale)),
               state == .writing, input.isReadyForMoreMediaData
         else { return }
         if adaptor.append(buffer, withPresentationTime: CMTime(seconds: frame.time, preferredTimescale: 600)) { lastFrame = frame.time }
@@ -228,8 +265,9 @@ private actor ScreenEncoder {
     }
 }
 
-/// One GPU pass from the render server's BGRA picture to the encoder's
-/// 4:2:0 video-range frame (BT.709), drawing the finger dots on the way.
+/// One GPU pass from the render server's BGRA windows, stacked bottom first,
+/// to the encoder's 4:2:0 video-range frame (BT.709), drawing the finger
+/// dots on the way.
 private final class FrameConverter: @unchecked Sendable {
     // Immutable after init; Metal's device, queue, pipeline and texture cache are thread-safe.
     private let queue: MTLCommandQueue
@@ -252,15 +290,19 @@ private final class FrameConverter: @unchecked Sendable {
 
     /// Finger dots and their outline ring: centres, radius and half the
     /// ring's width, in the frame's pixels. True once the GPU has written it.
-    func convert(_ source: CVPixelBuffer, into frame: CVPixelBuffer, dots: [SIMD2<Float>], radius: Float, ring: Float) async -> Bool {
+    func convert(_ sources: [CVPixelBuffer], into frame: CVPixelBuffer, dots: [SIMD2<Float>], radius: Float, ring: Float) async -> Bool {
         let width = CVPixelBufferGetWidth(frame), height = CVPixelBufferGetHeight(frame)
-        guard let rgb = texture(source, plane: 0, .bgra8Unorm, width, height),
+        let layers = sources.prefix(ScreenEncoder.maxLayers).compactMap { texture($0, plane: 0, .bgra8Unorm, width, height) }
+        guard !layers.isEmpty, layers.count == min(sources.count, ScreenEncoder.maxLayers),
               let luma = texture(frame, plane: 0, .r8Unorm, width, height),
               let chroma = texture(frame, plane: 1, .rg8Unorm, width / 2, height / 2),
               let commands = queue.makeCommandBuffer(), let encoder = commands.makeComputeCommandEncoder()
         else { return false }
         encoder.setComputePipelineState(pipeline)
-        encoder.setTextures([rgb.texture, luma.texture, chroma.texture], range: 0..<3)
+        encoder.setTextures(layers.map(\.texture), range: 0..<layers.count)
+        encoder.setTextures([luma.texture, chroma.texture], range: ScreenEncoder.maxLayers..<ScreenEncoder.maxLayers + 2)
+        var layerCount = UInt32(layers.count)
+        encoder.setBytes(&layerCount, length: MemoryLayout<UInt32>.size, index: 3)
         var count = UInt32(dots.count), shape = SIMD2(radius, ring)
         let points = dots.isEmpty ? [SIMD2<Float>.zero] : dots
         encoder.setBytes(points, length: MemoryLayout<SIMD2<Float>>.stride * points.count, index: 0)
@@ -273,8 +315,8 @@ private final class FrameConverter: @unchecked Sendable {
         encoder.endEncoding()
         // The CVMetalTextures must outlive the GPU's use of them.
         return await withCheckedContinuation { done in
-            commands.addCompletedHandler { [rgb, luma, chroma] finished in
-                withExtendedLifetime((rgb, luma, chroma)) { done.resume(returning: finished.status == .completed) }
+            commands.addCompletedHandler { [layers, luma, chroma] finished in
+                withExtendedLifetime((layers, luma, chroma)) { done.resume(returning: finished.status == .completed) }
             }
             commands.commit()
         }
@@ -298,18 +340,24 @@ private final class FrameConverter: @unchecked Sendable {
 
     constant float3 kLuma = float3(0.2126, 0.7152, 0.0722);
 
-    kernel void toVideo(texture2d<float, access::read> rgb [[texture(0)]],
-                        texture2d<float, access::write> luma [[texture(1)]],
-                        texture2d<float, access::write> chroma [[texture(2)]],
+    kernel void toVideo(array<texture2d<float, access::read>, 8> layers [[texture(0)]],
+                        texture2d<float, access::write> luma [[texture(8)]],
+                        texture2d<float, access::write> chroma [[texture(9)]],
                         constant float2 *dots [[buffer(0)]],
                         constant uint &count [[buffer(1)]],
                         constant float2 &shape [[buffer(2)]],
+                        constant uint &layerCount [[buffer(3)]],
                         uint2 block [[thread_position_in_grid]]) {
         if (block.x >= chroma.get_width() || block.y >= chroma.get_height()) return;
         float3 sum = 0;
         for (uint i = 0; i < 4; i++) {
             uint2 p = block * 2 + uint2(i & 1, i >> 1);
-            float3 c = rgb.read(p).rgb;
+            // Premultiplied windows, each over the ones below.
+            float3 c = 0;
+            for (uint l = 0; l < layerCount; l++) {
+                float4 top = layers[l].read(p);
+                c = top.rgb + c * (1 - top.a);
+            }
             float2 at = float2(p) + 0.5;
             for (uint d = 0; d < count; d++) {
                 float r = distance(at, dots[d]);
@@ -327,17 +375,18 @@ private final class FrameConverter: @unchecked Sendable {
     """
 }
 
-/// QuartzCore's render-server snapshot, the call under `drawHierarchy`: it
-/// renders committed layers into an IOSurface on the GPU, at any scale, from
-/// any thread. Here it renders the whole display but the overlay in one
-/// pass, so the keyboard (drawn by another process, not one of the app's
-/// windows), alerts and the status bar are in it as shown. Private: this overlay is only in builds
-/// Squircle signs for the user's phone, never in App Store exports.
+/// QuartzCore's render-server snapshot in layer mode, the call under
+/// `drawHierarchy`: it renders one of the app's committed layer trees into an
+/// IOSurface on the GPU, at any scale, from any thread. (The whole display
+/// without the overlay, `kCASnapshotModeExcludeContextList`, worked in the
+/// simulator but drew nothing on the phone, 2026-10-24.) Private: this
+/// overlay is only in builds Squircle signs for the user's phone, never in
+/// App Store exports.
 private struct RenderServer: @unchecked Sendable {
     private typealias Snapshot = @convention(c) (mach_port_t, CFDictionary) -> Bool
     private let snapshot: Snapshot
     // The keys and the mode are compared by identity, so they must be QuartzCore's own.
-    private let mode, excludeContexts, contextList, contextID, displayName, destination, transform: NSString
+    private let mode, modeLayer, contextID, layerID, displayName, destination, transform: NSString
 
     static let shared = RenderServer()
 
@@ -348,22 +397,22 @@ private struct RenderServer: @unchecked Sendable {
             dlsym(images, name)?.assumingMemoryBound(to: NSString?.self).pointee
         }
         guard let symbol = dlsym(images, "CARenderServerSnapshot"),
-              let mode = constant("kCASnapshotMode"), let excludeContexts = constant("kCASnapshotModeExcludeContextList"),
-              let contextList = constant("kCASnapshotContextList"), let contextID = constant("kCASnapshotContextId"),
+              let mode = constant("kCASnapshotMode"), let modeLayer = constant("kCASnapshotModeLayer"),
+              let contextID = constant("kCASnapshotContextId"), let layerID = constant("kCASnapshotLayerId"),
               let displayName = constant("kCASnapshotDisplayName"), let destination = constant("kCASnapshotDestination"),
               let transform = constant("kCASnapshotTransform"),
               UIWindow.instancesRespond(to: Self.contextSelector), UIScreen.instancesRespond(to: Self.displaySelector)
         else { return nil }
         snapshot = unsafeBitCast(symbol, to: Snapshot.self)
-        (self.mode, self.excludeContexts, self.contextList, self.contextID) = (mode, excludeContexts, contextList, contextID)
+        (self.mode, self.modeLayer, self.contextID, self.layerID) = (mode, modeLayer, contextID, layerID)
         (self.displayName, self.destination, self.transform) = (displayName, destination, transform)
     }
 
-    /// Draws the display as it is shown, without one context, into a BGRA
-    /// surface; `matrix` maps the display's points to the surface's pixels.
-    func render(excluding context: UInt32, display: NSString, transform matrix: CATransform3D, into surface: IOSurfaceRef) -> Bool {
+    /// Draws one layer tree as last committed into a BGRA surface, clearing
+    /// it first; `matrix` maps the layer's points to the surface's pixels.
+    func render(context: UInt32, layer: UInt64, transform matrix: CATransform3D, display: NSString, into surface: IOSurfaceRef) -> Bool {
         let options: NSDictionary = [
-            mode: excludeContexts, contextList: [[contextID: NSNumber(value: context)] as NSDictionary],
+            mode: modeLayer, contextID: NSNumber(value: context), layerID: NSNumber(value: layer),
             displayName: display, destination: surface, transform: NSValue(caTransform3D: matrix)
         ]
         // Port 0: the default render server.

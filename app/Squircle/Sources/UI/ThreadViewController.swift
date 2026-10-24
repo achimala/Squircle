@@ -117,9 +117,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private let fade = CAGradientLayer()
     private let table = ConversationTable(frame: .zero, style: .plain)
     private let composer = Composer(placeholder: "Message")
-    private lazy var picker = AttachmentPicker(host: self) { [weak self] image in
-        if let attachment = ImageAttachment(image) { self?.model.attach(attachment) }
-    }
+    private lazy var picker = AttachmentPicker(host: self) { [weak self] attachment in self?.model.attach(attachment) }
     private let notice = Theme.label("", Theme.font(.footnote, 13), color: Theme.failure, lines: 3)
     private let requestCard = RequestCard()
     private var request: UIVisualEffectView { requestCard.view }
@@ -383,8 +381,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         composer.onSend = { [weak self] in self?.send() }
         composer.onChange = { [weak self] in self?.renderSend() }
         composer.attachMenu = attachMenu()
-        composer.onImages = { [weak self] images in
-            for image in images { if let attachment = ImageAttachment(image) { self?.model.attach(attachment) } }
+        composer.onAttachments = { [weak self] attachments in
+            for attachment in attachments { self?.model.attach(attachment) }
         }
         composer.onRemoveAttachment = { [weak self] id in self?.model.removeAttachment(id) }
         jump.alpha = 0
