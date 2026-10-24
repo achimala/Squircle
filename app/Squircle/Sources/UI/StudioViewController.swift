@@ -61,6 +61,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private let stage = DeviceStage()
     private lazy var feeds = SimulatorFeeds(model: model)
     private lazy var dock = SimulatorDock(feeds: feeds)
+    /// The simulator shown large, while it is (or is flying back).
+    private weak var simulatorViewer: MediaViewer?
     /// The grid and its controls.
     private let home = UIView()
     private let grid = UIScrollView()
@@ -154,10 +156,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         view.addSubview(agentHost)
         view.addSubview(threadHost)
         view.addSubview(dock)
-        dock.onOpenThread = { [weak self] id in
-            guard let self else { return }
-            if id == agent?.currentSessionID { closeThread() } else if route.thread?.threadID != id { openThread(id) }
-        }
+        dock.onExpand = { [weak self] use in self?.expandSimulator(use) }
 
         grid.alwaysBounceVertical = true
         grid.showsVerticalScrollIndicator = false
@@ -279,6 +278,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if let scrub = value("SQUIRCLE_APP_SCRUB") { hold(appSpring, at: scrub); return }
             appSpring.set(1)
             guard let scrub = value("SQUIRCLE_SCRUB") else {
+                if let n = environment["SQUIRCLE_MEDIA"].flatMap(Int.init) {
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(3)); self?.agent?.debugScrollToMedia(n, kind: environment["SQUIRCLE_MEDIA_KIND"]) }
+                }
                 if let text = environment["SQUIRCLE_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
                 }
@@ -291,13 +293,16 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 return
             }
             let sessions = model.sessions(for: project)
-            let named = environment["SQUIRCLE_THREAD"].flatMap { title in sessions.first { $0.title == title } }
+            let named = environment["SQUIRCLE_THREAD"].flatMap { title in sessions.first { $0.title == title } ?? sessions.first { $0.title.contains(title) } }
             openThread(environment["SQUIRCLE_DRAFT"] == "1" ? nil : (named ?? sessions.first)?.id)
             if environment["SQUIRCLE_DEMO_QUESTION"] == "1" { thread?.debugShowQuestion() }
             let later: (@escaping @MainActor () -> Void) -> Void = { work in
                 Task { try? await Task.sleep(for: .seconds(2.5)); work() }
             }
             if environment["SQUIRCLE_DEMO_LENS"] == "1" { later { [weak self] in self?.thread?.debugLens() } }
+            if let n = environment["SQUIRCLE_MEDIA"].flatMap(Int.init) {
+                Task { [weak self] in try? await Task.sleep(for: .seconds(4)); self?.thread?.debugScrollToMedia(n, kind: environment["SQUIRCLE_MEDIA_KIND"]) }
+            }
             if environment["SQUIRCLE_DEMO_PULSE"] == "1" { later { [weak self] in self?.thread?.debugPulse() } }
             // `SQUIRCLE_SEND` here sends into the opened thread or draft, with
             // `SQUIRCLE_ATTACH` (an image file) as its picture.
@@ -314,38 +319,29 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 Task { [weak self] in try? await Task.sleep(for: .seconds(5)); self?.closeThread() }
             }
         }
-        // `SQUIRCLE_DEMO_VIDEO=PATH`: that movie full screen, as a recording opens.
+        // `SQUIRCLE_DEMO_VIDEO=PATH`: that movie large, as a recording opens.
         if let path = environment["SQUIRCLE_DEMO_VIDEO"] {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(3))
-                let video = VideoPlayerViewController(url: URL(fileURLWithPath: path))
-                self?.present(video, animated: true)
+                guard let window = self?.view.window else { return }
+                let url = URL(fileURLWithPath: path)
+                let video = MediaViewer.open(.video(poster: nil, size: nil, player: nil, url: { url }), from: MediaOrigin { nil }, in: window)
                 // `SQUIRCLE_DEMO_UNMUTE=1`: unmute, mute, unmute, pause, play and
-                // close, as its controls would, then open it again (still unmuted).
+                // close, as its controls would.
                 guard environment["SQUIRCLE_DEMO_UNMUTE"] == "1" else { return }
                 for step in ["unmute", "mute", "unmute", "pause", "play", "close"] {
                     try? await Task.sleep(for: .seconds(3))
                     NSLog("SQUIRCLE-AUDIO demo %@", step)
-                    switch step {
-                    case "unmute": video.player?.isMuted = false
-                    case "mute": video.player?.isMuted = true
-                    case "pause": video.player?.pause()
-                    case "play": video.player?.play()
-                    default: video.dismiss(animated: true)
-                    }
+                    if step == "close" { video.dismiss() } else { video.debugControl(step) }
                 }
-                try? await Task.sleep(for: .seconds(3))
-                let again = VideoPlayerViewController(url: URL(fileURLWithPath: path))
-                self?.present(again, animated: true)
-                try? await Task.sleep(for: .seconds(4))
-                again.dismiss(animated: true)
             }
         }
         if let wanted = environment["SQUIRCLE_SIM_EXPAND"] {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(9))
                 guard let self, let use = dock.uses.first(where: { wanted == "1" || $0.deviceName == wanted }) else { return }
-                dock.expand(use.id)
+                expandSimulator(use)
+                await MediaViewer.debugDrags(in: view.window)
             }
         }
         // `SQUIRCLE_OPEN_TARGET`: a notification's `squircle` payload as JSON, opened as if tapped.
@@ -580,7 +576,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         if let agent = model.agentThreadID(for: project) { titles[agent] = project.name }
         let front = route.thread != nil ? thread : agent
         dock.agentThread = model.agentThreadID(for: project)
-        dock.update(uses: model.activeSimulators(for: project), currentThread: front?.currentSessionID, titles: titles)
+        let uses = model.activeSimulators(for: project)
+        dock.update(uses: uses, currentThread: front?.currentSessionID, titles: titles)
+        // A simulator shown large goes back once its agent is done with it.
+        if let viewer = simulatorViewer, case .simulator(let use, _, _) = viewer.media, !uses.contains(where: { $0.id == use.id }) {
+            viewer.dismiss()
+        }
     }
 
     private func renderControls() {
@@ -1166,7 +1167,23 @@ extension StudioViewController: ConversationHost {
     var simulatorFeeds: SimulatorFeeds { feeds }
     var expandsSimulators: Bool { true }
     var showsAgentJelly: Bool { true }
-    func expandSimulator(_ use: SimulatorUse) { dock.expand(use.id) }
+    /// Large and touchable, flown up from its block in the conversation
+    /// or its picture in the dock, and back to whichever shows it then.
+    func expandSimulator(_ use: SimulatorUse) {
+        guard use.live, simulatorViewer?.route != .open, let window = view.window else { return }
+        let front = route.thread != nil ? thread : agent
+        let other = use.threadID != front?.currentSessionID
+        let origin = MediaOrigin(locate: { [weak self] in
+            guard let self else { return nil }
+            return (route.thread != nil ? thread : agent)?.simulatorSpot(use.id) ?? dock.spot(use.id)
+        }, conceal: { [weak self] hidden in
+            if hidden { self?.dock.lent.insert(use.id) } else { self?.dock.lent.remove(use.id) }
+        })
+        simulatorViewer = MediaViewer.open(.simulator(use, feeds: feeds, openThread: other ? { [weak self] in
+            guard let self else { return }
+            if use.threadID == agent?.currentSessionID { closeThread() } else if route.thread?.threadID != use.threadID { openThread(use.threadID) }
+        } : nil), from: origin, in: window)
+    }
     func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>) {
         guard conversation === (thread ?? agent) else { return }
         dock.docked = ids

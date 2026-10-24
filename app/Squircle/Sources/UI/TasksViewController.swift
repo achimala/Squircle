@@ -403,10 +403,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         page.onStatus = { [weak self] status in self?.task(id).map { self?.set($0, status) } }
         page.onTop = { [weak self] in self?.task(id).map { self?.set($0, toTop: true) } }
         page.onInstall = { [weak self] in self?.task(id).map { self?.install($0) } }
-        page.onMedia = { [weak self] picture in
-            guard let self, let item = task(id) else { return }
-            openMedia(picture.media, of: picture.task, title: item.ask)
-        }
+        page.onMedia = { [weak self] picture, button in self?.openMedia(picture.media, of: picture.task, from: button) }
         page.loadThumbnail = { [weak self] picture in await self?.thumbnail(picture.media, of: picture.task, height: 220) }
         pages[id] = page
         pager.addSubview(page)
@@ -627,16 +624,19 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         return await Downsample.image(data) { height * 3 / max(1, $0.height) }
     }
 
-    private func openMedia(_ media: AppTask.Media, of task: String, title: String) {
-        guard presentedViewController == nil else { return }
-        Task { [weak self] in
-            guard let self else { return }
-            if media.kind == "video" {
-                guard let url = await model.taskVideo(task: task, media: media.id) else { return }
-                present(VideoPlayerViewController(url: url), animated: true)
-            } else if let data = await model.taskMediaData(task: task, media: media.id), let image = UIImage(data: data) {
-                present(ImageViewController(image: image, title: media.caption.isEmpty ? title : media.caption), animated: true)
-            }
+    /// A task's picture or clip, flown up from its thumbnail.
+    private func openMedia(_ media: AppTask.Media, of task: String, from button: UIButton) {
+        guard let window = view.window, let poster = button.image(for: .normal) else { return }
+        let origin = MediaOrigin { [weak button] in button.map { MediaSpot($0) } }
+        if media.kind == "video" {
+            MediaViewer.open(.video(poster: poster, size: nil, player: nil, url: { [weak self] in
+                await self?.model.taskVideo(task: task, media: media.id)
+            }), from: origin, in: window)
+        } else {
+            MediaViewer.open(.image(poster, full: { [weak self] pixels in
+                guard let data = await self?.model.taskMediaData(task: task, media: media.id) else { return nil }
+                return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
+            }), from: origin, in: window)
         }
     }
 
@@ -1008,7 +1008,7 @@ final class WorkItemPage: UIView {
     var onStatus: ((AppTask.Status) -> Void)?
     var onTop: (() -> Void)?
     var onInstall: (() -> Void)?
-    var onMedia: ((Picture) -> Void)?
+    var onMedia: ((Picture, UIButton) -> Void)?
     var loadThumbnail: ((Picture) async -> UIImage?)?
     let scroll = UIScrollView()
     private let stack = UIStackView()
@@ -1221,7 +1221,7 @@ final class WorkItemPage: UIView {
         }
         let media = picture.media
         button.accessibilityLabel = media.caption.isEmpty ? (media.kind == "video" ? "Clip" : "Picture") : media.caption
-        button.addAction(UIAction { [weak self] _ in self?.onMedia?(picture) }, for: .touchUpInside)
+        button.addAction(UIAction { [weak self, weak button] _ in if let button { self?.onMedia?(picture, button) } }, for: .touchUpInside)
         loads.append(Task { [weak self, weak button] in
             guard let image = await self?.loadThumbnail?(picture), !Task.isCancelled, image.size.height > 0 else { return }
             width.constant = min(max(Self.pictureHeight * image.size.width / image.size.height, 90), 360)

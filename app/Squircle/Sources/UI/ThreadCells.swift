@@ -380,6 +380,8 @@ final class GalleryCell: TimelineCell {
     /// The decoded thumbnail, once `prepare` has made it.
     static func image(for shot: Shot) -> UIImage? { cache.object(forKey: "\(shot.step):\(shot.index)" as NSString) }
 
+    func view(for shot: Shot) -> ShotView? { row.arrangedSubviews.lazy.compactMap { $0 as? ShotView }.first { $0.shot == shot } }
+
     /// Decodes a loaded screenshot off the main thread, at the size it shows.
     static func prepare(_ shot: Shot) async -> UIImage? {
         if let cached = image(for: shot) { return cached }
@@ -508,6 +510,12 @@ final class ShotView: UIControl {
     /// does the picture fade in.
     private var waited = false
 
+    /// Where the media viewer flies from and back to, what it shows there,
+    /// and the clip playing in place.
+    var spot: MediaSpot { MediaSpot(self, style: image.layer) }
+    var picture: UIImage? { image.image }
+    var inlinePlayer: AVPlayer? { player }
+
     func update() {
         startPlaybackIfReady()
         guard let picture = GalleryCell.image(for: shot) else { waited = true; return }
@@ -630,6 +638,8 @@ final class FigureCell: TimelineCell {
     /// The decoded picture, once `prepare` has made it.
     static func image(for shot: Shot) -> UIImage? { cache.object(forKey: shot.step as NSString) }
 
+    func tile(for shot: Shot) -> FigureTile? { tiles.first { $0.shot == shot } }
+
     /// Decoded once off the main thread at the size it shows, not the
     /// file's full resolution.
     static func prepare(_ shot: Shot) async -> UIImage? {
@@ -718,6 +728,12 @@ final class FigureTile: UIControl {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    /// Where the media viewer flies from and back to, what it shows there,
+    /// and the clip playing in place.
+    var spot: MediaSpot { MediaSpot(self) }
+    var picture: UIImage? { image.image }
+    var inlinePlayer: AVPlayer? { player }
 
     func update(failed: Bool = false) {
         broken.isHidden = !failed || image.image != nil || FigureCell.image(for: shot) != nil
