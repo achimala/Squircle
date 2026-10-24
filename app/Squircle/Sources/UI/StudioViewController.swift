@@ -100,6 +100,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private var mountedApp: Mounted<String>?
     /// The conversation over the agent. Changes only at `spring` 0.
     private var mountedThread: Mounted<ThreadDestination>?
+    /// The app's threads closed lately, newest first: off screen and let go
+    /// of the model, so going back to one puts it back as it was instead of
+    /// building its page and every row again.
+    private var parked: [Mounted<ThreadDestination>] = []
     private var selectedID: String? { mountedApp?.key }
     private var agent: ThreadViewController? { mountedApp?.controller }
     private var thread: ThreadViewController? { mountedThread?.controller }
@@ -357,6 +361,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             let seconds = value("SQUIRCLE_STRESS_SECONDS").map(Double.init) ?? 30
             Task { [weak self] in await self?.stress(for: seconds) }
         }
+        if let name = environment["SQUIRCLE_NAV_LOOP"] {
+            Task { [weak self] in await self?.navigationLoop(app: name, rounds: Int(value("SQUIRCLE_NAV_ROUNDS") ?? 4)) }
+        }
         if environment["SQUIRCLE_DEMO"] == "1" {
             Task { [weak self] in
                 while true {
@@ -401,6 +408,53 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         driver.stop()
         dragging = driver
         driver.set(value)
+    }
+
+    /// Verification only (`SQUIRCLE_NAV_LOOP=APP NAME`): opens the app's
+    /// agent from Home, then each of its most recent threads in turn and
+    /// back with a left-edge swipe, `SQUIRCLE_NAV_ROUNDS` times, and logs
+    /// the late frames of every push and swipe (`NAV …` lines).
+    /// `SQUIRCLE_NAV_THREADS=ID,ID,…` names the threads instead.
+    private func navigationLoop(app name: String, rounds: Int) async {
+        while !(model.connected && projects.contains { $0.name == name }) { try? await Task.sleep(for: .milliseconds(200)) }
+        try? await Task.sleep(for: .seconds(3))
+        guard let project = projects.first(where: { $0.name == name }) else { return }
+        var total = (frames: 0, hitches: 0, ms: 0.0)
+        func measured(_ label: String, seconds: Double, _ action: () async -> Void) async {
+            var stamps: [(CFTimeInterval, CFTimeInterval)] = []
+            let link = CADisplayLink(target: DisplayLinkProxy { stamps.append(($0.timestamp, $0.duration)) },
+                                     selector: #selector(DisplayLinkProxy.tick(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            link.add(to: .main, forMode: .common)
+            let end = ContinuousClock.now + .seconds(seconds)
+            await action()
+            try? await Task.sleep(until: end)
+            link.invalidate()
+            let gaps = zip(stamps.dropFirst(), stamps).map { ($0.0 - $1.0, $1.1) }
+            let late = gaps.filter { $0.0 > 1.5 * $0.1 }
+            let ms = late.reduce(0) { $0 + ($1.0 - $1.1) * 1000 }
+            total = (total.frames + stamps.count, total.hitches + late.count, total.ms + ms)
+            NSLog("NAV %@ frames=%d hitches=%d hitch_ms=%.0f worst_ms=%.1f", label, stamps.count, late.count, ms, (gaps.map(\.0).max() ?? 0) * 1000)
+        }
+        func swipeBack() async {
+            beginBack()
+            for step in 1...16 {
+                moveBack(to: 1 - CGFloat(step) / 16 * 0.5)
+                await DisplayFrame.next()
+            }
+            endBack(velocity: 2, closing: true)
+        }
+        for _ in 0..<rounds {
+            await measured("open-app", seconds: 1.2) { openApp(project.id) }
+            let named = ProcessInfo.processInfo.environment["SQUIRCLE_NAV_THREADS"]?.split(separator: ",").map(String.init)
+            let threads = named ?? model.sessions(for: project).filter { $0.id != model.agentThreadID(for: project) }.prefix(3).map(\.id)
+            for id in threads {
+                await measured("push", seconds: 1.0) { openThread(id) }
+                await measured("back", seconds: 1.0) { await swipeBack() }
+            }
+            await measured("back-home", seconds: 1.2) { await swipeBack() }
+        }
+        NSLog("NAV total frames=%d hitches=%d hitch_ms=%.0f", total.frames, total.hitches, total.ms)
     }
 
     /// Verification only: taps and back swipes as fast as a hurried person,
@@ -784,6 +838,18 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         guard let mounted = mountedApp else { return }
         mountedApp = nil
         dismount(mounted.controller)
+        dropParked()
+    }
+
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        dropParked()
+    }
+
+    /// Threads kept for the app left behind, or for memory, go for good.
+    private func dropParked() {
+        parked.forEach { dismount($0.controller) }
+        parked = []
     }
 
     /// Adds a conversation as an opaque page that covers what is beneath it
@@ -806,6 +872,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private func dismount(_ controller: ThreadViewController) {
         controller.tearDown()
+        detach(controller)
+    }
+
+    private func detach(_ controller: ThreadViewController) {
         dock.docked = []
         controller.willMove(toParent: nil)
         controller.view.removeFromSuperview()
@@ -815,6 +885,13 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private func mountThread(_ key: ThreadDestination) {
         guard let project = selectedProject else { return }
         agent?.deactivate()
+        if let index = parked.firstIndex(where: { $0.key == key }) {
+            let kept = parked.remove(at: index)
+            host(kept.controller, in: threadHost)
+            kept.controller.resume()
+            mountedThread = kept
+            return
+        }
         let controller = ThreadViewController(model: model, project: project, sessionID: key.threadID)
         controller.onBack = { [weak self] in self?.closeThread() }
         host(controller, in: threadHost)
@@ -824,7 +901,15 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private func unmountThread() {
         guard let mounted = mountedThread else { return }
         mountedThread = nil
-        dismount(mounted.controller)
+        // A draft has nothing to come back to; a thread is kept a while.
+        if case .existing = mounted.key {
+            mounted.controller.park()
+            detach(mounted.controller)
+            parked.insert(mounted, at: 0)
+            while parked.count > 5 { dismount(parked.removeLast().controller) }
+        } else {
+            dismount(mounted.controller)
+        }
         agent?.reactivate()
     }
 
@@ -1065,28 +1150,29 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
         // Home falls back as the conversation slides over it: every device
         // drifts away from the opened one, shrinks and fades.
-        home.alpha = (1 - a * 1.6).clamped()
-        home.isHidden = a >= 1 && !appSpring.isAnimating && dragging == nil
+        home.update(\.alpha, to: (1 - a * 1.6).clamped())
+        home.update(\.isHidden, to: a >= 1 && !appSpring.isAnimating && dragging == nil)
         let raise = 1 + 0.08 * liftSpring.value
         for (index, project) in shown.enumerated() {
             guard let cell = cells[project.id] else { continue }
             let frame = layout.cellFrame(index).offsetBy(dx: 0, dy: -scroll)
             let recede = layout.recede(frame, from: origin, progress: a)
-            cell.layer.transform = project.id == raised ? CATransform3DScale(recede, raise, raise, 1) : recede
-            cell.alpha = layout.recedeAlpha(progress: a)
+            let transform = project.id == raised ? CATransform3DScale(recede, raise, raise, 1) : recede
+            if !CATransform3DEqualToTransform(cell.layer.transform, transform) { cell.layer.transform = transform }
+            cell.update(\.alpha, to: layout.recedeAlpha(progress: a))
             cell.captionAlpha = project.id == selectedID ? (1 - a * 4).clamped() : 1
         }
-        dock.alpha = a
-        dock.isUserInteractionEnabled = route.app != nil && a > 0.5
+        dock.update(\.alpha, to: a)
+        dock.update(\.isUserInteractionEnabled, to: route.app != nil && a > 0.5)
 
         // Flat pushes. The agent's conversation slides over Home; a thread
         // slides over the agent while the agent drifts a third as far left.
         // The device travels on its own.
-        agentHost.isHidden = a <= 0.001
+        agentHost.update(\.isHidden, to: a <= 0.001)
         agent?.setTransitionProgress(a * (1 - t))
-        agent?.view.transform = CGAffineTransform(translationX: width * (1 - a) - (layout.reducedMotion ? 0 : width * 0.3 * t), y: 0)
+        agent?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - a) - (layout.reducedMotion ? 0 : width * 0.3 * t), y: 0))
         thread?.setTransitionProgress(t)
-        thread?.view.transform = CGAffineTransform(translationX: width * (1 - t), y: 0)
+        thread?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - t), y: 0))
 
         // Touches go to the screen the route names, from the first frame of its
         // transition. A conversation on its way out still covers the one
@@ -1094,12 +1180,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let onGrid = route == .grid
         let onAgent = route.app != nil && route.app == selectedID && route.thread == nil
         let onThread = threadTarget == 1
-        home.isUserInteractionEnabled = onGrid
-        home.accessibilityElementsHidden = !onGrid
-        agent?.view.isUserInteractionEnabled = onAgent
-        agent?.view.accessibilityElementsHidden = !onAgent
-        thread?.view.isUserInteractionEnabled = onThread
-        thread?.view.accessibilityElementsHidden = !onThread
+        home.update(\.isUserInteractionEnabled, to: onGrid)
+        home.update(\.accessibilityElementsHidden, to: !onGrid)
+        agent?.view.update(\.isUserInteractionEnabled, to: onAgent)
+        agent?.view.update(\.accessibilityElementsHidden, to: !onAgent)
+        thread?.view.update(\.isUserInteractionEnabled, to: onThread)
+        thread?.view.update(\.accessibilityElementsHidden, to: !onThread)
         threadHost.swallowsTouches = thread != nil && !onThread
         #if DEBUG
         audit(a: a, t: t)

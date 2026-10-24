@@ -185,3 +185,13 @@ extension ChatSession {
         return title.hasPrefix(prefix) ? String(title.dropFirst(prefix.count)) : title
     }
 }
+
+extension NSObjectProtocol {
+    /// Sets a property only when it differs: UIKit does real work for
+    /// `isHidden`, `alpha` and `transform` even when they don't change
+    /// (it walks the subtree), and transitions set them every frame.
+    @inline(__always)
+    func update<Value: Equatable>(_ property: ReferenceWritableKeyPath<Self, Value>, to value: Value) {
+        if self[keyPath: property] != value { self[keyPath: property] = value }
+    }
+}

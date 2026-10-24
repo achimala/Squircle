@@ -188,16 +188,44 @@ enum ThreadItem: Equatable {
     /// Built turns by turn ID, reused while their inputs are equal.
     private static let turnCache = Mutex<[String: (inputs: TurnInputs, rows: TurnRows)]>([:])
 
-    private static func build(_ inputs: TimelineInputs) -> [ThreadItem] {
-        let (messages, running, expanded, builds, changes, simulators) =
-            (inputs.messages, inputs.running, inputs.expanded, inputs.builds, inputs.changes, inputs.simulators)
-        // Split into turns at each of your messages.
+    /// Builds each turn's rows ahead, off the main actor, as a thread first
+    /// shows them (folded; the last live while running): parsing a long
+    /// thread's Markdown is most of the cost of showing it the first time.
+    static func prepare(_ messages: [ChatMessage], running: Bool) {
+        let turns = self.turns(messages)
+        for (index, turn) in turns.enumerated() {
+            _ = rows(TurnInputs(user: turn.user, rest: turn.rest, live: running && index == turns.count - 1,
+                                expanded: false, simulators: []))
+        }
+    }
+
+    /// The conversation split into turns at each of your messages.
+    private static func turns(_ messages: [ChatMessage]) -> [(user: ChatMessage?, rest: [ChatMessage])] {
         var turns: [(user: ChatMessage?, rest: [ChatMessage])] = []
         for message in messages {
             if message.role == "user" { turns.append((message, [])) }
             else if turns.isEmpty { turns.append((nil, [message])) }
             else { turns[turns.count - 1].rest.append(message) }
         }
+        return turns
+    }
+
+    /// One turn's rows, built again only when its own inputs change.
+    private static func rows(_ key: TurnInputs) -> TurnRows {
+        let id = key.user?.id ?? "start"
+        if let hit = turnCache.withLock({ $0[id] }), hit.inputs == key { return hit.rows }
+        let rows = turnRows(id: id, key)
+        turnCache.withLock { cache in
+            if cache.count > 4000 { cache.removeAll() }
+            cache[id] = (key, rows)
+        }
+        return rows
+    }
+
+    private static func build(_ inputs: TimelineInputs) -> [ThreadItem] {
+        let (messages, running, expanded, builds, changes, simulators) =
+            (inputs.messages, inputs.running, inputs.expanded, inputs.builds, inputs.changes, inputs.simulators)
+        let turns = self.turns(messages)
         // Each simulator use belongs to the last turn that began before it. A
         // turn without your message (the conversation's first) begins with
         // its first message, so nothing from before the conversation shown
@@ -214,18 +242,8 @@ enum ThreadItem: Equatable {
         var made: [TurnRows] = []
         for (index, turn) in turns.enumerated() {
             let id = turn.user?.id ?? "start"
-            let key = TurnInputs(user: turn.user, rest: turn.rest, live: running && index == turns.count - 1,
-                                 expanded: expanded.contains(id), simulators: used[index] ?? [])
-            let rows: TurnRows
-            if let hit = turnCache.withLock({ $0[id] }), hit.inputs == key { rows = hit.rows }
-            else {
-                rows = turnRows(id: id, key)
-                turnCache.withLock { cache in
-                    if cache.count > 4000 { cache.removeAll() }
-                    cache[id] = (key, rows)
-                }
-            }
-            made.append(rows)
+            made.append(rows(TurnInputs(user: turn.user, rest: turn.rest, live: running && index == turns.count - 1,
+                                        expanded: expanded.contains(id), simulators: used[index] ?? [])))
         }
         // A build's card sits where it was last mentioned (Squircle's update,
         // the agent's words or its start) or where it finished, whichever is

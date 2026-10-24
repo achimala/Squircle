@@ -1414,7 +1414,7 @@ final class TaskStrip: UIControl {
         didSet { surface.alpha = isHighlighted ? 0.7 : 1 }
     }
 
-    private var shown: [String] = []
+    private var shown: (texts: [String], crews: [[JellyLook]])?
 
     /// Counts of open tasks; working and needing you are shown by who is on
     /// them (up to three of the crew, overlapping), the rest by a dot.
@@ -1433,9 +1433,10 @@ final class TaskStrip: UIControl {
         ].filter { $0.0 > 0 }
         if items.isEmpty { items = [(count(.queued), "queued", .tertiaryLabel, false, [])] }
         let texts = items.map { "\($0.0) \($0.1)" }
-        let key = texts + items.flatMap { $0.4.map { "\($0)" } }
-        guard key != shown else { return }
-        shown = key
+        // Compared as values: describing looks as text is slow (reflection), and this runs every render.
+        let crews = items.map(\.4)
+        guard shown?.texts != texts || shown?.crews != crews else { return }
+        shown = (texts, crews)
         parts.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for (index, item) in items.enumerated() {
             let lead: UIView
