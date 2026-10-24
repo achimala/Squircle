@@ -26,6 +26,11 @@ pub(crate) async fn run(dir: &Path, args: &[&str], max_output: usize) -> Result<
         .args(["-c", "core.fsmonitor=false", "--no-pager", "-C"])
         .arg(dir)
         .args(args);
+    // Tests never read the user's git configuration (signing, hooks,
+    // templates) or run hooks.
+    if cfg!(test) {
+        command.envs(ISOLATED);
+    }
     let output = crate::process::run_bounded(
         command,
         crate::process::Sink::Capture(max_output),
@@ -42,6 +47,16 @@ pub(crate) async fn run(dir: &Path, args: &[&str], max_output: usize) -> Result<
     );
     Ok(output.stdout)
 }
+
+/// The environment that keeps a git command away from the user's and the
+/// system's configuration and hooks.
+const ISOLATED: [(&str, &str); 5] = [
+    ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ("GIT_CONFIG_NOSYSTEM", "1"),
+    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_KEY_0", "core.hooksPath"),
+    ("GIT_CONFIG_VALUE_0", "/dev/null"),
+];
 
 /// [`run`] with the ordinary bounds, as text.
 pub(crate) async fn text(dir: &Path, args: &[&str]) -> Result<String> {
@@ -80,15 +95,16 @@ mod tests {
         std::fs::create_dir_all(main.join("ios/App.xcodeproj")).unwrap();
         std::fs::write(main.join("ios/App.xcodeproj/project.pbxproj"), "").unwrap();
         let git = |args: &[&str]| {
-            let status = Command::new("/usr/bin/git")
+            let mut command = Command::new("/usr/bin/git");
+            command
                 .arg("-C")
                 .arg(&main)
                 .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                 .args(args)
                 .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .output()
-                .unwrap();
+                .env_remove("GIT_WORK_TREE");
+            command.envs(super::ISOLATED);
+            let status = command.output().unwrap();
             assert!(status.status.success(), "{status:?}");
         };
         git(&["init", "-q"]);
