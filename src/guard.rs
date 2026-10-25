@@ -3,10 +3,8 @@
 //! (`codex exec`, `claude -p`, subagents, workflows). The one exception is
 //! the plugin's history subagent, a cheap read-only lookup of the app's
 //! past: the agent may start it freely, and inside it only reading tools
-//! and read-only commands run. The app agent may also send a subagent to
-//! Anthropic's cloud (`isolation: "remote"`), which never runs on the Mac.
-//! Only the app agent's Claude instance carries this hook; workers are
-//! unaffected.
+//! and read-only commands run. Only the app agent's Claude instance carries
+//! this hook; workers are unaffected.
 
 use serde_json::Value;
 
@@ -30,7 +28,6 @@ pub fn check(event: &Value, cli: &str) -> Option<String> {
         {
             return None;
         }
-        "Agent" | "Task" if input["isolation"] == "remote" => return None,
         "Agent" | "Task" => "Subagents",
         "Workflow" => "Workflows",
         _ => {
@@ -563,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_only_the_history_subagent_or_cloud_tasks_and_only_reading_inside_history() {
+    fn allows_only_the_history_subagent_and_only_reading_inside_it() {
         let call = |tool: &str, input: Value| json!({"hook_event_name": "PreToolUse", "agent_type": "squircle:app-agent", "tool_name": tool, "tool_input": input});
         assert_eq!(
             check(
@@ -585,19 +582,8 @@ mod tests {
             ),
             None
         );
-        assert_eq!(
-            check(
-                &call(
-                    "Agent",
-                    json!({"subagent_type": "general-purpose", "isolation": "remote", "prompt": "x"})
-                ),
-                "sq"
-            ),
-            None
-        );
         for input in [
             json!({"subagent_type": "general-purpose", "prompt": "x"}),
-            json!({"subagent_type": "general-purpose", "isolation": "worktree", "prompt": "x"}),
             json!({"subagent_type": "squircle:history", "model": "opus", "prompt": "x"}),
             json!({"subagent_type": "squircle:history", "isolation": "worktree", "prompt": "x"}),
             json!({"subagent_type": "history", "prompt": "x"}),
@@ -662,7 +648,6 @@ mod tests {
                 "allowed: {command}"
             );
         }
-        assert!(check(&inside("Agent", json!({"isolation": "remote"})), "sq").is_some());
         for tool in [
             "Edit",
             "Write",
