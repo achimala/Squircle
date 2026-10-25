@@ -2,14 +2,16 @@ import AppKit
 import Metal
 import simd
 
-// App icon candidates drawn by the app's own jelly shader (JellyShader.swift),
-// so the icon is the agent you see in the app. Run from app/Squircle:
+// The app icon, drawn by the app's own jelly shader (JellyShader.swift), so
+// the icon is the agent you see in the app. Run from app/Squircle:
 //
 //   swiftc -O Sources/UI/JellyShader.swift Resources/JellyIcon/main.swift -o /tmp/jelly-icon
-//   /tmp/jelly-icon OUTPUT_DIR
+//   /tmp/jelly-icon Resources/Assets.xcassets/AppIcon.appiconset
 //
-// Writes, for each layout, NAME.png (light), NAME-dark.png and NAME-tinted.png
-// (iOS 26 appearances), 1024 px square.
+// writes the icon (layout A, user-chosen 2026-10-25) as AppIcon.png, with
+// AppIcon-dark.png and AppIcon-tinted.png for iOS 26's appearances. Any other
+// OUTPUT_DIR gets every candidate layout as NAME.png, NAME-dark.png and
+// NAME-tinted.png, 1024 px square.
 
 /// Clay (Theme.swift), light and dark.
 enum Clay {
@@ -110,16 +112,44 @@ struct Layout {
     let draw: (Appearance, CGContext) -> Void
 }
 
-/// One jelly, alone and centred, `fraction` of the icon wide.
+/// Where the jelly's visual mass sits, in pixels: each pixel weighted by how
+/// far it is from `page` once drawn on it (body, eyes, highlight, side),
+/// rather than by its bounding box.
+func massCentre(_ jelly: CGImage, on page: SIMD3<Float>) -> SIMD2<Float> {
+    let data = jelly.dataProvider!.data! as Data
+    var total: Float = 0, x: Float = 0, y: Float = 0
+    data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+        let p = raw.bindMemory(to: UInt8.self)
+        for row in 0..<pixels {
+            for column in 0..<pixels {
+                // BGRA, premultiplied: on the page it is rgb + page·(1 − a).
+                let i = (row * pixels + column) * 4
+                let a = Float(p[i + 3]) / 255
+                guard a > 0 else { continue }
+                let rgb = SIMD3(Float(p[i + 2]), Float(p[i + 1]), Float(p[i])) / 255
+                let d = rgb - page * a
+                let w = (d * d).sum().squareRoot()
+                total += w; x += w * Float(column); y += w * Float(row)
+            }
+        }
+    }
+    return SIMD2(x, y) / total
+}
+
+/// One jelly, alone, `fraction` of the icon wide, its visual mass in the
+/// middle (measured on its light look, so every appearance lines up).
 func lone(_ appearance: Appearance, fraction: Float, page: SIMD3<Float>, strength: Float, in context: CGContext,
           dark: Bool = false) {
     let size: Float = 40, width = size / fraction, scale = Float(pixels) / width
     background(appearance, page: page, in: context)
-    // The turned cube's top shows above the body: nudge it down to look centred.
-    let look: Appearance = appearance == .light && dark ? .dark : appearance
-    let u = agent(center: SIMD2(width / 2, width / 2 + size * 0.06), size: size, scale: scale, appearance: look,
-                  gaze: SIMD2(0.3, 0.2), strength: strength)
-    place(render(u), in: context)
+    let shown: Appearance = appearance == .light && dark ? .dark : appearance
+    let measured: Appearance = dark ? .dark : .light
+    func jelly(_ look: Appearance, at centre: SIMD2<Float>) -> JellyUniforms {
+        agent(center: centre, size: size, scale: scale, appearance: look, gaze: SIMD2(0.3, 0.2), strength: strength)
+    }
+    let middle = SIMD2(width / 2, width / 2)
+    let off = massCentre(render(jelly(measured, at: middle)), on: page) / scale - middle
+    place(render(jelly(shown, at: middle - off)), in: context)
 }
 
 let layouts: [Layout] = [
@@ -165,12 +195,26 @@ let layouts: [Layout] = [
     },
 ]
 
+/// PNG data; opaque appearances drop the alpha channel (the store rejects it).
+func png(_ image: CGImage, opaque: Bool) -> Data {
+    var image = image
+    if opaque {
+        let context = CGContext(data: nil, width: pixels, height: pixels, bitsPerComponent: 8, bytesPerRow: pixels * 4,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        context.draw(image, in: CGRect(x: 0, y: 0, width: pixels, height: pixels))
+        image = context.makeImage()!
+    }
+    guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { fatalError("PNG") }
+    return data
+}
+
 let output = URL(fileURLWithPath: CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ".")
+let catalog = output.pathExtension == "appiconset"
 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-for layout in layouts {
+for layout in catalog ? [layouts[0]] : layouts {
     for (appearance, suffix) in [(Appearance.light, ""), (.dark, "-dark"), (.tinted, "-tinted")] {
         let image = canvas { layout.draw(appearance, $0) }
-        guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { fatalError("PNG") }
-        try png.write(to: output.appendingPathComponent("\(layout.name)\(suffix).png"))
+        let name = catalog ? "AppIcon" : layout.name
+        try png(image, opaque: appearance != .dark).write(to: output.appendingPathComponent("\(name)\(suffix).png"))
     }
 }
