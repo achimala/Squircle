@@ -155,9 +155,9 @@ func lone(_ appearance: Appearance, fraction: Float, page: SIMD3<Float>, strengt
 
 let layouts: [Layout] = [
     // A: terracotta jelly on the app's cream paper, a touch right of its
-    // mass centre (user, 2026-10-25: it read slightly left; 2.5% of the width).
+    // mass centre (user, 2026-10-25: it read slightly left).
     Layout(name: "a-cream") { appearance, context in
-        lone(appearance, fraction: 0.6, page: Clay.paper.light, strength: 1.15, in: context, nudge: 0.025)
+        lone(appearance, fraction: 0.6, page: Clay.paper.light, strength: 1.15, in: context, nudge: 0.0125)
     },
     // B: the dark-mode jelly on warm charcoal.
     Layout(name: "b-charcoal") { appearance, context in
