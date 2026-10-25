@@ -137,9 +137,10 @@ func massCentre(_ jelly: CGImage, on page: SIMD3<Float>) -> SIMD2<Float> {
 }
 
 /// One jelly, alone, `fraction` of the icon wide, its visual mass in the
-/// middle (measured on its light look, so every appearance lines up).
+/// middle (measured on its light look, so every appearance lines up), then
+/// `nudge` of the icon's width to the right.
 func lone(_ appearance: Appearance, fraction: Float, page: SIMD3<Float>, strength: Float, in context: CGContext,
-          dark: Bool = false) {
+          dark: Bool = false, nudge: Float = 0) {
     let size: Float = 40, width = size / fraction, scale = Float(pixels) / width
     background(appearance, page: page, in: context)
     let shown: Appearance = appearance == .light && dark ? .dark : appearance
@@ -149,13 +150,14 @@ func lone(_ appearance: Appearance, fraction: Float, page: SIMD3<Float>, strengt
     }
     let middle = SIMD2(width / 2, width / 2)
     let off = massCentre(render(jelly(measured, at: middle)), on: page) / scale - middle
-    place(render(jelly(shown, at: middle - off)), in: context)
+    place(render(jelly(shown, at: middle - off + SIMD2(width * nudge, 0))), in: context)
 }
 
 let layouts: [Layout] = [
-    // A: terracotta jelly on the app's cream paper.
+    // A: terracotta jelly on the app's cream paper, a touch right of its
+    // mass centre (user, 2026-10-25: it read slightly left).
     Layout(name: "a-cream") { appearance, context in
-        lone(appearance, fraction: 0.6, page: Clay.paper.light, strength: 1.15, in: context)
+        lone(appearance, fraction: 0.6, page: Clay.paper.light, strength: 1.15, in: context, nudge: 0.0125)
     },
     // B: the dark-mode jelly on warm charcoal.
     Layout(name: "b-charcoal") { appearance, context in
