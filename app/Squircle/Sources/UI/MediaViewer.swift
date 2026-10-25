@@ -767,6 +767,8 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
     #if DEBUG
     /// Verification only: presses a clip's control ("unmute", "mute", "pause", "play").
     func debugControl(_ step: String) { video?.debugControl(step) }
+    /// Verification only: drags the scrubber from one fraction to another over `duration`.
+    func debugScrub(from: Float, to: Float, duration: Double) async { await video?.debugScrub(from: from, to: to, duration: duration) }
     #endif
 
     #if DEBUG
@@ -906,8 +908,14 @@ private final class VideoControls: UIView {
     private var shared = false
     private var observations: [NSKeyValueObservation] = []
     private var ticker: Task<Void, Never>?
-    /// Scrubbing, and whether it was playing before.
+    /// Scrubbing, and whether it was playing before. It lasts until the finger
+    /// is up and the last seek has landed, so the slider never jumps back.
     private var scrubbing: Bool?
+    private var holding = false
+    /// Chase seeking (QA1820): one exact seek in flight, and the newest
+    /// position the finger asked for while it runs.
+    private var seeking = false
+    private var target: CMTime?
     private var closed = false
     private var presentationSize = CGSize.zero
 
@@ -1013,17 +1021,37 @@ private final class VideoControls: UIView {
             scrubbing = player.timeControlStatus != .paused
             player.pause()
         }
+        holding = true
         let duration = item.duration.seconds
         guard duration.isFinite, duration > 0 else { return }
         let seconds = Double(slider.value) * duration
-        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
         time.text = Elapsed.clock(duration - seconds)
+        target = CMTime(seconds: seconds, preferredTimescale: 600)
+        if !seeking { chase(player) }
+    }
+
+    /// Seeks to the newest target, then again if the finger moved meanwhile.
+    private func chase(_ player: AVPlayer) {
+        guard let next = target else { return settle() }
+        target = nil
+        seeking = true
+        Task { [weak self] in
+            await player.seek(to: next, toleranceBefore: .zero, toleranceAfter: .zero)
+            guard let self else { return }
+            seeking = false
+            if self.player === player { chase(player) }
+        }
     }
 
     private func endScrub() {
-        guard let resume = scrubbing else { return }
+        holding = false
+        if !seeking { settle() }
+    }
+
+    private func settle() {
+        guard !holding, let resume = scrubbing else { return }
         scrubbing = nil
-        if resume { player?.play() }
+        if resume && !closed { player?.play() }
     }
 
     /// Flying home: the audio goes; an inline player goes back to looping muted.
@@ -1048,6 +1076,18 @@ private final class VideoControls: UIView {
         case "unmute", "mute": if player?.isMuted == (step == "unmute") { mute.sendActions(for: .touchUpInside) }
         default: if (player?.timeControlStatus == .paused) == (step == "play") { play.sendActions(for: .touchUpInside) }
         }
+    }
+
+    func debugScrub(from: Float, to: Float, duration: Double) async {
+        let began = CACurrentMediaTime()
+        var progress = 0.0
+        while progress < 1 {
+            await DisplayFrame.next()
+            progress = min(1, (CACurrentMediaTime() - began) / duration)
+            slider.value = from + (to - from) * Float(progress)
+            scrub()
+        }
+        endScrub()
     }
     #endif
 

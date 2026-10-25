@@ -349,6 +349,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 guard let window = self?.view.window else { return }
                 let url = URL(fileURLWithPath: path)
                 let video = MediaViewer.open(.video(poster: nil, size: nil, player: nil, url: { url }), from: MediaOrigin { nil }, in: window)
+                // `SQUIRCLE_DEMO_SCRUB=FROM,TO,SECONDS[;…]`: drags its scrubber
+                // between those fractions, each two seconds after the last.
+                for step in (environment["SQUIRCLE_DEMO_SCRUB"] ?? "").split(separator: ";") {
+                    let n = step.split(separator: ",").compactMap { Double($0) }
+                    guard n.count == 3 else { continue }
+                    try? await Task.sleep(for: .seconds(2))
+                    await video.debugScrub(from: Float(n[0]), to: Float(n[1]), duration: n[2])
+                }
                 // `SQUIRCLE_DEMO_UNMUTE=1`: unmute, mute, unmute, pause, play and
                 // close, as its controls would.
                 guard environment["SQUIRCLE_DEMO_UNMUTE"] == "1" else { return }
