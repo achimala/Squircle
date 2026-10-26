@@ -432,26 +432,17 @@ async fn worker_updates_are_sent_once() {
         Some(event("t2:done"))
     );
 
-    // Question A, answered (working), then question B in the same turn.
+    // A worker's question waits on the user's phone; the agent isn't woken to relay it.
     let asking = row("w1", "p", "full-access", "t3", "running", true);
-    let ask = |id: &str| json!({"runtimeRequests": [{"id": id, "kind": "user_input", "status": "pending"}]});
-    fake.requests.lock().unwrap().insert("w1".into(), ask("A"));
+    fake.requests.lock().unwrap().insert(
+        "w1".into(),
+        json!({"runtimeRequests": [{"id": "A", "kind": "user_input", "status": "pending"}]}),
+    );
     agents
         .consume_shell(&json!({"kind": "thread.updated", "location": "active", "thread": asking}))
         .await;
     agents.flush().await.unwrap();
-    agents.flush().await.unwrap();
-    assert_eq!(fake.sent("message.dispatch").len(), 3);
-    agents.consume_shell(&json!({"kind": "thread.updated", "location": "active", "thread": row("w1", "p", "full-access", "t3", "running", false)})).await;
-    agents.observe_workers().await;
-    fake.requests.lock().unwrap().insert("w1".into(), ask("B"));
-    agents.consume_shell(&json!({"kind": "thread.updated", "location": "active", "thread": row("w1", "p", "full-access", "t3", "running", true)})).await;
-    agents.flush().await.unwrap();
-    assert_eq!(fake.sent("message.dispatch").len(), 4);
-    assert_eq!(
-        agents.registry().workers["w1"].notified,
-        Some(event("t3:needs-you:B"))
-    );
+    assert_eq!(fake.sent("message.dispatch").len(), 2);
 }
 
 #[tokio::test]

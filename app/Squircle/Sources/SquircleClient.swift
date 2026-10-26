@@ -216,6 +216,26 @@ final class SquircleClient {
         return reply?.task?.revision
     }
 
+    /// Everything waiting on you, across apps.
+    func waiting() async throws -> WaitingList {
+        try await get(["v1", "waiting"], revalidate: true)
+    }
+
+    /// Your answer to a question in the tracker; it goes to the thread that asked.
+    func answerQuestion(id: String, text: String) async throws {
+        try await send(request(["v1", "questions", id, "answer"], method: "POST",
+                               body: JSONSerialization.data(withJSONObject: ["text": text])))
+    }
+
+    /// Your answer to a thread's own question (`answers`) or approval
+    /// (`decision`), straight to that thread; its app agent is told.
+    func respond(threadID: String, requestID: String, decision: String?, answers: JSONValue?) async throws {
+        var body: [String: JSONValue] = ["thread_id": .string(threadID), "request_id": .string(requestID)]
+        if let decision { body["decision"] = .string(decision) }
+        if let answers { body["answers"] = answers }
+        try await send(request(["v1", "waiting", "respond"], method: "POST", body: JSONEncoder().encode(JSONValue.object(body))))
+    }
+
     func taskMediaFile(taskID: String, id: String) async throws -> Data {
         try await bytes(request(["v1", "tasks", taskID, "media", id]))
     }

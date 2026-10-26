@@ -43,6 +43,58 @@ lines). A fresh agent's handoff lists every open work item and sub-task,
 History's open ones included, uncapped (after an ask filed under an
 unrelated task was lost across a fresh start).
 
+## Questions and what waits on you (2026-10-26, user decision)
+
+User: "It's real annoying when the main agent or the inner ones ask
+questions and they get buried in an avalanche of responses, or the outer one
+has to proxy the inner questions. Need questions to land consistently in the
+task tracking … Not just plain text. I need to see everything waiting on me."
+
+- **Questions live on tasks.** `squircle task ask ITEM --thread ID --question
+  "..." [--option ...]` adds an open question to a work item or sub-task
+  (`questions` on the record: text, up to 6 options, the asking thread,
+  `open | answered {text, at} | withdrawn {at}`). While one is open the task
+  is held at needs you (linked work can't move it off; an explicit open
+  status is refused; closing the task withdraws it). Answering the last open
+  one moves it to in progress. `task withdraw QUESTION_ID` takes one back.
+- **The answer goes back as a message.** The phone answers with `POST
+  /v1/questions/{id}/answer`; the asking thread gets an `[answer]` note
+  (`squircle-answer`, label "Answered") through the outbox; when a worker
+  asked, its app agent is told too.
+- **Agents use it, not chat.** The plugin prompt and the per-turn note say to
+  ask only with `task ask` and end the turn; the note lists open questions
+  as `?` lines under their task. The app agent's guard refuses Claude's
+  `AskUserQuestion` and points to `task ask`. Workers ask with their own
+  question tool (or `task ask`).
+- **Worker questions without proxying.** A worker's own T3 question or
+  approval no longer wakes its app agent (`due_wakes` skips needs-you). It
+  appears directly in the list below, linked to the task that links the
+  worker, and is answered straight to the worker (`POST /v1/waiting/respond`,
+  T3's `runtime-request.respond`); the app agent then gets an `[answer]` note.
+- **One list.** `GET /v1/waiting` gives, per app with an agent: open tracker
+  questions, threads' own pending questions and approvals (from each
+  needs-you thread's projection), and needs-you tasks neither covers. On the
+  phone a glass "N waiting" capsule sits top centre on Home (hidden at
+  none) and opens the Waiting sheet: per app, rows with the question in
+  full, options as glass buttons and a reply field; approvals with their
+  choices; a needs-you task opens its app (or the linked thread). Answered
+  rows leave at once. On the app's agent, tapping the counts strip opens
+  the sheet (this app first) while anything there waits on you, else Tasks.
+- **Notifications.** A new tracker question, and a worker's question or
+  approval ("“title” asks: …"), go out through `src/push` with
+  `"waiting": true` in the payload, which opens the Waiting sheet. Untested
+  on a phone: no APNs key is configured yet.
+
+Verified 2026-10-26 on a simulator against a second service on loopback with
+a copy of the data directory (wake delivery and simulator upkeep switched off
+by an uncommitted local patch): Home showed "6 waiting" with real Squircle
+and LanguageApp tasks; the sheet listed them; tapping an option and typing a
+reply each answered a real question (task back to in progress, the
+`[answer]` note queued for the agent); a `{"waiting": true}` payload opened
+the sheet. **Not verified:** a live worker T3 request in the list (none was
+pending), the strip tap (the simulator driver timed out on that screen), a
+delivered push.
+
 ## Demands reach the tracker and every worker (2026-10-24)
 
 User: "It needs to be writing the task with my demands and then doing

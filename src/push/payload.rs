@@ -17,6 +17,9 @@ pub struct Target {
     /// The built app's bundle ID, to find its app on the phone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle: Option<String>,
+    /// Something now waits on the user: the phone opens what waits on them.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub waiting: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +55,7 @@ pub fn alert_payload(notes: &[&Note]) -> Value {
         },
         app: first.target.app.clone(),
         bundle: first.target.bundle.clone(),
+        waiting: notes.iter().all(|n| n.target.waiting),
     };
     json!({
         "aps": {"alert": {"title": first.app, "body": body}, "sound": "default",

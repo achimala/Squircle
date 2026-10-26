@@ -17,9 +17,12 @@ enum PushTarget: Equatable {
     case app(App, thread: String?)
     /// A build, and its app when the Mac knows it.
     case build(String, app: App?)
+    /// A new question or request: everything waiting on you.
+    case waiting
 
     init?(userInfo: [AnyHashable: Any]) {
         guard let info = userInfo["squircle"] as? [String: Any] else { return nil }
+        if info["waiting"] as? Bool == true { self = .waiting; return }
         let string = { (key: String) in (info[key] as? String).flatMap { $0.isEmpty ? nil : $0 } }
         let app: App? = string("project").map(App.project) ?? string("bundle").map(App.bundle)
             ?? string("app").map(App.catalog)
@@ -44,6 +47,7 @@ enum PushTarget: Equatable {
         switch self {
         case .app(let app, _): app
         case .build(_, let app): app
+        case .waiting: nil
         }
     }
 

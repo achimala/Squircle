@@ -77,7 +77,27 @@ pub(super) enum TaskCommand {
         )]
         history_before: Option<String>,
     },
-    /// One task (a work item with its sub-tasks) with linked threads, builds, media and history.
+    /// Ask the user a question about a work item or sub-task, instead of asking in chat: it waits on their phone with everything else waiting on them (and notifies them), the task shows needs you, and the answer comes back to you as an [answer] message. End your turn after asking unless other work needs no answer.
+    Ask {
+        /// The work item or sub-task it is about.
+        id: String,
+        #[arg(long, help = "Your thread ID; the answer is sent there")]
+        thread: String,
+        #[arg(long, help = "The question, short and self-contained")]
+        question: String,
+        #[arg(
+            long = "option",
+            value_name = "CHOICE",
+            help = "A choice to offer as a button (repeat, up to 6); the user can always type their own"
+        )]
+        options: Vec<String>,
+    },
+    /// Take back a question (from task ask) that no longer matters.
+    Withdraw {
+        /// The question's ID, from task ask or task show.
+        question: String,
+    },
+    /// One task (a work item with its sub-tasks) with linked threads, builds, media, questions and history.
     Show { id: String },
     /// Mark the user's messages so far as asking for nothing to track (a thanks, a question you answered). Until each of their messages is recorded (task add / sub add --thread) or marked, thread spawn, send and answer refuse.
     Heard {
@@ -181,6 +201,27 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
         )
         .await?,
         TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,
+        TaskCommand::Ask {
+            id,
+            thread,
+            question,
+            options,
+        } => {
+            post(
+                cli,
+                &format!("/v1/tasks/{}/questions", task_id(id)?),
+                json!({"thread": thread, "question": question, "options": options}),
+            )
+            .await?
+        }
+        TaskCommand::Withdraw { question } => {
+            post(
+                cli,
+                &format!("/v1/questions/{}/withdraw", task_id(question)?),
+                json!({}),
+            )
+            .await?
+        }
         TaskCommand::Heard { thread } => {
             post(cli, "/v1/agents/heard", json!({"thread": thread})).await?
         }

@@ -4,7 +4,8 @@
 //! the plugin's history subagent, a cheap read-only lookup of the app's
 //! past: the agent may start it freely, and inside it only reading tools
 //! and read-only commands run. Only the app agent's Claude instance carries
-//! this hook; workers are unaffected.
+//! this hook; workers are unaffected. Its questions to the user go through
+//! the tracker (`task ask`), never Claude's own question tool.
 
 use serde_json::Value;
 
@@ -19,6 +20,13 @@ pub fn check(event: &Value, cli: &str) -> Option<String> {
     // Claude Code marks a subagent's own tool calls with its id and type.
     if event["agent_id"].is_string() && event["agent_type"] == HISTORY_AGENT {
         return history_tool(tool, input, cli);
+    }
+    if tool == "AskUserQuestion" {
+        return Some(format!(
+            "Questions to the user go in the tracker, where they wait on the phone with everything else waiting on the user: \
+             `{cli} task ask ITEM --thread <your thread id> --question \"...\" [--option \"...\"]...`, then end your turn; \
+             the answer arrives as an [answer] message."
+        ));
     }
     let what = match tool {
         "Agent" | "Task"

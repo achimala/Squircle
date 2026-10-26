@@ -20,8 +20,8 @@ use std::{
 };
 
 pub use crate::fsm::tasks::{
-    BuildPhase, BuildSignal, By, Change, Signals, Source, Status, Task, Update, WorkerPhase,
-    WorkerSignal,
+    BuildPhase, BuildSignal, By, Change, Question, QuestionState, Signals, Source, Status, Task,
+    Update, WorkerPhase, WorkerSignal,
 };
 
 /// The book as saved, for reading without the service (`squircle history`).
@@ -209,6 +209,76 @@ impl Tasks {
             }
         };
         self.owner.ask(move |s| s.apply_get(vec![event], &id)).await
+    }
+
+    /// Puts a question to the user on task `id` for `thread`, which gets the
+    /// answer. Holds the task at needs you from `observed`, like an explicit
+    /// status.
+    pub async fn ask(
+        &self,
+        id: &str,
+        text: &str,
+        options: Vec<String>,
+        thread: &str,
+        observed: Option<Signals>,
+    ) -> Result<(Task, Question)> {
+        let question = uuid::Uuid::new_v4().to_string();
+        let event = Event::Ask {
+            id: id.into(),
+            question: question.clone(),
+            text: text.into(),
+            options,
+            thread: thread.into(),
+            observed,
+            now: crate::model::now(),
+        };
+        self.owner
+            .ask(move |s| {
+                s.apply(vec![event])?;
+                s.book
+                    .committed()
+                    .question(&question)
+                    .ok_or_else(|| anyhow!("No question {question}"))
+            })
+            .await
+    }
+
+    /// The user's answer, or with `None` the asker withdrawing it.
+    pub async fn close_question(
+        &self,
+        question: &str,
+        answer: Option<&str>,
+    ) -> Result<(Task, Question)> {
+        let now = crate::model::now();
+        let event = match answer {
+            Some(text) => Event::Answer {
+                question: question.into(),
+                text: text.into(),
+                now,
+            },
+            None => Event::Withdraw {
+                question: question.into(),
+                now,
+            },
+        };
+        let question = question.to_string();
+        self.owner
+            .ask(move |s| {
+                s.apply(vec![event])?;
+                s.book
+                    .committed()
+                    .question(&question)
+                    .ok_or_else(|| anyhow!("No question {question}"))
+            })
+            .await
+    }
+
+    /// The task holding question `id`, and the question.
+    pub fn question(&self, id: &str) -> Result<(Task, Question)> {
+        self.book
+            .get()
+            .question(id)
+            .ok_or_else(|| anyhow!("No question {id}"))
     }
 
     pub async fn attach(&self, id: &str, file: &Path, caption: Option<&str>) -> Result<Media> {
