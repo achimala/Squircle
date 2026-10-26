@@ -1705,6 +1705,11 @@ final class SquircleModel {
         }
     }
     private func sendAnswer(_ item: String, _ send: (SquircleClient) async throws -> Void) async {
+        #if DEBUG
+        // `SQUIRCLE_DRY_ANSWERS=1`: answers leave the list here and reach nobody,
+        // for trying it on a simulator against the real list.
+        if ProcessInfo.processInfo.environment["SQUIRCLE_DRY_ANSWERS"] == "1" { answeredHere.insert(item); return }
+        #endif
         guard let client, !answering.contains(item) else { return }
         answering.insert(item)
         defer { answering.remove(item) }

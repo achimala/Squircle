@@ -6,6 +6,8 @@ struct StageLayout: Equatable {
     var size: CGSize
     var safe: UIEdgeInsets
     var reducedMotion: Bool
+    /// Room for what waits on you above the devices (`HomeWaitingView`).
+    var waiting: CGFloat = 0
 
 
     // MARK: Home grid
@@ -16,7 +18,9 @@ struct StageLayout: Equatable {
     static let cellCaption: CGFloat = 26
 
     var columns: Int { size.width > 600 ? 3 : 2 }
-    var gridTop: CGFloat { safe.top + 62 }
+    /// Just below Home's controls.
+    var homeTop: CGFloat { safe.top + 62 }
+    var gridTop: CGFloat { homeTop + waiting }
     var cellWidth: CGFloat {
         let n = CGFloat(columns)
         return ((size.width - 2 * Self.gridMargin - Self.gridGap * (n - 1)) / n).rounded(.down)

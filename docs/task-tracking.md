@@ -73,26 +73,41 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   T3's `runtime-request.respond`); the app agent then gets an `[answer]` note.
 - **One list.** `GET /v1/waiting` gives, per app with an agent: open tracker
   questions, threads' own pending questions and approvals (from each
-  needs-you thread's projection), and needs-you tasks neither covers. On the
-  phone a glass "N waiting" capsule sits top centre on Home (hidden at
-  none) and opens the Waiting sheet: per app, rows with the question in
-  full, options as glass buttons and a reply field; approvals with their
-  choices; a needs-you task opens its app (or the linked thread). Answered
-  rows leave at once. On the app's agent, tapping the counts strip opens
-  the sheet (this app first) while anything there waits on you, else Tasks.
+  needs-you thread's projection), and needs-you tasks neither covers.
+- **On the phone (2026-10-26, user: "the questions should show inline in
+  the sheet in needs you. And the global needs you stuff across the apps
+  should just be its own piece of UI on the Home Screen"; this replaced a
+  separate Waiting sheet, then a Waiting tab).** In an app's Tasks sheet
+  each open question sits under its work item's row in Needs you (a work
+  item with a question is in Needs you whatever its status): the question
+  in full, options as glass buttons, a reply field; a worker's approval
+  with its choices; a question about a sub-task names it; a needs-you
+  sub-task shows under its item and opens its page; a question no task
+  claims leads the section. The item's page shows its open questions under
+  its note. Answered ones leave at once and the task moves on as the Mac
+  says. Home lists everything waiting across apps above the devices
+  (plain text, "Waiting on you" and a count, then each app's name and its
+  first two items, then "N more in Tasks"): few-choice answers are buttons
+  right there; tapping an item opens its app's Tasks sheet at its task.
+  The counts strip and the checklist button open Tasks as before.
 - **Notifications.** A new tracker question, and a worker's question or
   approval ("“title” asks: …"), go out through `src/push` with
-  `"waiting": true` in the payload, which opens the Waiting sheet. Untested
-  on a phone: no APNs key is configured yet.
+  `"waiting": true`, the project and the thread in the payload; a tap opens
+  that app's Tasks sheet at the task the thread's question is about (Home
+  when the payload names no app). Untested on a phone: no APNs key is
+  configured yet.
 
-Verified 2026-10-26 on a simulator against a second service on loopback with
-a copy of the data directory (wake delivery and simulator upkeep switched off
-by an uncommitted local patch): Home showed "6 waiting" with real Squircle
-and LanguageApp tasks; the sheet listed them; tapping an option and typing a
-reply each answered a real question (task back to in progress, the
-`[answer]` note queued for the agent); a `{"waiting": true}` payload opened
-the sheet. **Not verified:** a live worker T3 request in the list (none was
-pending), the strip tap (the simulator driver timed out on that screen), a
+Verified 2026-10-26 on a simulator against the live service with
+`SQUIRCLE_DRY_ANSWERS=1` (DEBUG: an answer leaves the list on the phone and
+is sent nowhere): Home listed 8 real items (LanguageApp needs-you tasks,
+Squircle's three tracker questions); "3 more in Tasks" and tapping a
+question opened the app's sheet at its task; the questions showed under
+their items in Needs you and on the page; a `{"waiting": true, project,
+thread}` payload opened the sheet at the question; a dry "Not now" on Home
+removed the row (the Mac still listed it). `SQUIRCLE_STRESS=1` 40 s:
+`violations=0`. **Not verified:** a live worker T3 request (none was
+pending), answering inside the sheet (the simulator driver times out over
+the agent's conversation; the same answer path as Home), the strip tap, a
 delivered push.
 
 ## Demands reach the tracker and every worker (2026-10-24)

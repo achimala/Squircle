@@ -17,15 +17,16 @@ enum PushTarget: Equatable {
     case app(App, thread: String?)
     /// A build, and its app when the Mac knows it.
     case build(String, app: App?)
-    /// A new question or request: everything waiting on you.
-    case waiting
+    /// A new question or request: its app's Tasks, at the question
+    /// (Home, with everything waiting, when it names no app).
+    case waiting(App?, thread: String?)
 
     init?(userInfo: [AnyHashable: Any]) {
         guard let info = userInfo["squircle"] as? [String: Any] else { return nil }
-        if info["waiting"] as? Bool == true { self = .waiting; return }
         let string = { (key: String) in (info[key] as? String).flatMap { $0.isEmpty ? nil : $0 } }
         let app: App? = string("project").map(App.project) ?? string("bundle").map(App.bundle)
             ?? string("app").map(App.catalog)
+        if info["waiting"] as? Bool == true { self = .waiting(app, thread: string("thread")); return }
         if let build = string("build") {
             self = .build(build, app: app)
         } else if let app {
@@ -47,7 +48,7 @@ enum PushTarget: Equatable {
         switch self {
         case .app(let app, _): app
         case .build(_, let app): app
-        case .waiting: nil
+        case .waiting(let app, _): app
         }
     }
 
@@ -55,6 +56,12 @@ enum PushTarget: Equatable {
     var project: String? { if case .project(let id) = appRef { id } else { nil } }
     var bundle: String? { if case .bundle(let id) = appRef { id } else { nil } }
     var catalogApp: String? { if case .catalog(let id) = appRef { id } else { nil } }
-    var thread: String? { if case .app(_, let thread) = self { thread } else { nil } }
+    var thread: String? {
+        switch self {
+        case .app(_, let thread), .waiting(_, let thread): thread
+        case .build: nil
+        }
+    }
+    var waiting: Bool { if case .waiting = self { true } else { false } }
     var build: String? { if case .build(let id, _) = self { id } else { nil } }
 }
