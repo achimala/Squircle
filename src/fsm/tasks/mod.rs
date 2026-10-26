@@ -74,6 +74,42 @@ pub struct Source {
     pub message_id: String,
 }
 
+/// A question the agent (or a worker) put to the user on a task, in the
+/// tracker rather than in chat. Asking holds the task at needs you until
+/// every one of its questions is answered or withdrawn.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    pub id: String,
+    pub text: String,
+    /// Choices the phone offers as buttons; the user may still type anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// The thread that asked, which the answer goes to.
+    pub thread_id: String,
+    pub asked_at: u64,
+    pub state: QuestionState,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuestionState {
+    Open,
+    Answered {
+        text: String,
+        at: u64,
+    },
+    /// The asker took it back, or the task was closed.
+    Withdrawn {
+        at: u64,
+    },
+}
+
+impl Question {
+    pub fn open(&self) -> bool {
+        self.state == QuestionState::Open
+    }
+}
+
 /// A task as readers see it: a copy of one saved revision. Changes go
 /// through `Tasks`, which saves them before anyone can read them.
 #[derive(Clone, Debug, Serialize)]
@@ -108,6 +144,8 @@ pub struct Task {
     /// Rises with every saved change, including what linked work was seen doing.
     pub revision: u64,
     pub history: Vec<Change>,
+    /// Questions to the user, oldest first, answered ones kept.
+    pub questions: Vec<Question>,
 }
 
 /// A linked worker's state as T3 shows it. `Missing` is no fact at all (no
@@ -421,6 +459,8 @@ struct Record {
     revision: u64,
     observed: Observation,
     history: Vec<Change>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    questions: Vec<Question>,
 }
 
 /// A record as read from disk, including files from before revisions
@@ -458,6 +498,8 @@ struct StoredRecord {
     archived_at: Option<u64>,
     #[serde(default)]
     seen: String,
+    #[serde(default)]
+    questions: Vec<Question>,
 }
 
 impl From<StoredRecord> for Record {
@@ -489,6 +531,7 @@ impl From<StoredRecord> for Record {
             revision: s.revision,
             observed,
             history: s.history,
+            questions: s.questions,
         }
     }
 }
@@ -516,7 +559,13 @@ impl Record {
             },
             revision: self.revision,
             history: self.history.clone(),
+            questions: self.questions.clone(),
         }
+    }
+
+    /// Whether a question to the user is open on it.
+    fn asking(&self) -> bool {
+        self.questions.iter().any(Question::open)
     }
 
     /// Any change to the task itself: it counts as touched and leaves History.
@@ -526,8 +575,20 @@ impl Record {
         self.revision += 1;
     }
 
+    /// While a question is open the task stays at needs you; closing it
+    /// withdraws its open questions.
     fn set(&mut self, status: Status, by: By, note: Option<&str>, now: u64) {
+        let status = if self.asking() && status.open() {
+            Status::NeedsYou
+        } else {
+            status
+        };
         let note = note.map(str::trim);
+        if !status.open() {
+            for question in self.questions.iter_mut().filter(|q| q.open()) {
+                question.state = QuestionState::Withdrawn { at: now };
+            }
+        }
         if status == self.status && note.is_none_or(|n| n == self.note) {
             return;
         }
@@ -668,6 +729,14 @@ impl Book {
             .filter(|t| t.project_id == project && t.parent.is_none())
             .map(|t| self.publish(t))
             .collect()
+    }
+
+    /// The task holding question `id`, and the question.
+    pub fn question(&self, id: &str) -> Option<(Task, Question)> {
+        self.tasks.values().find_map(|t| {
+            let q = t.questions.iter().find(|q| q.id == id)?;
+            Some((t.publish(), q.clone()))
+        })
     }
 
     /// Every task, sub-tasks as their own entries.
@@ -842,6 +911,25 @@ pub enum Event {
     },
     /// Untouched tasks move into History.
     AgeDue { now: u64 },
+    /// A question to the user on task `id`, from `thread`; it holds the task
+    /// at needs you (from `observed`, like an explicit status) until answered.
+    Ask {
+        id: String,
+        question: String,
+        text: String,
+        options: Vec<String>,
+        thread: String,
+        observed: Option<Signals>,
+        now: u64,
+    },
+    /// The user's answer to an open question.
+    Answer {
+        question: String,
+        text: String,
+        now: u64,
+    },
+    /// The asker takes an open question back.
+    Withdraw { question: String, now: u64 },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -876,6 +964,49 @@ fn link(
     }
     task.touch(now);
     book.bubble(id, false, By::Auto, now);
+    changed(book)
+}
+
+/// Answers or withdraws an open question. Once none is left open, a task
+/// held at needs you by its questions goes on (in progress): the asker has
+/// what it waited for.
+fn close_question(
+    mut book: Book,
+    question: &str,
+    state: QuestionState,
+    by: By,
+    now: u64,
+) -> Reduction<Book, Effect> {
+    let Some(task) = book
+        .tasks
+        .values_mut()
+        .find(|t| t.questions.iter().any(|q| q.id == question))
+    else {
+        return Reduction::same(
+            book,
+            Disposition::Rejected(format!("No question {question}")),
+        );
+    };
+    let entry = task
+        .questions
+        .iter_mut()
+        .find(|q| q.id == question)
+        .expect("found above");
+    if !entry.open() {
+        let reason = match entry.state {
+            QuestionState::Answered { .. } => "That question was already answered",
+            _ => "That question was withdrawn",
+        };
+        return Reduction::same(book, Disposition::Rejected(reason.into()));
+    }
+    entry.state = state;
+    let (id, before) = (task.id.clone(), task.status);
+    task.touch(now);
+    if !task.asking() && task.status == Status::NeedsYou {
+        task.set(Status::InProgress, by, None, now);
+    }
+    let after = task.status;
+    book.bubble(&id, after != before, by, now);
     changed(book)
 }
 
@@ -960,6 +1091,7 @@ impl Machine for M17 {
                         by,
                         note: String::new(),
                     }],
+                    questions: vec![],
                 };
                 let id = task.id.clone();
                 book.tasks.insert(id.clone(), task);
@@ -976,6 +1108,18 @@ impl Machine for M17 {
                 let Some(current) = book.tasks.get(&id) else {
                     return missing(book, &id);
                 };
+                if current.asking()
+                    && update
+                        .status
+                        .is_some_and(|s| s.open() && s != Status::NeedsYou)
+                {
+                    return Reduction::same(
+                        book,
+                        Disposition::Rejected(format!(
+                            "{id} waits on a question to the user; it stays needs you until they answer (or it is withdrawn)"
+                        )),
+                    );
+                }
                 let (project, old_parent, before) = (
                     current.project_id.clone(),
                     current.parent.clone(),
@@ -1120,6 +1264,73 @@ impl Machine for M17 {
                     Reduction::same(book, Disposition::Unchanged)
                 }
             }
+            Event::Ask {
+                id,
+                question,
+                text,
+                options,
+                thread,
+                observed,
+                now,
+            } => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return Reduction::same(
+                        book,
+                        Disposition::Rejected("A question needs its text".into()),
+                    );
+                }
+                let Some(task) = book.tasks.get_mut(&id) else {
+                    return missing(book, &id);
+                };
+                let before = task.status;
+                task.questions.push(Question {
+                    id: question,
+                    text: text.chars().take(1000).collect(),
+                    options: options
+                        .iter()
+                        .map(|o| o.trim().chars().take(120).collect::<String>())
+                        .filter(|o| !o.is_empty())
+                        .take(6)
+                        .collect(),
+                    thread_id: thread,
+                    asked_at: now,
+                    state: QuestionState::Open,
+                });
+                task.touch(now);
+                task.set(Status::NeedsYou, By::Agent, None, now);
+                if let Some(observed) = observed {
+                    task.hold(&observed);
+                }
+                let after = task.status;
+                book.bubble(&id, after != before, By::Agent, now);
+                changed(book)
+            }
+            Event::Answer {
+                question,
+                text,
+                now,
+            } => {
+                let text = text.trim();
+                if text.is_empty() {
+                    return Reduction::same(
+                        book,
+                        Disposition::Rejected("The answer is empty".into()),
+                    );
+                }
+                let state = QuestionState::Answered {
+                    text: text.chars().take(4000).collect(),
+                    at: now,
+                };
+                close_question(book, &question, state, By::User, now)
+            }
+            Event::Withdraw { question, now } => close_question(
+                book,
+                &question,
+                QuestionState::Withdrawn { at: now },
+                By::Agent,
+                now,
+            ),
             Event::AgeDue { now } => {
                 let mut any = false;
                 for task in book.tasks.values_mut().filter(|t| t.ages(now)) {
@@ -1156,6 +1367,13 @@ impl Machine for M17 {
                 found.push(Violation(format!(
                     "task {} status differs from its last change",
                     task.id
+                )));
+            }
+            if task.asking() && task.status != Status::NeedsYou {
+                found.push(Violation(format!(
+                    "task {} has an open question but is {}",
+                    task.id,
+                    task.status.label()
                 )));
             }
             if let Some(parent) = &task.parent {
@@ -1367,5 +1585,59 @@ mod tests {
         // Reopening it by hand undoes the replacement.
         let book = set(book, &id, Status::Queued, By::User, None, 5);
         assert_eq!(book.get(&id).unwrap().replaced_by, None);
+    }
+
+    #[test]
+    fn a_question_holds_needs_you_against_linked_work_until_answered() {
+        let (book, id) = book();
+        let ask = |book: Book, question: &str, now: u64| {
+            step(
+                book,
+                Event::Ask {
+                    id: id.clone(),
+                    question: question.into(),
+                    text: "Top or bottom?".into(),
+                    options: vec!["Top".into(), "Bottom".into()],
+                    thread: "agent".into(),
+                    observed: None,
+                    now,
+                },
+            )
+        };
+        let book = ask(book, "q1", 1);
+        assert_eq!(book.get(&id).unwrap().status, Status::NeedsYou);
+        // The worker starting a new turn doesn't move it off needs you.
+        let (book, _) = observe(book, &id, worker("2", WorkerPhase::Working), 2);
+        assert_eq!(book.get(&id).unwrap().status, Status::NeedsYou);
+        let answer = |book: Book, now: u64| {
+            M17::reduce(
+                book,
+                Event::Answer {
+                    question: "q1".into(),
+                    text: "Bottom".into(),
+                    now,
+                },
+            )
+        };
+        let reduction = answer(book, 3);
+        let book = reduction.state;
+        assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
+        let again = answer(book, 4);
+        assert!(matches!(again.disposition, Disposition::Rejected(_)));
+        // Closing the task withdraws a question still open.
+        let book = set(
+            ask(again.state, "q2", 5),
+            &id,
+            Status::Done,
+            By::User,
+            None,
+            6,
+        );
+        let task = book.get(&id).unwrap();
+        assert_eq!(task.status, Status::Done);
+        assert!(matches!(
+            task.questions[1].state,
+            QuestionState::Withdrawn { .. }
+        ));
     }
 }

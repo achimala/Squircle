@@ -230,6 +230,12 @@ impl State {
                 if event.kind == EventKind::Done && self.sim_waiting.contains(id) {
                     return None;
                 }
+                // A worker's own question or approval waits on the user's
+                // phone with everything else; the user answers it there, and
+                // the app agent hears once they have (no proxying).
+                if event.kind == EventKind::NeedsYou {
+                    return None;
+                }
                 let queued = registry
                     .outbox
                     .iter()

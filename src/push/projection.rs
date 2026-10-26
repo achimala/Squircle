@@ -245,9 +245,17 @@ impl Push {
                 {
                     return;
                 }
+                let waiting = change == Change::Asks;
                 let line = match (&worker, change) {
                     (Some(title), Change::Replied) => format!("“{title}” finished"),
-                    (Some(title), Change::Asks) => format!("“{title}” needs you"),
+                    (Some(title), Change::Asks) => match &threads {
+                        Some(t) => t
+                            .question(&thread)
+                            .await
+                            .map(|q| format!("“{title}” asks: {}", summary_line(&q)))
+                            .unwrap_or_else(|| format!("“{title}” needs you")),
+                        None => format!("“{title}” needs you"),
+                    },
                     (Some(title), Change::Failed) => format!("“{title}” stopped with an error"),
                     (None, Change::Replied) => match &threads {
                         Some(t) => t
@@ -274,6 +282,8 @@ impl Push {
                     target: Target {
                         project: Some(project),
                         thread: Some(thread),
+                        // A question or approval opens what waits on the user.
+                        waiting,
                         ..Target::default()
                     },
                 });

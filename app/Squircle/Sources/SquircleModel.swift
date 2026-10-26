@@ -99,6 +99,13 @@ final class SquircleModel {
     /// The model you chose last, for new drafts.
     private var preferredModel: JSONValue?
     private var taskLists = TaskLists() { didSet { if taskLists != oldValue { changed() } } }
+    /// What waits on you across apps, as the Mac last listed it.
+    private var waitingList = WaitingList() { didSet { if waitingList != oldValue { changed() } } }
+    /// Items you answered here that the Mac still lists; and ones on their way.
+    private var answeredHere: Set<String> = [] { didSet { if answeredHere != oldValue { changed() } } }
+    private(set) var answering: Set<String> = [] { didSet { if answering != oldValue { changed() } } }
+    /// Everything waiting on you, less what you just answered.
+    var waiting: WaitingList { waitingList.without(answeredHere) }
     private var historyLoads: Set<String> = []
     /// Each app's agent thread, by T3 project ID, from the Mac.
     private(set) var agents: [String: String] = [:] { didSet { if agents != oldValue { shellChanged() } } }
@@ -1646,6 +1653,7 @@ final class SquircleModel {
         let generation = catalogGeneration
         async let b = client.builds(); async let m = client.fetchAppMetadata(); async let a = try? client.agents()
         async let sims = try? client.simulatorSessions()
+        async let waitingNow = try? client.waiting()
         async let lists: [(String, AppTasks)] = withTaskGroup(of: (String, AppTasks)?.self) { group in
             for app in apps { group.addTask { (try? await client.tasks(projectID: app)).map { (app, $0) } } }
             var lists: [(String, AppTasks)] = []
@@ -1664,9 +1672,49 @@ final class SquircleModel {
         } catch { failure = error }  // T3 chat remains usable if the build service is temporarily offline.
         if let known = await a { adopt(known) }
         if let active = await sims { adoptSimulators(active) }
+        if let list = await waitingNow { adoptWaiting(list) }
         for (app, list) in await lists { adoptTasks(list, for: app) }
         if let thread, let media = await published { adoptMedia(media, for: thread) }
         return failure
+    }
+
+    // MARK: Waiting on you
+
+    private func adoptWaiting(_ list: WaitingList) {
+        waitingList = list
+        // Once the Mac stops listing what you answered, it is the Mac's again.
+        let listed = Set(list.apps.flatMap { $0.items.map(\.id) })
+        answeredHere.formIntersection(listed)
+    }
+    private func refreshWaiting() async {
+        guard let client, let list = try? await client.waiting() else { return }
+        adoptWaiting(list)
+    }
+    /// Your answer to a question in the tracker. The row leaves at once and
+    /// comes back only if the Mac refuses it.
+    func answer(_ question: WaitingList.Question, text: String) async {
+        let item = WaitingList.Item.question(question).id
+        await sendAnswer(item) { try await $0.answerQuestion(id: question.id, text: text) }
+    }
+    /// Your answer to a thread's own question or approval, straight to it.
+    func respond(_ request: WaitingList.Request, decision: String? = nil, answers: [String: JSONValue]? = nil) async {
+        let item = WaitingList.Item.request(request).id
+        await sendAnswer(item) {
+            try await $0.respond(threadID: request.threadID, requestID: request.pending.id, decision: decision,
+                                 answers: answers.map(JSONValue.object))
+        }
+    }
+    private func sendAnswer(_ item: String, _ send: (SquircleClient) async throws -> Void) async {
+        guard let client, !answering.contains(item) else { return }
+        answering.insert(item)
+        defer { answering.remove(item) }
+        do {
+            try await send(client)
+            answeredHere.insert(item)
+        } catch {
+            self.error = error.localizedDescription
+        }
+        await refreshWaiting()
     }
 
     // MARK: Tasks

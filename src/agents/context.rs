@@ -24,10 +24,13 @@ pub enum Note {
     /// The service's news about this Mac's simulators: a runaway app it
     /// stopped, or the simulator host failing.
     SimHealth,
+    /// The user's answer to a question in the tracker, or to a worker's
+    /// question or approval they answered directly.
+    Answer,
 }
 
 impl Note {
-    pub const ALL: [Note; 8] = [
+    pub const ALL: [Note; 9] = [
         Note::WorkerUpdate,
         Note::BuildUpdate,
         Note::Handoff,
@@ -36,6 +39,7 @@ impl Note {
         Note::SimReady,
         Note::Upkeep,
         Note::SimHealth,
+        Note::Answer,
     ];
 
     pub(super) fn kind(self) -> &'static str {
@@ -48,6 +52,7 @@ impl Note {
             Note::SimReady => "squircle-sim-ready",
             Note::Upkeep => "squircle-upkeep",
             Note::SimHealth => "squircle-sim-health",
+            Note::Answer => "squircle-answer",
         }
     }
 
@@ -60,6 +65,7 @@ impl Note {
             Note::SimReady => "Simulator ready",
             Note::Upkeep => "Tidied up",
             Note::SimHealth => "Simulator trouble",
+            Note::Answer => "Answered",
         }
     }
 
@@ -250,6 +256,20 @@ impl Agents {
                 t.id
             )
         };
+        // Open questions to the user under the task they are about.
+        let asked = |t: &crate::tasks::Task, indent: &str| -> String {
+            t.questions
+                .iter()
+                .filter(|q| q.open())
+                .map(|q| {
+                    format!(
+                        "\n{indent}? asked the user: “{}” ({})",
+                        q.text.replace('\n', " "),
+                        q.id
+                    )
+                })
+                .collect()
+        };
         open.iter()
             .take(if everything { usize::MAX } else { 40 })
             .map(|t| {
@@ -257,9 +277,9 @@ impl Agents {
                     .subtasks
                     .iter()
                     .filter(|s| s.status.open())
-                    .map(|s| format!("\n  · {}", line(s)))
+                    .map(|s| format!("\n  · {}{}", line(s), asked(s, "    ")))
                     .collect();
-                format!("\n- {}{subtasks}", line(t))
+                format!("\n- {}{}{subtasks}", line(t), asked(t, "  "))
             })
             .collect()
     }
@@ -485,7 +505,11 @@ impl Agents {
              (linked workers and builds move them too; an item follows its sub-tasks). A worker's brief (`thread spawn --task`, `thread send`) ends with the user's current asks for its work item \
              from the tracker, so a correction you don't record never reaches it. When the user corrects or adds to work in progress, mark the asks it \
              replaces (`task update ID --replaced-by NEW`) and send the worker the whole current spec, not just the new piece; after many revisions, \
-             prefer a fresh worker briefed from the clean spec. Never tell the user something works or is done until you or a worker \
+             prefer a fresh worker briefed from the clean spec. \
+             Ask the user anything (a choice, a review, a go-ahead) only with `task ask ITEM --thread {id} --question \"...\" [--option \"...\"]`, \
+             never as a question in your reply: it waits on their phone with everything else waiting on them (`?` lines above), and the answer \
+             arrives as an [answer] message; end your turn after asking unless other work needs no answer. Workers' own questions and approvals \
+             reach the user directly in the same place; you are told when one is answered; never relay or repeat them. Never tell the user something works or is done until you or a worker \
              has looked at it (screenshots or a recording) against every one of its asks; say what is still wrong. Don't promise check-ins at times: \
              you can't keep time, [worker update]s wake you.\n\
              Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
