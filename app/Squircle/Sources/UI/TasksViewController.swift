@@ -3,8 +3,9 @@ import UIKit
 /// The app's tasks beside its agent. The Tasks tab opens on every work item
 /// at a glance, grouped by what each needs (needs you and ready to try on
 /// top); a row opens the item's page, and pages swipe sideways through the
-/// list in the same order. Done work ages into History; the Threads tab is
-/// every thread of the app.
+/// list in the same order. Questions waiting on you sit under their task in
+/// Needs you (and on its page), answered right there. Done work ages into
+/// History; the Threads tab is every thread of the app.
 @MainActor
 final class TasksViewController: UIViewController, UIScrollViewDelegate, UITableViewDelegate, UIGestureRecognizerDelegate {
     /// A thread to open; nil starts a new one.
@@ -67,6 +68,13 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     private var freshness: RefreshLease?
     /// The next History page is on its way.
     private var loadingHistory = false
+    private lazy var answers = WaitingAnswers(model: model)
+    /// What each question row shows, by row ID (`ask.` and the item's ID).
+    private var asks: [String: AskRow] = [:]
+    /// What waits on you for each work item.
+    private var asked: [String: [WaitingList.Item]] = [:]
+    /// A task to show first, once it's listed (a question tapped elsewhere).
+    private var focus: String?
 
     /// Sections top to bottom; done and dropped tasks stay a day before History.
     enum Group: Hashable {
@@ -87,12 +95,17 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         }
     }
     private static let searchRow = "search"
+    private static let askPrefix = "ask."
+    /// `about`: it's about one of the item's sub-tasks, so that is named.
+    struct AskRow: Equatable { let item: WaitingList.Item; let busy: Bool; let last: Bool; var about = false }
     /// What needs a look comes first: you, then something to try.
     private static let statusOrder: [AppTask.Status] = [.needsYou, .readyToTry, .inProgress, .queued]
 
-    init(model: SquircleModel, project: AppProject, threads: Bool = false) {
+    /// `focus`: a task whose row (or work item's row) shows first.
+    init(model: SquircleModel, project: AppProject, threads: Bool = false, focus: String? = nil) {
         self.model = model
         self.project = project
+        self.focus = focus
         super.init(nibName: nil, bundle: nil)
         tabs.selectedSegmentIndex = threads ? 1 : 0
     }
@@ -122,8 +135,20 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         table.register(TaskGroupHeader.self, forHeaderFooterViewReuseIdentifier: "group")
         table.register(TaskCell.self, forCellReuseIdentifier: "task")
         table.register(TaskSearchCell.self, forCellReuseIdentifier: Self.searchRow)
+        table.register(WaitingCell.self, forCellReuseIdentifier: "ask")
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] table, path, id in
             guard let self else { return UITableViewCell() }
+            if id.hasPrefix(Self.askPrefix) {
+                let cell = table.dequeueReusableCell(withIdentifier: "ask", for: path) as! WaitingCell
+                guard let ask = asks[id] else { return cell }
+                cell.setLast(ask.last)
+                // The cell's text column, so it's measured at its real width.
+                cell.item.fitWidth = table.bounds.width - 72
+                answers.configure(cell.item, ask.item, about: ask.about) { [weak self] in
+                    self?.table.performBatchUpdates(nil)
+                }
+                return cell
+            }
             if id == Self.searchRow {
                 let cell = table.dequeueReusableCell(withIdentifier: Self.searchRow, for: path) as! TaskSearchCell
                 cell.field.text = query
@@ -197,7 +222,8 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             table.topAnchor.constraint(equalTo: view.topAnchor),
             table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            // A reply field under a question stays above the keyboard.
+            table.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
             pager.topAnchor.constraint(equalTo: view.topAnchor),
             pager.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pager.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -247,6 +273,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         super.viewDidLayoutSubviews()
         layoutPages()
         applyPush()
+        defer { showFocus() }
         // Every list starts just below the controls and scrolls up under them.
         let top = header.frame.maxY + 4, bottom = view.safeAreaInsets.bottom + 28
         let scrolls = [table, threads.scrollView] + pages.values.map(\.scroll)
@@ -387,6 +414,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
     private func makePage(_ id: String) -> WorkItemPage {
         let page = WorkItemPage()
+        page.answers = answers
         page.scroll.contentInsetAdjustmentBehavior = .never
         let top = header.frame.maxY + 4
         page.scroll.contentInset = UIEdgeInsets(top: top, left: 0, bottom: view.safeAreaInsets.bottom + 28, right: 0)
@@ -433,7 +461,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         let ticked = checking.contains { $0.id == task.id }
         let threads = task.allThreads
         let worker = threads.first { $0.state == "needs-you" } ?? threads.first { $0.state == "working" } ?? threads.first { $0.state == "error" }
-        return TaskRow(ask: task.ask, status: task.status, checked: !task.status.open || ticked, faded: task.archivedAt != nil,
+        return TaskRow(ask: task.ask, status: task.status, joined: asked[task.id] != nil && task.status.open, checked: !task.status.open || ticked, faded: task.archivedAt != nil,
                        note: task.note, steps: task.subtasks.isEmpty ? nil : "\(task.subtasks.filter { !$0.status.open }.count)/\(task.subtasks.count)",
                        worker: worker.flatMap { thread in TaskParts.mood(thread).map { .worker(thread.id, $0) } },
                        install: installable(task).build.map { _ in installing == task.id ? "Opening…" : "Install" })
@@ -447,7 +475,13 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
                      position: index.map { "\($0 + 1) of \(order.count)" } ?? "",
                      subtasks: task.subtasks.map { .init(id: $0.id, ask: $0.ask, note: $0.note, status: $0.status, opens: $0.mainThread != nil) },
                      threads: task.allThreads.filter { $0.state != "missing" },
-                     media: ([task] + task.subtasks).flatMap { owner in owner.media.map { WorkItemPage.Picture(task: owner.id, media: $0) } })
+                     media: ([task] + task.subtasks).flatMap { owner in owner.media.map { WorkItemPage.Picture(task: owner.id, media: $0) } },
+                     // Its sub-tasks that need you are in its checklist already.
+                     asks: (asked[task.id] ?? []).filter { if case .task = $0 { false } else { true } }.map { item in
+                         var about = false
+                         if case .question(let question) = item { about = question.taskID != task.id }
+                         return .init(item: item, busy: model.answering.contains(item.id), last: false, about: about)
+                     })
     }
 
     /// `now` is for the swipe actions themselves, which move their row
@@ -459,6 +493,24 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         list = model.tasks(for: project)
         // The threads open tasks link to, ready before one is tapped.
         model.prefetch(threads: list.tasks.filter { $0.status.open }.flatMap(\.allThreads).map(\.id))
+        // What waits on you here, by the work item it's about. Needs-you
+        // work items are rows already, their sub-tasks show under them; a
+        // question nothing claims leads Needs you.
+        let waiting = model.waiting.apps.first { $0.projectID == project.id }?.items.filter {
+            if case .task(let task) = $0 { !list.tasks.contains { $0.id == task.taskID } } else { true }
+        } ?? []
+        var loose: [WaitingList.Item] = []
+        asked = [:]
+        for item in waiting {
+            let owner: AppTask? = switch item {
+            case .question(let question): list.tasks.first { $0.id == question.taskID || $0.subtasks.contains { $0.id == question.taskID } }
+            case .request(let request): list.tasks.first { task in task.status.open && task.allThreads.contains { $0.id == request.threadID } }
+            case .task(let task): list.tasks.first { $0.subtasks.contains { $0.id == task.taskID } }
+            }
+            if case .task = item, owner == nil { continue }
+            if let owner, owner.status.open { asked[owner.id, default: []].append(item) } else { loose.append(item) }
+        }
+        answers.keep(Set(waiting.map(\.id)))
         let words = query.lowercased().split(separator: " ")
         let found: (AppTask) -> Bool = { task in
             guard !words.isEmpty else { return true }
@@ -473,13 +525,18 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         }
         let groups: [Group] = Self.statusOrder.map { .status($0) } + [.finished]
         for group in groups {
-            let ids = list.tasks.filter { task in
+            var ids = list.tasks.filter { task in
                 guard found(task) else { return false }
+                // Anything with a question for you is in Needs you.
+                if task.status.open, asked[task.id] != nil { return group == .status(.needsYou) }
                 return switch group {
                 case .status(let status): task.status == status
                 default: !task.status.open
                 }
-            }.map(\.id)
+            }.flatMap { task in
+                [task.id] + (asked[task.id] ?? []).map { Self.askPrefix + $0.id }
+            }
+            if group == .status(.needsYou), words.isEmpty { ids = loose.map { Self.askPrefix + $0.id } + ids }
             guard !ids.isEmpty else { continue }
             snapshot.appendSections([group])
             snapshot.appendItems(ids, toSection: group)
@@ -494,9 +551,21 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         // Rows whose look changed are drawn again; the rest keep their place.
         // The model changes every few seconds for unrelated reasons, and
         // applying an unchanged list anyway resets an open swipe.
-        let previous = rows
+        let previous = rows, previousAsks = asks
         rows = Dictionary((list.tasks + list.history).map { ($0.id, row($0)) }, uniquingKeysWith: { first, _ in first })
-        let changed = snapshot.itemIdentifiers.filter { previous[$0] != nil && previous[$0] != rows[$0] }
+        asks = [:]
+        let items = Dictionary(waiting.map { (Self.askPrefix + $0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let shownIDs = snapshot.itemIdentifiers
+        for (index, id) in shownIDs.enumerated() {
+            guard let item = items[id] else { continue }
+            let next = shownIDs.indices.contains(index + 1) ? shownIDs[index + 1] : nil
+            var about = false
+            if case .question(let question) = item { about = !list.tasks.contains { $0.id == question.taskID } }
+            asks[id] = AskRow(item: item, busy: model.answering.contains(item.id), last: !(next?.hasPrefix(Self.askPrefix) ?? false), about: about)
+        }
+        let changed = snapshot.itemIdentifiers.filter {
+            (previous[$0] != nil && previous[$0] != rows[$0]) || (previousAsks[$0] != nil && previousAsks[$0] != asks[$0])
+        }
         let current = dataSource.snapshot()
         let moved = current.sectionIdentifiers != snapshot.sectionIdentifiers || snapshot.sectionIdentifiers.contains {
             current.itemIdentifiers(inSection: $0) != snapshot.itemIdentifiers(inSection: $0)
@@ -513,7 +582,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
         // The pages run through the same rows. An open item that left the
         // list (it aged into History, folded) goes back to the overview.
-        order = snapshot.itemIdentifiers.filter { $0 != Self.searchRow }
+        order = snapshot.itemIdentifiers.filter { $0 != Self.searchRow && !$0.hasPrefix(Self.askPrefix) }
         if let id = openItem, !order.contains(id) {
             route = .overview
             push.redirect(to: 0)
@@ -522,6 +591,20 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         layoutPages()
         notice.text = model.error == nil ? "No tasks yet" : model.error
         renderChrome()
+        showFocus()
+    }
+
+    /// The focused task's row at the top, once the list has it.
+    private func showFocus() {
+        guard let wanted = focus, table.contentInset.top > 0 else { return }
+        let id = list.tasks.first { $0.id == wanted || $0.subtasks.contains { $0.id == wanted } }?.id ?? wanted
+        guard let path = dataSource.indexPath(for: id) else { return }
+        focus = nil
+        table.layoutIfNeeded()
+        table.scrollToRow(at: path, at: .top, animated: false)
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["SQUIRCLE_TASK_PAGE"] == "1" { showItem(id) }
+        #endif
     }
 
     // MARK: Actions
@@ -653,7 +736,8 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
     private func configure(_ header: TaskGroupHeader, _ group: Group) {
         let folds = group == .history && query.isEmpty
-        let count = folds ? list.history.count : dataSource.snapshot().numberOfItems(inSection: group)
+        let count = folds ? list.history.count
+            : dataSource.snapshot().itemIdentifiers(inSection: group).filter { !$0.hasPrefix(Self.askPrefix) }.count
         header.configure(group.title, count: count, color: group.color,
                          chevron: folds ? (showsHistory ? "chevron.up" : "chevron.down") : nil)
         header.onTap = folds ? { [weak self] in self?.toggleHistory() } : nil
@@ -691,11 +775,18 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard let id = dataSource.itemIdentifier(for: indexPath), id != Self.searchRow else { return }
+        // A sub-task that needs you opens its work item's page.
+        if case .task(let sub)? = asks[id]?.item {
+            list.tasks.first { $0.subtasks.contains { $0.id == sub.taskID } }.map { showItem($0.id) }
+            return
+        }
         showItem(id)
     }
 
     func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
-        dataSource.itemIdentifier(for: indexPath) != Self.searchRow
+        guard let id = dataSource.itemIdentifier(for: indexPath) else { return false }
+        if case .task? = asks[id]?.item { return true }
+        return id != Self.searchRow && !id.hasPrefix(Self.askPrefix)
     }
 
     func tableView(_ tableView: UITableView, willBeginEditingRowAt indexPath: IndexPath) { swiping = true }
@@ -804,6 +895,8 @@ private final class TaskSearchCell: UITableViewCell {
 private struct TaskRow: Equatable {
     let ask: String
     let status: AppTask.Status
+    /// Its questions follow right under it, with no rule between.
+    let joined: Bool
     /// Shows a tick: done, or ticked here and about to move.
     let checked: Bool
     let faded: Bool
@@ -924,6 +1017,7 @@ private final class TaskCell: UITableViewCell {
         jelly.isHidden = row.worker == nil
         install.isHidden = row.install == nil
         install.configuration?.title = row.install
+        rule.isHidden = row.joined
         shown = row
         accessibilityLabel = [row.faded ? nil : WorkItemPage.name(row.status), row.ask, note.text].compactMap { $0 }.joined(separator: ", ")
         accessibilityTraits = .button
@@ -1003,7 +1097,11 @@ final class WorkItemPage: UIView {
         let subtasks: [Sub]
         let threads: [AppTask.Thread]
         let media: [Picture]
+        /// What waits on you about it, answered here.
+        let asks: [TasksViewController.AskRow]
     }
+    /// Draws and answers `asks`.
+    var answers: WaitingAnswers?
     var onThread: ((String) -> Void)?
     var onSubtask: ((String) -> Void)?
     var onTick: ((String) -> Void)?
@@ -1021,6 +1119,7 @@ final class WorkItemPage: UIView {
     private let shipped = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel)
     private let position = Theme.label("", Theme.font(.footnote, 13), color: .tertiaryLabel)
     private let steps = UIStackView()
+    private let questions = UIStackView()
     private let crew = UIStackView()
     private let chips = UIStackView()
     private let pictures = UIStackView()
@@ -1092,9 +1191,13 @@ final class WorkItemPage: UIView {
         position.setContentHuggingPriority(.required, for: .horizontal)
         let statusRow = UIStackView(arrangedSubviews: [status, UIView(), position])
         statusRow.alignment = .firstBaseline
-        [statusRow, ask, note, installRow, steps, crew, chipScroll, pictureScroll].forEach(stack.addArrangedSubview)
+        questions.axis = .vertical
+        questions.spacing = 18
+        [statusRow, ask, note, questions, installRow, steps, crew, chipScroll, pictureScroll].forEach(stack.addArrangedSubview)
         stack.setCustomSpacing(6, after: statusRow)
         stack.setCustomSpacing(6, after: ask)
+        stack.setCustomSpacing(22, after: note)
+        stack.setCustomSpacing(22, after: questions)
         stack.setCustomSpacing(20, after: installRow)
         stack.setCustomSpacing(20, after: steps)
         scroll.translatesAutoresizingMaskIntoConstraints = false
@@ -1168,6 +1271,16 @@ final class WorkItemPage: UIView {
         shipped.isHidden = content.shipped == nil
         install.superview?.isHidden = install.isHidden && shipped.isHidden
 
+        if content.asks != was?.asks {
+            questions.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            for ask in content.asks {
+                let view = WaitingItemView()
+                view.fitWidth = max(0, bounds.width - 48)
+                answers?.configure(view, ask.item, about: ask.about)
+                questions.addArrangedSubview(view)
+            }
+            questions.isHidden = content.asks.isEmpty
+        }
         if content.subtasks != was?.subtasks {
             steps.arrangedSubviews.forEach { $0.removeFromSuperview() }
             for sub in content.subtasks {

@@ -73,8 +73,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     var onScrollBegan: (() -> Void)?
     /// The app's tasks, with its threads a tab away.
     var onTasks: (() -> Void)?
-    /// What waits on you, this app's first.
-    var onWaiting: (() -> Void)?
     var onBuilds: (() -> Void)?
     private let tasks = Theme.glassButton(symbol: "checklist", identifier: "agent.tasks", accessibilityLabel: "Tasks")
     /// Open tasks at a glance, just above the field; tapping opens Tasks.
@@ -426,11 +424,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         jump.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
         jump.configuration?.contentInsets = .zero
         strip.isHidden = true
-        // While something here waits on you, the strip opens that; else Tasks.
-        strip.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            if model.waiting.apps.contains(where: { [project] in $0.projectID == project.id }) { onWaiting?() } else { onTasks?() }
-        }, for: .touchUpInside)
+        strip.addAction(UIAction { [weak self] _ in self?.onTasks?() }, for: .touchUpInside)
         [request, notice, jump, strip, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         let stripGap = strip.bottomAnchor.constraint(equalTo: composer.topAnchor)
         let stripCollapsed = strip.heightAnchor.constraint(equalToConstant: 0)
