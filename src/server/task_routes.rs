@@ -254,6 +254,9 @@ pub(super) struct AddTask {
     pub(super) ask: String,
     pub(super) status: Option<tasks::Status>,
     pub(super) note: Option<String>,
+    /// Earlier asks this one replaces; each is dropped as replaced by it.
+    #[serde(default)]
+    pub(super) replaces: Vec<String>,
     #[serde(default)]
     pub(super) by_user: bool,
 }
@@ -290,11 +293,48 @@ pub(super) async fn add_task(
         )
         .await
         .map_err(task_error)?;
-    let next = if r.parent.is_some() {
-        "Link its workers and builds as you start them; set its status when it changes (its work item follows)."
+    for old in &r.replaces {
+        let current = tasks.get(old).map_err(ApiError::missing)?;
+        let update = tasks::Update {
+            replaced_by: Some(task.id.clone()),
+            ..Default::default()
+        };
+        let observed = task_signals(&state, &current);
+        tasks
+            .update(old, update, by, Some(observed))
+            .await
+            .map_err(task_error)?;
+    }
+    let mut next = if r.parent.is_some() {
+        "Link its workers and builds as you start them; set its status when it changes (its work item follows).".to_string()
     } else {
-        "Break it down with `task sub add` if it has parts; link workers and builds as you start them; set its status when it changes."
+        "Break it down with `task sub add` if it has parts; link workers and builds as you start them; set its status when it changes.".to_string()
     };
+    // A new ask of the user's beside open ones: the old ones it changes must
+    // stop reaching workers as rules.
+    let others: Vec<String> = match (&task.source, &r.parent) {
+        (Some(_), Some(parent)) => tasks
+            .get(parent)
+            .map(|item| {
+                item.subtasks
+                    .iter()
+                    .filter(|s| {
+                        s.id != task.id && s.source.is_some() && s.status != tasks::Status::Dropped
+                    })
+                    .map(|s| format!("{} \"{}\"", s.id, s.ask.replace('\n', " ")))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => vec![],
+    };
+    if !others.is_empty() && r.replaces.is_empty() {
+        next.push_str(&format!(
+            " If this changes or contradicts any of the user's earlier asks here, mark them replaced \
+             (`task update ID --replaced-by {}`) so workers stop getting them as rules: {}",
+            task.id,
+            others.join("; ")
+        ));
+    }
     Ok(Json(success(
         json!({"task": task_view(&state, &task), "next": next}),
     )))

@@ -93,6 +93,9 @@ pub struct Task {
     pub note: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Source>,
+    /// The later ask that replaces this one (it is dropped and stays so).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaced_by: Option<String>,
     pub threads: Vec<String>,
     pub builds: Vec<String>,
     /// Position within its status group; lower first.
@@ -407,6 +410,8 @@ struct Record {
     note: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<Source>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replaced_by: Option<String>,
     threads: Vec<String>,
     builds: Vec<String>,
     order: f64,
@@ -432,6 +437,8 @@ struct StoredRecord {
     note: String,
     #[serde(default)]
     source: Option<Source>,
+    #[serde(default)]
+    replaced_by: Option<String>,
     #[serde(default)]
     threads: Vec<String>,
     #[serde(default)]
@@ -472,6 +479,7 @@ impl From<StoredRecord> for Record {
             status: s.status,
             note: s.note,
             source: s.source,
+            replaced_by: s.replaced_by,
             threads: s.threads,
             builds: s.builds,
             order: s.order,
@@ -496,6 +504,7 @@ impl Record {
             status: self.status,
             note: self.note.clone(),
             source: self.source.clone(),
+            replaced_by: self.replaced_by.clone(),
             threads: self.threads.clone(),
             builds: self.builds.clone(),
             order: self.order,
@@ -547,14 +556,17 @@ impl Record {
     /// was last seen, the status they imply replaces the current one. A done
     /// or dropped task reopens only for new work (a new link, a new turn, a
     /// worker working or asking again), not old work finishing; new work also
-    /// brings a task back from History. Returns whether anything changed.
+    /// brings a task back from History. A replaced one never reopens: its
+    /// workers go on with the ask that replaced it. Returns whether anything changed.
     fn follow(&mut self, signals: &Signals, subtasks: &[Status], now: u64) -> bool {
         let (next, news) = self.observed.next(&self.threads, &self.builds, signals);
         if next == self.observed {
             return false;
         }
         self.record(next);
-        if news == News::None || (!self.status.open() && news != News::NewWork) {
+        if news == News::None
+            || (!self.status.open() && (news != News::NewWork || self.replaced_by.is_some()))
+        {
             return true;
         }
         if news == News::NewWork {
@@ -711,7 +723,8 @@ impl Book {
 
     /// A work item takes the roll-up of its sub-tasks and its own linked
     /// work. A closed one reopens only when a sub-task has work again
-    /// (queued, in progress or needing you); old work finishing leaves it closed.
+    /// (queued, in progress or needing you); old work finishing leaves it
+    /// closed, and a replaced one stays closed.
     fn rederive(&mut self, id: &str, by: By, now: u64) {
         let statuses = self.statuses(id);
         let Some(item) = self.tasks.get_mut(id) else {
@@ -720,7 +733,7 @@ impl Book {
         let active = statuses
             .iter()
             .any(|s| matches!(s, Status::Queued | Status::InProgress | Status::NeedsYou));
-        if !item.status.open() && !active {
+        if !item.status.open() && (!active || item.replaced_by.is_some()) {
             return;
         }
         let own = item.observed.implied(&item.threads, &item.builds);
@@ -776,6 +789,9 @@ pub struct Update {
     pub to_top: bool,
     /// Move it under this work item; empty makes a sub-task a work item of its own.
     pub parent: Option<String>,
+    /// A later ask of the same app replaces this one: it is dropped and
+    /// stays dropped. Reopening it (an open status) undoes that.
+    pub replaced_by: Option<String>,
 }
 
 /// Everything that can happen to the task book. Time and new IDs come in
@@ -929,6 +945,7 @@ impl Machine for M17 {
                         .map(|n| n.trim().chars().take(300).collect())
                         .unwrap_or_default(),
                     source,
+                    replaced_by: None,
                     threads,
                     builds: vec![],
                     order,
@@ -981,6 +998,25 @@ impl Machine for M17 {
                         book.bubble(&id, true, by, now);
                     }
                 }
+                let replaced_by = update
+                    .replaced_by
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|r| !r.is_empty())
+                    .map(str::to_string);
+                if let Some(later) = &replaced_by {
+                    let reason = match book.tasks.get(later) {
+                        None => Some(format!("No task {later}")),
+                        Some(_) if *later == id => Some("A task can't replace itself".into()),
+                        Some(t) if t.project_id != project => {
+                            Some(format!("{later} belongs to another app"))
+                        }
+                        Some(_) => None,
+                    };
+                    if let Some(reason) = reason {
+                        return Reduction::same(book, Disposition::Rejected(reason));
+                    }
+                }
                 let parent = book.tasks[&id].parent.clone();
                 let lowest = book
                     .tasks
@@ -998,8 +1034,18 @@ impl Machine for M17 {
                     task.ask = ask.chars().take(500).collect();
                     task.touch(now);
                 }
-                match update.status {
-                    Some(status) => task.set(status, by, update.note.as_deref(), now),
+                let (status, note) = match &replaced_by {
+                    Some(_) => (
+                        Some(Status::Dropped),
+                        update.note.as_deref().or(Some("Replaced by a later ask")),
+                    ),
+                    None => (update.status, update.note.as_deref()),
+                };
+                if replaced_by.is_some() || status.is_some_and(Status::open) {
+                    task.replaced_by = replaced_by;
+                }
+                match status {
+                    Some(status) => task.set(status, by, note, now),
                     None => {
                         if let Some(note) = update.note.as_deref() {
                             let status = task.status;
@@ -1007,7 +1053,7 @@ impl Machine for M17 {
                         }
                     }
                 }
-                if update.status.is_some()
+                if status.is_some()
                     && let Some(observed) = observed
                 {
                     task.hold(&observed);
@@ -1017,7 +1063,7 @@ impl Machine for M17 {
                     task.touch(now);
                 }
                 let after = task.status;
-                if update.status.is_some_and(|s| !s.open()) {
+                if status.is_some_and(|s| !s.open()) {
                     book.cascade(&id, after, by, now);
                 }
                 book.bubble(&id, after != before, by, now);
@@ -1274,5 +1320,52 @@ mod tests {
             16,
         );
         assert_eq!(book.get(&id).unwrap().status, Status::ReadyToTry);
+    }
+
+    #[test]
+    fn a_replaced_ask_stays_dropped_while_its_worker_goes_on() {
+        let (book, id) = book();
+        let later = TaskID::fresh();
+        let book = step(
+            book,
+            Event::Add {
+                id: later.clone(),
+                project: "p".into(),
+                ask: "Stack them, fold only the tall ones".into(),
+                status: None,
+                note: None,
+                by: By::Agent,
+                source: None,
+                threads: vec!["w".into()],
+                parent: None,
+                now: 1,
+            },
+        );
+        let (book, _) = observe(book, &id, worker("1", WorkerPhase::Working), 2);
+        let replace = Update {
+            replaced_by: Some(later.to_string()),
+            ..Default::default()
+        };
+        let book = step(
+            book,
+            Event::Edit {
+                id: id.clone(),
+                update: replace,
+                by: By::Agent,
+                observed: None,
+                now: 3,
+            },
+        );
+        // The same worker takes the next turn on the later ask: new work, but
+        // not on the ask it replaced.
+        let (book, _) = observe(book, &id, worker("2", WorkerPhase::Working), 4);
+        let task = book.get(&id).unwrap();
+        assert_eq!(
+            (task.status, task.replaced_by.as_deref()),
+            (Status::Dropped, Some(later.as_str()))
+        );
+        // Reopening it by hand undoes the replacement.
+        let book = set(book, &id, Status::Queued, By::User, None, 5);
+        assert_eq!(book.get(&id).unwrap().replaced_by, None);
     }
 }
