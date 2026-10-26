@@ -2946,3 +2946,29 @@ sharper swap was deferred to rest. Not yet looked at on a phone, and Tasks
 media was compiled but not opened on screen (the test runner could not tap
 inside the Tasks sheet).
 
+## 2026-10-26 Squircle steps read as what they did
+
+User ask: give Squircle commands proper treatment in the transcript instead
+of `cd …; A=('…/squircle' --data-dir … --server …); "${A[@]}" task …`, and
+make it clear when agents add and change tasks or use other Squircle
+functionality.
+
+- **Short form.** The service writes `DATA_DIR/bin/squircle` (sets
+  `SQUIRCLE_DATA_DIR`/`SQUIRCLE_SERVER`, execs the running binary); `agent
+  setup` links it into `~/.local/bin`, which T3's agents already have on PATH
+  (T3 instances take no environment). The plugin, per-turn note, worker briefs
+  and simulator messages then say plain `squircle …`; the guard checks the
+  history subagent's commands against that same form. Hooks keep the full path.
+- **Phone.** Derived on the phone, where the parser already read worker and
+  build commands and the app's tasks turn IDs into asks (the service only
+  passes the command and its output). Tracker changes are their own lines with
+  the accent's checklist or note mark: "Added task: …", "Marked “…” ready to
+  try" (status in its Tasks colour), "Replaced “…” with “…”", "Asked you: …",
+  "Added note: …", "Attached a clip to “…”", "Marked 3 tasks dropped" for a
+  loop. An ID only the shell knows reads "a task", never as `$S`. The parser
+  follows `"${A[@]}"`/`"$S"` arrays and paths with spaces, `$( … )` captures
+  and `for` loops. A step that also merged or built keeps its own line for
+  that work. Tapping a Squircle line (other than a worker's, which opens the
+  worker) shows its command and output, with Open in Tasks when the app has
+  the task; Tasks then opens on that work item's page.
+

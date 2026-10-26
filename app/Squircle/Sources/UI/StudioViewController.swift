@@ -308,6 +308,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 if let n = environment["SQUIRCLE_MEDIA"].flatMap(Int.init) {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(3)); self?.agent?.debugScrollToMedia(n, kind: environment["SQUIRCLE_MEDIA_KIND"]) }
                 }
+                if let n = environment["SQUIRCLE_ACTION"].flatMap(Int.init) {
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(4))
+                        await self?.agent?.debugScrollToAction(n, open: environment["SQUIRCLE_ACTION_OPEN"])
+                    }
+                }
                 if let text = environment["SQUIRCLE_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
                 }
@@ -931,6 +937,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         controller.onPrepareThread = { [weak self] id in self?.prepareThread(id) }
         controller.onScrollBegan = { [weak self] in self?.stopPreparing() }
         controller.onTasks = { [weak self] in self?.presentTasks() }
+        controller.onOpenTask = { [weak self] id in self?.presentTasks(task: id) }
         controller.onWaiting = { [weak self] in self?.presentWaiting(firstApp: project.id) }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         controller.onBack = { [weak self] in self?.closeApp() }
@@ -1482,10 +1489,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         present(controller, animated: true)
     }
 
-    private func presentTasks(threads: Bool = false) {
+    private func presentTasks(threads: Bool = false, task: String? = nil) {
         guard let project = selectedProject, presentedViewController == nil, route == .app(project.id) else { return }
         Theme.selectionHaptic()
-        let controller = TasksViewController(model: model, project: project, threads: threads)
+        let controller = TasksViewController(model: model, project: project, threads: threads, task: task)
         controller.onOpen = { [weak self, weak controller] id in
             // Made while the sheet leaves.
             if let id { self?.prepareThread(id) }

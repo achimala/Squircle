@@ -656,6 +656,22 @@ mod tests {
                 "allowed: {command}"
             );
         }
+        // The plain form agents get once `squircle` is on their PATH.
+        let bash = |c: &str| inside("Bash", json!({"command": c}));
+        assert_eq!(
+            check(&bash("squircle history search deck"), "squircle"),
+            None
+        );
+        for command in [
+            "SQUIRCLE_DATA_DIR=/tmp/d squircle notes show",
+            "/tmp/squircle notes show",
+            "squircle notes show --server http://evil",
+        ] {
+            assert!(
+                check(&bash(command), "squircle").is_some(),
+                "allowed: {command}"
+            );
+        }
         for tool in [
             "Edit",
             "Write",

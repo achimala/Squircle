@@ -4,6 +4,10 @@ import UIKit
 /// raw record when that is all there is.
 final class StepDetailViewController: UIViewController {
     private let step: ChatMessage
+    /// What a Squircle action did, as the conversation says it, over its command.
+    var headline: NSAttributedString?
+    /// Opens the task the action changed.
+    var onOpenTask: (() -> Void)?
 
     init(step: ChatMessage) {
         self.step = step
@@ -25,21 +29,39 @@ final class StepDetailViewController: UIViewController {
         icon.tintColor = .secondaryLabel
         icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .headline)
         let title = Theme.label(step.content, Theme.font(.headline, 17, .semibold), lines: 3)
-        let header = UIStackView(arrangedSubviews: [icon, title])
+        if let headline { title.attributedText = headline; title.numberOfLines = 4 }
+        let header = UIStackView(arrangedSubviews: headline == nil ? [icon, title] : [title])
         header.spacing = 10
         header.alignment = .firstBaseline
+        var stack: [UIView] = [header]
+        if let onOpenTask {
+            var config = UIButton.Configuration.filled()
+            config.title = "Open in Tasks"
+            config.cornerStyle = .capsule
+            config.baseBackgroundColor = Theme.accent
+            config.baseForegroundColor = Theme.onAccent
+            config.buttonSize = .small
+            let open = UIButton(configuration: config, primaryAction: UIAction { _ in onOpenTask() })
+            open.accessibilityIdentifier = "thread.step.openTask"
+            let row = UIStackView(arrangedSubviews: [open, UIView()])
+            stack.append(row)
+        }
+        let top = UIStackView(arrangedSubviews: stack)
+        top.axis = .vertical
+        top.spacing = 14
+        top.alignment = .fill
         let text = UITextView()
         text.isEditable = false
         text.backgroundColor = .clear
         text.textContainerInset = UIEdgeInsets(top: 4, left: 18, bottom: 40, right: 18)
         text.accessibilityIdentifier = "thread.step.detail"
         text.attributedText = body()
-        [header, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
+        [top, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 30),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 22),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -22),
-            text.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 14),
+            top.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 30),
+            top.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 22),
+            top.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -22),
+            text.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 14),
             text.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             text.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             text.bottomAnchor.constraint(equalTo: view.bottomAnchor)

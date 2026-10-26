@@ -90,9 +90,13 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     /// What needs a look comes first: you, then something to try.
     private static let statusOrder: [AppTask.Status] = [.needsYou, .readyToTry, .inProgress, .queued]
 
-    init(model: SquircleModel, project: AppProject, threads: Bool = false) {
+    /// The task to open on, at its work item's page.
+    private var initialTask: String?
+
+    init(model: SquircleModel, project: AppProject, threads: Bool = false, task: String? = nil) {
         self.model = model
         self.project = project
+        initialTask = task?.lowercased()
         super.init(nibName: nil, bundle: nil)
         tabs.selectedSegmentIndex = threads ? 1 : 0
     }
@@ -223,6 +227,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         freshness = model.keepFresh(.tasks(appID: project.id))
         Task { await model.refreshTasks() }
         render()
+        if let task = initialTask { initialTask = nil; open(task: task) }
         renderUndo(animated: false)
     }
 
@@ -270,6 +275,17 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         layoutPages()
         push.redirect(to: 1)
         renderChrome()
+    }
+
+    /// Already on its work item's page as the sheet comes up.
+    private func open(task id: String) {
+        let list = model.tasks(for: project)
+        guard let item = (list.tasks + list.history).first(where: { $0.id.lowercased() == id || $0.subtasks.contains { $0.id.lowercased() == id } }),
+              order.contains(item.id) else { return }
+        route = .item(item.id)
+        layoutPages()
+        push.set(1)
+        applyPush()
     }
 
     private func showOverview() {

@@ -21,6 +21,8 @@ struct AgentStep: Equatable {
     var hidden = false
     /// Squircle commands the step ran.
     var actions: [SquircleAction] = []
+    /// It ran other work too (a merge, a build), which its own line shows.
+    var alsoRan = false
 
     /// How much a description says: a written sentence beats a raw command,
     /// and an edit with its text beats one without.
@@ -35,6 +37,11 @@ struct AgentStep: Equatable {
             let command = args["command"].string ?? ""
             let actions = SquircleAction.parse(command: command, result: call.result)
             if let first = actions.first(where: \.visible) ?? actions.first {
+                // Work besides Squircle's keeps its own line, in the agent's words.
+                if actions.contains(where: \.visible), let other = CommandLabel.besidesSquircle(command) {
+                    let description = args["description"].string.flatMap { $0.isEmpty ? nil : sentence($0) }
+                    return AgentStep(kind: .squircle, title: description ?? other, symbol: "terminal", live: other, actions: actions, alsoRan: true)
+                }
                 return AgentStep(kind: .squircle, title: first.sentence(worker: nil) + (first.refused ? " · refused" : ""),
                                  symbol: first.symbol, actions: actions)
             }

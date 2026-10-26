@@ -16,6 +16,18 @@ enum CommandLabel {
         return describe(main)
     }
 
+    /// What else a command that runs Squircle does, besides it ("Merging"),
+    /// or nil when the rest only sets up, reads its replies or trims them.
+    static func besidesSquircle(_ command: String) -> String? {
+        var variables: [String: String] = [:]
+        let quiet: Set<String> = ["squircle", "grep", "head", "tail", "cut", "jq", "python", "python3", "wc", "sort", "uniq", "tr", "cat", "ls", "git"]
+        let rest = Shell.parse(unwrapped(command)).compactMap { program($0, variables: &variables) }
+            .filter { !$0.piped && !noise.contains($0.name) && !quiet.contains($0.name) || ($0.name == "git" && !["status", "log", "diff", "show", "branch", "rev-parse"].contains(gitSubcommand($0))) }
+        // Only work that changes or builds something earns its own line.
+        let looks = ["Running ", "Reading", "Searching", "Finding", "Listing", "Counting", "Checking git", "Checking branches", "Querying", "Fetching", "Copying", "Creating folders", "Checking simulators", "Capturing"]
+        return rest.filter { !leadIn($0) }.map(describe).first { line in !looks.contains { line.hasPrefix($0) } }
+    }
+
     /// One command reduced to its program and arguments.
     struct Program {
         var name: String
@@ -67,7 +79,9 @@ enum CommandLabel {
             var name = AgentStep.file(first)
             if first.hasPrefix("$") {
                 let variable = first.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: "{}"))
-                guard let value = variables[variable], let program = Shell.commands(value).first?.first else { return nil }
+                // A path with spaces (`S='…/Application Support/…/squircle'`) is one program.
+                guard let value = variables[variable],
+                      let program = value.hasSuffix("/squircle") ? value : Shell.commands(value).first?.first else { return nil }
                 name = AgentStep.file(program)
             }
             // An array's elements (`T=(--platform ios)`), not a command.

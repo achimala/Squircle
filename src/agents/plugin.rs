@@ -44,8 +44,13 @@ pub async fn setup(root: &Path, server: &str, remove: bool) -> Result<Value> {
         }
         return Ok(json!({"removed_instance": removed, "plugin_left_at": plugin}));
     }
+    // Agents type plain `squircle`; hooks keep the full path.
+    if !wrapper(root).exists() {
+        write_wrapper(root, server, &std::env::current_exe()?.canonicalize()?)?;
+    }
+    let on_path = link_wrapper(root)?;
     let cli = cli_invocation(root, server);
-    let escaped = serde_json::to_string(&cli)?;
+    let escaped = serde_json::to_string(&cli_full(root, server))?;
     let escaped = &escaped[1..escaped.len() - 1];
     for (path, template) in PLUGIN_FILES {
         let target = plugin.join(path);
@@ -90,6 +95,7 @@ pub async fn setup(root: &Path, server: &str, remove: bool) -> Result<Value> {
         .await?;
     Ok(
         json!({"plugin": plugin, "instance": INSTANCE, "launch_args": launch,
+              "squircle_on_path": on_path.as_ref().ok(), "squircle_not_on_path": on_path.as_ref().err(), "invocation": cli,
               "note": "T3 now offers a \"Squircle agent\" Claude instance on your existing Claude login. Run with --remove to take it out."}),
     )
 }
