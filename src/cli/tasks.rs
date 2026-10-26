@@ -20,6 +20,13 @@ pub(super) enum TaskCommand {
         status: Option<squircle::tasks::Status>,
         #[arg(long, help = "What it waits on, in a few words")]
         note: Option<String>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "ID[,ID]",
+            help = "Earlier asks this one replaces: they are dropped as replaced and stop reaching workers"
+        )]
+        replaces: Vec<String>,
     },
     /// Change a task's status, note or wording.
     Update {
@@ -38,6 +45,12 @@ pub(super) enum TaskCommand {
             help = "Move it under this work item, or with none make it a work item of its own"
         )]
         under: Option<String>,
+        #[arg(
+            long,
+            value_name = "ID",
+            help = "A later ask replaces this one: it is dropped as replaced and stops reaching workers"
+        )]
+        replaced_by: Option<String>,
     },
     /// Sub-tasks: the small items under a work item (an ask that belongs to it, or your own breakdown).
     Sub {
@@ -103,7 +116,18 @@ pub(super) enum SubCommand {
             help = "Your thread ID, to record the message it came from (an app agent's unrecorded messages block spawn and send)"
         )]
         thread: Option<String>,
+        #[arg(
+            long,
+            value_delimiter = ',',
+            value_name = "ID[,ID]",
+            help = "Earlier asks this one replaces: they are dropped as replaced and stop reaching workers"
+        )]
+        replaces: Vec<String>,
     },
+}
+
+fn task_ids(ids: &[String]) -> Result<Vec<&str>> {
+    ids.iter().map(|id| task_id(id)).collect()
 }
 
 pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value>> {
@@ -114,11 +138,12 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
             ask,
             status,
             note,
+            replaces,
         } => {
             post(
                 cli,
                 "/v1/tasks",
-                json!({"thread":thread,"project":project,"ask":ask,"status":status,"note":note}),
+                json!({"thread":thread,"project":project,"ask":ask,"status":status,"note":note,"replaces":task_ids(replaces)?}),
             )
             .await?
         }
@@ -129,6 +154,7 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
             ask,
             top,
             under,
+            replaced_by,
         } => {
             let parent = match under.as_deref() {
                 Some("none") => Some(String::new()),
@@ -139,7 +165,8 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
                 cli,
                 reqwest::Method::PATCH,
                 &format!("/v1/tasks/{}", task_id(id)?),
-                Some(json!({"status":status,"note":note,"ask":ask,"to_top":top,"parent":parent})),
+                Some(json!({"status":status,"note":note,"ask":ask,"to_top":top,"parent":parent,
+                    "replaced_by":replaced_by.as_deref().map(task_id).transpose()?})),
                 false,
             )
             .await?
@@ -173,11 +200,12 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
                     status,
                     note,
                     thread,
+                    replaces,
                 },
         } => post(
             cli,
             "/v1/tasks",
-            json!({"parent":task_id(item)?,"thread":thread,"ask":ask,"status":status,"note":note}),
+            json!({"parent":task_id(item)?,"thread":thread,"ask":ask,"status":status,"note":note,"replaces":task_ids(replaces)?}),
         )
         .await?,
         TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,

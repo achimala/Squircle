@@ -63,14 +63,41 @@ as done and promised to "check every ~20 min". So:
   is checked when the agent tries to hand work on.
 - **Briefs carry the asks.** `thread spawn` requires `--task`. Its prompt,
   and every `thread send` to a worker linked to a task, ends with the
-  work item's ask and every sub-task's ask (dropped ones left out, done ones
-  marked "still holds") in the user's words, so a re-brief can't drop a
-  correction the tracker has.
+  work item's ask and the user's asks under it (dropped and replaced ones
+  left out, done ones marked "still holds"; since 2026-10-26 not the agent's
+  own sub-tasks, below), so a re-brief can't drop a correction the tracker
+  has.
 - **Instructions.** The plugin prompt and the per-turn note: one sub-task per
   demand, corrections and details ("from bottom") included, in the user's
   words, before acting; never present work as done without having looked at
   it (screenshots or a recording) against every ask of its work item; never
   promise timed check-ins (`[worker update]`s wake the agent).
+
+## Only the current spec reaches workers (2026-10-26)
+
+Letters Abroad's folder item had grown to ~70 sub-tasks over days, and every
+brief carried all of them as "the user's words, every one holds": older asks
+the user had since contradicted ("tall sheets curve around smaller items in
+front" before "no wrapping, the card is covered by its flap"), and about
+half the agent's own paraphrased steps. Workers couldn't tell what was
+current, and the latest asks lost. So:
+
+- **Replaced asks retire.** `task sub add ITEM --ask ... --replaces ID[,ID]`
+  or `task update ID --replaced-by ID` drops the old ask with `replaced_by`
+  set and the note "Replaced by a later ask" (the phone shows it like any
+  dropped sub-task, ✕ and that note; history kept). A replaced task never
+  reopens for its linked workers' new work, since they go on with the ask that
+  replaced it; an explicit open status undoes the replacement. Adding a user
+  ask beside open ones, the result's `next` lists them and asks the agent to
+  mark any it replaces.
+- **The block is the user's asks only.** It lists each work item, then its
+  sub-tasks that have a source message and aren't dropped or replaced,
+  oldest first, "each holds unless a later one changes it". The agent's
+  breakdown stays out: the brief already says that in the agent's words.
+- **Instructions.** When the user corrects or adds to work in progress, the
+  agent retires what it replaces and sends the worker the whole current spec,
+  not just the new piece; after many revisions it prefers a fresh worker
+  briefed from the clean spec.
 
 ## Model
 
