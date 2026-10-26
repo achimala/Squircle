@@ -69,7 +69,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private let connection = Theme.glassButton(symbol: "macbook", identifier: "connection.status", accessibilityLabel: "Mac connection")
     private let add = Theme.glassButton(symbol: "plus", identifier: "project.add", accessibilityLabel: "Add app")
     /// How many things wait on you across apps; opens them. Hidden at none.
-    private let waitingButton = Theme.glassButton(title: "", identifier: "waiting.open")
+    /// Everything waiting on you, above the devices.
+    private lazy var waitingList = HomeWaitingView(model: model)
     /// Holds the app's agent; touches pass through when empty.
     private let agentHost = PassthroughView()
     /// Holds a thread over the agent; touches pass through when empty.
@@ -172,9 +173,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         grid.accessibilityIdentifier = "app.grid"
         if #available(iOS 26.0, *) { grid.topEdgeEffect.style = .soft }
         home.addSubview(grid)
-        [connection, add, waitingButton].forEach(home.addSubview)
-        waitingButton.isHidden = true
-        waitingButton.addAction(UIAction { [weak self] _ in self?.presentWaiting() }, for: .touchUpInside)
+        [connection, add].forEach(home.addSubview)
+        grid.addSubview(waitingList)
+        waitingList.onOpen = { [weak self] project, task in self?.presentTasks(project: project, focus: task) }
         connection.showsMenuAsPrimaryAction = true
         add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
         arrange.addTarget(self, action: #selector(arrangePressed(_:)))
@@ -268,7 +269,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it)
     /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` (or a simulator's name) brings
     /// the first (or that) simulator large; `SQUIRCLE_BUILDS=1` shows the app's builds and
-    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads` opens Tasks on either tab (`SQUIRCLE_DEMO_TASKS=1` shows made-up tasks, `=PATH` a copy of a real list; `SQUIRCLE_DEMO_SENT=1` with no Mac connection shows a made-up app "Demo" whose agent sent to and heard from workers). `SQUIRCLE_OPEN_TARGET` opens a notification payload; `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_DEMO_VIDEO=PATH` opens a movie full screen; `SQUIRCLE_STRESS=1`
+    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads|TASK_ID` opens Tasks on either tab (a task ID shows its row, `SQUIRCLE_TASK_PAGE=1` its page) (`SQUIRCLE_DEMO_TASKS=1` shows made-up tasks, `=PATH` a copy of a real list; `SQUIRCLE_DEMO_SENT=1` with no Mac connection shows a made-up app "Demo" whose agent sent to and heard from workers). `SQUIRCLE_OPEN_TARGET` opens a notification payload; `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_DEMO_VIDEO=PATH` opens a movie full screen; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
@@ -318,7 +319,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
                 }
                 if let tab = environment["SQUIRCLE_TASKS"] {
-                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentTasks(threads: tab == "threads") }
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentTasks(threads: tab == "threads", focus: tab.count > 8 ? tab : nil) }
                 }
                 if environment["SQUIRCLE_BUILDS"] == "1" {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentBuilds() }
@@ -384,10 +385,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 expandSimulator(use)
                 await MediaViewer.debugDrags(in: view.window)
             }
-        }
-        // `SQUIRCLE_WAITING=1`: what waits on you, once the Mac has listed it.
-        if environment["SQUIRCLE_WAITING"] == "1" {
-            Task { [weak self] in try? await Task.sleep(for: .seconds(3)); self?.presentWaiting() }
         }
         // `SQUIRCLE_OPEN_TARGET`: a notification's `squircle` payload as JSON, opened as if tapped.
         if let json = environment["SQUIRCLE_OPEN_TARGET"], let payload = try? JSONSerialization.jsonObject(with: Data(json.utf8)),
@@ -628,8 +625,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let safe = view.safeAreaInsets
         connection.place(in: CGRect(x: 16, y: safe.top + 4, width: 44, height: 44))
         add.place(in: CGRect(x: bounds.width - 60, y: safe.top + 4, width: 44, height: 44))
-        let waitingWidth = min(bounds.width - 152, waitingButton.sizeThatFits(CGSize(width: bounds.width, height: 44)).width)
-        waitingButton.place(in: CGRect(x: (bounds.width - waitingWidth) / 2, y: safe.top + 4, width: waitingWidth, height: 44))
         applyScene()
     }
 
@@ -639,7 +634,13 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     private func makeLayout() -> StageLayout {
-        StageLayout(size: view.bounds.size, safe: view.safeAreaInsets, reducedMotion: Motion.reduced)
+        var layout = StageLayout(size: view.bounds.size, safe: view.safeAreaInsets, reducedMotion: Motion.reduced)
+        let width = view.bounds.width - 2 * StageLayout.gridMargin
+        if !waitingList.isEmpty, width > 0 {
+            layout.waiting = waitingList.systemLayoutSizeFitting(CGSize(width: width, height: 0), withHorizontalFittingPriority: .required,
+                                                                 verticalFittingPriority: .fittingSizeLevel).height.rounded(.up) + 22
+        }
+        return layout
     }
 
     private var layout: StageLayout { laidOut ?? makeLayout() }
@@ -721,15 +722,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         connection.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
             done(self.map { [ConnectionMenu.section($0.model)] } ?? [])
         }])
-        let waiting = model.waiting.count
-        let title = waiting > 0 ? "\(waiting) waiting" : ""
-        if waitingButton.configuration?.title != title {
-            waitingButton.configuration?.title = title
-            waitingButton.configuration?.baseForegroundColor = Theme.accent
-            waitingButton.accessibilityLabel = waiting == 1 ? "1 thing waiting on you" : "\(waiting) things waiting on you"
-            waitingButton.isHidden = waiting == 0
-            view.setNeedsLayout()
-        }
+        if waitingList.update(model.waiting, order: projects.map(\.id), busy: model.answering) { relayout() }
     }
 
     /// Every cell in its place in `shown`; the held one under the finger.
@@ -737,6 +730,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private func layoutGrid(animated: Bool = false) {
         let layout = self.layout, shown = self.shown, held = lift
         grid.contentSize = CGSize(width: view.bounds.width, height: layout.gridContentHeight(count: shown.count))
+        waitingList.frame = CGRect(x: StageLayout.gridMargin, y: layout.homeTop, width: layout.size.width - 2 * StageLayout.gridMargin,
+                                   height: max(0, layout.waiting - 22))
         let place = { [cells] in
             for (index, project) in shown.enumerated() {
                 guard let cell = cells[project.id] else { continue }
@@ -799,10 +794,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// builds on hand don't explain waits while the Mac is asked again, and
     /// is dropped only once the Mac's answer doesn't have it either.
     func open(_ target: PushTarget) {
-        if target == .waiting {
+        // A question naming no app: Home, where everything waiting shows.
+        if target.waiting, target.appRef == nil {
             pendingOpen = nil
             if presentedViewController != nil { dismiss(animated: false) }
-            presentWaiting()
+            view.endEditing(true)
+            route = .grid
+            sync()
+            grid.setContentOffset(.zero, animated: false)
             return
         }
         if let resolved = resolve(target) { show(target, resolved); return }
@@ -845,6 +844,19 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         if presentedViewController != nil { dismiss(animated: false) }
         view.endEditing(true)
         let id = resolved.project.id
+        // A question: the app's Tasks, at the task it is about.
+        if target.waiting {
+            let task = model.waiting.apps.first { $0.projectID == id }?.items.lazy.compactMap { item -> String? in
+                switch item {
+                case .question(let question): question.threadID == target.thread ? question.taskID : nil
+                case .task(let task): task.threadID == target.thread ? task.taskID : nil
+                case .request(let request): request.threadID == target.thread ? self.model.tasks(for: resolved.project).tasks
+                    .first { $0.allThreads.contains { $0.id == request.threadID } }?.id : nil
+                }
+            }.first
+            presentTasks(project: id, focus: task)
+            return
+        }
         if let thread = target.thread, thread != model.agentThreadID(for: resolved.project) {
             route = .thread(app: id, .existing(thread))
         } else {
@@ -937,8 +949,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         controller.onPrepareThread = { [weak self] id in self?.prepareThread(id) }
         controller.onScrollBegan = { [weak self] in self?.stopPreparing() }
         controller.onTasks = { [weak self] in self?.presentTasks() }
-        controller.onOpenTask = { [weak self] id in self?.presentTasks(task: id) }
-        controller.onWaiting = { [weak self] in self?.presentWaiting(firstApp: project.id) }
+        controller.onOpenTask = { [weak self] id in self?.presentTasks(project: project.id, task: id) }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         controller.onBack = { [weak self] in self?.closeApp() }
         return controller
@@ -1269,7 +1280,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         autoscroll = Task { [weak self] in
             while let self, !Task.isCancelled, let held = lift {
                 let y = held.finger.y - grid.contentOffset.y, band: CGFloat = 70
-                let top = layout.gridTop + band, bottom = grid.bounds.height - view.safeAreaInsets.bottom - band
+                let top = layout.homeTop + band, bottom = grid.bounds.height - view.safeAreaInsets.bottom - band
                 let speed = y < top ? -(top - y) / band * 14 : y > bottom ? (y - bottom) / band * 14 : 0
                 let maxY = max(0, grid.contentSize.height - grid.bounds.height)
                 let offset = (grid.contentOffset.y + speed).clamped(0, maxY)
@@ -1489,39 +1500,23 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         present(controller, animated: true)
     }
 
-    private func presentTasks(threads: Bool = false, task: String? = nil) {
-        guard let project = selectedProject, presentedViewController == nil, route == .app(project.id) else { return }
+    /// The app's Tasks sheet; from Home (or another app) it opens the app
+    /// first, under the sheet. `focus`: a task whose row shows first;
+    /// `task`: a task whose work item's page it opens on.
+    private func presentTasks(project id: String? = nil, threads: Bool = false, focus: String? = nil, task: String? = nil) {
+        guard presentedViewController == nil, let id = id ?? selectedProject.flatMap({ route == .app($0.id) ? $0.id : nil }),
+              let project = projects.first(where: { $0.id == id }) else { return }
         Theme.selectionHaptic()
-        let controller = TasksViewController(model: model, project: project, threads: threads, task: task)
+        if route != .app(id) {
+            view.endEditing(true)
+            route = .app(id)
+            sync()
+        }
+        let controller = TasksViewController(model: model, project: project, threads: threads, focus: focus, task: task)
         controller.onOpen = { [weak self, weak controller] id in
             // Made while the sheet leaves.
             if let id { self?.prepareThread(id) }
             controller?.dismiss(animated: true) { self?.openThread(id) }
-        }
-        controller.modalPresentationStyle = .pageSheet
-        if let sheet = controller.sheetPresentationController {
-            sheet.detents = [.large()]
-            sheet.prefersGrabberVisible = true
-        }
-        present(controller, animated: true)
-    }
-
-    /// Everything waiting on you, across apps (`firstApp` first). Answering
-    /// happens in the sheet; a needs-you task opens its app or thread.
-    private func presentWaiting(firstApp: String? = nil) {
-        guard presentedViewController == nil else { return }
-        Theme.selectionHaptic()
-        let controller = WaitingViewController(model: model, firstApp: firstApp)
-        controller.onOpen = { [weak self] project, thread in
-            guard let self else { return }
-            view.endEditing(true)
-            let agent = projects.first { $0.id == project }.flatMap(model.agentThreadID)
-            if let thread, thread != agent {
-                route = .thread(app: project, .existing(thread))
-            } else {
-                route = .app(project)
-            }
-            sync()
         }
         controller.modalPresentationStyle = .pageSheet
         if let sheet = controller.sheetPresentationController {

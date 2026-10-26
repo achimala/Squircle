@@ -75,8 +75,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     var onTasks: (() -> Void)?
     /// Opens Tasks at one task (a work item or sub-task, by ID).
     var onOpenTask: ((String) -> Void)?
-    /// What waits on you, this app's first.
-    var onWaiting: (() -> Void)?
     var onBuilds: (() -> Void)?
     private let tasks = Theme.glassButton(symbol: "checklist", identifier: "agent.tasks", accessibilityLabel: "Tasks")
     /// Open tasks at a glance, just above the field; tapping opens Tasks.
@@ -428,11 +426,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         jump.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
         jump.configuration?.contentInsets = .zero
         strip.isHidden = true
-        // While something here waits on you, the strip opens that; else Tasks.
-        strip.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            if model.waiting.apps.contains(where: { [project] in $0.projectID == project.id }) { onWaiting?() } else { onTasks?() }
-        }, for: .touchUpInside)
+        strip.addAction(UIAction { [weak self] _ in self?.onTasks?() }, for: .touchUpInside)
         [request, notice, jump, strip, composer].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         let stripGap = strip.bottomAnchor.constraint(equalTo: composer.topAnchor)
         let stripCollapsed = strip.heightAnchor.constraint(equalToConstant: 0)
@@ -1785,10 +1779,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
     }
     /// Verification only: `SQUIRCLE_ACTION=N` scrolls to the Nth newest
-    /// Squircle line; `SQUIRCLE_ACTION_OPEN=1` then taps it, `=task` its
+    /// tracker line; `SQUIRCLE_ACTION_OPEN=1` then taps it, `=task` its
     /// Open in Tasks too.
     func debugScrollToAction(_ n: Int, open: String?) async {
-        let rows = dataSource.snapshot().itemIdentifiers.filter { if case .action = itemsByID[$0] { true } else { false } }
+        let rows = dataSource.snapshot().itemIdentifiers.filter { if case .action(let line) = itemsByID[$0] { line.action?.isTracker == true } else { false } }
         guard rows.count >= n, let path = dataSource.indexPath(for: rows[rows.count - n]) else { return }
         pinToBottom = false
         table.scrollToRow(at: path, at: .middle, animated: false)
