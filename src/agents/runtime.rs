@@ -28,7 +28,7 @@ impl Agents {
         };
         Ok(Arc::new(Self {
             root: root.to_path_buf(),
-            cli: cli_invocation(root, server),
+            server: server.to_string(),
             owner: Owner::spawn("agents", state),
             view: snapshot,
             fake: std::sync::OnceLock::new(),
@@ -288,9 +288,10 @@ impl Agents {
         self.view.get().t3.clone().with_context(|| self.status())
     }
 
-    /// The squircle invocation agents are told to use.
-    pub fn cli(&self) -> &str {
-        &self.cli
+    /// The squircle invocation agents are told to use: plain `squircle`
+    /// once `agent setup` puts it on their PATH, as it may after start.
+    pub fn cli(&self) -> String {
+        cli_invocation(&self.root, &self.server)
     }
 
     pub(super) async fn ready(&self) -> Result<Arc<dyn Peer>> {

@@ -309,6 +309,12 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 if let n = environment["SQUIRCLE_MEDIA"].flatMap(Int.init) {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(3)); self?.agent?.debugScrollToMedia(n, kind: environment["SQUIRCLE_MEDIA_KIND"]) }
                 }
+                if let n = environment["SQUIRCLE_ACTION"].flatMap(Int.init) {
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(4))
+                        await self?.agent?.debugScrollToAction(n, open: environment["SQUIRCLE_ACTION_OPEN"])
+                    }
+                }
                 if let text = environment["SQUIRCLE_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
                 }
@@ -943,6 +949,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         controller.onPrepareThread = { [weak self] id in self?.prepareThread(id) }
         controller.onScrollBegan = { [weak self] in self?.stopPreparing() }
         controller.onTasks = { [weak self] in self?.presentTasks() }
+        controller.onOpenTask = { [weak self] id in self?.presentTasks(project: project.id, task: id) }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         controller.onBack = { [weak self] in self?.closeApp() }
         return controller
@@ -1494,8 +1501,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     /// The app's Tasks sheet; from Home (or another app) it opens the app
-    /// first, under the sheet. `focus`: a task whose row shows first.
-    private func presentTasks(project id: String? = nil, threads: Bool = false, focus: String? = nil) {
+    /// first, under the sheet. `focus`: a task whose row shows first;
+    /// `task`: a task whose work item's page it opens on.
+    private func presentTasks(project id: String? = nil, threads: Bool = false, focus: String? = nil, task: String? = nil) {
         guard presentedViewController == nil, let id = id ?? selectedProject.flatMap({ route == .app($0.id) ? $0.id : nil }),
               let project = projects.first(where: { $0.id == id }) else { return }
         Theme.selectionHaptic()
@@ -1504,7 +1512,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             route = .app(id)
             sync()
         }
-        let controller = TasksViewController(model: model, project: project, threads: threads, focus: focus)
+        let controller = TasksViewController(model: model, project: project, threads: threads, focus: focus, task: task)
         controller.onOpen = { [weak self, weak controller] id in
             // Made while the sheet leaves.
             if let id { self?.prepareThread(id) }

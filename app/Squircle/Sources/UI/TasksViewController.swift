@@ -101,11 +101,16 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     /// What needs a look comes first: you, then something to try.
     private static let statusOrder: [AppTask.Status] = [.needsYou, .readyToTry, .inProgress, .queued]
 
-    /// `focus`: a task whose row (or work item's row) shows first.
-    init(model: SquircleModel, project: AppProject, threads: Bool = false, focus: String? = nil) {
+    /// The task to open on, at its work item's page.
+    private var initialTask: String?
+
+    /// `focus`: a task whose row (or work item's row) shows first; `task`:
+    /// a task whose work item's page it opens on.
+    init(model: SquircleModel, project: AppProject, threads: Bool = false, focus: String? = nil, task: String? = nil) {
         self.model = model
         self.project = project
         self.focus = focus
+        initialTask = task?.lowercased()
         super.init(nibName: nil, bundle: nil)
         tabs.selectedSegmentIndex = threads ? 1 : 0
     }
@@ -249,6 +254,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         freshness = model.keepFresh(.tasks(appID: project.id))
         Task { await model.refreshTasks() }
         render()
+        if let task = initialTask { initialTask = nil; open(task: task) }
         renderUndo(animated: false)
     }
 
@@ -297,6 +303,17 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         layoutPages()
         push.redirect(to: 1)
         renderChrome()
+    }
+
+    /// Already on its work item's page as the sheet comes up.
+    private func open(task id: String) {
+        let list = model.tasks(for: project)
+        guard let item = (list.tasks + list.history).first(where: { $0.id.lowercased() == id || $0.subtasks.contains { $0.id.lowercased() == id } }),
+              order.contains(item.id) else { return }
+        route = .item(item.id)
+        layoutPages()
+        push.set(1)
+        applyPush()
     }
 
     private func showOverview() {

@@ -101,7 +101,7 @@ impl Agents {
              or `{cli} task add --thread {coordinator} --ask \"...\"` for a new one. If they ask for nothing to track \
              (a thanks, a question you answered), run `{cli} task heard --thread {coordinator}`. Then run this again; \
              the worker's brief will carry every ask of its work item.",
-            cli = self.cli,
+            cli = self.cli(),
         )
     }
 

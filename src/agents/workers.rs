@@ -97,6 +97,7 @@ impl Agents {
             let id = uuid::Uuid::new_v4().to_string();
             let text = format!(
                 "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. Remove anything else you create (scratch simulators, temp services or files) before you finish. \
+                 Run Squircle as {cli} … from any directory, the IDs and words written out (the user's phone reads each call back as what it did). \
                  If the user asks you for something directly, put it in the tracker before working on it ({cli} task --help): a sub-task of the work item it belongs to, otherwise a new work item. \
                  To ask the user something, use your question tool (or {cli} task ask ITEM --thread {id} --question ...): it reaches their phone directly, with everything else waiting on them; don't put questions in a reply and end your turn. \
                  To run, check or demo the app in a simulator, first run {cli} sim start --thread {id} (see sim --help): Squircle records it, the user watches it live, and the recording appears in your turn. Then call T3's device_open with the deviceId it returns and drive it with the agent-device command that gives; run {cli} sim stop --thread {id} when done (it shuts the simulator down). If it says you're queued, end your turn: a [simulator ready] message wakes you when one is held for you; run sim start again then. Use sim start for every simulator: don't boot or create simulators with simctl or xcodebuild, and don't run agent-device record or device_open on any other simulator. \
@@ -104,7 +105,7 @@ impl Agents {
                  A performance recording the user sends from the phone is a linked .perf.json: {cli} perf show PATH summarizes it (hitches with symbolicated main-thread stacks, timeline). \
                  The user also reads your replies on their phone: keep them short and plain, show pictures as ![..](/absolute/path) and clips as [..](/absolute/path) \
                  (copied out of /tmp into ~/.t3/userdata/attachments), and don't present bare paths or IDs as information.",
-                cli = self.cli
+                cli = self.cli()
             );
             let message_id = uuid::Uuid::new_v4().to_string();
             let message = Note::Task.message(&message_id, &text, json!({"from": coordinator}));

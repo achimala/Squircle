@@ -32,6 +32,11 @@ struct SquircleAction: Equatable {
         case buildStart(BuildID?)
         case cleanup, status, buildStatus, simStart, simStop, simOther
         case restart, fresh, agentOther, perf, media, help, other
+        /// Tracker changes, to `task` unless said otherwise: a new ask (one
+        /// that replaces `replaces`, if any), a status, a question to you.
+        case taskAdd, taskReplace, taskStatus(String), taskReword, taskMove, taskNote
+        case taskAsk, taskWithdraw, taskAttach(video: Bool), taskLink(build: Bool, remove: Bool), taskLookup, taskHeard
+        case noteAdd, noteEdit, noteRemove, notesLookup
     }
     /// What Squircle's reply says happened.
     enum Outcome: Equatable {
@@ -52,6 +57,18 @@ struct SquircleAction: Equatable {
     var text: String?
     /// What it built, from `--scheme` or the project's name.
     var app: String?
+    /// The task it changes (or the one a new ask replaces), by ID.
+    var task: String?
+    /// The ask that replaces `task`, from `update --replaced-by`.
+    var replacement: String?
+    /// Earlier asks a new one replaces.
+    var replaces: [String] = []
+    /// What a task waits on or what happened, from `--note`.
+    var note: String?
+    /// `update --top`.
+    var toTop = false
+    /// How many times a loop runs it; 0 when it can't be told.
+    var repeats: Int?
     var outcome = Outcome.pending
 
     var refused: Bool { outcome == .refused }
@@ -63,6 +80,16 @@ struct SquircleAction: Equatable {
         }
     }
     var build: BuildID? { if case .buildStart(let id) = kind { id } else { nil } }
+    /// A change to the app's tasks or the agent's notes.
+    var isTracker: Bool {
+        switch kind {
+        case .taskAdd, .taskReplace, .taskStatus, .taskReword, .taskMove, .taskNote, .taskAsk, .taskWithdraw, .taskAttach, .taskLink,
+             .noteAdd, .noteEdit, .noteRemove: true
+        default: false
+        }
+    }
+    /// The tasks it is about, the one it changes first.
+    var tasks: [String] { ([task, replacement].compactMap { $0 }) + replaces }
     var isSpawn: Bool { if case .spawn = kind { true } else { false } }
 
     /// Actions that change something show as their own line; lookups fold
@@ -71,7 +98,7 @@ struct SquircleAction: Equatable {
         if refused { return false }
         switch kind {
         case .spawn, .send, .read, .answer, .archive, .cleanup, .buildStart, .simStart, .simStop, .restart, .fresh: return true
-        default: return false
+        default: return isTracker
         }
     }
 
@@ -91,6 +118,10 @@ struct SquircleAction: Equatable {
         case .perf: return "waveform.path.ecg"
         case .media: return "photo"
         case .agentOther, .help, .other: return "terminal"
+        case .taskAsk, .taskWithdraw: return "questionmark.bubble"
+        case .taskLookup, .taskHeard, .taskAdd, .taskReplace, .taskStatus, .taskReword, .taskMove, .taskNote, .taskAttach, .taskLink:
+            return "checklist"
+        case .noteAdd, .noteEdit, .noteRemove, .notesLookup: return "note.text"
         }
     }
 
@@ -104,7 +135,7 @@ struct SquircleAction: Equatable {
         case .archive: return "Archived"
         case .cleanup: return "Cleaned up finished workers"
         case .status: return "Checked workers"
-        case .buildStart: return "Started build"
+        case .buildStart: return "Started a build"
         case .buildStatus: return "Checked builds"
         case .simStart: return "Started simulator"
         case .simStop: return "Stopped simulator"
@@ -116,7 +147,68 @@ struct SquircleAction: Equatable {
         case .media: return "Published a recording"
         case .help: return "Read Squircle's help"
         case .other: return "Ran Squircle"
+        case .taskLookup: return "Checked tasks"
+        case .taskHeard: return "Noted nothing to track"
+        case .notesLookup: return "Read notes"
+        default: return phrase { _ in nil }.first?.text ?? "Ran Squircle"
         }
+    }
+
+    /// One piece of a tracker line: what was done, what to, a status.
+    struct Piece: Equatable {
+        enum Role: Equatable { case verb, plain, subject, quiet, status(String) }
+        let text: String
+        let role: Role
+        static func verb(_ text: String) -> Piece { Piece(text: text, role: .verb) }
+        static func plain(_ text: String) -> Piece { Piece(text: text, role: .plain) }
+        static func subject(_ text: String) -> Piece { Piece(text: text, role: .subject) }
+        static func quiet(_ text: String) -> Piece { Piece(text: text, role: .quiet) }
+    }
+
+    /// What a tracker change did, in your words where it has them: "Added
+    /// task: …", "Marked “…” ready to try", "Replaced “…” with “…”", "Asked
+    /// you: …". `name` finds a task's ask by ID; a task it can't find reads
+    /// as "a task", never as its ID.
+    func phrase(_ name: (String) -> String?) -> [Piece] {
+        // Two asks on a line share it, so both fit before it wraps twice.
+        let two = (kind == .taskAdd && !replaces.isEmpty) || kind == .taskReplace
+        // A task named mid-line stays short, so what happened to it (a status) still shows.
+        func quoted(_ text: String?) -> String? { Self.clip(text, limit: two ? 32 : 48).map { "“" + $0 + "”" } }
+        let subject = repeats.map { $0 > 1 ? "\($0) tasks" : "tasks" } ?? quoted(task.flatMap(name)) ?? "a task"
+        let note = Self.clip(self.note).map { [Piece.quiet("· " + $0)] } ?? []
+        switch kind {
+        case .taskAdd where !replaces.isEmpty:
+            let old = replaces.count == 1 ? quoted(name(replaces[0])) ?? "an earlier ask" : "\(replaces.count) earlier asks"
+            return [.verb("Replaced"), .subject(old), .plain("with"), .subject(quoted(text) ?? "a new ask")]
+        case .taskAdd: return [.verb("Added task:"), .subject(Self.clip(text, limit: 90) ?? "a new ask")]
+        case .taskReplace:
+            return [.verb("Replaced"), .subject(subject), .plain("with"), .subject(quoted(replacement.flatMap(name)) ?? "a later ask")]
+        case .taskStatus(let status): return [.verb("Marked"), .subject(subject), Piece(text: Self.statusWords[status] ?? status, role: .status(status))] + note
+        case .taskReword: return [.verb("Reworded"), .subject(subject)] + (Self.clip(text).map { [.plain("as"), .subject("“" + $0 + "”")] } ?? [])
+        case .taskMove: return [.verb("Moved"), .subject(subject)] + (toTop ? [.plain("to the top")] : [])
+        case .taskNote: return [.verb("Noted on"), .subject(subject)] + note
+        case .taskAsk: return [.verb("Asked you:"), .subject(Self.clip(text, limit: 90) ?? "a question")]
+        case .taskWithdraw: return [.verb("Took back a question")]
+        case .taskAttach(let video): return [.verb(video ? "Attached a clip to" : "Attached a screenshot to"), .subject(subject)]
+        case .taskLink(let build, let remove):
+            return [.verb(remove ? "Unlinked" : "Linked"), .plain((build ? "a build " : "a worker ") + (remove ? "from" : "to")), .subject(subject)]
+        case .noteAdd: return [.verb("Added note:"), .subject(Self.clip(text) ?? "a note")]
+        case .noteEdit: return [.verb("Edited note:"), .subject(Self.clip(text) ?? "a note")]
+        case .noteRemove: return [.verb("Removed a note")]
+        default: return [.verb(verb)]
+        }
+    }
+
+    static let statusWords = ["queued": "queued", "in_progress": "in progress", "needs_you": "needs you",
+                              "ready_to_try": "ready to try", "done": "done", "dropped": "dropped"]
+
+    /// Words as they read on one line, or nil when they are only shell
+    /// (`$(cat /tmp/ask.txt)`, `$I`) and say nothing.
+    static func clip(_ text: String?, limit: Int = 140) -> String? {
+        guard let text else { return nil }
+        let line = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: " ")
+        guard !line.isEmpty, !line.hasPrefix("$") else { return nil }
+        return line.count > limit ? String(line.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…" : line
     }
 
     /// The step's title when it folds with the rest of the turn's work.
@@ -125,7 +217,8 @@ struct SquircleAction: Equatable {
         case .spawn: return verb + " · " + (name ?? title ?? "a worker")
         case .send, .answer, .archive: return verb + " " + (name ?? "a worker")
         case .read: return verb + " " + (name.map { $0 + "’s reply" } ?? "a worker’s reply")
-        case .buildStart: return verb + (app.map { " · " + $0 } ?? "")
+        case .buildStart: return verb + (app.map { " of " + $0 } ?? "")
+        case _ where isTracker: return phrase { _ in nil }.map(\.text).joined(separator: " ")
         default: return verb
         }
     }
@@ -135,51 +228,113 @@ struct SquircleAction: Equatable {
     /// Every Squircle command in `command`. `result` is the whole call's
     /// output: a lone command owns all of it; several share it only when it
     /// splits into exactly one Squircle reply each, in order. Otherwise
-    /// their targets and outcomes stay unknown rather than borrowed.
+    /// their targets and outcomes stay unknown rather than borrowed. One
+    /// whose output a `$( … )` captures has none to show.
     static func parse(command: String, result: String? = nil) -> [SquircleAction] {
-        let invocations = invocations(command)
+        var scope = Scope()
+        let invocations = invocations(command, scope: &scope)
         guard !invocations.isEmpty else { return [] }
-        let outputs: [Output?]
-        if result == nil {
-            outputs = invocations.map { _ in nil }
-        } else if invocations.count == 1 {
-            outputs = [Output(result ?? "")]
-        } else if let replies = Output.replies(result ?? ""), replies.count == invocations.count {
-            outputs = replies.map(Output.init)
-        } else {
-            outputs = invocations.map { _ in Output.unattributed }
+        let printed = invocations.filter { !$0.captured }.count
+        var replies: [String]?
+        if let result, printed > 1, let split = Output.replies(result), split.count == printed { replies = split }
+        var next = 0
+        return invocations.compactMap { invocation in
+            var output: Output?
+            if invocation.captured {
+                output = result == nil ? nil : .unattributed
+            } else if let result {
+                if printed == 1 { output = Output(result) } else if let replies { output = Output(replies[next]) } else { output = .unattributed }
+                next += 1
+            }
+            var found = action(invocation.words, output: output)
+            found?.repeats = invocation.repeats
+            return found
         }
-        return zip(invocations, outputs).compactMap { action($0, output: $1) }
+    }
+
+    /// Names a command line gives the CLI as it goes: `S() { …/squircle …; }`,
+    /// `S=…/squircle`, `A=(…/squircle --data-dir …)`, and option arrays
+    /// (`A=(--data-dir … --server …)`) to pass it.
+    private struct Scope {
+        var functions = Set<String>(), variables = Set<String>(), options = Set<String>()
+        var defining: String?
+        /// `A=` waiting for the array that follows it.
+        var array: String?
+        /// Items of the `for` loop being read, 0 when unknown; nil outside one.
+        var loop: Int?
+        var pendingLoop: Int?
+    }
+
+    private struct Invocation {
+        var words: [String]
+        var captured = false
+        var repeats: Int?
     }
 
     /// The words after the CLI's name, for each Squircle command in `command`.
-    private static func invocations(_ command: String) -> [[String]] {
-        guard command.contains("squircle") else { return [] }
-        var functions = Set<String>(), variables = Set<String>()
-        var defining: String?
-        var found: [[String]] = []
+    private static func invocations(_ command: String, scope: inout Scope, captured: Bool = false) -> [Invocation] {
+        guard command.contains("squircle") || !scope.variables.isEmpty || !scope.functions.isEmpty else { return [] }
+        var found: [Invocation] = []
         for words in Shell.commands(command) {
-            // `S() { …/squircle … "$@"; }` and `S="…/squircle …"` name the CLI.
-            if words.count == 2, words[1] == "()" { defining = words[0]; continue }
-            if let name = defining {
-                defining = nil
-                if words.contains(where: isBinary) { functions.insert(name); continue }
+            // `$( … )` runs first, its output kept by the shell.
+            for word in words {
+                guard let open = word.range(of: "$("), let close = word.range(of: ")", options: .backwards), open.upperBound <= close.lowerBound else { continue }
+                found += invocations(String(word[open.upperBound..<close.lowerBound]), scope: &scope, captured: true)
             }
+            if let name = scope.array {
+                scope.array = nil
+                if let first = words.first, isBinary(first) { scope.variables.insert(name); continue }
+                if words.first?.hasPrefix("-") == true { scope.options.insert(name); continue }
+            }
+            // `S() { …/squircle … "$@"; }` and `S="…/squircle …"` name the CLI.
+            if words.count == 2, words[1] == "()" { scope.defining = words[0]; continue }
+            if let name = scope.defining {
+                scope.defining = nil
+                if words.contains(where: isBinary) { scope.functions.insert(name); continue }
+            }
+            if words.count == 1, words[0].hasSuffix("="), words[0].dropLast().allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) {
+                scope.array = String(words[0].dropLast())
+                continue
+            }
+            // `for o in a b c; do … done`: what runs inside runs once per item.
+            if words.first == "for", words.count > 2, words[2] == "in" {
+                let items = words.dropFirst(3)
+                scope.pendingLoop = items.contains { $0.contains("$") || $0.contains("*") } ? 0 : items.count
+                continue
+            }
+            if words.first == "while" || words.first == "until" { scope.pendingLoop = 0 }
+            if words.first == "do" { scope.loop = scope.pendingLoop ?? 0; scope.pendingLoop = nil }
+            if words.first == "done" { scope.loop = nil; continue }
             var index = 0
             while index < words.count, let eq = words[index].firstIndex(of: "="), words[index][..<eq].allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }),
                   !words[index].hasPrefix("-") {
                 let value = words[index][words[index].index(after: eq)...]
-                if value.split(separator: " ").first.map({ isBinary(String($0)) }) == true { variables.insert(String(words[index][..<eq])) }
+                // A path with spaces, or a path and its options.
+                if isBinary(String(value)) || value.split(separator: " ").first.map({ isBinary(String($0)) }) == true {
+                    scope.variables.insert(String(words[index][..<eq]))
+                }
                 index += 1
             }
             // The command itself, not an argument (`grep squircle`).
-            while index < words.count, ["env", "exec", "time", "command", "nohup"].contains(words[index]) { index += 1 }
-            let start = index
-            guard start < words.count, isBinary(words[start]) || functions.contains(words[start])
-                    || variables.contains(where: { words[start] == "$" + $0 || words[start] == "${\($0)}" }) else { continue }
-            if isAction(Array(words[(start + 1)...])) { found.append(Array(words[(start + 1)...])) }
+            while index < words.count, ["env", "exec", "time", "command", "nohup", "do", "then", "else", "{"].contains(words[index]) { index += 1 }
+            guard index < words.count else { continue }
+            let head = words[index]
+            guard isBinary(head) || scope.functions.contains(head) || variable(head).map(scope.variables.contains) == true else { continue }
+            var rest = Array(words[(index + 1)...])
+            // `"$S" "${A[@]}" task …`: the options array is the CLI's own.
+            while let first = rest.first, let name = variable(first), scope.options.contains(name) { rest.removeFirst() }
+            if isAction(rest) { found.append(Invocation(words: rest, captured: captured, repeats: scope.loop.flatMap { $0 == 1 ? nil : $0 })) }
         }
         return found
+    }
+
+    /// `X` of `$X`, `${X}` or `${X[@]}`.
+    private static func variable(_ word: String) -> String? {
+        guard word.hasPrefix("$") else { return nil }
+        var name = word.dropFirst()
+        if name.hasPrefix("{"), name.hasSuffix("}") { name = name.dropFirst().dropLast() }
+        if let bracket = name.firstIndex(of: "[") { name = name[..<bracket] }
+        return name.isEmpty ? nil : String(name)
     }
 
     private static func isBinary(_ word: String) -> Bool {
@@ -190,7 +345,9 @@ struct SquircleAction: Equatable {
     private static let valued: Set<String> = [
         "--data-dir", "--server", "--coordinator", "--title", "--branch", "--base", "--prompt", "--model", "--thread", "--device",
         "--id", "--project", "--scheme", "--configuration", "--mode", "--export", "--export-method", "--idempotency-key",
-        "--file", "--caption", "--build", "--summary", "--message", "--handoff", "--kind", "--name", "--team", "--bundle-id"
+        "--file", "--caption", "--build", "--summary", "--message", "--handoff", "--kind", "--name", "--team", "--bundle-id",
+        "--task", "--ask", "--status", "--note", "--under", "--replaced-by", "--replaces", "--question", "--option", "--provider",
+        "--effort", "--limit", "--max-chars", "--since", "--in", "--export-options", "--history-before"
     ]
 
     private struct Words {
@@ -250,9 +407,50 @@ struct SquircleAction: Equatable {
         case ("agent", _): action = SquircleAction(kind: .agentOther)
         case ("perf", _): action = SquircleAction(kind: .perf)
         case ("media", _): action = SquircleAction(kind: .media)
+        case ("task", _): action = task(sub, sub == "sub" ? Array(positional.dropFirst(2)) : args, options)
+        case ("notes", "add"): action = SquircleAction(kind: .noteAdd, text: args.first)
+        case ("notes", "edit"): action = SquircleAction(kind: .noteEdit, text: args.dropFirst().first)
+        case ("notes", "remove"): action = SquircleAction(kind: .noteRemove)
+        case ("notes", _): action = SquircleAction(kind: .notesLookup)
         default: action = SquircleAction(kind: .other)
         }
         action.outcome = output?.outcome ?? .pending
+        return action
+    }
+
+    /// `task …`; `sub add ITEM` adds an ask like `add` does.
+    private static func task(_ sub: String, _ args: [String], _ options: [String: String]) -> SquircleAction {
+        let id = args.first.flatMap(uuid)
+        var action: SquircleAction
+        switch sub {
+        case "add", "sub" where args.first == "add":
+            action = SquircleAction(kind: .taskAdd, text: options["--ask"])
+            action.replaces = (options["--replaces"] ?? "").split(separator: ",").compactMap { uuid(String($0)) }
+        case "update":
+            if let replacement = options["--replaced-by"] {
+                action = SquircleAction(kind: .taskReplace)
+                action.replacement = uuid(replacement)
+            } else if let status = options["--status"] {
+                action = SquircleAction(kind: .taskStatus(status))
+            } else if let ask = options["--ask"] {
+                action = SquircleAction(kind: .taskReword, text: ask)
+            } else if options["--under"] != nil || options["--top"] != nil {
+                action = SquircleAction(kind: .taskMove)
+                action.toTop = options["--under"] == nil
+            } else {
+                action = SquircleAction(kind: .taskNote)
+            }
+            action.note = options["--note"]
+        case "ask": action = SquircleAction(kind: .taskAsk, text: options["--question"])
+        case "withdraw": return SquircleAction(kind: .taskWithdraw)
+        case "attach":
+            let file = (options["--file"] ?? "").lowercased()
+            action = SquircleAction(kind: .taskAttach(video: [".mp4", ".mov", ".m4v"].contains { file.hasSuffix($0) }))
+        case "link": action = SquircleAction(kind: .taskLink(build: options["--build"] != nil, remove: options["--remove"] != nil))
+        case "heard": return SquircleAction(kind: .taskHeard)
+        default: return SquircleAction(kind: .taskLookup)
+        }
+        if action.kind != .taskAdd { action.task = id }
         return action
     }
 

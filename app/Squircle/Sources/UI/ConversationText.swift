@@ -115,6 +115,22 @@ final class ConversationText {
             symbol = news.succeeded ? "shippingbox" : "xmark.octagon"
             add("From ", bold); add("Squircle · " + news.app + " build", font)
             state = news.succeeded ? ("ready", Theme.success) : ("failed", Theme.failure)
+        case .action(let action) where action.isTracker:
+            // Changes to your tasks and the agent's notes lead with the
+            // accent's mark, so they read as Squircle's at a glance.
+            symbol = action.symbol
+            for (index, piece) in action.phrase({ line.taskAsks[$0] }).enumerated() {
+                let space = index == 0 ? "" : " "
+                switch piece.role {
+                case .verb: add(space + piece.text, bold)
+                case .plain: add(space + piece.text, font, .secondaryLabel)
+                case .subject: add(space + piece.text, font)
+                case .quiet: add(space + piece.text, font, .secondaryLabel)
+                case .status(let raw):
+                    let status = AppTask.Status(rawValue: raw)
+                    add(space + piece.text, Theme.font(.subheadline, 15, .semibold), status.map(WorkItemPage.color) ?? .secondaryLabel)
+                }
+            }
         case .action(let action):
             symbol = action.symbol
             switch action.kind {
@@ -133,7 +149,7 @@ final class ConversationText {
             case .read: add("Read ", bold); add(name + "’s reply", font)
             case .archive: add("Archived ", bold); add(name, font)
             case .buildStart:
-                add(action.verb, bold); if let app = action.app { add(" · " + app, font) }
+                add(action.verb, bold); if let app = action.app { add(" of ", bold); add(app, font) }
                 switch line.buildStatus {
                 case "queued"?: state = ("queued", .tertiaryLabel)
                 case "running"?: state = ("building", Theme.accent)
@@ -162,7 +178,8 @@ final class ConversationText {
             text.insert(NSAttributedString(attachment: attachment), at: 0)
             lead = size.width + 4
         } else if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: UIImage.SymbolConfiguration(font: Theme.font(.footnote, 13, .medium)))?
-            .withTintColor(line.failed ? Theme.failure : line.running ? Theme.accent : .secondaryLabel, renderingMode: .alwaysOriginal) {
+            .withTintColor(line.failed ? Theme.failure : line.running || line.action?.isTracker == true ? Theme.accent : .secondaryLabel,
+                           renderingMode: .alwaysOriginal) {
             text.insert(NSAttributedString(string: "  ", attributes: [.font: font]), at: 0)
             text.insert(NSAttributedString(attachment: NSTextAttachment(image: symbol)), at: 0)
         }

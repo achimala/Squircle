@@ -105,7 +105,7 @@ impl Host for AgentsHost {
     }
 
     fn cli(&self) -> String {
-        self.0.cli().to_string()
+        self.0.cli()
     }
 
     fn boot<'a>(&'a self, device: &'a str) -> Pending<'a, Result<()>> {

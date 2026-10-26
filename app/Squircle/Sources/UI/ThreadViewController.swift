@@ -73,6 +73,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     var onScrollBegan: (() -> Void)?
     /// The app's tasks, with its threads a tab away.
     var onTasks: (() -> Void)?
+    /// Opens Tasks at one task (a work item or sub-task, by ID).
+    var onOpenTask: ((String) -> Void)?
     var onBuilds: (() -> Void)?
     private let tasks = Theme.glassButton(symbol: "checklist", identifier: "agent.tasks", accessibilityLabel: "Tasks")
     /// Open tasks at a glance, just above the field; tapping opens Tasks.
@@ -992,8 +994,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard items.contains(where: { if case .action = $0 { return true }; return false }) else { return items }
         let workers = model.workers
         let sessions = Dictionary(model.sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let tasks = model.tasks(for: project).everyTask
+        let asks = Dictionary(tasks.map { ($0.id.lowercased(), $0.ask) }, uniquingKeysWith: { a, _ in a })
         return items.compactMap { item in
             guard case .action(var line) = item else { return item }
+            if let action = line.action, action.isTracker {
+                for id in action.tasks { line.taskAsks[id] = asks[id] }
+                // A new ask is found by its words; a replaced one opens what replaced it.
+                switch action.kind {
+                case .taskAdd: line.task = tasks.first { $0.ask == action.text }?.id
+                case .taskReplace: line.task = action.replacement.flatMap { asks[$0] == nil ? nil : $0 } ?? action.task
+                default: line.task = action.task.flatMap { asks[$0] == nil ? nil : $0 }
+                }
+                return .action(line)
+            }
             // A spawn whose reply was cut short or shared with other commands
             // is found by its own branch or title, never by another's ID.
             if line.thread == nil, case .action(let action) = line.kind, action.isSpawn {
@@ -1408,7 +1422,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func tappable(_ item: ThreadItem?) -> Bool {
         switch item {
         case .agentMessage: return true
-        case .action(let line): return opens(item) != nil || line.text?.isEmpty == false
+        case .action(let line): return opens(item) != nil || line.text?.isEmpty == false || line.step != nil
         case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
         case .earlier, .summary, .note, .changes: return true
         case .update: return opens(item) != nil
@@ -1495,7 +1509,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             else { toggle(message.id) }
         case .action(let line):
             // What the agent sent reads in full in the worker it went to.
+            // Anything else shows the command it came from, and opens its task.
             if let id = opens(item) { onOpenThread?(id) } else if line.text?.isEmpty == false { toggle(line.id) }
+            else if let step = line.step { showDetail(step, line: line) }
         default: break
         }
     }
@@ -1538,9 +1554,19 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         present(DiffViewController(title: "Changes") { [weak self] in await self?.model.turnDiff(changes) }, animated: true)
     }
 
-    private func showDetail(_ step: ChatMessage) {
+    private func showDetail(_ step: ChatMessage, line: ActionLine? = nil) {
         guard presentedViewController == nil else { return }
-        present(StepDetailViewController(step: step), animated: true)
+        let detail = StepDetailViewController(step: step)
+        if let line {
+            detail.headline = ConversationText.action(line, expanded: false, traits: traitCollection)
+            if let task = line.task, let onOpenTask {
+                detail.onOpenTask = { [weak self, weak detail] in
+                    guard self != nil else { return }
+                    detail?.dismiss(animated: true) { onOpenTask(task) }
+                }
+            }
+        }
+        present(detail, animated: true)
     }
 
     private func loadImage(_ shot: Shot, item: String) async -> Bool {
@@ -1751,6 +1777,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             }
             await MediaViewer.debugDrags(in: self?.view.window)
         }
+    }
+    /// Verification only: `SQUIRCLE_ACTION=N` scrolls to the Nth newest
+    /// tracker line; `SQUIRCLE_ACTION_OPEN=1` then taps it, `=task` its
+    /// Open in Tasks too.
+    func debugScrollToAction(_ n: Int, open: String?) async {
+        let rows = dataSource.snapshot().itemIdentifiers.filter { if case .action(let line) = itemsByID[$0] { line.action?.isTracker == true } else { false } }
+        guard rows.count >= n, let path = dataSource.indexPath(for: rows[rows.count - n]) else { return }
+        pinToBottom = false
+        table.scrollToRow(at: path, at: .middle, animated: false)
+        guard open != nil else { return }
+        tableView(table, didSelectRowAt: path)
+        guard open == "task" else { return }
+        try? await Task.sleep(for: .seconds(2))
+        (presentedViewController as? StepDetailViewController)?.onOpenTask?()
     }
     /// Verification only: types and sends a real message, as the composer does.
     func debugSend(_ text: String) {

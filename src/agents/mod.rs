@@ -84,7 +84,7 @@ const BUILD_WATCH_SECS: u64 = 14 * 24 * 3600;
 pub struct Agents {
     root: PathBuf,
     /// The squircle executable and its arguments, for instructions to agents.
-    cli: String,
+    server: String,
     /// The registry, T3's shell and the connection; reached only by letters.
     owner: Owner<State>,
     view: Snapshot<View>,

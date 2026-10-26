@@ -79,6 +79,14 @@ struct ActionLine: Equatable {
     var state: WorkerState?
     /// For a build it started: where that build stands ("running", "succeeded", …).
     var buildStatus: String?
+    /// The asks of the tasks a tracker change names, by ID.
+    var taskAsks: [String: String] = [:]
+    /// The task a tap opens in Tasks, when the app has it.
+    var task: String?
+    /// The tool call it came from, whose command shows on tap.
+    var step: ChatMessage?
+
+    var action: SquircleAction? { if case .action(let action) = kind { action } else { nil } }
 
     var text: String? {
         guard case .action(let action) = kind else { return nil }
@@ -386,7 +394,7 @@ enum ThreadItem: Equatable {
         guard let actions = step.step?.actions else { return [] }
         return actions.enumerated().filter { $0.element.visible }.map { index, action in
             .action(ActionLine(id: "action:\(step.id)#\(index)", kind: .action(action), thread: action.worker, title: action.title,
-                               running: step.isStreaming, failed: step.failed))
+                               running: step.isStreaming, failed: step.failed, step: step))
         }
     }
 
@@ -445,6 +453,7 @@ enum ThreadItem: Equatable {
         for step in run {
             let actions = actionRows(step)
             if actions.isEmpty { rail.append(step); continue }
+            if step.step?.alsoRan == true { rail.append(step) }
             flush()
             rows += actions
         }

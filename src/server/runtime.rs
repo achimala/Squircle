@@ -38,11 +38,14 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     };
     let listener = tokio::net::TcpListener::bind(listen).await?;
     let tasks = Arc::new(Tasks::open(&store.root)?);
-    let agents = Agents::open(
+    let server = format!("http://{}", listener.local_addr()?);
+    // Agents run `squircle` through this wrapper of the running binary.
+    crate::agents::write_wrapper(
         &store.root,
-        &format!("http://{}", listener.local_addr()?),
-        tasks.clone(),
+        &server,
+        &std::env::current_exe()?.canonicalize()?,
     )?;
+    let agents = Agents::open(&store.root, &server, tasks.clone())?;
     let push = Push::open(&store.root)?;
     agents.attach_push(push.clone());
     let pool = Pool::open(&store.root, agents.clone())?;

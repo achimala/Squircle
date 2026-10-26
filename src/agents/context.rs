@@ -147,8 +147,20 @@ pub(super) fn quote(path: &Path) -> String {
     }
 }
 
-/// How agents invoke this same CLI against this same service.
+/// How agents invoke this same CLI against this same service: plain
+/// `squircle` once `agent setup` has put this data directory's wrapper on
+/// their PATH, else the binary's path with both options.
 pub fn cli_invocation(root: &Path, server: &str) -> String {
+    if on_path(root) {
+        "squircle".into()
+    } else {
+        cli_full(root, server)
+    }
+}
+
+/// This binary's path with the data directory and service spelled out,
+/// for hooks and anywhere PATH can't be relied on.
+pub fn cli_full(root: &Path, server: &str) -> String {
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
         .unwrap_or_else(|_| PathBuf::from("squircle"));
@@ -157,6 +169,81 @@ pub fn cli_invocation(root: &Path, server: &str) -> String {
         quote(&exe),
         quote(root)
     )
+}
+
+/// The data directory's `squircle`: runs this binary against this data
+/// directory and service from anywhere, so agents can type just `squircle`.
+pub fn wrapper(root: &Path) -> PathBuf {
+    root.join("bin").join("squircle")
+}
+
+/// Where T3's agents find `squircle`: `~/.local/bin`, on the PATH T3 gives
+/// them (Claude Code installs itself there).
+pub fn path_link() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".local/bin/squircle"))
+}
+
+/// Whether `squircle` on agents' PATH is this data directory's wrapper.
+fn on_path(root: &Path) -> bool {
+    let target = |p: &Path| p.canonicalize().ok();
+    path_link().is_some_and(|link| target(&link).is_some_and(|t| Some(t) == target(&wrapper(root))))
+}
+
+/// Writes the wrapper for `exe` (the service's own binary), replacing an
+/// older one. It sets the data directory and service for every call.
+pub fn write_wrapper(root: &Path, server: &str, exe: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let root = root.canonicalize()?;
+    let path = wrapper(&root);
+    let text = format!(
+        "#!/bin/sh\n# Squircle's CLI for the service at {server} with its data in {}; written by the service.\n\
+         SQUIRCLE_DATA_DIR={}\nSQUIRCLE_SERVER={}\nexport SQUIRCLE_DATA_DIR SQUIRCLE_SERVER\nexec {} \"$@\"\n",
+        root.display(),
+        quote(&root),
+        quote(Path::new(server)),
+        quote(exe)
+    );
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+        return Ok(());
+    }
+    private_dir(path.parent().unwrap())?;
+    let staged = path.with_extension("new");
+    std::fs::write(&staged, text)?;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::rename(&staged, &path)?;
+    Ok(())
+}
+
+/// Puts this data directory's wrapper on agents' PATH as `squircle`. Leaves
+/// a `squircle` that is someone else's (a file, or a link to a wrapper that
+/// still exists) alone, and says so.
+pub fn link_wrapper(root: &Path) -> Result<std::result::Result<PathBuf, String>> {
+    let Some(link) = path_link() else {
+        return Ok(Err("no home directory".into()));
+    };
+    let target = wrapper(root);
+    if on_path(root) {
+        return Ok(Ok(link));
+    }
+    match std::fs::symlink_metadata(&link) {
+        Ok(meta) if !meta.file_type().is_symlink() => {
+            return Ok(Err(format!(
+                "{} is another program; agents keep the full path",
+                link.display()
+            )));
+        }
+        Ok(_) if link.canonicalize().is_ok() => {
+            return Ok(Err(format!(
+                "{} runs another data directory's Squircle; agents keep the full path",
+                link.display()
+            )));
+        }
+        Ok(_) => std::fs::remove_file(&link)?,
+        Err(_) => {}
+    }
+    std::fs::create_dir_all(link.parent().unwrap())?;
+    std::os::unix::fs::symlink(&target, &link)?;
+    Ok(Ok(link))
 }
 
 /// The project root that contains `cwd` most closely, comparing resolved
@@ -348,7 +435,7 @@ impl Agents {
              Recent commits:\n{commits}\n\nYour workers: {workers}\n\n\
              Every open work item and sub-task (`{cli} task --help`); these are the user's asks, keep them all:{tasks}\n\n\
              What the user said lately, oldest first:{said}",
-            cli = self.cli,
+            cli = self.cli(),
             tasks = self.open_tasks(&agent.project_id, true),
             old = agent.thread_id,
             commits = if commits.is_empty() {
@@ -516,7 +603,7 @@ impl Agents {
              copied out of /tmp into ~/.t3/userdata/attachments. Builds you or your workers start (`build start --thread {id}`) appear in the chat \
              by themselves when they finish, with Install or why they failed: don't promise otherwise or paste build IDs. \
              No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.{refreshed}",
-            cli = self.cli,
+            cli = self.cli(),
             id = agent.thread_id,
         )
     }

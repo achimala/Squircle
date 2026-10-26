@@ -201,7 +201,11 @@ captures and does not overwrite edited names/summaries.
   [tasks](task-tracking.md#model)). There is no streaming CLI mode, retention deletion or log rotation.
 
 `SQUIRCLE_DATA_DIR`/`--data-dir` select the private store. `SQUIRCLE_SERVER`/
-`--server` select the API address. Credentials come from the local store; they are
+`--server` select the API address. The service writes `DATA_DIR/bin/squircle`,
+a wrapper that sets both for its own binary, and `squircle agent setup` links
+it as `~/.local/bin/squircle` (on the PATH T3 gives its agents) unless another
+`squircle` is there. Agents are then told to type plain `squircle …`; without
+the link they get the full path and options. Hooks always use the full form. Credentials come from the local store; they are
 not placed in command-line arguments. Control requests use a different token from
 phone uploads. The service defaults to loopback and requires user-provided HTTPS
 for phone access. See [lifecycle limits](verification.md#limits-and-lifecycle).
