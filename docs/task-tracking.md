@@ -80,7 +80,8 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   separate Waiting sheet, then a Waiting tab).** In an app's Tasks sheet
   each open question sits under its work item's row in Needs you (a work
   item with a question is in Needs you whatever its status): the question
-  in full, options as glass buttons, a reply field; a worker's approval
+  in full, options as glass buttons in a row (wrapping only when they
+  don't fit), a reply field; a worker's approval
   with its choices; a question about a sub-task names it; a needs-you
   sub-task shows under its item and opens its page; a question no task
   claims leads the section. The item's page shows its open questions under

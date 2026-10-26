@@ -41,7 +41,7 @@ final class WaitingAnswers {
                           title: request.pending.title, detail: request.pending.prompt, monospaced: true)
                 let options = request.pending.options
                 if options.isEmpty {
-                    view.choices([("Decline", nil, false), ("Allow", nil, true)], side: true, busy: busy) { [weak self] index in
+                    view.choices([("Decline", nil, false), ("Allow", nil, true)], busy: busy) { [weak self] index in
                         self?.decide(request, index == 1 ? "accept" : "decline")
                     }
                 } else {
@@ -105,8 +105,9 @@ final class WaitingAnswers {
 }
 
 /// One thing waiting on you: who asks, the question in full, its answers
-/// as plain glass buttons, and a reply field. `compact` (Home): smaller,
-/// answers side by side in a row that scrolls, no field.
+/// as plain glass buttons side by side (wrapping only when they don't
+/// fit), and a reply field. `compact` (Home): smaller, answers in one row
+/// that scrolls sideways, no field.
 final class WaitingItemView: UIView {
     /// The item drawn, so a late redraw never lands on a reused view.
     var itemID: String?
@@ -117,6 +118,12 @@ final class WaitingItemView: UIView {
     private let detail = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel, lines: 4)
     private let buttons = UIStackView()
     private let buttonScroll = UIScrollView()
+    private let flow = AnswerFlow()
+    /// Its width before it is laid out, for a table measuring its cell.
+    var fitWidth: CGFloat {
+        get { flow.widthHint }
+        set { flow.widthHint = newValue }
+    }
     private let field = UITextField()
     private let fieldWrap = UIView()
     private var onChoose: ((Int) -> Void)?
@@ -177,7 +184,7 @@ final class WaitingItemView: UIView {
             answers = buttonScroll
             fieldWrap.isHidden = true
         } else {
-            answers = buttons
+            answers = flow
         }
         let stack = UIStackView(arrangedSubviews: [about, title, detail, answers, fieldWrap])
         stack.axis = .vertical
@@ -215,22 +222,16 @@ final class WaitingItemView: UIView {
         detail.isHidden = compact || (more ?? "").isEmpty
     }
 
-    /// Answers as buttons: (title, subtitle, prominent). Stacked, or side by
-    /// side (`side`, or always when compact).
-    func choices(_ options: [(String, String?, Bool)], side: Bool = false, busy: Bool, choose: @escaping (Int) -> Void) {
+    /// Answers as buttons, side by side: (title, subtitle, prominent).
+    func choices(_ options: [(String, String?, Bool)], busy: Bool, choose: @escaping (Int) -> Void) {
         onChoose = choose
         buttons.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let vertical = !side && !compact
-        buttons.axis = vertical ? .vertical : .horizontal
-        if !compact {
-            buttons.alignment = vertical ? .leading : .fill
-            buttons.distribution = vertical ? .fill : .fillEqually
-        }
+        var made: [UIButton] = []
         for (index, option) in options.enumerated() {
             let button = Theme.glassButton(title: option.0, prominent: option.2, identifier: "waiting.option.\(option.0)")
             button.configuration?.subtitle = compact ? nil : option.1
             button.configuration?.titleLineBreakMode = compact ? .byTruncatingTail : .byWordWrapping
-            button.configuration?.titleAlignment = vertical ? .leading : .center
+            button.configuration?.titleAlignment = .center
             if compact {
                 button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14)
                 button.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
@@ -239,12 +240,12 @@ final class WaitingItemView: UIView {
                     return attributes
                 }
             }
-            button.contentHorizontalAlignment = vertical ? .leading : .center
             button.isEnabled = !busy
             button.addAction(UIAction { [weak self] _ in self?.onChoose?(index) }, for: .touchUpInside)
-            buttons.addArrangedSubview(button)
+            if compact { buttons.addArrangedSubview(button) } else { made.append(button) }
         }
-        (compact ? buttonScroll : buttons).isHidden = options.isEmpty
+        if !compact { flow.set(made) }
+        (compact ? buttonScroll : flow).isHidden = options.isEmpty
         if compact { buttonScroll.contentOffset.x = 0 }
     }
 
@@ -254,6 +255,65 @@ final class WaitingItemView: UIView {
         field.placeholder = placeholder
         field.isEnabled = !busy
         fieldWrap.isHidden = compact || placeholder == nil
+    }
+}
+
+/// Buttons left to right in rows, a new row only when the next doesn't
+/// fit; one wider than a row wraps its title. Its height follows its width
+/// (`widthHint` until it has one).
+private final class AnswerFlow: UIView {
+    var widthHint: CGFloat = 0 { didSet { if widthHint != oldValue, bounds.width == 0 { invalidateIntrinsicContentSize() } } }
+    private var items: [UIButton] = []
+    private var measured: CGFloat = -1
+    private static let gap: CGFloat = 8
+
+    func set(_ buttons: [UIButton]) {
+        items.forEach { $0.removeFromSuperview() }
+        items = buttons
+        for button in buttons {
+            button.translatesAutoresizingMaskIntoConstraints = true
+            addSubview(button)
+        }
+        invalidateIntrinsicContentSize()
+        setNeedsLayout()
+    }
+
+    /// Each button's frame for `width`, and the height they take.
+    private func frames(for width: CGFloat) -> ([CGRect], CGFloat) {
+        guard width > 0 else { return (items.map { _ in .zero }, 0) }
+        var frames: [CGRect] = []
+        var x: CGFloat = 0, y: CGFloat = 0, row: CGFloat = 0
+        for button in items {
+            var size = button.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+            if size.width > width {
+                size = CGSize(width: width, height: button.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height)
+            }
+            if x > 0, x + size.width > width {
+                x = 0
+                y += row + Self.gap
+                row = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + Self.gap
+            row = max(row, size.height)
+        }
+        return (frames, items.isEmpty ? 0 : y + row)
+    }
+
+    private var width: CGFloat { bounds.width > 0 ? bounds.width : widthHint }
+
+    override var intrinsicContentSize: CGSize {
+        CGSize(width: UIView.noIntrinsicMetric, height: frames(for: width).1)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let (frames, _) = frames(for: bounds.width)
+        for (button, frame) in zip(items, frames) where button.frame != frame { button.frame = frame }
+        if measured != bounds.width {
+            measured = bounds.width
+            invalidateIntrinsicContentSize()
+        }
     }
 }
 

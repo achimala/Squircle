@@ -142,6 +142,8 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
                 let cell = table.dequeueReusableCell(withIdentifier: "ask", for: path) as! WaitingCell
                 guard let ask = asks[id] else { return cell }
                 cell.setLast(ask.last)
+                // The cell's text column, so it's measured at its real width.
+                cell.item.fitWidth = table.bounds.width - 72
                 answers.configure(cell.item, ask.item, about: ask.about) { [weak self] in
                     self?.table.performBatchUpdates(nil)
                 }
@@ -1273,6 +1275,7 @@ final class WorkItemPage: UIView {
             questions.arrangedSubviews.forEach { $0.removeFromSuperview() }
             for ask in content.asks {
                 let view = WaitingItemView()
+                view.fitWidth = max(0, bounds.width - 48)
                 answers?.configure(view, ask.item, about: ask.about)
                 questions.addArrangedSubview(view)
             }
