@@ -23,11 +23,22 @@ enum Transport {
     }
 }
 
+/// What the Mac's service says changed, on its event stream (`GET /v1/events`).
+enum ServiceNotice: Equatable {
+    /// The stream is listening: what's fetched from now on misses nothing.
+    case ready
+    /// `topic`'s reply differs now (for `tasks`, `media` and `log`, the one
+    /// for `id`; `media` without an ID: any thread's may).
+    case changed(topic: String, id: String?)
+}
+
 final class SquircleClient {
     let configuration: AppConfiguration
     private let session: URLSession
-    /// The last body and ETag of each polled reply: the service answers an
-    /// unchanged one with an empty 304, so a poll costs a few hundred bytes.
+    /// The event stream's: it stays open, quiet for as long as nothing changes.
+    private let streams: URLSession
+    /// The last body and ETag of each list the phone keeps: the service
+    /// answers an unchanged one with an empty 304.
     private let validated = OSAllocatedUnfairLock<[URL: (etag: String, data: Data)]>(initialState: [:])
 
     init(configuration: AppConfiguration, sessionConfiguration: URLSessionConfiguration = .ephemeral) {
@@ -38,11 +49,40 @@ final class SquircleClient {
         sessionConfiguration.urlCache = nil
         sessionConfiguration.timeoutIntervalForRequest = 45
         sessionConfiguration.timeoutIntervalForResource = 3_600
+        let streaming = (sessionConfiguration.copy() as? URLSessionConfiguration) ?? sessionConfiguration
+        streaming.timeoutIntervalForRequest = .infinity
+        streaming.timeoutIntervalForResource = .infinity
         session = URLSession(configuration: sessionConfiguration, delegate: RefuseRedirects(), delegateQueue: nil)
+        streams = URLSession(configuration: streaming, delegate: RefuseRedirects(), delegateQueue: nil)
     }
-    deinit { session.invalidateAndCancel() }
+    deinit { session.invalidateAndCancel(); streams.invalidateAndCancel() }
     /// Cancels everything under way; the client can't be used again.
-    func invalidate() { session.invalidateAndCancel() }
+    func invalidate() { session.invalidateAndCancel(); streams.invalidateAndCancel() }
+
+    /// Holds the service's event stream open and hands each notice to
+    /// `receive`, `ready` first. Returns when the service ends it; throws
+    /// when it can't be opened or breaks, or when cancelled.
+    func events(_ receive: @MainActor (ServiceNotice) async -> Void) async throws {
+        try await transport("Squircle") {
+            var request = try request(["v1", "events"])
+            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+            let (bytes, response) = try await streams.bytes(for: request)
+            try validate(response, service: "Squircle")
+            // Each event is one `data:` line, named by an `event:` line before it.
+            var name: Substring?
+            for try await line in bytes.lines {
+                if line.hasPrefix("event:") {
+                    name = line.dropFirst(6).drop { $0 == " " }
+                } else if line.hasPrefix("data:") {
+                    defer { name = nil }
+                    if name == "ready" { await receive(.ready); continue }
+                    struct Change: Decodable { let topic: String; let id: String? }
+                    guard let change = try? JSONDecoder().decode(Change.self, from: Data(line.utf8.dropFirst(5))) else { continue }
+                    await receive(.changed(topic: change.topic, id: change.id))
+                }
+            }
+        }
+    }
 
     func builds() async throws -> [AppBuild] {
         try await get(["v1", "builds"], revalidate: true)
@@ -340,8 +380,8 @@ final class SquircleClient {
     /// Every service reply: `{"ok": true, "data": …}`.
     private struct Envelope<T: Decodable>: Decodable { let ok: Bool; let data: T? }
 
-    /// `revalidate`: for replies polled every few seconds; an unchanged one
-    /// costs no body.
+    /// `revalidate`: for lists fetched again on each change notice; an
+    /// unchanged one costs no body.
     private func get<T: Decodable>(_ path: [String], query: [URLQueryItem] = [], revalidate: Bool = false) async throws -> T {
         try await call(request(path, query: query), revalidate: revalidate)
     }
@@ -369,6 +409,7 @@ final class SquircleClient {
     private func bytes(_ request: URLRequest) async throws -> Data {
         try await transport("Squircle") {
             let (data, response) = try await session.data(for: request)
+            trace(request, response)
             try validate(response, service: "Squircle")
             return data
         }
@@ -389,6 +430,7 @@ final class SquircleClient {
             let known = revalidate ? url.flatMap { url in validated.withLock { $0[url] } } : nil
             if let known { request.setValue(known.etag, forHTTPHeaderField: "If-None-Match") }
             var (data, response) = try await session.data(for: request)
+            trace(request, response)
             if let http = response as? HTTPURLResponse, let url, revalidate {
                 if http.statusCode == 304, let known {
                     data = known.data
@@ -407,6 +449,11 @@ final class SquircleClient {
             guard let decoded = try? JSONDecoder().decode(T.self, from: data) else { throw ClientError.response(service) }
             return decoded
         }
+    }
+    /// Each request and its status, in a `SQUIRCLE_PERF=1` connection trace.
+    private func trace(_ request: URLRequest, _ response: URLResponse) {
+        let line = "\(request.httpMethod ?? "GET") \(request.url?.path ?? "") \((response as? HTTPURLResponse)?.statusCode ?? 0)"
+        Task { @MainActor in ConnectionTrace.mark("http", line) }
     }
     private func backendMessage(_ data: Data) -> String? {
         struct Failure: Decodable { struct Detail: Decodable { let message: String }; let error: Detail }

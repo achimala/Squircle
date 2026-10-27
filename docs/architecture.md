@@ -293,14 +293,22 @@ its attempt ID; one from an older attempt is ignored, and a subscription
 ending during setup fails that attempt instead of being lost. Status text
 derives from the phase ("Offline" after 8 s). Provider configuration is a
 `ResourceState` (`absent / loading / ready(fetchedAt) / failed(retryAt)`),
-reloaded from the service every metadata pass when failed (5 s retry) or
-older than 10 minutes, on connect and on a send that lacks it; T3's socket
+reloaded from the service when T3 connects, when the event stream opens
+(if it failed, or is older than 10 minutes) and on a send that lacks it; T3's socket
 is not torn down for it.
 
 **Refresh and transcripts (W6/W7).** Screens take a `RefreshLease` for
-`.tasks(app)` or `.conversation(id)`; one coalesced metadata pass every 4 s
-fetches builds, apps, agents and simulators, plus tasks and media only for
-held leases. A thread's state records `provenance` (`none / cached(seq) /
+`.tasks(app)` or `.conversation(id)`. Nothing is fetched on a timer
+(2026-10-27): while active the phone holds the service's event stream
+(`GET /v1/events`, server-sent events, `src/server/event_routes.rs`), which
+names each list whose reply changed (builds, apps, agents, simulators,
+waiting, an app's tasks, a thread's media, a running build's log, install
+transfers), and the phone fetches exactly that, tasks and media only for
+held leases. On opening (`ready`) it fetches everything once. A closed
+stream opens again on foreground, a new network path, T3's socket
+connecting or T3 activity, and once at once after one that was open ends;
+never on a retry timer. The service computes each list's reply on every
+owner change and sends a notice only when its ETag differs. A thread's state records `provenance` (`none / cached(seq) /
 live(seq)`); rows are cached only as a `Transcript` built from one state, so
 cached rows and state can't come from different revisions. The timeline
 reuses each turn's rows while its inputs are unchanged. Chat action lines
@@ -411,9 +419,8 @@ phone already holds (this session or the disk cache), so T3 replays only
 the events since, or sends a snapshot when the gap is too large (2026-10-15:
 a long agent thread's snapshot is about 600 KB). A revert falls back to a
 snapshot. The Squircle service answers GET JSON with an ETag (unchanged
-polls get an empty 304) and gzip; the phone polls builds, apps, agents and
-simulators every 4 s, and tasks and the open thread's media only while a
-screen holds a refresh lease for them. Sequenced events deduplicate
+fetches get an empty 304) and gzip; the phone fetches a list when the
+event stream names it (above). Sequenced events deduplicate
 replay and append streaming text deltas; an empty final text event preserves the
 accumulated response. A message whose acknowledgement is lost goes
 again by itself, as the same T3 command, on the next connection (T3

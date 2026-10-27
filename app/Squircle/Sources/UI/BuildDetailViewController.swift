@@ -352,18 +352,24 @@ final class BuildLogViewController: UIViewController {
             if size > Self.tailBytes, let newline = body.firstIndex(of: "\n") { body = String(body[body.index(after: newline)...]) }
             append(body, scrollToEnd: true)
             notice.text = body.isEmpty ? "No log yet" : nil
-            // Follow a build that is still running.
-            while !Task.isCancelled {
-                try await Task.sleep(for: .seconds(2))
-                let running = !(model.builds.first(where: { $0.id == build.id })?.status ?? build.status).isTerminalBuildState
-                let page = try await model.buildLog(id: build.id, offset: offset, limit: Self.tailBytes)
-                offset = page.nextOffset
-                if !page.text.isEmpty {
-                    let atEnd = text.contentOffset.y >= text.contentSize.height - text.bounds.height - 40
-                    append(page.text, scrollToEnd: atEnd)
-                    notice.text = nil
-                }
-                if !running && !page.hasMore { break }
+            // Follow a build that is still running: the Mac says when its log
+            // grows, and when the build list changes (it may have finished).
+            var running = !(model.builds.first(where: { $0.id == build.id })?.status ?? build.status).isTerminalBuildState
+            guard running else { return }
+            let id = build.id
+            for await _ in model.notices(where: { topic, about in topic == "builds" || topic == "log" && about == id }) {
+                var page: BuildLogPage
+                repeat {
+                    running = !(model.builds.first(where: { $0.id == build.id })?.status ?? build.status).isTerminalBuildState
+                    page = try await model.buildLog(id: build.id, offset: offset, limit: Self.tailBytes)
+                    offset = page.nextOffset
+                    if !page.text.isEmpty {
+                        let atEnd = text.contentOffset.y >= text.contentSize.height - text.bounds.height - 40
+                        append(page.text, scrollToEnd: atEnd)
+                        notice.text = nil
+                    }
+                } while page.hasMore && !Task.isCancelled
+                if !running || Task.isCancelled { break }
             }
         } catch is CancellationError {
         } catch {

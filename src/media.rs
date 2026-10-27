@@ -93,6 +93,21 @@ pub fn add(root: &Path, thread: &str, file: &Path, caption: Option<&str>) -> Res
     store(root, thread, file, caption, None, false)
 }
 
+/// Threads whose media changed in this process, as they change: what the
+/// phone's event stream tells it to fetch again. A receiver that falls
+/// behind hears `Lagged` and must assume any thread changed.
+pub fn changes() -> tokio::sync::broadcast::Receiver<String> {
+    CHANGED.subscribe()
+}
+
+static CHANGED: std::sync::LazyLock<tokio::sync::broadcast::Sender<String>> =
+    std::sync::LazyLock::new(|| tokio::sync::broadcast::channel(64).0);
+
+fn changed(thread: &str) {
+    // Fails only with nobody listening, when nobody needs to hear it.
+    let _ = CHANGED.send(thread.to_string());
+}
+
 /// Moves a finished simulator recording into the thread's media.
 pub fn add_recording(root: &Path, thread: &str, file: &Path, clip: SimulatorClip) -> Result<Media> {
     store(root, thread, file, None, Some(clip), true)
@@ -112,14 +127,16 @@ fn store(
     simulator: Option<SimulatorClip>,
     take: bool,
 ) -> Result<Media> {
-    store_in(
+    let media = store_in(
         &private_directory(root, thread)?,
         thread,
         file,
         caption,
         simulator,
         take,
-    )
+    )?;
+    changed(thread);
+    Ok(media)
 }
 
 /// Copies `file` into another owner's media folder (a task's, say); its
@@ -196,8 +213,10 @@ pub fn resized(file: &Path, bytes: u64) {
         return;
     };
     media.bytes = bytes;
-    if let Ok(bytes) = serde_json::to_vec_pretty(&media) {
-        let _ = crate::store::write_private(&record, true, |out| Ok(out.write_all(&bytes)?));
+    if let Ok(bytes) = serde_json::to_vec_pretty(&media)
+        && crate::store::write_private(&record, true, |out| Ok(out.write_all(&bytes)?)).is_ok()
+    {
+        changed(&media.thread_id);
     }
 }
 

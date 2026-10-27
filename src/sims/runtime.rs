@@ -128,6 +128,12 @@ impl Sims {
         self.ledger.get()
     }
 
+    /// One item each time the ledger is saved.
+    pub fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        self.ledger.changes().boxed()
+    }
+
     /// Reduces one event for one session and saves the result.
     pub(super) async fn step(
         &self,

@@ -73,6 +73,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/tasks/{id}/questions", post(ask_task))
         .route("/v1/questions/{id}/answer", post(answer_question))
         .route("/v1/questions/{id}/withdraw", post(withdraw_question))
+        .route("/v1/events", get(events))
         .route("/v1/waiting", get(list_waiting))
         .route("/v1/waiting/respond", post(respond_request))
         .route("/v1/import", post(import))
