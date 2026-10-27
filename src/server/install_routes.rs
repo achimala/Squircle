@@ -167,7 +167,7 @@ pub(super) async fn download_ipa(
     let sent = Delivered {
         sent: 0,
         size,
-        ticket: Some((state.tickets.clone(), token)),
+        ticket: Some((state.tickets.clone(), token, state.installs_changed.clone())),
     };
     use futures_util::StreamExt;
     let stream = ReaderStream::new(file).scan(sent, |sent, chunk| {
@@ -194,7 +194,7 @@ pub(super) async fn download_ipa(
 pub(super) struct Delivered {
     pub(super) sent: u64,
     pub(super) size: u64,
-    pub(super) ticket: Option<(Owner<Store>, String)>,
+    pub(super) ticket: Option<(Owner<Store>, String, Arc<tokio::sync::watch::Sender<u64>>)>,
 }
 
 impl Drop for Delivered {
@@ -202,9 +202,10 @@ impl Drop for Delivered {
         if self.sent != self.size {
             return;
         }
-        if let Some((tickets, token)) = self.ticket.take() {
+        if let Some((tickets, token, changed)) = self.ticket.take() {
             tickets.tell(move |store| {
                 let _ = advance_ticket(store, &token, |t| t.completed(now()));
+                changed.send_modify(|n| *n = n.wrapping_add(1));
             });
         }
     }
@@ -232,7 +233,10 @@ pub(super) async fn mark_ticket(
         .ask(move |store| {
             let _ = advance_ticket(store, &token, mark);
         })
-        .await
+        .await;
+    state
+        .installs_changed
+        .send_modify(|n| *n = n.wrapping_add(1));
 }
 
 pub(super) fn advance_ticket(

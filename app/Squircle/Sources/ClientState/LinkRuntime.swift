@@ -30,6 +30,8 @@ final class LinkRuntime {
     weak var host: LinkHost?
     private var retry: Task<Void, Never>?
     private var followRetry: Task<Void, Never>?
+    /// Tells the reducer once a session has held for `Link.stable`.
+    private var stability: Task<Void, Never>?
     private var lease: UIBackgroundTaskIdentifier = .invalid
     /// The attempt the gateway's socket belongs to.
     private var socketAttempt: Int?
@@ -59,7 +61,7 @@ final class LinkRuntime {
     /// Ends the connection for good: timers, the background lease and the socket.
     func close() {
         send(.close)
-        retry?.cancel(); followRetry?.cancel(); retry = nil; followRetry = nil
+        retry?.cancel(); followRetry?.cancel(); stability?.cancel(); retry = nil; followRetry = nil; stability = nil
         gateway.close()
     }
 
@@ -159,8 +161,15 @@ final class LinkRuntime {
             }
         case .sessionReady(let session):
             ConnectionTrace.mark("connected")
+            stability?.cancel()
+            stability = Task { [weak self] in
+                try? await Task.sleep(for: Link.stable)
+                guard !Task.isCancelled else { return }
+                self?.send(.tick(now: .now))
+            }
             host?.linkSessionReady(session)
         case .sessionLost:
+            stability?.cancel(); stability = nil
             host?.linkSessionLost()
         case .report(let report):
             host?.linkReport(report)

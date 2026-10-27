@@ -74,6 +74,8 @@ mod task_routes;
 use task_routes::*;
 mod waiting_routes;
 use waiting_routes::*;
+mod event_routes;
+use event_routes::*;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -84,6 +86,10 @@ pub struct AppState {
     tickets: Owner<Store>,
     /// App catalog writes, one at a time.
     catalog: Arc<Lane>,
+    /// Counts catalog writes, so the phone's event stream hears of them.
+    catalog_changed: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Counts install-link transfer marks, for the same stream.
+    installs_changed: Arc<tokio::sync::watch::Sender<u64>>,
     /// Per-build diagnostic appends and reads (append-only files), one at a time.
     diagnostics: Arc<Lane>,
     /// Build jobs: records, unpersisted results and live operations.
@@ -119,14 +125,7 @@ impl AppState {
     /// changed: its job, its launch diagnostics, the agent that owns it.
     pub(super) fn build_changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
         use futures_util::StreamExt;
-        let mut diagnosed = self.diagnosed.subscribe();
-        diagnosed.mark_unchanged();
-        let diagnosed = futures_util::stream::unfold(diagnosed, |mut d| async move {
-            d.changed().await.ok()?;
-            Some(((), d))
-        })
-        .boxed();
-        let mut sources = vec![self.jobs.changes(), diagnosed];
+        let mut sources = vec![self.jobs.changes(), counted(&self.diagnosed)];
         sources.extend(self.agents.as_ref().map(|a| a.changes()));
         futures_util::stream::select_all(sources).boxed()
     }
@@ -149,6 +148,8 @@ impl AppState {
             files: Arc::new(store.clone()),
             tickets: Owner::spawn("install tickets", store),
             catalog: Arc::new(Lane::new(Rank::Catalog)),
+            catalog_changed: Arc::new(tokio::sync::watch::channel(0).0),
+            installs_changed: Arc::new(tokio::sync::watch::channel(0).0),
             diagnostics: Arc::new(Lane::new(Rank::Diagnostics)),
             builds: Arc::new(Lane::new(Rank::Build)),
             inspections: Arc::new(AtomicUsize::new(0)),
@@ -173,6 +174,39 @@ async fn in_lane<T: Send + 'static>(
 ) -> std::result::Result<T, tokio::task::JoinError> {
     let lane = lane.clone();
     tokio::spawn(async move { lane.run(tokio::task::spawn_blocking(work)).await }).await?
+}
+
+/// Where catalog writes run: its lane, and the count they bump.
+pub(super) struct CatalogWrites(Arc<Lane>, Arc<tokio::sync::watch::Sender<u64>>);
+
+impl AppState {
+    pub(super) fn catalog_writes(&self) -> CatalogWrites {
+        CatalogWrites(self.catalog.clone(), self.catalog_changed.clone())
+    }
+}
+
+/// [`in_lane`] in the catalog's lane, then tells the catalog's readers.
+async fn in_catalog<T: Send + 'static>(
+    writes: CatalogWrites,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> std::result::Result<T, tokio::task::JoinError> {
+    let done = in_lane(&writes.0, work).await;
+    writes.1.send_modify(|n| *n = n.wrapping_add(1));
+    done
+}
+
+/// One item after each change `sender` counts.
+pub(super) fn counted(
+    sender: &tokio::sync::watch::Sender<u64>,
+) -> futures_util::stream::BoxStream<'static, ()> {
+    use futures_util::StreamExt;
+    let mut counted = sender.subscribe();
+    counted.mark_unchanged();
+    futures_util::stream::unfold(counted, |mut c| async move {
+        c.changed().await.ok()?;
+        Some(((), c))
+    })
+    .boxed()
 }
 
 #[cfg(test)]

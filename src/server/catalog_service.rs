@@ -7,7 +7,7 @@ use super::*;
 pub(super) async fn build_app(state: &AppState, job: &Job) -> Option<apps::AppRecord> {
     let (store, job) = (state.files.clone(), job.clone());
     // Copies the preview in the catalog's lane, off the async workers.
-    let result = in_lane(&state.catalog, move || {
+    let result = in_catalog(state.catalog_writes(), move || {
         if job.output().is_some() && job.request().is_some() {
             apps::sync_build_preview(&store, &job)
                 .map(Some)
@@ -75,7 +75,7 @@ pub(super) async fn import_catalog_app(
     )
     .await
     .map_err(ApiError::bad)?;
-    let app = in_lane(&state.catalog.clone(), move || {
+    let app = in_catalog(state.catalog_writes(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }

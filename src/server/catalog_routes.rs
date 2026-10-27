@@ -64,7 +64,7 @@ pub(super) async fn order_apps(
     input: std::result::Result<Json<apps::AppOrder>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
-    let apps = in_lane(&state.catalog.clone(), move || {
+    let apps = in_catalog(state.catalog_writes(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
@@ -93,7 +93,7 @@ pub(super) async fn register_app(
     input: std::result::Result<Json<apps::AppRegistration>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
-    let app = in_lane(&state.catalog.clone(), move || {
+    let app = in_catalog(state.catalog_writes(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
@@ -110,7 +110,7 @@ pub(super) async fn update_app(
     input: std::result::Result<Json<apps::AppUpdate>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let input = body(input)?;
-    let app = in_lane(&state.catalog.clone(), move || {
+    let app = in_catalog(state.catalog_writes(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }
@@ -142,7 +142,7 @@ pub(super) async fn publish_app_preview(
     })
     .await
     .map_err(ApiError::internal)??;
-    let app = in_lane(&state.catalog.clone(), move || {
+    let app = in_catalog(state.catalog_writes(), move || {
         if state.draining.load(Ordering::Acquire) {
             return Err(ApiError::unavailable());
         }

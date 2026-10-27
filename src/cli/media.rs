@@ -87,10 +87,16 @@ pub(super) async fn media(cli: &Cli, command: &MediaCommand) -> Result<Option<Va
                 file,
                 caption,
             } => {
-                let media = squircle::media::add(&root, thread, file, caption.as_deref())?;
-                success(
-                    json!({"id":media.id,"thread_id":media.thread_id,"kind":media.kind,"caption":media.caption,"bytes":media.bytes,"next":"The clip appears in the thread on the phone within a few seconds."}),
+                // Through the service, which tells the phone it is there.
+                let file = std::path::absolute(file)?;
+                let mut reply = post(
+                    cli,
+                    &format!("/v1/t3/threads/{thread}/media"),
+                    json!({"file": file, "caption": caption}),
                 )
+                .await?;
+                reply["data"]["next"] = json!("The clip appears in the thread on the phone.");
+                reply
             }
             MediaCommand::List { thread } => {
                 success(json!({"media":squircle::media::list(&root, thread)?}))
