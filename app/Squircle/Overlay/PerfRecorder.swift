@@ -5,14 +5,17 @@ import Synchronization
 import UIKit
 
 /// Records how the host app performs, from inside its own process: every
-/// frame's timing, the main thread's stack about once a millisecond, CPU,
-/// memory, thermal state and touches. The Mac names the app's frames from
+/// display refresh, what actually reached the screen (each CAMetalLayer
+/// drawable's presented time), GPU time per command buffer and per pass,
+/// every thread's stacks and CPU, memory, thermal and power state, frame-rate
+/// requests and touches. The Mac names the app's frames from
 /// the build's dSYM (`squircle perf`). Not the app's log: `OSLogStore` reads
 /// the process's whole log to find a window of it, which took seconds in the
 /// simulator and longer on the phone, every time a recording stopped.
 @MainActor
 final class PerfRecorder: CaptureProducer {
-    private let sampler: MainThreadSampler
+    private let sampler: ThreadSampler
+    private let probe: GPUProbe
     private var link: CADisplayLink?
     private let started = CACurrentMediaTime()
     private let startDate = Date()
@@ -25,10 +28,15 @@ final class PerfRecorder: CaptureProducer {
     private var events: [[String: Any]] = []
     private var observers: [NSObjectProtocol] = []
     private weak var overlay: UIWindow?
+    private weak var scene: UIWindowScene?
 
-    init(below overlay: UIWindow) {
+    convenience init(below overlay: UIWindow) { self.init(scene: overlay.windowScene, excluding: overlay) }
+
+    init(scene: UIWindowScene?, excluding overlay: UIWindow?) {
         self.overlay = overlay
-        sampler = MainThreadSampler()
+        self.scene = scene
+        sampler = ThreadSampler()
+        probe = GPUProbe()
         touches = TouchTracker(origin: started)
         frames.reserveCapacity(8_000)
         sampler.start()
@@ -38,8 +46,15 @@ final class PerfRecorder: CaptureProducer {
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         self.link = link
-        touches.attach(to: overlay.windowScene?.windows.filter { $0 !== overlay } ?? [])
+        probe.watchFrameRates(origin: started)
+        touches.attach(to: scene?.windows.filter { $0 !== overlay } ?? [])
         let center = NotificationCenter.default
+        for (name, kind) in [(ProcessInfo.thermalStateDidChangeNotification, "thermal"),
+                             (Notification.Name.NSProcessInfoPowerStateDidChange, "low-power")] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.event(kind) }
+            })
+        }
         for (name, kind) in [(UIApplication.didEnterBackgroundNotification, "background"),
                              (UIApplication.willEnterForegroundNotification, "foreground"),
                              (UIApplication.willResignActiveNotification, "inactive"),
@@ -54,12 +69,19 @@ final class PerfRecorder: CaptureProducer {
     deinit {
         // Never left running past its owner, finished or not.
         sampler.abandon()
+        probe.uninstall()
         link?.invalidate()
     }
 
     private func event(_ kind: String) {
-        events.append(["t": CACurrentMediaTime() - started, "kind": kind])
-        if kind != "memory-warning" { interrupted = true }
+        var event: [String: Any] = ["t": CACurrentMediaTime() - started, "kind": kind]
+        switch kind {
+        case "thermal": event["state"] = ThreadSampler.thermal(ProcessInfo.processInfo.thermalState)
+        case "low-power": event["on"] = ProcessInfo.processInfo.isLowPowerModeEnabled
+        case "memory-warning": break
+        default: interrupted = true
+        }
+        events.append(event)
     }
 
     private func tick(_ link: CADisplayLink) {
@@ -68,7 +90,7 @@ final class PerfRecorder: CaptureProducer {
         interrupted = false
         // A late frame: note what was on screen while it was late.
         if let last = frames.last, let gap = FrameGap(from: last, to: frame), gap.late {
-            hitchScreens.append((last.time, overlay.flatMap(Self.screenName(below:)) ?? ""))
+            hitchScreens.append((last.time, Self.screenName(in: scene, excluding: overlay) ?? ""))
         }
         frames.append(frame)
     }
@@ -76,6 +98,7 @@ final class PerfRecorder: CaptureProducer {
     func cancel() {
         stopProducing()
         _ = sampler.stop()
+        probe.uninstall()
     }
 
     private func stopProducing() {
@@ -93,9 +116,14 @@ final class PerfRecorder: CaptureProducer {
         stopProducing()
         let duration = CACurrentMediaTime() - started
         let raw = sampler.stop()
+        let metal = probe.finish(origin: started)
         let frames = self.frames, screens = hitchScreens
-        let gaps = FrameGap.all(frames)
-        let hitches = gaps.filter(\.late).map { hitch -> [String: Any] in
+        // The thumbnail charts what reached the screen: new Metal frames when
+        // the app draws with Metal, display refreshes otherwise.
+        let presented = Self.presented(metal, period: frames.last?.period ?? 1.0 / 60)
+        let gaps = FrameGap.all(presented.count > 1 ? presented : frames)
+        // Late display refreshes (the main thread missed one), with the screen they were on.
+        let hitches = FrameGap.all(frames).filter(\.late).map { hitch -> [String: Any] in
             let screen = screens.last { abs($0.0 - hitch.start) < 0.0005 }?.1 ?? ""
             return ["start": hitch.start, "duration": hitch.overdue, "period": hitch.period, "screen": screen]
         }
@@ -109,22 +137,31 @@ final class PerfRecorder: CaptureProducer {
             "executable": info["CFBundleExecutable"] as? String ?? ""
         ]
         if let id = info["SquircleBuildID"] as? String, !id.isEmpty { app["squircle_build_id"] = id }
+        let screen = scene?.screen ?? UIScreen.main
         let header: [String: Any] = [
-            "format": "squircle-perf", "version": 1,
+            "format": "squircle-perf", "version": 2,
             "app": app,
             "device": ["model": Self.machine(), "system": device.systemName + " " + device.systemVersion, "os_build": Self.osBuild(),
                        "simulator": ProcessInfo.processInfo.environment["SIMULATOR_DEVICE_NAME"] != nil],
             "started_at": startDate.timeIntervalSince1970,
             "duration": duration,
             "refresh_hz": FrameGap.usualRate(frames),
-            "sample_interval_ms": MainThreadSampler.interval * 1000,
+            "display": ["max_fps": screen.maximumFramesPerSecond,
+                        // Without it an iPhone app's own display links stay at 60 Hz.
+                        "promotion_unlocked": info["CADisableMinimumFrameDurationOnPhone"] as? Bool ?? false,
+                        "low_power": ProcessInfo.processInfo.isLowPowerModeEnabled,
+                        "thermal": ThreadSampler.thermal(ProcessInfo.processInfo.thermalState)] as [String: Any],
+            "main_thread": Double(raw.mainID),
+            "metal": metal,
+            "sample_interval_ms": ThreadSampler.interval * 1000,
+            "thread_sample_interval_ms": ThreadSampler.interval * Double(ThreadSampler.othersEvery) * 1000,
             "frames": frames.map { ($0.time * 10_000).rounded() / 10_000 },
             // Each frame's expected period, and the frames that follow a
             // pause (the app inactive or away): their gap is no frame.
             "periods": frames.map { ($0.period * 100_000).rounded() / 100_000 },
             "resumed": frames.indices.filter { frames[$0].resumed },
             "hitches": hitches,
-            "events": (events + touchEvents).sorted { ($0["t"] as? Double ?? 0) < ($1["t"] as? Double ?? 0) }
+            "events": (events + touchEvents + (metal["events"] as? [[String: Any]] ?? [])).sorted { ($0["t"] as? Double ?? 0) < ($1["t"] as? Double ?? 0) }
         ]
         let origin = started
         return await Task.detached(priority: .userInitiated) {
@@ -133,13 +170,58 @@ final class PerfRecorder: CaptureProducer {
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("perf-\(UUID().uuidString).perf.json")
             guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
                   (try? data.write(to: url)) != nil else { return nil }
-            return CaptureOutput.performance(url: url, duration: duration, gaps: gaps, hitches: hitches.count)
+            return CaptureOutput.performance(url: url, duration: duration, gaps: gaps, hitches: gaps.filter(\.late).count)
         }.value
     }
 
+    #if DEBUG
+    /// Verification only, in a Debug overlay injected into an app in the
+    /// simulator, with no paired connection: `SQUIRCLE_PERF_HEADLESS=PATH`
+    /// records for `SQUIRCLE_PERF_SECONDS` (default 10), starting
+    /// `SQUIRCLE_PERF_DELAY` seconds (default 3) after the app's first scene
+    /// is active, and writes the capture to PATH.
+    nonisolated static func headlessIfAsked() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let path = environment["SQUIRCLE_PERF_HEADLESS"] else { return }
+        let delay = environment["SQUIRCLE_PERF_DELAY"].flatMap(Double.init) ?? 3
+        let seconds = environment["SQUIRCLE_PERF_SECONDS"].flatMap(Double.init) ?? 10
+        Task { @MainActor in
+            for await _ in NotificationCenter.default.notifications(named: UIScene.didActivateNotification) { break }
+            try? await Task.sleep(for: .seconds(delay))
+            let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first { $0.activationState == .foregroundActive }
+            let recorder = PerfRecorder(scene: scene, excluding: nil)
+            try? await Task.sleep(for: .seconds(seconds))
+            guard let output = await recorder.finish() else { return print("SQUIRCLE_PERF failed") }
+            try? FileManager.default.removeItem(atPath: path)
+            try? FileManager.default.moveItem(at: output.url, to: URL(fileURLWithPath: path))
+            print("SQUIRCLE_PERF wrote \(path)")
+        }
+    }
+    #endif
+
+    /// Screen frames with new Metal content: every distinct time a drawable
+    /// reached the screen, as frames for the thumbnail.
+    private static func presented(_ metal: [String: Any], period: Double) -> [FrameTiming] {
+        let drawables = metal["drawables"] as? [[Double]] ?? []
+        // On-glass times where the device reports them, else present calls.
+        var times = drawables.compactMap { $0.count > 3 && $0[3] > 0 ? $0[3] : nil }
+        if times.isEmpty { times = drawables.compactMap { $0.count > 5 && $0[5] > 0 ? $0[5] : nil } }
+        var frames: [FrameTiming] = []
+        for time in times.sorted() {
+            guard let last = frames.last else {
+                frames.append(FrameTiming(time: time, period: period, resumed: true))
+                continue
+            }
+            // Layers shown together are one frame; after a still screen,
+            // the gap is no late frame.
+            if time - last.time > 0.002 { frames.append(FrameTiming(time: time, period: period, resumed: time - last.time > 0.25)) }
+        }
+        return frames
+    }
+
     /// The innermost view controller showing in the app's key window.
-    private static func screenName(below overlay: UIWindow) -> String? {
-        let windows = overlay.windowScene?.windows.filter { $0 !== overlay && !$0.isHidden } ?? []
+    private static func screenName(in scene: UIWindowScene?, excluding overlay: UIWindow?) -> String? {
+        let windows = scene?.windows.filter { $0 !== overlay && !$0.isHidden } ?? []
         guard var top = (windows.first { $0.isKeyWindow } ?? windows.last)?.rootViewController else { return nil }
         while true {
             if let next = top.presentedViewController, !next.isBeingDismissed { top = next }
@@ -267,21 +349,26 @@ final class TouchTracker {
     }
 }
 
-/// Samples the main thread's call stack from a background thread.
+/// Samples the app's threads' call stacks from a background thread: the
+/// main thread about once a millisecond (wall time, so its waits show), and
+/// every thread that used CPU about every 4 ms, each sample weighted by the
+/// CPU time that thread used since its last one.
 ///
-/// Never freezes the app: between suspending the main thread and resuming it,
-/// the sampler makes one kernel call (`thread_get_state`) and reads memory
-/// only inside the main thread's own stack, so it can never wait on a lock
-/// the main thread holds (malloc, the Swift runtime, dyld). Everything that
-/// allocates happens after the resume. A sample that can't be read is
-/// skipped; the main thread is resumed on every path.
-final class MainThreadSampler: Thread, @unchecked Sendable {
+/// Never freezes the app: between suspending a thread and resuming it, the
+/// sampler makes kernel calls only (`thread_get_state`, and `mach_vm_region`
+/// the first time it sees a thread, for its stack's bounds) and reads memory
+/// only inside that thread's own stack, so it can never wait on a lock the
+/// thread holds (malloc, the Swift runtime, dyld). Everything that allocates
+/// happens after the resume. A sample that can't be read is skipped; the
+/// thread is resumed on every path.
+final class ThreadSampler: Thread, @unchecked Sendable {
     static let interval = 0.001
+    static let othersEvery = 4
     private static let maxDepth = 192
 
-    private let target: thread_act_t
-    private let stackLow: UInt64
-    private let stackHigh: UInt64
+    private let mainThread: thread_act_t
+    let mainID: UInt64
+    private let mainBounds: (UInt64, UInt64)
     private let done = Atomic<Bool>(false)
     private let exited = NSCondition()
     private var hasExited = false
@@ -289,23 +376,32 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
     private var stacks: [[UInt64]] = []
     private var index: [[UInt64]: Int] = [:]
     private var samples: [(Double, Int32)] = []
+    /// (time, stack, thread ID, CPU microseconds since that thread's last sample)
+    private var threadSamples: [(Double, Int32, UInt64, Int32)] = []
+    private var threads: [UInt64: ThreadRecord] = [:]
+    private var bounds: [UInt64: (UInt64, UInt64)] = [:]
     private var metrics: [[String: Any]] = []
+
+    struct ThreadRecord { var name: String; var cpu: UInt64; var first: UInt64; var priority: Int32 }
 
     /// Call on the main thread.
     override init() {
         precondition(Foundation.Thread.isMainThread)
-        target = mach_thread_self()
+        mainThread = mach_thread_self()
+        var id: UInt64 = 0
+        pthread_threadid_np(nil, &id)
+        mainID = id
         let top = UInt64(UInt(bitPattern: pthread_get_stackaddr_np(pthread_self())))
-        stackHigh = top
-        stackLow = top - UInt64(pthread_get_stacksize_np(pthread_self()))
+        mainBounds = (top - UInt64(pthread_get_stacksize_np(pthread_self())), top)
         super.init()
         name = "Squircle perf sampler"
         qualityOfService = .userInteractive
         samples.reserveCapacity(70_000)
+        threadSamples.reserveCapacity(70_000)
     }
 
     deinit {
-        mach_port_deallocate(mach_task_self_, target)
+        mach_port_deallocate(mach_task_self_, mainThread)
     }
 
     override func main() {
@@ -314,24 +410,21 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
         let toSeconds = Double(timebase.numer) / Double(timebase.denom) / 1e9
         let buffer = UnsafeMutablePointer<UInt64>.allocate(capacity: Self.maxDepth)
         defer { buffer.deallocate() }
+        let me = mach_thread_self()
+        defer { mach_port_deallocate(mach_task_self_, me) }
         var nextMetrics = 0.0
         var lastCPU: (wall: Double, main: Double, all: Double)?
+        var tick = 0
         while !done.load(ordering: .relaxed) {
             let now = Double(mach_absolute_time()) * toSeconds
-            let depth = capture(into: buffer)
-            if depth > 0 {
-                let stack = Array(UnsafeBufferPointer(start: buffer, count: depth))
-                let id: Int
-                if let known = index[stack] { id = known } else {
-                    id = stacks.count
-                    stacks.append(stack)
-                    index[stack] = id
-                }
-                if samples.count < 200_000 { samples.append((now, Int32(id))) }
-            }
+            var known: (UInt64, UInt64)? = mainBounds
+            let depth = Self.capture(mainThread, bounds: &known, into: buffer)
+            if depth > 0, samples.count < 200_000 { samples.append((now, intern(buffer, depth))) }
+            if tick % Self.othersEvery == 0 { sampleThreads(at: now, skipping: me, into: buffer) }
+            tick += 1
             if now >= nextMetrics {
                 nextMetrics = now + 0.25
-                let cpu = Self.cpuTimes(main: target)
+                let cpu = Self.cpuTimes(main: mainThread)
                 var sample: [String: Any] = ["t": now, "memory_mb": Self.footprint() / 1_048_576,
                                              "thermal": Self.thermal(ProcessInfo.processInfo.thermalState)]
                 if let last = lastCPU, now > last.wall {
@@ -350,11 +443,64 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
         exited.unlock()
     }
 
+    private func intern(_ buffer: UnsafeMutablePointer<UInt64>, _ depth: Int) -> Int32 {
+        let stack = Array(UnsafeBufferPointer(start: buffer, count: depth))
+        if let known = index[stack] { return Int32(known) }
+        stacks.append(stack)
+        index[stack] = stacks.count - 1
+        return Int32(stacks.count - 1)
+    }
+
+    /// Every thread that ran since its last sample, the main thread too.
+    private func sampleThreads(at now: Double, skipping me: thread_act_t, into buffer: UnsafeMutablePointer<UInt64>) {
+        var list: thread_act_array_t?
+        var count: mach_msg_type_number_t = 0
+        guard task_threads(mach_task_self_, &list, &count) == KERN_SUCCESS, let list else { return }
+        for i in 0..<Int(count) {
+            let thread = list[i]
+            defer { mach_port_deallocate(mach_task_self_, thread) }
+            guard thread != me, let (id, cpu, name, priority, running) = Self.info(thread) else { continue }
+            var record = threads[id] ?? ThreadRecord(name: name, cpu: cpu, first: cpu, priority: priority)
+            let used = cpu &- record.cpu
+            if !name.isEmpty { record.name = name }
+            record.cpu = cpu
+            record.priority = priority
+            threads[id] = record
+            // Real-time threads (audio) are timed but never held: a pause there is audible.
+            guard used > 0 || running, priority < 97, threadSamples.count < 300_000 else { continue }
+            var known = thread == mainThread ? mainBounds : bounds[id]
+            let depth = Self.capture(thread, bounds: &known, into: buffer)
+            if let known { bounds[id] = known }
+            if depth > 0 { threadSamples.append((now, intern(buffer, depth), id, Int32(clamping: used / 1_000))) }
+        }
+        vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: list)), vm_size_t(Int(count) * MemoryLayout<thread_t>.size))
+    }
+
+    /// A thread's ID, CPU nanoseconds, name, priority and whether it is running.
+    private static func info(_ thread: thread_act_t) -> (UInt64, UInt64, String, Int32, Bool)? {
+        var identifier = thread_identifier_info_data_t()
+        var size = mach_msg_type_number_t(MemoryLayout<thread_identifier_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let gotID = withUnsafeMutablePointer(to: &identifier) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { thread_info(thread, thread_flavor_t(THREAD_IDENTIFIER_INFO), $0, &size) }
+        }
+        var extended = thread_extended_info_data_t()
+        size = mach_msg_type_number_t(MemoryLayout<thread_extended_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let gotInfo = withUnsafeMutablePointer(to: &extended) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(size)) { thread_info(thread, thread_flavor_t(THREAD_EXTENDED_INFO), $0, &size) }
+        }
+        guard gotID == KERN_SUCCESS, gotInfo == KERN_SUCCESS else { return nil }
+        let name = withUnsafeBytes(of: extended.pth_name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+        return (identifier.thread_id, extended.pth_user_time &+ extended.pth_system_time, name, extended.pth_curpri,
+                extended.pth_run_state == TH_STATE_RUNNING)
+    }
+
     /// One stack, leaf first, into `buffer`. Nothing in here allocates.
-    private func capture(into buffer: UnsafeMutablePointer<UInt64>) -> Int {
+    /// `bounds` is the thread's stack; when nil it is looked up from its
+    /// stack pointer while the thread is held.
+    private static func capture(_ target: thread_act_t, bounds: inout (UInt64, UInt64)?, into buffer: UnsafeMutablePointer<UInt64>) -> Int {
         #if arch(arm64)
         // Plain locals: no lazily initialised globals, which take a lock.
-        let mask: UInt64 = 0x0000_000F_FFFF_FFFF, maxDepth = 192, low = stackLow, high = stackHigh
+        let mask: UInt64 = 0x0000_000F_FFFF_FFFF, maxDepth = 192
         guard thread_suspend(target) == KERN_SUCCESS else { return 0 }
         var state = arm_thread_state64_t()
         var count = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.size / MemoryLayout<natural_t>.size)
@@ -363,23 +509,26 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
         }
         var depth = 0
         if read == KERN_SUCCESS {
+            if bounds == nil { bounds = stackRegion(containing: UInt64(state.__sp)) }
             buffer[0] = UInt64(state.__pc) & mask
             buffer[1] = UInt64(state.__lr) & mask
             depth = 2
-            var fp = UInt64(state.__fp)
-            // Each frame record is {previous fp, return address}, always
-            // inside the stack and always further up it.
-            while depth < maxDepth, fp >= low, fp + 16 <= high, fp & 0xF == 0 {
-                guard let record = UnsafePointer<UInt64>(bitPattern: UInt(fp)) else { break }
-                let next = record[0], ret = record[1] & mask
-                guard ret != 0 else { break }
-                // A leaf that saved its frame already has the lr as its return address.
-                if !(depth == 2 && ret == buffer[1]) {
-                    buffer[depth] = ret
-                    depth += 1
+            if let (low, high) = bounds {
+                var fp = UInt64(state.__fp)
+                // Each frame record is {previous fp, return address}, always
+                // inside the stack and always further up it.
+                while depth < maxDepth, fp >= low, fp + 16 <= high, fp & 0xF == 0 {
+                    guard let record = UnsafePointer<UInt64>(bitPattern: UInt(fp)) else { break }
+                    let next = record[0], ret = record[1] & mask
+                    guard ret != 0 else { break }
+                    // A leaf that saved its frame already has the lr as its return address.
+                    if !(depth == 2 && ret == buffer[1]) {
+                        buffer[depth] = ret
+                        depth += 1
+                    }
+                    guard next > fp else { break }
+                    fp = next
                 }
-                guard next > fp else { break }
-                fp = next
             }
         }
         thread_resume(target)
@@ -389,16 +538,31 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
         #endif
     }
 
+    /// The VM region holding `sp`: the thread's stack.
+    private static func stackRegion(containing sp: UInt64) -> (UInt64, UInt64)? {
+        var address = vm_address_t(sp), size = vm_size_t(0)
+        var info = vm_region_basic_info_data_64_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_region_basic_info_data_64_t>.size / MemoryLayout<Int32>.size)
+        var object: mach_port_t = 0
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: Int32.self, capacity: Int(count)) {
+                vm_region_64(mach_task_self_, &address, &size, VM_REGION_BASIC_INFO_64, $0, &count, &object)
+            }
+        }
+        guard result == KERN_SUCCESS, UInt64(address) <= sp, sp < UInt64(address + size) else { return nil }
+        return (UInt64(address), UInt64(address + size))
+    }
+
     /// Asks it to stop without waiting (its owner is gone).
     func abandon() { done.store(true, ordering: .relaxed) }
 
     /// Stops sampling and hands over what it recorded.
-    func stop() -> MainThreadSamples {
+    func stop() -> ThreadSamples {
         done.store(true, ordering: .relaxed)
         exited.lock()
         while !hasExited, isExecuting { _ = exited.wait(until: Date().addingTimeInterval(1)) }
         exited.unlock()
-        return MainThreadSamples(stacks: stacks, samples: samples, metrics: metrics)
+        return ThreadSamples(stacks: stacks, samples: samples, threadSamples: threadSamples, threads: threads, mainID: mainID, metrics: metrics)
     }
 
     private static func footprint() -> Double {
@@ -434,7 +598,7 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
         return (mainTime, all)
     }
 
-    private static func thermal(_ state: ProcessInfo.ThermalState) -> String {
+    static func thermal(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
         case .nominal: "nominal"
         case .fair: "fair"
@@ -447,9 +611,12 @@ final class MainThreadSampler: Thread, @unchecked Sendable {
 
 /// What the sampler recorded, turned into JSON with each address's image
 /// and, where the phone knows it, its symbol.
-struct MainThreadSamples: @unchecked Sendable {
+struct ThreadSamples: @unchecked Sendable {
     let stacks: [[UInt64]]
     let samples: [(Double, Int32)]
+    let threadSamples: [(Double, Int32, UInt64, Int32)]
+    let threads: [UInt64: ThreadSampler.ThreadRecord]
+    let mainID: UInt64
     let metrics: [[String: Any]]
 
     func export(origin: Double) -> [String: Any] {
@@ -474,6 +641,12 @@ struct MainThreadSamples: @unchecked Sendable {
         return [
             "stacks": stacks.map { $0.map(Self.hex) },
             "samples": samples.map { [round($0.0), Double($0.1)] },
+            // [time, stack, thread ID, CPU µs that thread used since its previous sample]
+            "thread_samples": threadSamples.map { [round($0.0), Double($0.1), Double($0.2), Double($0.3)] },
+            "threads": threads.sorted { $0.value.cpu &- $0.value.first > $1.value.cpu &- $1.value.first }.map { id, thread -> [String: Any] in
+                ["id": Double(id), "name": thread.name, "main": id == mainID, "priority": thread.priority,
+                 "cpu_ms": (Double(thread.cpu &- thread.first) / 1e5).rounded() / 10]
+            },
             "metrics": metrics.map { sample in
                 var copy = sample
                 copy["t"] = round(sample["t"] as? Double ?? origin)

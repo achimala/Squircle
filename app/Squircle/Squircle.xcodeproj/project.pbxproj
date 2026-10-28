@@ -52,6 +52,7 @@
 		4CF0218EF899EB2390B44FCA /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD9D79E5C23223D44EB56B4B /* Link.swift */; };
 		4D5A0C54F52464D0DC7E6B0B /* ThreadViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */; };
 		4DDFD13E3021EAE8FBD50E7D /* T3RuntimeMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = 614340BADDBB401F4BDCFAE6 /* T3RuntimeMode.swift */; };
+		4E90B0E07988EB3B276E12DB /* GPUProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = B139C93570C1C1D4649B3312 /* GPUProbe.swift */; };
 		52A55DF003085423A2CC75CF /* Reduction.swift in Sources */ = {isa = PBXBuildFile; fileRef = E82DFCDDC8D37D4A8C1B776F /* Reduction.swift */; };
 		531210BE2D3ED19FEEDAE324 /* MediaViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E3FBED8B705AF489D5D4F09 /* MediaViewer.swift */; };
 		540C9A566D7E624B05F3C475 /* CaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B031C12FA385E38F95AAF587 /* CaptureSession.swift */; };
@@ -76,6 +77,7 @@
 		7F275A46B1B215258858E66C /* RequestCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5386BA2E356615AB102C8F0 /* RequestCard.swift */; };
 		80634C6AFE018923DA492393 /* LinkRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42E355291AFF2203E6E4CEAE /* LinkRuntime.swift */; };
 		825485BA091840E2DDC3668A /* Jelly.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FC2D42D3BB1254066A5007E /* Jelly.swift */; };
+		848F4F1C5CBFFC419203C92A /* GPUProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = B139C93570C1C1D4649B3312 /* GPUProbe.swift */; };
 		8561E88460F96DCD4AB29DB4 /* ThreadViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */; };
 		856B0BA10D16A808D8A613D6 /* SimulatorViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */; };
 		857787AA81D421AE636AA038 /* Reduction.swift in Sources */ = {isa = PBXBuildFile; fileRef = E82DFCDDC8D37D4A8C1B776F /* Reduction.swift */; };
@@ -221,6 +223,7 @@
 		A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadTimeline.swift; sourceTree = "<group>"; };
 		B031C12FA385E38F95AAF587 /* CaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSession.swift; sourceTree = "<group>"; };
 		B0960CDAD4EDF34EF7986A50 /* SquircleWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = SquircleWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		B139C93570C1C1D4649B3312 /* GPUProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUProbe.swift; sourceTree = "<group>"; };
 		C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorViews.swift; sourceTree = "<group>"; };
 		C37CA1E433E4B0E8834ACEE9 /* TasksViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksViewController.swift; sourceTree = "<group>"; };
 		C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Gateway.swift; sourceTree = "<group>"; };
@@ -314,6 +317,7 @@
 				B031C12FA385E38F95AAF587 /* CaptureSession.swift */,
 				413DFF5E9FEE90218E49E059 /* FrameSpring.swift */,
 				CD5E21CCB017A11F8E69752C /* GlassJelly.swift */,
+				B139C93570C1C1D4649B3312 /* GPUProbe.swift */,
 				5C2A80FAC707271FB5E24DAF /* HostCapture.swift */,
 				0C4FD428C018FB4AA1950164 /* OverlayHost.swift */,
 				27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */,
@@ -649,6 +653,7 @@
 				C40EFCF07F2A151D2BFBAE46 /* DeviceStage.swift in Sources */,
 				93827AAA4A823E5BCDF41C05 /* DiffViewer.swift in Sources */,
 				46CA1887E09993777FA2FC1D /* FrameSpring.swift in Sources */,
+				4E90B0E07988EB3B276E12DB /* GPUProbe.swift in Sources */,
 				6F5DF790DA62AD3825768741 /* GlassJelly.swift in Sources */,
 				FB3FA377C1D0CCED56B5215F /* HostCapture.swift in Sources */,
 				2AD99D1225F365AB08C7FA39 /* JSONValue.swift in Sources */,
@@ -747,6 +752,7 @@
 				B9EF10730486FE81421DC60F /* DeviceStage.swift in Sources */,
 				97B0E27B68EBBED4F0D63633 /* DiffViewer.swift in Sources */,
 				E97B8544C8D44C08980511EA /* FrameSpring.swift in Sources */,
+				848F4F1C5CBFFC419203C92A /* GPUProbe.swift in Sources */,
 				6C61E7B0513FDFC6D7E44DFA /* GlassJelly.swift in Sources */,
 				4B0F162145780C3662E872B0 /* HostCapture.swift in Sources */,
 				B254903EDAAA3C21EABA5340 /* JSONValue.swift in Sources */,

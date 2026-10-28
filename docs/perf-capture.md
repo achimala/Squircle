@@ -74,7 +74,7 @@ in the same place.
   and are linked in the message ("Video · 0:12"). The file is sent as it is
   (QuickTime stays `.mov`, checked by its `ftyp`); the 300 MB capture limit
   applies.
-- Performance (`PerfRecorder`, `MainThreadSampler`): display-link frame times
+- Performance (`PerfRecorder`, `ThreadSampler`, `GPUProbe`): display-link frame times
   (hitch = frame more than 1.5 periods apart), main-thread stack every ~1 ms
   (suspend, `thread_get_state`, frame-pointer walk bounded to the main
   thread's stack, resume; nothing allocates or locks while suspended),
@@ -85,6 +85,52 @@ in the same place.
   far longer on the phone (the user saw stop "hang"). Without it the main
   thread's part of a stop measured 2 ms and the rest (stacks, `dladdr`, JSON)
   0.3 s off the main thread; the bubble reads "Finishing recording" meanwhile.
+- **2026-10-28 (user: "why are perf recordings useless"; then "real info
+  about what the CPUs and GPU are doing"): format version 2.** The frame
+  count was display-link ticks, which keep coming at the refresh rate while
+  an app that draws itself with Metal falls behind, so Letters Abroad
+  recordings said 105–111 fps while the user saw 20–30, and there was no GPU
+  or off-main-thread data. Now, only while recording (`GPUProbe` swaps its
+  hooks in at start and puts the originals back at stop):
+  - every `CAMetalLayer.nextDrawable` (wait time, layer), the drawable's
+    `present`/`presentDrawable:` call and its presented handler (on-glass
+    time, or 0 when the compositor dropped it; the simulator SDK has no
+    presented handler, so there the present calls are the source);
+  - every command buffer's `commit` with a completed handler (GPU start/end),
+    `waitUntilScheduled`/`waitUntilCompleted` time and thread;
+  - per pass GPU time from stage-boundary timestamp counters, through a copy
+    of the app's pass descriptor with a sample-buffer attachment (render:
+    vertex and fragment; compute and blit: the encoder), labelled with the
+    encoder's label; GPU ticks mapped to host time from two
+    `sampleTimestamps` calibrations. Only where the GPU supports it: never in
+    the simulator. **Not yet run on a phone.**
+  - display-link rate requests, thermal and Low Power changes, the display's
+    max rate and `CADisableMinimumFrameDurationOnPhone`.
+  `ThreadSampler` (was `MainThreadSampler`) still samples the main thread
+  every ~1 ms by wall time, and now every thread that used CPU every ~4 ms
+  (`task_threads`, `THREAD_EXTENDED_INFO` for CPU and name, stack bounds
+  from `vm_region_64` of its stack pointer looked up while it is held),
+  each sample weighted by that thread's CPU time since its last sample.
+  `perf show` leads with presented fps while something moves (frames
+  clustered across layers shown together; a still screen is not a late
+  frame), the frame-time distribution, a check when refreshes and new frames
+  disagree, late frames by cause (main thread, render thread, GPU, drawable
+  wait, the app's own pacing, nothing in the app busy), the busiest threads,
+  heaviest app functions (total) and functions (self) across all threads,
+  heaviest stacks with system runs folded, GPU per frame and per pass, CPU
+  waits on the GPU, Metal layers, pacing and caps, then each late frame and
+  a per-second timeline (new frames, refreshes, GPU %). Version 1 captures
+  say the screen was not measured.
+  Simulator check (Letters Abroad demo build, `DEBUG` overlay injected with
+  `DYLD_INSERT_LIBRARIES` and `SQUIRCLE_PERF_HEADLESS`, scripted folder open,
+  edge swipe home, close and shelf swipes, 20 s): presented frames 530 and
+  499 in two runs against 542 and 512 changed frames counted in Squircle's
+  screen recording of the same runs (per-second correlation 0.98 and 0.99);
+  display refreshes 1194 and 1196. Not visible in-process: GPU hardware
+  counters beyond pass timestamps (occupancy, bandwidth, per-draw shader
+  cost), the render server's own work and its frame drops for
+  Core Animation-only content, kernel scheduling: Instruments with the
+  phone attached.
 - Upload: `POST /v1/captures?kind=video|performance` (control token, 300 MB
   route limit) into `<data>/captures/`, started as soon as the recording is
   attached; uploads don't wait for each other. Until the message is sent its

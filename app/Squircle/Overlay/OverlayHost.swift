@@ -6,6 +6,9 @@ import UIKit
 /// carries no provisioning profile.
 @_cdecl("squircle_overlay_start")
 public func squircleOverlayStart() {
+    #if DEBUG
+    PerfRecorder.headlessIfAsked()
+    #endif
     let bundleID = Bundle.main.bundleIdentifier ?? ""
     guard AppConfiguration.Shared.teamID != nil, !bundleID.isEmpty, bundleID != AppConfiguration.Namespace.appBundleID else { return }
     // Squircle's paired connection; without it the overlay stays off.
