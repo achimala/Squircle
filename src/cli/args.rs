@@ -117,7 +117,7 @@ pub(super) enum Commands {
     },
     /// Performance recordings made in the app on the phone: summary with symbolicated hitches, plus the raw file.
     #[command(
-        after_help = "The user records performance from the debug overlay's + menu (Record Performance) while using the app; the message links a .perf.json capture on this Mac.\n  squircle perf show PATH_OR_ID           worst hitches with main-thread stacks (app frames from the build's dSYM), heaviest functions, per-second timeline, log\n  squircle --json perf show PATH_OR_ID    the same as structured JSON\n  squircle perf list                      recent captures\nScreen recordings from the same menu and videos the user attaches are .mp4 or .mov files in the same folder; look at their frames (e.g. ffmpeg -i FILE -vf fps=2 /tmp/f%03d.png)."
+        after_help = "The user records performance from the debug overlay's + menu (Record Performance) while using the app; the message links a .perf.json capture on this Mac.\n  squircle perf show PATH_OR_ID           frames that reached the screen, late frames by cause (CPU/GPU/drawable/pacing), every thread's CPU with stacks (app frames from the build's dSYM), GPU per frame and pass, per-second timeline\n  squircle --json perf show PATH_OR_ID    the same as structured JSON\n  squircle perf list                      recent captures\nScreen recordings from the same menu and videos the user attaches are .mp4 or .mov files in the same folder; look at their frames (e.g. ffmpeg -i FILE -vf fps=2 /tmp/f%03d.png)."
     )]
     Perf {
         #[command(subcommand)]

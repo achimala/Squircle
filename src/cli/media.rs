@@ -2,7 +2,7 @@ use super::*;
 
 #[derive(Subcommand)]
 pub(super) enum PerfCommand {
-    /// Summarize a capture: hitches with symbolicated main-thread stacks, heaviest functions, timeline. Text unless --json.
+    /// Summarize a capture: presented fps, late frames by cause, every thread's CPU with symbolicated stacks, GPU per frame and pass, timeline. Text unless --json.
     Show {
         #[arg(help = "Capture path (from the message) or ID (perf list)")]
         capture: String,

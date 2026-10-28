@@ -52,7 +52,7 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `crashes ID --since N --limit N` | Crash events only, same record cursor |
 | `symbolicate --report PATH --dsym PATH` | Local Xcode symbolication attempt for Apple-text reports |
 | `diagnostics send --file PATH` | Upload one diagnostic JSON fixture |
-| `perf show PATH\|ID [--dsym PATH]` | A performance recording from the phone's overlay: worst hitches with symbolicated main-thread stacks, heaviest functions, per-second timeline, app log (older captures only); text, or `--json` |
+| `perf show PATH\|ID [--dsym PATH]` | A performance recording from the phone's overlay: frames that actually reached the screen (fps while moving, a check against display refreshes), late frames by cause (main thread, render thread, GPU, drawable wait, app pacing), CPU of every thread with heaviest functions and stacks, GPU time per frame and per pass, pacing and caps, per-second timeline; text, or `--json` |
 | `perf list` | Performance captures and screen recordings uploaded from the phone (`POST /v1/captures`: authenticated before the body is read, each streamed to its own private file) |
 
 `install-link` does not install or remotely launch an app. Its ticket records
