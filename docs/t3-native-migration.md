@@ -2992,7 +2992,10 @@ scheduled tasks bound to it, links).
   (30) past `SQUIRCLE_COMPACT_TOKENS` (200000) gets `/compact` on its own
   thread, as before. Each new context reading counts once, so an agent still
   large after a compaction is compacted again once it has been idle that long
-  again. `SQUIRCLE_FRESH_*` and `SQUIRCLE_NIGHTLY_FRESH_*` are gone, and so
+  again, but only while compaction shrinks it (by at least a tenth): one that
+  leaves it about as large stops the repeats until a new message reaches the
+  thread (the user's, a note or a notice) or someone runs `agent compact`.
+  `SQUIRCLE_FRESH_*` and `SQUIRCLE_NIGHTLY_FRESH_*` are gone, and so
   is the nightly hour (the only local-time rule).
 - **No `agent fresh`.** The command, `POST /v1/agents/fresh`, the handoff,
   renaming the old thread "… (until DATE)", moving workers and updates to a

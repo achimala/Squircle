@@ -325,5 +325,7 @@ pub(crate) const CONTEXT_READING: &str = "select
     (select json_extract(payload_json,'$.tokenUsage.usedTokens') from orchestration_v2_projection_provider_turns
        where thread_id=?1 and json_extract(payload_json,'$.tokenUsage') is not null
        order by coalesce(completed_at, started_at) desc limit 1) used,
+    (select message_id from orchestration_v2_projection_messages where thread_id=?1 and role='user'
+       order by created_at desc, rowid desc limit 1) latest,
     max(coalesce((select max(created_at) from orchestration_v2_projection_messages where thread_id=?1),''),
         coalesce((select max(updated_at) from orchestration_v2_projection_turn_items where thread_id=?1),'')) last_at";

@@ -90,7 +90,6 @@ fn context_goes_to_the_deepest_project() {
 }
 
 type DispatchHook = Box<dyn Fn(&Value) + Send>;
-type DetailHook = Box<dyn Fn(&str) -> Option<Value> + Send>;
 
 /// T3 as the agents see it: records commands, shows created threads in
 /// the shell (held back while `held` is set, until `release`), and
@@ -115,8 +114,6 @@ struct Fake {
     /// Told when a thread is created.
     created: tokio::sync::Notify,
     on_dispatch: Mutex<Option<DispatchHook>>,
-    /// A shell item T3 sends while a thread's detail is read.
-    on_detail: Mutex<Option<DetailHook>>,
 }
 
 impl Fake {
@@ -147,16 +144,7 @@ impl Fake {
 
 impl Fake {
     /// A thread's projection, as `orchestration.getThreadProjection` answers.
-    async fn projection(&self, id: &str) -> Value {
-        let item = self
-            .on_detail
-            .lock()
-            .unwrap()
-            .as_ref()
-            .and_then(|hook| hook(id));
-        if let Some(item) = item {
-            self.agents().consume_shell(&item).await;
-        }
+    fn projection(&self, id: &str) -> Value {
         let messages: Vec<Value> = self
             .messages
             .lock()
@@ -204,7 +192,7 @@ impl Peer for Fake {
                 {"instanceId": "claudeAgent", "driver": "claudeAgent", "status": "ready", "models": [{"slug": "m"}]}]}),
                 ),
                 "orchestration.getThreadProjection" => {
-                    Ok(self.projection(payload["threadId"].as_str().unwrap()).await)
+                    Ok(self.projection(payload["threadId"].as_str().unwrap()))
                 }
                 _ => panic!("unexpected call {tag}"),
             }
@@ -513,6 +501,7 @@ async fn a_compaction_whose_answer_is_lost_is_settled_by_the_same_command() {
     let checked = |at: &str| m26::Event::Checked {
         thread: "agent".into(),
         reading: wanted(at),
+        latest: None,
         compact: agents.compact_command("agent", "Compacted", 0).unwrap(),
     };
     fake.fail.lock().unwrap().push(("message.dispatch", true));
@@ -532,7 +521,7 @@ async fn a_compaction_whose_answer_is_lost_is_settled_by_the_same_command() {
     let sent = fake.sent("message.dispatch");
     assert_eq!(sent.len(), 1);
     assert!(
-        matches!(&agents.registry().upkeep["p"].intent, m26::Intent::Applied { reading } if reading.at.as_deref() == Some("r1"))
+        matches!(&agents.registry().upkeep["p"].intent, m26::Intent::Applied { reading, .. } if reading.at.as_deref() == Some("r1"))
     );
 }
 
