@@ -149,9 +149,9 @@ final class SquircleClient {
         }
     }
 
-    /// Restarts an app agent's session, or starts it fresh in a new thread.
-    func resetAgent(projectID: String, fresh: Bool) async throws {
-        var request = try request(["v1", "agents", fresh ? "fresh" : "restart"], method: "POST",
+    /// Restarts an app agent's session on its thread.
+    func restartAgent(projectID: String) async throws {
+        var request = try request(["v1", "agents", "restart"], method: "POST",
                                   body: JSONEncoder().encode(["project_id": projectID]))
         request.timeoutInterval = 60
         try await send(request)

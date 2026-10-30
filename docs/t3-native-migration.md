@@ -1788,6 +1788,11 @@ Squircle build `5f52e109-f73e-42c1-8946-ae7ca8675cf2` (0.3.0 45, main at
 
 ## 2026-10-14 restart and start fresh (0.3.0 46)
 
+**Superseded 2026-10-30 for start fresh:** the agent keeps one thread for
+good and is only compacted; `agent fresh`, the handoff and Start Fresh are
+gone. Restart stays. See
+[one permanent agent thread](#2026-10-30-one-permanent-agent-thread).
+
 User: running agents keep an old system prompt, and the LanguageApp agent
 had a long history of doing all the work itself; they wanted a way to fix
 that from the phone or by telling the agent.
@@ -2535,7 +2540,10 @@ copies T3's or the providers' stores.
   durable lines per app (`<data>/notes/<project>.json`, at most 300 characters
   each and 4000 in all) for preferences, decisions and gotchas, listed in each
   turn's note. Not a log; history stays in its sources.
-- **Upkeep** (`src/upkeep.rs`, `Agents::upkeep`): every five minutes, for each
+- **Upkeep** (`src/upkeep.rs`, `Agents::upkeep`; the fresh-start rules
+  below were removed 2026-10-30, see
+  [one permanent agent thread](#2026-10-30-one-permanent-agent-thread)):
+  every five minutes, for each
   ready agent whose thread T3 currently shows between turns and none of whose
   workers is working, the service reads its latest `context-window.updated`
   reading and the thread's last message or activity. Past
@@ -2971,4 +2979,34 @@ functionality.
   that work. Tapping a Squircle line (other than a worker's, which opens the
   worker) shows its command and output, with Open in Tasks when the app has
   the task; Tasks then opens on that work item's page.
+
+## 2026-10-30 one permanent agent thread
+
+User decision, superseding the fresh start of 2026-10-14 and upkeep's fresh
+rules of 2026-10-15: an app's agent keeps one T3 thread for good and is only
+compacted when it gets big. Rolling over to a new thread hid the app's
+history from its conversation and broke anything tied to the thread (T3
+scheduled tasks bound to it, links).
+
+- **Upkeep compacts only.** An agent idle `SQUIRCLE_COMPACT_IDLE_MINUTES`
+  (30) past `SQUIRCLE_COMPACT_TOKENS` (200000) gets `/compact` on its own
+  thread, as before. Each new context reading counts once, so an agent still
+  large after a compaction is compacted again once it has been idle that long
+  again. `SQUIRCLE_FRESH_*` and `SQUIRCLE_NIGHTLY_FRESH_*` are gone, and so
+  is the nightly hour (the only local-time rule).
+- **No `agent fresh`.** The command, `POST /v1/agents/fresh`, the handoff,
+  renaming the old thread "… (until DATE)", moving workers and updates to a
+  new thread, and M14's replacement steps are removed; `agent compact` is the
+  manual way to shrink the context. `agent restart` keeps its thread. The
+  phone's ⋯ menu keeps Restart Agent only, and the plugin tells the agent its
+  conversation is permanent and compacted while idle.
+- **Existing apps** keep their current agent thread; threads renamed by
+  earlier fresh starts stay where they are in Threads. Their `[handoff]`
+  turns now show as Squircle's generic "Handoff" line (the record's label),
+  like any marked kind the app doesn't know. Old upkeep records with a fresh
+  decision still load (the field is ignored). `agents.json` is read only in
+  its `lifecycle` form; the pre-lifecycle fields are no longer read.
+
+Checked: `cargo test` and clippy pass, and the app builds for the simulator.
+Not run against the live service or looked at on a phone yet.
 

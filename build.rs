@@ -72,11 +72,7 @@ const POLICY_CLOCKS: [(&str, usize, &str); 11] = [
         1,
         "T3 reconnect pacing (nothing announces T3 listening)",
     ),
-    (
-        "src/agents/upkeep.rs",
-        1,
-        "compaction and fresh-start idle thresholds, the nightly hour",
-    ),
+    ("src/agents/upkeep.rs", 1, "the compaction idle threshold"),
     (
         "src/preview.rs",
         1,

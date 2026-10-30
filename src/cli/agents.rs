@@ -46,22 +46,9 @@ pub(super) enum AgentCommand {
         #[command(flatten)]
         target: AgentTarget,
     },
-    /// Replace the agent with a new thread seeded by a short handoff; the old conversation stays readable and its workers move to the new agent.
+    /// Compact the agent's context now, on its one thread (Claude's /compact, keeping tasks, decisions, running work and recent exchanges).
     #[command(
-        after_help = "The handoff has the app, recent commits, open workers, the user's recent messages, your last reply and your --handoff note. Happens now if the agent is between turns, otherwise when its current turn ends."
-    )]
-    Fresh {
-        #[command(flatten)]
-        target: AgentTarget,
-        #[arg(
-            long,
-            help = "What the new agent must know that git and the workers don't show: what the user asked to remember, plans in flight"
-        )]
-        handoff: Option<String>,
-    },
-    /// Compact the agent's context now (Claude's /compact, keeping tasks, decisions, running work and recent exchanges).
-    #[command(
-        after_help = "Refused while the agent's turn runs. The service also does this by itself when an agent sits idle with a large context; see docs/cli.md (agent upkeep)."
+        after_help = "Refused while the agent's turn runs. The agent keeps its thread for good; this is its only context management. The service also compacts an agent by itself when it sits idle with a large context; see docs/cli.md (agent upkeep)."
     )]
     Compact {
         #[command(flatten)]
@@ -195,9 +182,6 @@ pub(super) async fn agent(cli: &Cli, command: &AgentCommand) -> Result<Option<Va
             AgentCommand::List => get(cli, "/v1/agents").await?,
             AgentCommand::Restart { target } => {
                 post(cli, "/v1/agents/restart", json!({"project_id":target.project,"thread_id":target.thread})).await?
-            }
-            AgentCommand::Fresh { target, handoff } => {
-                post(cli, "/v1/agents/fresh", json!({"project_id":target.project,"thread_id":target.thread,"handoff":handoff})).await?
             }
             AgentCommand::Compact { target } => {
                 post(cli, "/v1/agents/compact", json!({"project_id":target.project,"thread_id":target.thread})).await?

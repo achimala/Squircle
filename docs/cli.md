@@ -76,8 +76,7 @@ directory and adds the T3 instance; `--remove` takes it out).
 | `t3 connect --url URL`, `t3 status` | Service's own T3 session; connection state |
 | `agent start --project T3_ID [--message TEXT] [--runtime-mode MODE]` | Create or find the app's agent and send it a message. `MODE` (`approval-required`, `auto-accept-edits`, `auto`, `full-access`) applies when the thread is created, before its first turn; default `full-access`. Concurrent first sends create one agent |
 | `agent restart --project ID\|--thread ID` | Relaunch the agent's Claude session on the same thread; its next turn gets the current instructions (once, in the turn note) with history kept. Runs when the agent's turn ends |
-| `agent fresh --project ID\|--thread ID [--handoff TEXT]` | Replace the agent with a new thread seeded by a handoff (app, recent commits, workers, recent user messages, last reply, the note); the old thread is renamed "… (until DATE)" and stays in Threads; workers move over. Runs when the agent's turn ends |
-| `agent compact --project ID\|--thread ID` | Claude's `/compact` now, keeping tasks, decisions, running work and recent exchanges; refused while a turn runs. The service also compacts or starts fresh idle agents with a large context by itself (see [agent memory](t3-native-migration.md#2026-10-15-agent-memory); `SQUIRCLE_COMPACT_TOKENS`, `SQUIRCLE_COMPACT_IDLE_MINUTES`, `SQUIRCLE_FRESH_TOKENS`, `SQUIRCLE_FRESH_IDLE_MINUTES`, `SQUIRCLE_NIGHTLY_FRESH_HOUR`, `SQUIRCLE_NIGHTLY_FRESH_TOKENS`) |
+| `agent compact --project ID\|--thread ID` | Claude's `/compact` now, on the agent's one thread, keeping tasks, decisions, running work and recent exchanges; refused while a turn runs. The agent keeps its thread for good: compaction is its only context management, and the service also compacts an idle agent with a large context by itself, again while it stays large (see [one thread](t3-native-migration.md#2026-10-30-one-permanent-agent-thread); `SQUIRCLE_COMPACT_TOKENS`, `SQUIRCLE_COMPACT_IDLE_MINUTES`) |
 | `history search WORDS [--in SOURCES] [--since 7d] [--limit N]`, `history show REF [--max-chars N]` | Read-only search of the app's past where it lives: T3 messages, thread titles and tool activity (`state.sqlite`, read-only), tasks, builds, git commits and Markdown docs, read on each search (no index or copy) and ranked; short snippets with references (`msg:`, `thread:`, `act:`, `task:`, `build:`, `commit:`, `doc:PATH#L12`) that `show` expands. The app is the project of `--thread`/`--project`, else of the current folder. Text, or `--json` |
 | `notes show\|add TEXT\|edit N TEXT\|remove N [--thread ID]` | The app agent's few durable notes (preferences, decisions, gotchas; 300 characters each, 4000 in all), listed in each turn's note |
 | `agent list`, `agent context [--hook]` | Agents (with `cli`, the service's own invocation); the per-turn note (thread ID, live workers) its hook injects, for the deepest project root containing the folder |
@@ -88,10 +87,10 @@ directory and adds the T3 instance; `--remove` takes it out).
 
 The service wakes the agent with a `[worker update]` turn when a worker
 finishes, errors or needs input, once per turn outcome (a second question in
-the same turn wakes it again). Wake-ups and restart/fresh requests are saved
+the same turn wakes it again). Wake-ups and restart requests are saved
 and retried until T3 accepts them, under the same message ID. `agent
-restart`/`fresh` run only while T3 currently shows the agent's turn ended;
-a turn that starts in the meantime defers them again. Agents never poll.
+restart` runs only while T3 currently shows the agent's turn ended;
+a turn that starts in the meantime defers it again. Agents never poll.
 
 ## Notifications
 
