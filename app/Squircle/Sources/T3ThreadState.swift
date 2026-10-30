@@ -120,8 +120,6 @@ struct T3ThreadState: Codable {
             case .workers(let news):
                 message.isUpdate = true; message.news = news; message.threadIDs = news.map(\.id)
                 message.content = news.isEmpty ? "Workers moved on" : news.map(\.summary).joined(separator: " · ")
-            case .handoff:
-                message.isUpdate = true; message.content = "Started fresh"
             case .agent(let author):
                 message.agent = author; message.content = Self.task(message.content)
             case .other(let label):
@@ -305,8 +303,6 @@ struct ToolCall {
 enum ServiceNote: Equatable {
     case build(BuildNews)
     case workers([WorkerNews])
-    /// A fresh agent's briefing.
-    case handoff
     /// A worker's task or another agent's `thread send`.
     case agent(AgentAuthor)
     /// A kind this build doesn't know: Squircle's line, with its label.
@@ -350,7 +346,6 @@ enum ServiceNote: Equatable {
                 worker["id"].string.map { WorkerNews(id: $0, title: worker["title"].string ?? "A worker",
                                                      state: WorkerState(rawValue: worker["state"].string ?? "") ?? .done) }
             })
-        case "squircle-handoff": self = .handoff
         case "squircle-task": self = .agent(AgentAuthor(kind: .task, from: payload["from"].string))
         case "squircle-agent-message": self = .agent(AgentAuthor(kind: .message, from: payload["from"].string))
         default: self = .other(record["label"].string ?? "Squircle")

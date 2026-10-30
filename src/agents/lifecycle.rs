@@ -48,12 +48,6 @@ impl Agents {
                     ..
                 },
             ) => agent,
-            Some(
-                agent @ Agent {
-                    lifecycle: Lifecycle::Replacing { .. },
-                    ..
-                },
-            ) => return Ok(agent),
             Some(agent) => {
                 // A thread T3 has not sent yet may just be new: wait for it a moment.
                 let row = match self.thread(&agent.thread_id) {
@@ -120,7 +114,7 @@ impl Agents {
             let mut next = None;
             for effect in self.reduce_agent(project, event).await? {
                 match effect {
-                    m14::Effect::Commit | m14::Effect::Rebind => {}
+                    m14::Effect::Commit => {}
                     m14::Effect::SendCreate(command) => {
                         next = Some(m14::Event::Sent {
                             outcome: client.dispatch(&command).await,
@@ -193,29 +187,6 @@ impl Agents {
             .await
     }
 
-    /// The agent, its workers and its updates not sent yet follow the new
-    /// thread. One that may have reached the old thread is settled there
-    /// (M16), never resent.
-    pub(super) fn rebind(registry: &mut Registry, project: &str, previous: &str, thread: &str) {
-        for worker in registry
-            .workers
-            .values_mut()
-            .filter(|w| w.coordinator == previous)
-        {
-            worker.coordinator = thread.into();
-        }
-        for wake in registry
-            .outbox
-            .iter_mut()
-            .filter(|w| w.coordinator == previous && w.outbound.delivery == Delivery::Queued)
-        {
-            wake.coordinator = thread.into();
-        }
-        if let Some(agent) = registry.agents.get_mut(project) {
-            agent.thread_id = thread.into();
-        }
-    }
-
     pub(super) fn agent_for_thread(&self, thread_id: &str) -> Option<Agent> {
         self.registry()
             .agents
@@ -224,7 +195,7 @@ impl Agents {
             .cloned()
     }
 
-    // MARK: Restart and fresh start
+    // MARK: Restart
 
     /// The agent named by its project or its thread.
     pub(super) fn find_agent(
@@ -249,15 +220,14 @@ impl Agents {
         }
     }
 
-    /// Restarts or replaces an app's agent: now if it is between turns,
+    /// Restarts an app's agent on its thread: now if it is between turns,
     /// otherwise once no turn is running. The request is saved first and
     /// cleared only once it succeeds; a failure is retried and shows as the
-    /// agent's reset `error`.
-    pub async fn reset(
+    /// agent's restart `error`.
+    pub async fn restart(
         self: &Arc<Self>,
         project_id: Option<&str>,
         thread_id: Option<&str>,
-        reset: Reset,
     ) -> Result<Value> {
         self.ready().await?;
         let project = self.find_agent(project_id, thread_id)?.project_id;
@@ -266,10 +236,7 @@ impl Agents {
                 let agent = self.find_agent(Some(&project), None)?;
                 self.thread(&agent.thread_id)
                     .context("The app agent's thread is gone")?;
-                for effect in self
-                    .reduce_agent(&project, m14::Event::Request(reset))
-                    .await?
-                {
+                for effect in self.reduce_agent(&project, m14::Event::Restart).await? {
                     if let m14::Effect::Failed(detail) = effect {
                         bail!(detail)
                     }
@@ -287,8 +254,7 @@ impl Agents {
             .await
     }
 
-    /// Starts the queued resets whose agent has no turn running, and resumes
-    /// interrupted fresh starts.
+    /// Starts the queued restarts whose agent has no turn running.
     pub(super) async fn run_due_resets(self: &Arc<Self>) {
         let due: Vec<String> = self
             .owner
@@ -299,16 +265,15 @@ impl Agents {
                     .values()
                     .filter(|agent| {
                         !s.resets.contains(&agent.project_id)
-                            && match agent.lifecycle {
-                                Lifecycle::Replacing { .. } => s.shell.current(),
-                                Lifecycle::ResetQueued { .. } | Lifecycle::Restarting { .. } => s
-                                    .shell
-                                    .observe(&agent.thread_id)
-                                    .current()
-                                    .flatten()
-                                    .is_some_and(|o| !o.busy()),
-                                _ => false,
-                            }
+                            && matches!(
+                                agent.lifecycle,
+                                Lifecycle::RestartQueued { .. } | Lifecycle::Restarting { .. }
+                            )
+                            && s.shell
+                                .observe(&agent.thread_id)
+                                .current()
+                                .flatten()
+                                .is_some_and(|o| !o.busy())
                     })
                     .map(|a| a.project_id.clone())
                     .collect();
@@ -379,18 +344,10 @@ impl Agents {
         }
     }
 
-    /// What T3 shows now of the agent's thread and, during a replacement,
-    /// of the new one: what a reset step decides on.
+    /// What T3 shows now of the agent's thread: what a restart decides on.
     pub(super) async fn look(&self, client: &dyn Peer, agent: &Agent) -> m14::Event {
-        let successor = match &agent.lifecycle {
-            Lifecycle::Replacing { replacement, .. } => {
-                self.seen(&replacement.thread_id, |o| o.is_some())
-            }
-            _ => core::Observed::Unavailable("no replacement".into()),
-        };
         m14::Event::Look {
             agent: self.seen_live(client, &agent.thread_id).await,
-            successor,
             next: identity(),
         }
     }
@@ -456,186 +413,50 @@ impl Agents {
         client.dispatch(&Command::new(identity, body)).await
     }
 
-    /// Carries out the project's queued or interrupted reset (M14), each
-    /// step saved before its command is sent. Call in its operation lane.
-    /// Nothing is stopped while a turn may be running, the agent's or a
-    /// newer one: that defers the reset until it ends.
+    /// Carries out the project's queued or interrupted restart (M14), its
+    /// stop saved before it is sent. Call in its operation lane. Nothing is
+    /// stopped while a turn may be running, the agent's or a newer one:
+    /// that defers the restart until it ends.
     pub(super) async fn perform(&self, project: &str) -> Result<Value> {
         let client = self.ready().await?;
         let start = self.find_agent(Some(project), None)?;
-        let (action, mut previous) = match &start.lifecycle {
-            Lifecycle::ResetQueued {
-                reset: Reset::Restart,
-                ..
-            }
-            | Lifecycle::Restarting { .. } => ("restart", start.thread_id.clone()),
-            Lifecycle::ResetQueued {
-                reset: Reset::Fresh { .. },
-                ..
-            } => ("fresh", start.thread_id.clone()),
-            Lifecycle::Replacing { replacement, .. } => ("fresh", replacement.previous.clone()),
-            Lifecycle::Creating { .. } | Lifecycle::Ready { .. } => {
-                return Ok(
-                    json!({"project_id": project, "thread_id": start.thread_id, "when": "done"}),
-                );
-            }
-        };
+        if matches!(
+            start.lifecycle,
+            Lifecycle::Creating { .. } | Lifecycle::Ready { .. }
+        ) {
+            return Ok(
+                json!({"project_id": project, "thread_id": start.thread_id, "when": "done"}),
+            );
+        }
+        let thread = start.thread_id.clone();
         let mut event = self.look(&*client, &start).await;
         loop {
             let mut next = None;
             for effect in self.reduce_agent(project, event).await? {
-                let agent = self.find_agent(Some(project), None)?;
                 match effect {
-                    m14::Effect::Commit | m14::Effect::Rebind => {}
-                    m14::Effect::Send(Order::Stop, identity) => {
-                        let thread = match &agent.lifecycle {
-                            Lifecycle::Replacing { replacement, .. } => {
-                                replacement.previous.clone()
-                            }
-                            _ => agent.thread_id.clone(),
-                        };
+                    m14::Effect::Commit => {}
+                    m14::Effect::Stop(identity) => {
                         let outcome = self.stop(&*client, &thread, &identity).await;
                         next = Some(m14::Event::Sent {
                             outcome,
                             next: self::identity(),
                         });
                     }
-                    m14::Effect::Send(order, identity) => {
-                        let command = self.order(&agent, order, &identity)?;
-                        let outcome = client.dispatch(&command).await;
-                        next = Some(m14::Event::Sent {
-                            outcome,
-                            next: self::identity(),
-                        });
-                    }
-                    m14::Effect::Gather => {
-                        let plan = self
-                            .plan(&*client, &agent)
-                            .await
-                            .map_err(|e| format!("{e:#}"));
-                        if let Ok(plan) = &plan {
-                            previous = plan.previous.clone();
-                        }
-                        // Gathering took a while: what counts is the agent right after.
-                        next = Some(m14::Event::Gathered {
-                            plan,
-                            agent: self.seen_live(&*client, &agent.thread_id).await,
-                            next: identity(),
-                        });
-                    }
-                    m14::Effect::LookUp => {
-                        let Lifecycle::Replacing { replacement, .. } = &agent.lifecycle else {
-                            bail!("A handoff looked for outside a fresh start")
-                        };
-                        let found = self
-                            .has_message(&*client, &replacement.thread_id, &replacement.message_id)
-                            .await
-                            .map_err(|e| format!("{e:#}"));
-                        next = Some(m14::Event::LookedUp {
-                            found,
-                            next: identity(),
-                        });
-                    }
                     m14::Effect::Deferred => {
                         return Ok(json!({
-                        "project_id": project, "thread_id": agent.thread_id, "action": action, "when": "after-turn",
+                        "project_id": project, "thread_id": thread, "action": "restart", "when": "after-turn",
                         "next": "Happens when the agent's current turn ends. If that is you: end your turn now, telling the user in a sentence."}));
-                    }
-                    m14::Effect::Done if action == "restart" => {
-                        return Ok(json!({
-                        "project_id": project, "thread_id": agent.thread_id, "action": "restart", "when": "now",
-                        "next": "The agent's next message starts a new session with the same history and gets the current instructions."}));
                     }
                     m14::Effect::Done => {
                         return Ok(json!({
-                        "project_id": project, "thread_id": agent.thread_id, "previous_thread_id": previous,
-                        "action": "fresh", "when": "now",
-                        "next": "The new agent has the handoff and is replying; the old conversation stays readable in the app's Threads."}));
+                        "project_id": project, "thread_id": thread, "action": "restart", "when": "now",
+                        "next": "The agent's next message starts a new session with the same history and gets the current instructions."}));
                     }
                     m14::Effect::Failed(detail) => bail!(detail),
-                    m14::Effect::SendCreate(_) => bail!("Unexpected creation during a reset"),
+                    m14::Effect::SendCreate(_) => bail!("Unexpected creation during a restart"),
                 }
             }
-            event = next.context("The reset stopped without an answer")?;
+            event = next.context("The restart stopped without an answer")?;
         }
-    }
-
-    /// The command for a reset step, from the saved lifecycle.
-    pub(super) fn order(
-        &self,
-        agent: &Agent,
-        order: Order,
-        identity: &Identity,
-    ) -> Result<Command> {
-        let body = match (order, &agent.lifecycle) {
-            (Order::Rename, Lifecycle::Replacing { replacement, .. }) => json!({
-                "type": "thread.metadata.update", "threadId": replacement.previous,
-                "title": replacement.title.as_deref().context("The fresh start has no title for the old thread")?}),
-            (Order::Create, Lifecycle::Replacing { replacement, .. }) => {
-                return self.create_command(
-                    &agent.project_id,
-                    &replacement.thread_id,
-                    Some(&replacement.model),
-                    &replacement.runtime_mode,
-                    identity,
-                );
-            }
-            (Order::Handoff, Lifecycle::Replacing { replacement, .. }) => deliver(
-                &replacement.thread_id,
-                Note::Handoff.message(
-                    &replacement.message_id,
-                    &replacement.handoff,
-                    json!({"previous": replacement.previous}),
-                ),
-            ),
-            (order, lifecycle) => bail!("No {order:?} command for an agent that is {lifecycle:?}"),
-        };
-        Ok(Command::new(identity, body))
-    }
-
-    /// A fresh start's plan: the handoff, the new thread's identities and
-    /// the old thread's new title. The new agent keeps the old one's model
-    /// and runtime mode; a mode T3 doesn't report holds the fresh start.
-    pub(super) async fn plan(&self, client: &dyn Peer, agent: &Agent) -> Result<Replacement> {
-        let Lifecycle::ResetQueued {
-            reset: Reset::Fresh { note },
-            ..
-        } = &agent.lifecycle
-        else {
-            bail!("No fresh start is queued")
-        };
-        let handoff = self.handoff(client, agent, note.as_deref()).await?;
-        let row = self
-            .thread(&agent.thread_id)
-            .context("The app agent's thread is gone")?;
-        let mode = row["runtimeMode"].as_str().filter(|mode| RUNTIME_MODES.contains(mode)).with_context(|| format!(
-            "T3 doesn't report a runtime mode this service knows for the app agent ({}), so the fresh start waits",
-            row["runtimeMode"].as_str().unwrap_or("none")))?;
-        let app = self
-            .shell()
-            .project(&agent.project_id)
-            .and_then(|p| p["title"].as_str().map(str::to_string))
-            .unwrap_or_else(|| "App".into());
-        let day = Process::new("date")
-            .arg("+%b %-d")
-            .output()
-            .await
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-        Ok(Replacement {
-            previous: agent.thread_id.clone(),
-            thread_id: uuid::Uuid::new_v4().to_string(),
-            model: row["modelSelection"]["model"]
-                .as_str()
-                .unwrap_or(DEFAULT_MODEL)
-                .into(),
-            runtime_mode: mode.into(),
-            handoff,
-            message_id: uuid::Uuid::new_v4().to_string(),
-            title: Some(format!("{app} agent (until {day})")),
-            note: None,
-            step: None,
-            delivery: Delivery::Queued,
-        })
     }
 }

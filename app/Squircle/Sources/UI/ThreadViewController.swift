@@ -294,13 +294,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             let project = project
             items.append(UIMenu(options: .displayInline, children: [
                 UIAction(title: "Restart Agent", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
-                    Task { await self?.model.resetAgent(project, fresh: false) }
-                },
-                UIMenu(title: "Start Fresh", image: UIImage(systemName: "sparkles"), children: [
-                    UIAction(title: "Start Fresh", subtitle: "New conversation; this one stays in Threads", attributes: .destructive) { [weak self] _ in
-                        Task { await self?.model.resetAgent(project, fresh: true) }
-                    }
-                ])
+                    Task { await self?.model.restartAgent(project) }
+                }
             ]))
         }
         items.append(UIMenu(options: .displayInline, children: [
@@ -769,7 +764,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// The conversation this one now is, if it changed: a draft whose
     /// thread T3 created (even if its first turn then failed), or the
-    /// app's agent the Mac reports after a fresh start or a first send.
+    /// app's agent the Mac reports after a first send (or a new agent, its
+    /// old thread archived).
     private func successor() -> ConversationID? {
         if let next = model.successor(of: conversation) { return next }
         guard isAgent, pendingSend == nil, let id = model.agentThreadID(for: project), id != conversation.threadID else { return nil }

@@ -6,7 +6,7 @@
 //! input. How to work is up to the user and the agent. No model runs here.
 
 use crate::actor::{Lane, Lanes, Owner, Published, Rank, Snapshot};
-use crate::fsm::coordinator::agent::{self as m14, Order};
+use crate::fsm::coordinator::agent as m14;
 use crate::fsm::coordinator::outbox::{self, Outbound, Settled};
 use crate::fsm::coordinator::upkeep::{self as m26, Origin, Reading};
 use crate::fsm::coordinator::worker::{self as m15, ArchiveOrder, BootEffect, BootEvent};

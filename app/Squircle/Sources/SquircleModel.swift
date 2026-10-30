@@ -665,13 +665,12 @@ final class SquircleModel {
     }
     /// The Mac's Squircle service, for notification registration.
     var service: SquircleClient? { client }
-    /// Restarts the app's agent session, or replaces it with a new thread;
-    /// the Mac does it once the agent's turn ends, and the agent view
-    /// follows the new thread when the Mac reports it.
-    func resetAgent(_ project: AppProject, fresh: Bool) async {
+    /// Restarts the app's agent session on its thread; the Mac does it once
+    /// the agent's turn ends.
+    func restartAgent(_ project: AppProject) async {
         guard let client else { return }
         do {
-            try await client.resetAgent(projectID: project.id, fresh: fresh)
+            try await client.restartAgent(projectID: project.id)
             await refreshMetadata(fresh: true)
         } catch { self.error = error.localizedDescription }
     }

@@ -39,9 +39,8 @@ prompts say: put every user ask in the tracker, in their words, before any
 work on it: a sub-task of the work item it clearly belongs to, otherwise a
 new work item; never under an unrelated one; track your own breakdown as
 sub-tasks. The note lists open work items with their open sub-tasks (`·`
-lines). A fresh agent's handoff lists every open work item and sub-task,
-History's open ones included, uncapped (after an ask filed under an
-unrelated task was lost across a fresh start).
+lines). (Fresh agents' handoffs, which listed every open item, went with
+fresh starts on 2026-10-30: the agent keeps one thread.)
 
 ## Questions and what waits on you (2026-10-26, user decision)
 

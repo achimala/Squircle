@@ -3,8 +3,8 @@ use super::*;
 impl Agents {
     // MARK: Upkeep
 
-    /// Compacts or starts fresh the idle agents whose context grew large
-    /// (`crate::upkeep`). Never touches a running turn. An agent is looked
+    /// Compacts the idle agents whose context grew large, on their own
+    /// thread (`crate::upkeep`). Never touches a running turn. An agent is looked
     /// at when its thread, or what keeps upkeep away from it, changes in
     /// T3's shell, and again when its idle time reaches a rule's threshold.
     pub async fn upkeep(self: Arc<Self>) {
@@ -56,7 +56,7 @@ impl Agents {
     /// shows now counts, with no turn that may be running and no worker working.
     pub(super) fn upkeep_blocker(&self, agent: &Agent) -> Option<&'static str> {
         if !matches!(agent.lifecycle, Lifecycle::Ready { .. }) {
-            return Some("being created or reset");
+            return Some("being created or restarted");
         }
         if !matches!(self.observe(&agent.thread_id), Observed::Current { value: Some(ref o), .. } if !o.busy())
         {
@@ -73,8 +73,8 @@ impl Agents {
         None
     }
 
-    /// Reads the agent's context and acts on it if a rule applies now.
-    /// Returns when a rule may next apply with nothing else changing.
+    /// Reads the agent's context and compacts it if that is due now.
+    /// Returns when it may next be due with nothing else changing.
     pub(super) async fn upkeep_agent(
         self: &Arc<Self>,
         config: &crate::upkeep::Upkeep,
@@ -101,14 +101,11 @@ impl Agents {
         let now = crate::clock::now();
         let idle = (now - last).max(0.0) as u64;
         let next = config.next_due(used, last, now);
-        let wanted = config
-            .decide(used, idle, crate::upkeep::local_hour(now))
-            .map(|decision| Reading {
-                origin: Origin::Automatic,
-                decision,
-                at: Some(reading.into()),
-                tokens: used,
-            });
+        let wanted = config.compact(used, idle).then(|| Reading {
+            origin: Origin::Automatic,
+            at: Some(reading.into()),
+            tokens: used,
+        });
         // The read took a while: decide only on what T3 shows now.
         let Some(agent) = self
             .registry()
@@ -149,9 +146,8 @@ impl Agents {
     }
 
     /// Feeds one event to the app's upkeep (M26) and carries out what it
-    /// decides, each decision saved before its effect runs. A fresh start is
-    /// saved as the agent's queued reset in the same change, then left to
-    /// the reset runner. Returns what the last compaction sent got.
+    /// decides, each decision saved before its effect runs. Returns what the
+    /// last compaction sent got.
     pub(super) async fn run_upkeep(
         self: &Arc<Self>,
         project: &str,
@@ -168,13 +164,6 @@ impl Agents {
             {
                 match effect {
                     m26::Effect::Commit => {}
-                    m26::Effect::StartFresh(reading) => {
-                        eprintln!(
-                            "Agent upkeep: fresh start of the {project} agent at {} tokens",
-                            crate::upkeep::tokens(reading.tokens)
-                        );
-                        self.run_due_resets().await;
-                    }
                     m26::Effect::Send(command) => {
                         let sent = self.client().await?.dispatch(&command).await;
                         outcome = Some(sent.clone());
@@ -198,7 +187,7 @@ impl Agents {
         let agent = self.find_agent(project_id, thread_id)?;
         ensure!(
             matches!(agent.lifecycle, Lifecycle::Ready { .. }),
-            "The app's agent is being created or reset"
+            "The app's agent is being created or restarted"
         );
         ensure!(
             !self.observe_now(&agent.thread_id)?.busy(),

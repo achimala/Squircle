@@ -11,8 +11,6 @@ pub enum Note {
     WorkerUpdate,
     /// The service's news that a build failed.
     BuildUpdate,
-    /// The briefing a fresh agent starts from.
-    Handoff,
     /// A worker's prompt from its app agent.
     Task,
     /// `thread send` from another agent.
@@ -30,10 +28,9 @@ pub enum Note {
 }
 
 impl Note {
-    pub const ALL: [Note; 9] = [
+    pub const ALL: [Note; 8] = [
         Note::WorkerUpdate,
         Note::BuildUpdate,
-        Note::Handoff,
         Note::Task,
         Note::AgentMessage,
         Note::SimReady,
@@ -46,7 +43,6 @@ impl Note {
         match self {
             Note::WorkerUpdate => "squircle-worker-update",
             Note::BuildUpdate => "squircle-build-update",
-            Note::Handoff => "squircle-handoff",
             Note::Task => "squircle-task",
             Note::AgentMessage => "squircle-agent-message",
             Note::SimReady => "squircle-sim-ready",
@@ -60,7 +56,6 @@ impl Note {
         match self {
             Note::WorkerUpdate => "Worker update",
             Note::BuildUpdate => "Build update",
-            Note::Handoff => "Handoff",
             Note::Task | Note::AgentMessage => "Agent message",
             Note::SimReady => "Simulator ready",
             Note::Upkeep => "Tidied up",
@@ -303,14 +298,13 @@ pub(super) fn owner<'a>(
 
 impl Agents {
     /// The app's open work items, most urgent first, each with its open
-    /// sub-tasks, one line each. With `everything`, also open ones that aged
-    /// into History and no cap, so a fresh agent forgets nothing.
-    pub(super) fn open_tasks(&self, project: &str, everything: bool) -> String {
+    /// sub-tasks, one line each.
+    pub(super) fn open_tasks(&self, project: &str) -> String {
         let mut open: Vec<_> = self
             .tasks
             .list(project)
             .into_iter()
-            .filter(|t| (everything || t.archived_at.is_none()) && t.status.open())
+            .filter(|t| t.archived_at.is_none() && t.status.open())
             .collect();
         let rank = |s: Status| {
             [
@@ -358,7 +352,7 @@ impl Agents {
                 .collect()
         };
         open.iter()
-            .take(if everything { usize::MAX } else { 40 })
+            .take(40)
             .map(|t| {
                 let subtasks: String = t
                     .subtasks
@@ -369,108 +363,6 @@ impl Agents {
                 format!("\n- {}{}{subtasks}", line(t), asked(t, "  "))
             })
             .collect()
-    }
-
-    /// What a new agent needs from the old one, gathered without a model:
-    /// the app, recent commits, open workers, what the user said lately, the
-    /// old agent's last reply and its own note.
-    pub(super) async fn handoff(
-        &self,
-        client: &dyn Peer,
-        agent: &Agent,
-        note: Option<&str>,
-    ) -> Result<String> {
-        let project = self
-            .shell()
-            .project(&agent.project_id)
-            .cloned()
-            .context("The app's T3 project is gone")?;
-        let app = project["title"].as_str().unwrap_or("this app");
-        let root = project["workspaceRoot"].as_str().map(PathBuf::from);
-        let commits = match &root {
-            Some(root) => git(root, &["log", "--oneline", "--no-decorate", "-8"])
-                .await
-                .unwrap_or_default(),
-            None => String::new(),
-        };
-        let workers = self.workers(Some(&agent.thread_id));
-        let workers = if workers.is_empty() {
-            "none".to_string()
-        } else {
-            workers
-                .iter()
-                .map(|w| {
-                    format!(
-                        "\n- {} ({})",
-                        w["title"].as_str().unwrap_or(""),
-                        w["state"].as_str().unwrap_or("")
-                    )
-                })
-                .collect()
-        };
-        let old = self.thread_detail(client, &agent.thread_id).await?;
-        let said: Vec<String> = old["messages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|m| users_own(m))
-            .filter_map(|m| m["text"].as_str())
-            .map(|t| t.split("\n\n---\n").next().unwrap_or(t).trim())
-            .filter(|t| !t.is_empty() && !t.starts_with('['))
-            .map(|t| {
-                if t.chars().count() > 300 {
-                    format!("{}…", t.chars().take(300).collect::<String>())
-                } else {
-                    t.to_string()
-                }
-            })
-            .collect();
-        let said = said[said.len().saturating_sub(8)..]
-            .iter()
-            .map(|t| format!("\n- {}", t.replace('\n', " ")))
-            .collect::<String>();
-        let mut text = format!(
-            "[handoff] You are taking over as {app}'s app agent in a fresh conversation. \
-             The previous one stays readable in the app's Threads; `{cli} thread read {old}` gives its last reply.\n\n\
-             Recent commits:\n{commits}\n\nYour workers: {workers}\n\n\
-             Every open work item and sub-task (`{cli} task --help`); these are the user's asks, keep them all:{tasks}\n\n\
-             What the user said lately, oldest first:{said}",
-            cli = self.cli(),
-            tasks = self.open_tasks(&agent.project_id, true),
-            old = agent.thread_id,
-            commits = if commits.is_empty() {
-                "none".into()
-            } else {
-                commits
-            },
-            said = if said.is_empty() {
-                "\nnothing".into()
-            } else {
-                said
-            },
-        );
-        let last = old["messages"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .rev()
-            .find(|m| m["role"] == "assistant")
-            .and_then(|m| m["text"].as_str())
-            .unwrap_or("")
-            .trim();
-        if !last.is_empty() {
-            let last = if last.chars().count() > 1500 {
-                format!("{}…", last.chars().take(1500).collect::<String>())
-            } else {
-                last.to_string()
-            };
-            text += &format!("\n\nThe previous agent's last reply:\n{last}");
-        }
-        if let Some(note) = note.map(str::trim).filter(|n| !n.is_empty()) {
-            text += &format!("\n\nThe previous agent's note:\n{note}");
-        }
-        text += "\n\nReply to the user in a sentence or two: you're ready, and what is open. Don't start work until they ask.";
-        Ok(text)
     }
 
     /// The note at the start of each agent turn and after compaction: its
@@ -554,7 +446,7 @@ impl Agents {
                 })
                 .collect()
         };
-        let tasks = self.open_tasks(&agent.project_id, false);
+        let tasks = self.open_tasks(&agent.project_id);
         let unheard = match self.unheard(&agent.thread_id).await {
             Ok(unheard) => super::demands::listed(&unheard).map(|list| format!(
                 "\nThe user's messages not in the tracker yet; record each demand in them (`task sub add ITEM --thread {id} --ask` in their words, \

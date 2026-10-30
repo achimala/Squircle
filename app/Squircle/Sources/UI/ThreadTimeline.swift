@@ -239,7 +239,7 @@ enum ThreadItem: Equatable {
         // Each simulator use belongs to the last turn that began before it. A
         // turn without your message (the conversation's first) begins with
         // its first message, so nothing from before the conversation shown
-        // (a fresh start's earlier turns) lands in it.
+        // lands in it.
         let starts = turns.map { turn in
             (turn.user ?? turn.rest.first).flatMap { date($0.createdAt) } ?? .distantPast
         }

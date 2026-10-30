@@ -1,7 +1,6 @@
 use super::*;
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(try_from = "AgentFile")]
 pub struct Agent {
     pub project_id: String,
     pub thread_id: String,
@@ -14,21 +13,16 @@ pub struct Agent {
     pub heard: Option<String>,
 }
 
-pub use crate::fsm::coordinator::agent::{Lifecycle, Replacement, Reset};
+pub use crate::fsm::coordinator::agent::Lifecycle;
 pub use crate::fsm::coordinator::thread::{Execution, Phase, ThreadObservation};
 pub use crate::fsm::coordinator::worker::{ArchiveStep, Stage};
 
 impl Lifecycle {
-    /// Records a reset attempt's outcome; returns the backoff before the
+    /// Records a restart attempt's outcome; returns the backoff before the
     /// next attempt after a failure.
     pub(super) fn attempted(&mut self, failure: Option<String>) -> Option<Duration> {
-        let (Lifecycle::ResetQueued {
-            error, failures, ..
-        }
+        let (Lifecycle::RestartQueued { error, failures }
         | Lifecycle::Restarting {
-            error, failures, ..
-        }
-        | Lifecycle::Replacing {
             error, failures, ..
         }) = self
         else {
@@ -41,64 +35,6 @@ impl Lifecycle {
         };
         *error = failure;
         error.is_some().then(|| Duration::from_secs(4 << *failures))
-    }
-}
-
-/// `agents.json` as written before `lifecycle` (flags and optionals), or now.
-#[derive(Deserialize)]
-pub(super) struct AgentFile {
-    pub(super) project_id: String,
-    pub(super) thread_id: String,
-    pub(super) created_at: u64,
-    #[serde(default)]
-    pub(super) lifecycle: Option<Lifecycle>,
-    #[serde(default)]
-    pub(super) creating: bool,
-    #[serde(default)]
-    pub(super) pending: Option<Reset>,
-    #[serde(default)]
-    pub(super) replacing: Option<Replacement>,
-    #[serde(default)]
-    pub(super) reset_error: Option<String>,
-    #[serde(default)]
-    pub(super) refresh: bool,
-    #[serde(default)]
-    pub(super) heard: Option<String>,
-}
-
-impl TryFrom<AgentFile> for Agent {
-    type Error = String;
-    fn try_from(f: AgentFile) -> std::result::Result<Self, String> {
-        let lifecycle = match f.lifecycle {
-            Some(lifecycle) => lifecycle,
-            None => match (f.creating, f.pending, f.replacing) {
-                (true, None, None) => Lifecycle::Creating { command: None },
-                (false, Some(Reset::Fresh { .. }), Some(replacement)) => Lifecycle::Replacing {
-                    replacement,
-                    error: f.reset_error,
-                    failures: 0,
-                },
-                (false, Some(reset), None) => Lifecycle::ResetQueued {
-                    reset,
-                    error: f.reset_error,
-                    failures: 0,
-                },
-                (false, None, None) => Lifecycle::Ready { refresh: f.refresh },
-                _ => {
-                    return Err(format!(
-                        "agent of project {} has contradictory reset fields",
-                        f.project_id
-                    ));
-                }
-            },
-        };
-        Ok(Agent {
-            project_id: f.project_id,
-            thread_id: f.thread_id,
-            created_at: f.created_at,
-            lifecycle,
-            heard: f.heard,
-        })
     }
 }
 

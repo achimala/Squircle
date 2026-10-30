@@ -31,7 +31,7 @@ struct SquircleAction: Equatable {
         /// The build it started, once its reply names it.
         case buildStart(BuildID?)
         case cleanup, status, buildStatus, simStart, simStop, simOther
-        case restart, fresh, agentOther, perf, media, help, other
+        case restart, agentOther, perf, media, help, other
         /// Tracker changes, to `task` unless said otherwise: a new ask (one
         /// that replaces `replaces`, if any), a status, a question to you.
         case taskAdd, taskReplace, taskStatus(String), taskReword, taskMove, taskNote
@@ -97,7 +97,7 @@ struct SquircleAction: Equatable {
     var visible: Bool {
         if refused { return false }
         switch kind {
-        case .spawn, .send, .read, .answer, .archive, .cleanup, .buildStart, .simStart, .simStop, .restart, .fresh: return true
+        case .spawn, .send, .read, .answer, .archive, .cleanup, .buildStart, .simStart, .simStop, .restart: return true
         default: return isTracker
         }
     }
@@ -114,7 +114,6 @@ struct SquircleAction: Equatable {
         case .simStart, .simOther: return "iphone"
         case .simStop: return "iphone.slash"
         case .restart: return "arrow.clockwise"
-        case .fresh: return "sparkles"
         case .perf: return "waveform.path.ecg"
         case .media: return "photo"
         case .agentOther, .help, .other: return "terminal"
@@ -141,7 +140,6 @@ struct SquircleAction: Equatable {
         case .simStop: return "Stopped simulator"
         case .simOther: return "Checked simulators"
         case .restart: return "Restarted"
-        case .fresh: return "Started fresh"
         case .agentOther: return "Set up the agent"
         case .perf: return "Read a performance recording"
         case .media: return "Published a recording"
@@ -345,7 +343,7 @@ struct SquircleAction: Equatable {
     private static let valued: Set<String> = [
         "--data-dir", "--server", "--coordinator", "--title", "--branch", "--base", "--prompt", "--model", "--thread", "--device",
         "--id", "--project", "--scheme", "--configuration", "--mode", "--export", "--export-method", "--idempotency-key",
-        "--file", "--caption", "--build", "--summary", "--message", "--handoff", "--kind", "--name", "--team", "--bundle-id",
+        "--file", "--caption", "--build", "--summary", "--message", "--kind", "--name", "--team", "--bundle-id",
         "--task", "--ask", "--status", "--note", "--under", "--replaced-by", "--replaces", "--question", "--option", "--provider",
         "--effort", "--limit", "--max-chars", "--since", "--in", "--export-options", "--history-before"
     ]
@@ -403,7 +401,6 @@ struct SquircleAction: Equatable {
         case ("sim", "stop"): action = SquircleAction(kind: .simStop)
         case ("sim", _): action = SquircleAction(kind: .simOther)
         case ("agent", "restart"): action = SquircleAction(kind: .restart)
-        case ("agent", "fresh"): action = SquircleAction(kind: .fresh)
         case ("agent", _): action = SquircleAction(kind: .agentOther)
         case ("perf", _): action = SquircleAction(kind: .perf)
         case ("media", _): action = SquircleAction(kind: .media)

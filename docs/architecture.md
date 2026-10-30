@@ -75,7 +75,7 @@ phone's update curtain waits for every byte sent.
 resets; a persisted reservation finishes under the same thread ID. `POST
 /v1/agents` takes an optional `runtime_mode` (`approval-required`,
 `auto-accept-edits`, `auto`, `full-access`; default `full-access`), applied
-when the thread is created; a fresh start keeps its predecessor's mode;
+when the thread is created;
 workers run in their agent's mode unless `thread spawn --runtime-mode`
 overrides it, mapped per provider (`auto` stays auto on Claude, Codex,
 Cursor and Grok; Antigravity takes auto-edit). `GET /v1/agents` returns `cli`, the service's own
@@ -177,9 +177,10 @@ which only a current observation of a stopped (or absent) session can mint;
 → remove files (`stage: files-removed`) → T3 `thread.archive` →
 `archived`. `thread cleanup` needs the same receipt.
 
-**Resets (W1).** `agent restart`/`fresh` queue `lifecycle: reset-queued`
-and run only when a current observation shows the agent not busy, read again
-immediately before stopping (twice for fresh, around the handoff). Any turn,
+**Restarts (W1).** `agent restart` queues `lifecycle: restart-queued`
+and runs only when a current observation shows the agent not busy, read again
+immediately before stopping. The agent keeps one thread for good (2026-10-30;
+no fresh starts). Any turn,
 including one started after the request, defers it; there is no turn-ID
 fence. Failures back off 8–256 s. The service's own T3 reconnect resets its
 1–30 s backoff only after a session that reached a current shell and lasted
@@ -349,14 +350,13 @@ never a file used in the last 15 minutes or a recording the user handed in.
 Pictures stay in memory. UserDefaults keys are unchanged.
 
 **Saved service files.** `agents.json`: per agent `lifecycle` (`creating /
-ready{refresh} / reset-queued{reset} / replacing{replacement}`, with
+ready{refresh} / restart-queued / restarting{stop}`, with
 `error`/`failures`), per worker `stage` and object `notified`, `outbox`
 wakes with `delivery` and the attempt's `command` identity, `failures`,
 `retry_at`, `error`; `upkeep` per project (M26: `unknown | applied |
 blocked`, with the compaction's command); `undelivered` receipts; C00's
-`transaction`/`revision` stamps. It still reads the earlier `creating`, `pending`,
-`replacing`, `reset_error`, `archived`, `attempted`, `handoff_sent` and
-colon-key forms and writes the new ones. `tasks.json`: see
+`transaction`/`revision` stamps. It still reads the earlier `archived`,
+`attempted` and colon-key forms and writes the new ones. `tasks.json`: see
 [tasks](task-tracking.md#model). `push/devices.json` keeps `activities`
 (`{project: {id, token}}`) for running activities only; starts and flights
 are memory only.

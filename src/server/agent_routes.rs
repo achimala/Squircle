@@ -72,7 +72,6 @@ pub(super) async fn ensure_agent(
 pub(super) struct ResetAgent {
     pub(super) project_id: Option<String>,
     pub(super) thread_id: Option<String>,
-    pub(super) handoff: Option<String>,
 }
 
 pub(super) async fn restart_agent(
@@ -81,29 +80,7 @@ pub(super) async fn restart_agent(
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
     let result = agents(&state)?
-        .reset(
-            request.project_id.as_deref(),
-            request.thread_id.as_deref(),
-            crate::agents::Reset::Restart,
-        )
-        .await
-        .map_err(agent_error)?;
-    Ok(Json(success(result)))
-}
-
-pub(super) async fn fresh_agent(
-    State(state): State<AppState>,
-    payload: std::result::Result<Json<ResetAgent>, JsonRejection>,
-) -> ApiResult<Json<Value>> {
-    let request = body(payload)?;
-    let result = agents(&state)?
-        .reset(
-            request.project_id.as_deref(),
-            request.thread_id.as_deref(),
-            crate::agents::Reset::Fresh {
-                note: request.handoff,
-            },
-        )
+        .restart(request.project_id.as_deref(), request.thread_id.as_deref())
         .await
         .map_err(agent_error)?;
     Ok(Json(success(result)))

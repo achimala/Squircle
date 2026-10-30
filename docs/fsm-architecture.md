@@ -30,7 +30,7 @@ T3 remains the authority for execution, projects, threads, approvals and device 
 | M11 | Jelly scheduling | Renderer/scene; hero cadence and at most four small loops |
 | M12 | Simulator presentation and feed demand | Host + session/target; dock route, visibility and consumers |
 | M13 | Device channel | Target + generation; H.264 video/input lifetime and gesture queue |
-| M14 | App-agent lifecycle | Project; creation, restart and fresh replacement journal |
+| M14 | App-agent lifecycle | Project; creation and restart journal (fresh replacement removed 2026-10-30) |
 | M15 | Worker lifecycle | Worker thread; bootstrap and stop/remove/archive journal |
 | M16 | Delivery outbox | Destination + event ID; worker/build/simulator wakes and alert obligations |
 | M17 | Task lifecycle | Task; explicit status, linked observations, placement and revision |
@@ -42,7 +42,7 @@ T3 remains the authority for execution, projects, threads, approvals and device 
 | M23 | Install attempt and evidence | Ticket/attempt; transfer evidence, phone watch and launch report |
 | M24 | Push/Live Activity | App desired state; per-device activity delivery |
 | M25 | Phone registration and presence | Device/scene; token generation, presence lease and activity reports |
-| M26 | Idle upkeep | Agent + context reading; eligibility, compact/fresh intent and outcome |
+| M26 | Idle upkeep | Agent + context reading; eligibility, compaction intent and outcome |
 | M27 | Service lifecycle and handover | Data-directory lock generation; admission, drain and adoption |
 | M28 | Helper process | Operation; process-group, output and reap ownership |
 
@@ -681,6 +681,12 @@ Decoder table: waiting+Config→awaitingKeyframe; awaitingKeyframe+non-key frame
 
 ### M14 — App-agent creation, restart and fresh replacement
 
+**2026-10-30 (user decision):** the agent keeps one thread for good, so the
+fresh replacement (`FreshOperation`, handoff, rename, rebinding) is removed.
+As implemented, `Lifecycle = creating | ready{refresh} | restart-queued |
+restarting{stop}` in `src/fsm/coordinator/agent.rs`. The design below is
+kept as written.
+
 `State = absent | reserving(CreateIntent) | creating(CreateIntent, delivery) | ready(AgentRef, Instructions) | resetQueued(AgentRef, ResetIntent) | resetting(RestartOperation) | replacing(FreshOperation) | blocked(Operation, Failure)`. `Instructions = current(revision) | refreshOwed(expectedRevision)`.
 `RestartOperation.phase = validating | stopUnknown | awaitingStopped | refreshingInstructions`.
 `FreshOperation.phase = gatheringHandoff | validatingStop | stopUnknown | awaitingStopped | renaming | creatingNew | rebinding | deliveringHandoff` with fixed old/new IDs, selected runtime mode and exact commands. Phase payloads contain only the receipts required for the next step. Do not rename/stop before persisting that phase's intent.
@@ -1176,6 +1182,10 @@ stateDiagram-v2
 No transition for repeated same token, old registration response or duplicate watcher registration. Pending token reports persist in private phone storage if restoration requires them; authorization tokens retain existing secure storage rules and never enter logs. Permissions are not re-prompted on each retry.
 
 ### M26 — Idle compaction and fresh upkeep
+
+**2026-10-30 (user decision):** compaction is upkeep's only decision; there
+is no fresh decision or night policy. A reading is acted on once, so an
+agent still large after compacting is compacted again on a later reading.
 
 `State = disabled(ConfigError) | observing | checking(Candidate, ObservationFence) | eligible(Decision, ReadingKey, Fence) | submitting(Intent) | unknown(Intent) | applied(Receipt, ReadingKey) | blocked(IntentOrCandidate, Failure)`.
 `Decision = compact | fresh`; `Candidate` carries configured size/age/night policy and manual/automatic origin. `ReadingKey` identifies agent incarnation, source context watermark and threshold decision, not just a counter in memory. Mark applied only after a real command receipt. Fresh delegates to M14; it is not implemented a second time here. `Checking` owns one read-only context query through M28.

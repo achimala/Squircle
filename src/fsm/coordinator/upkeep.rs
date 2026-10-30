@@ -9,8 +9,8 @@
 //! answer lost to a disconnect or a restart is settled by sending that same
 //! command again (T3 answers a known ID from its receipt), never a second
 //! one. A reading counts as acted on only once T3 accepted it, and one T3
-//! refused is not tried again. A fresh start is M14's: here it is only the
-//! request, saved together with the agent's queued reset.
+//! refused is not tried again. Compaction is the only thing upkeep does:
+//! the agent keeps its one thread for good.
 
 use super::{Command, Dispatched};
 use crate::fsm::core::{Disposition, Reduction};
@@ -25,18 +25,10 @@ pub enum Origin {
     Manual,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum Decision {
-    Compact,
-    Fresh { nightly: bool },
-}
-
-/// The context reading a decision was made on.
+/// The context reading a compaction was decided on.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reading {
     pub origin: Origin,
-    pub decision: Decision,
     /// When T3 recorded that context size (its `context-window.updated`
     /// activity); none for a manual compaction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,11 +38,11 @@ pub struct Reading {
 
 impl Reading {
     fn same(&self, other: &Reading) -> bool {
-        self.decision == other.decision && self.at.is_some() && self.at == other.at
+        self.at.is_some() && self.at == other.at
     }
 }
 
-/// What became of the latest upkeep decision for one agent thread.
+/// What became of the latest compaction for one agent thread.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum Intent {
@@ -62,7 +54,7 @@ pub enum Intent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// T3 accepted the compaction, or the fresh start was queued.
+    /// T3 accepted the compaction.
     Applied { reading: Reading },
     /// T3 refused the compaction; this reading is not tried again.
     Blocked { reading: Reading, error: String },
@@ -78,8 +70,8 @@ pub struct Record {
 
 #[derive(Debug)]
 pub enum Event {
-    /// The agent of `thread` is eligible now and policy wants `reading`
-    /// (`None`: nothing to do). `compact` is the exact command a new
+    /// The agent of `thread` is eligible now and policy wants it compacted
+    /// on `reading` (`None`: nothing to do). `compact` is the exact command a new
     /// compaction would send.
     Checked {
         thread: String,
@@ -98,9 +90,6 @@ pub enum Effect {
     Commit,
     /// Send this command.
     Send(Command),
-    /// Save the record together with the agent's queued fresh start, then
-    /// run that reset.
-    StartFresh(Reading),
 }
 
 pub fn reduce(state: Option<Record>, event: Event) -> Reduction<Option<Record>, Effect> {
@@ -126,8 +115,7 @@ pub fn reduce(state: Option<Record>, event: Event) -> Reduction<Option<Record>, 
                 }),
                 wanted,
             ) => {
-                let again = pending.origin == Origin::Manual
-                    || wanted.is_some_and(|w| w.decision == Decision::Compact);
+                let again = pending.origin == Origin::Manual || wanted.is_some();
                 if again {
                     Reduction::applied(state, vec![Effect::Send(command)])
                 } else {
@@ -143,19 +131,7 @@ pub fn reduce(state: Option<Record>, event: Event) -> Reduction<Option<Record>, 
                 }),
                 Some(wanted),
             ) if done.same(&wanted) => Reduction::same(state, Duplicate),
-            (_, Some(wanted)) => match wanted.decision {
-                Decision::Compact => compact_now(thread, wanted, compact),
-                Decision::Fresh { .. } => {
-                    let effects = vec![Effect::StartFresh(wanted.clone())];
-                    Reduction::applied(
-                        Some(Record {
-                            thread,
-                            intent: Intent::Applied { reading: wanted },
-                        }),
-                        effects,
-                    )
-                }
-            },
+            (_, Some(wanted)) => compact_now(thread, wanted, compact),
         },
         Event::Manual { thread, compact } => match current(&thread, state.clone()) {
             Some(Record {
@@ -166,7 +142,6 @@ pub fn reduce(state: Option<Record>, event: Event) -> Reduction<Option<Record>, 
                 thread,
                 Reading {
                     origin: Origin::Manual,
-                    decision: Decision::Compact,
                     at: None,
                     tokens: 0,
                 },

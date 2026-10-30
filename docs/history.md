@@ -18,8 +18,10 @@ T3 or the phone. See
 read-only Haiku subagent backed by `squircle history` (T3's conversations,
 tasks, builds, git and docs, read where they live, nothing copied), keeps a
 few durable notes (`squircle notes`) that ride in every turn, and the Mac
-compacts or starts fresh idle agents whose context grew large. See
-[agent memory](t3-native-migration.md#2026-10-15-agent-memory).
+compacts idle agents whose context grew large. See
+[agent memory](t3-native-migration.md#2026-10-15-agent-memory). Since
+2026-10-30 the agent keeps one thread for good: compaction only, no fresh
+starts ([one thread](t3-native-migration.md#2026-10-30-one-permanent-agent-thread)).
 
 **2026-10-15: second code review fixes (W1–W8).** The
 [second review](code-review-2026-10-b.md)'s service and app fixes are
@@ -58,6 +60,7 @@ can be restarted (same history, current instructions) or started fresh (new
 thread with a handoff; the old one stays in Threads) from its ⋯ menu or by
 telling it. See
 [restart and start fresh](t3-native-migration.md#2026-10-14-restart-and-start-fresh-030-46).
+Start fresh was removed on 2026-10-30.
 
 **2026-10-13: one look everywhere, version 0.3.0 (41).** Conversations read
 like plain chat in the app and the overlay alike: status lines are plain text,

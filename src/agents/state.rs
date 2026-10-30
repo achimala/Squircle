@@ -317,9 +317,8 @@ impl State {
         )))
     }
 
-    /// Reduces `event` for the app's agent (M14) and saves what it decided,
-    /// with the rebinding a replacement's handoff step implies, before any
-    /// effect it asks for runs.
+    /// Reduces `event` for the app's agent (M14) and saves what it decided
+    /// before any effect it asks for runs.
     pub(super) fn reduce_agent(
         &mut self,
         project: &str,
@@ -344,17 +343,8 @@ impl State {
                 violation.0
             );
         }
-        let rebind = reduction.effects.contains(&m14::Effect::Rebind);
-        if rebind || reduction.effects.contains(&m14::Effect::Commit) {
+        if reduction.effects.contains(&m14::Effect::Commit) {
             let mut next = self.registry().clone();
-            if let (true, Lifecycle::Replacing { replacement, .. }) = (rebind, &reduction.state) {
-                Agents::rebind(
-                    &mut next,
-                    project,
-                    &replacement.previous,
-                    &replacement.thread_id,
-                );
-            }
             if let Some(agent) = next.agents.get_mut(project) {
                 agent.lifecycle = reduction.state;
             }
@@ -363,10 +353,8 @@ impl State {
         Ok(reduction.effects)
     }
 
-    /// Reduces `event` for the app's upkeep record and saves the result, with
-    /// the queued fresh start it may call for. A fresh start is only queued
-    /// for an agent still ready on the same thread; otherwise nothing is
-    /// saved and nothing happens.
+    /// Reduces `event` for the app's upkeep record and saves the result
+    /// before the compaction it may call for is sent.
     pub(super) fn reduce_upkeep(
         &mut self,
         project: &str,
@@ -378,38 +366,10 @@ impl State {
             debug_assert!(false, "{fault}");
             eprintln!("Upkeep fault for {project}: {fault}");
         }
-        let fresh = reduction.effects.iter().find_map(|e| match e {
-            m26::Effect::StartFresh(r) => Some(r.clone()),
-            _ => None,
-        });
-        if fresh.is_none() && !reduction.effects.contains(&m26::Effect::Commit) {
+        if !reduction.effects.contains(&m26::Effect::Commit) {
             return Ok(reduction.effects);
         }
         let mut next = self.registry().clone();
-        if let Some(reading) = fresh {
-            let thread = reduction.state.as_ref().map(|r| r.thread.as_str());
-            let Some(agent) = next.agents.get_mut(project).filter(|a| {
-                matches!(a.lifecycle, Lifecycle::Ready { .. })
-                    && Some(a.thread_id.as_str()) == thread
-            }) else {
-                return Ok(vec![]);
-            };
-            let nightly = matches!(
-                reading.decision,
-                crate::upkeep::Tidy::Fresh { nightly: true }
-            );
-            let note = format!(
-                "Squircle started this conversation fresh{} because the previous one had grown to {} tokens \
-                while the user was away. Ask the history subagent about anything earlier.",
-                if nightly { " overnight" } else { "" },
-                crate::upkeep::tokens(reading.tokens)
-            );
-            agent.lifecycle = Lifecycle::ResetQueued {
-                reset: Reset::Fresh { note: Some(note) },
-                error: None,
-                failures: 0,
-            };
-        }
         match reduction.state {
             Some(record) => next.upkeep.insert(project.into(), record),
             None => next.upkeep.remove(project),

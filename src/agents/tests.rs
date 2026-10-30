@@ -503,24 +503,20 @@ async fn a_compaction_whose_answer_is_lost_is_settled_by_the_same_command() {
         r.agents.insert("p".into(), agent("agent"));
     })
     .await;
-    let wanted = |at: &str, decision| {
+    let wanted = |at: &str| {
         Some(Reading {
             origin: Origin::Automatic,
-            decision,
             at: Some(at.into()),
             tokens: 300_000,
         })
     };
-    let checked = |at: &str, decision| m26::Event::Checked {
+    let checked = |at: &str| m26::Event::Checked {
         thread: "agent".into(),
-        reading: wanted(at, decision),
+        reading: wanted(at),
         compact: agents.compact_command("agent", "Compacted", 0).unwrap(),
     };
     fake.fail.lock().unwrap().push(("message.dispatch", true));
-    let lost = agents
-        .run_upkeep("p", checked("r1", m26::Decision::Compact))
-        .await
-        .unwrap();
+    let lost = agents.run_upkeep("p", checked("r1")).await.unwrap();
     assert!(matches!(lost, Some(Dispatched::Unknown(_))));
     // Restarted, the next check that wants compaction sends that command again; T3 has it.
     let agents = Agents::open(
@@ -531,41 +527,22 @@ async fn a_compaction_whose_answer_is_lost_is_settled_by_the_same_command() {
     .unwrap();
     assert!(agents.fake.set(fake.clone()).is_ok());
     agents.consume_shell(&json!({"kind": "snapshot", "snapshot": {"projects": [], "threads": [row("agent", "p", "auto", "a", "completed", false)]}})).await;
-    let settled = agents
-        .run_upkeep("p", checked("r2", m26::Decision::Compact))
-        .await
-        .unwrap();
+    let settled = agents.run_upkeep("p", checked("r2")).await.unwrap();
     assert!(matches!(settled, Some(Dispatched::Accepted(_))));
     let sent = fake.sent("message.dispatch");
     assert_eq!(sent.len(), 1);
     assert!(
         matches!(&agents.registry().upkeep["p"].intent, m26::Intent::Applied { reading } if reading.at.as_deref() == Some("r1"))
     );
-    // A fresh start is saved as the agent's queued reset, in the same change.
-    assert_eq!(
-        agents
-            .run_upkeep("p", checked("r3", m26::Decision::Fresh { nightly: true }))
-            .await
-            .unwrap(),
-        None
-    );
-    let registry = agents.registry();
-    assert!(
-        matches!(&registry.agents["p"].lifecycle, Lifecycle::ResetQueued { reset: Reset::Fresh { note: Some(note) }, .. } if note.contains("overnight"))
-    );
-    assert!(
-        matches!(&registry.upkeep["p"].intent, m26::Intent::Applied { reading } if reading.at.as_deref() == Some("r3"))
-    );
 }
 
 #[tokio::test]
-async fn a_reset_never_stops_a_newer_turn() {
+async fn a_restart_never_stops_a_newer_turn() {
     let temp = tempfile::tempdir().unwrap();
     let idle = row("agent", "p", "full-access", "t1", "completed", false);
     let busy = row("agent", "p", "full-access", "t2", "running", false);
     let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![idle.clone()]).await;
-    let queued = |reset: Reset| Lifecycle::ResetQueued {
-        reset,
+    let queued = Lifecycle::RestartQueued {
         error: Some("earlier failure".into()),
         failures: 1,
     };
@@ -573,7 +550,7 @@ async fn a_reset_never_stops_a_newer_turn() {
         r.agents.insert(
             "p".into(),
             Agent {
-                lifecycle: queued(Reset::Restart),
+                lifecycle: queued,
                 ..agent("agent")
             },
         );
@@ -590,7 +567,7 @@ async fn a_reset_never_stops_a_newer_turn() {
     assert!(fake.sent("provider-session.detach").is_empty());
     assert!(matches!(
         agents.list()[0].lifecycle,
-        Lifecycle::ResetQueued { .. }
+        Lifecycle::RestartQueued { .. }
     ));
     upsert(&idle).await;
     assert_eq!(agents.perform("p").await.unwrap()["when"], "now");
@@ -600,28 +577,6 @@ async fn a_reset_never_stops_a_newer_turn() {
         agents.list()[0].lifecycle,
         Lifecycle::Ready { refresh: true }
     );
-
-    // A turn that starts while the fresh start gathers its handoff.
-    registered(&agents, move |r| {
-        r.agents.get_mut("p").unwrap().lifecycle = queued(Reset::Fresh { note: None })
-    })
-    .await;
-    *fake.on_detail.lock().unwrap() = Some(Box::new(move |_| {
-        Some(json!({"kind": "thread.updated", "location": "active", "thread": busy.clone()}))
-    }));
-    assert_eq!(agents.perform("p").await.unwrap()["when"], "after-turn");
-    assert_eq!(
-        fake.log.lock().unwrap().len(),
-        1,
-        "only the earlier restart's stop"
-    );
-    assert!(matches!(
-        agents.list()[0].lifecycle,
-        Lifecycle::ResetQueued {
-            reset: Reset::Fresh { .. },
-            ..
-        }
-    ));
 }
 
 #[tokio::test]
@@ -743,106 +698,6 @@ async fn reopened(
     agents.consume_shell(&json!({"kind": "snapshot", "snapshot": {
         "projects": [{"id": "p", "title": "App", "workspaceRoot": workspace}], "threads": threads}})).await;
     agents
-}
-
-/// A fresh start whose answer is lost at each step in turn, with the
-/// service restarted right after: it resumes from the saved step, and T3
-/// gets each command once (a resend is answered from its receipt). The
-/// agent, its workers and its unsent update move to the new thread in
-/// one save; an update that may have reached the old thread stays there.
-#[tokio::test]
-async fn a_fresh_start_resumes_after_a_crash_at_any_step() {
-    for step in [
-        "provider-session.detach",
-        "thread.metadata.update",
-        "thread.create",
-        "message.dispatch",
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let old = row("old", "p", "auto", "t", "completed", false);
-        let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![old.clone()]).await;
-        let wake = |id: &str, delivery| Wake {
-            coordinator: "old".into(),
-            message_id: id.into(),
-            workers: vec![],
-            text: "x".into(),
-            record: json!({}),
-            outbound: Outbound {
-                delivery,
-                ..Default::default()
-            },
-            build: None,
-        };
-        registered(&agents, move |r| {
-            r.agents.insert("p".into(), agent("old"));
-            r.workers.insert("w1".into(), worker("old"));
-            r.outbox.push(wake("unsent", Delivery::Queued));
-            r.outbox.push(wake("maybe", Delivery::OutcomeUnknown));
-        })
-        .await;
-        fake.fail.lock().unwrap().push((step, true));
-        assert!(
-            agents
-                .reset(
-                    Some("p"),
-                    None,
-                    Reset::Fresh {
-                        note: Some("n".into())
-                    }
-                )
-                .await
-                .is_err(),
-            "{step}"
-        );
-        let threads: Vec<Value> = agents
-            .shell()
-            .threads
-            .values()
-            .map(|t| (**t).clone())
-            .collect();
-        drop(agents);
-        let agents = reopened(temp.path(), &fake, threads, temp.path()).await;
-        let done = agents
-            .ops
-            .run("p".into(), agents.perform("p"))
-            .await
-            .unwrap();
-        assert_eq!(
-            (done["when"].as_str(), done["previous_thread_id"].as_str()),
-            (Some("now"), Some("old")),
-            "{step}"
-        );
-        let registry = agents.registry();
-        let new = registry.agents["p"].thread_id.clone();
-        assert!(
-            new != "old" && registry.agents["p"].lifecycle == Lifecycle::Ready { refresh: false },
-            "{step}"
-        );
-        assert_eq!(registry.workers["w1"].coordinator, new);
-        let by_id = |id: &str| {
-            registry
-                .outbox
-                .iter()
-                .find(|w| w.message_id == id)
-                .unwrap()
-                .coordinator
-                .clone()
-        };
-        assert_eq!(
-            (by_id("unsent"), by_id("maybe")),
-            (new.clone(), "old".to_string()),
-            "{step}"
-        );
-        for kind in [
-            "provider-session.detach",
-            "thread.metadata.update",
-            "thread.create",
-            "message.dispatch",
-        ] {
-            assert_eq!(fake.sent(kind).len(), 1, "{kind} after a cut at {step}");
-        }
-        assert_eq!(fake.sent("thread.create")[0]["runtimeMode"], "auto");
-    }
 }
 
 /// A message whose answer is lost is sent again, when asked again, as

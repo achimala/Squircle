@@ -1,21 +1,20 @@
-//! M14, an app agent's creation, restart and fresh replacement
-//! (docs/fsm-architecture.md). Every step that changes T3 is saved, with the
-//! exact identity of the command it sends, before that command goes out; a
-//! step whose answer is lost is sent again under the same identity (T3
-//! answers a known ID from its receipt), and a new identity is made only
-//! after T3 refused one. So a crash or a lost answer at any point resumes
-//! the same operation, never a second agent, stop or handoff.
+//! M14, an app agent's creation and restart (docs/fsm-architecture.md). The
+//! agent keeps one T3 thread for good; a restart relaunches its session on
+//! that thread. Every step that changes T3 is saved, with the exact identity
+//! of the command it sends, before that command goes out; a step whose
+//! answer is lost is sent again under the same identity (T3 answers a known
+//! ID from its receipt), and a new identity is made only after T3 refused
+//! one. So a crash or a lost answer at any point resumes the same
+//! operation, never a second agent or stop.
 //!
 //! Nothing is stopped while a turn may be running (Q1: the check and the
 //! stop race another client starting a turn in between; the user accepted
-//! that). A thread whose runtime mode T3 does not report blocks a fresh
-//! start; it never defaults to a mode.
+//! that).
 //!
 //! The owner (`crate::agents::Agents`) supplies observations, new
 //! identities and T3's answers, turns orders into commands, and saves each
-//! reduction before the effects after its `Commit`/`Rebind` run.
+//! reduction before the effects after its `Commit` run.
 
-use super::outbox::{self, Delivery};
 use super::thread::ThreadObservation;
 use super::{Command, Dispatched, Identity};
 use crate::fsm::core::{Disposition, Observed, Reduction, Violation};
@@ -25,19 +24,9 @@ fn is_zero(n: &u32) -> bool {
     *n == 0
 }
 
-fn is_queued(d: &Delivery) -> bool {
-    *d == Delivery::Queued
-}
-
-/// Where an app agent is between creation, ordinary use and a reset. Each
-/// operation owns its own progress and last error, so a replacement cannot
-/// exist without the fresh start it belongs to.
+/// Where an app agent is between creation, ordinary use and a restart.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(tag = "state", rename_all = "kebab-case")]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "One value per app; keep the durable replacement plan inline rather than allocating every transition."
-)]
 pub enum Lifecycle {
     /// Reserved before T3 is asked to create the thread, so a retry or a
     /// restart finishes that thread instead of creating a second agent.
@@ -54,11 +43,10 @@ pub enum Lifecycle {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         refresh: bool,
     },
-    /// A restart or fresh start that has not begun: it runs once no turn is
-    /// running (an agent cannot stop its own session while it runs, and a
-    /// newer turn is never stopped), and is retried after a failure.
-    ResetQueued {
-        reset: Reset,
+    /// A restart that has not begun: it runs once no turn is running (an
+    /// agent cannot stop its own session while it runs, and a newer turn is
+    /// never stopped), and is retried after a failure.
+    RestartQueued {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         #[serde(default, skip_serializing_if = "is_zero")]
@@ -72,92 +60,9 @@ pub enum Lifecycle {
         #[serde(default, skip_serializing_if = "is_zero")]
         failures: u32,
     },
-    /// A fresh start past its first step: its identities and handoff are
-    /// fixed, and each step resumes where it stood.
-    Replacing {
-        replacement: Replacement,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-        #[serde(default, skip_serializing_if = "is_zero")]
-        failures: u32,
-    },
-}
-
-/// `restart` relaunches the agent's Claude session on the same thread, so the
-/// next message starts with the current plugin instructions and the same
-/// history. `fresh` replaces the thread with a new one seeded by a handoff.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum Reset {
-    Restart,
-    Fresh { note: Option<String> },
-}
-
-/// A fresh start: the old and new thread, what the new one is created with
-/// and told, and the step it stands at.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub struct Replacement {
-    pub previous: String,
-    pub thread_id: String,
-    pub model: String,
-    pub runtime_mode: String,
-    pub handoff: String,
-    pub message_id: String,
-    /// The old thread's new title.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    /// The request's note, kept so a fresh start that has to wait can be
-    /// queued again as it was asked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-    /// None for a replacement saved before steps were: its old thread was
-    /// already stopped and renamed, and `delivery` says whether its handoff
-    /// may have been sent (then it is looked for before it is sent again).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub step: Option<Step>,
-    #[serde(
-        default,
-        alias = "handoff_sent",
-        deserialize_with = "outbox::delivery_or_legacy",
-        skip_serializing_if = "is_queued"
-    )]
-    pub delivery: Delivery,
-}
-
-/// A fresh start's steps, in order, each with its command's identity.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-#[serde(tag = "step", rename_all = "kebab-case")]
-pub enum Step {
-    /// Stopping the old thread's session.
-    Stop { command: Identity },
-    /// Renaming the old thread.
-    Rename { command: Identity },
-    /// Creating the new thread.
-    Create { command: Identity },
-    /// The agent, its workers and its unsent updates follow the new thread;
-    /// the handoff starts its first turn.
-    Handoff { command: Identity },
-}
-
-/// A command the owner builds for an order: from the lifecycle's own data
-/// and the identity given.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Order {
-    /// Stop the agent thread's session (a restart's, or the old thread's).
-    Stop,
-    /// Give the old thread its new title.
-    Rename,
-    /// Create the new thread.
-    Create,
-    /// Start the new thread's first turn with the handoff.
-    Handoff,
 }
 
 #[derive(Debug)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "Short-lived reducer input; boxing the plan would add allocation to every handoff."
-)]
 pub enum Event {
     /// Creation: whether T3's shell has the reserved thread, and the
     /// creation a first attempt sends.
@@ -165,46 +70,26 @@ pub enum Event {
         exists: Observed<bool>,
         create: Command,
     },
-    /// `agent restart` / `agent fresh`.
-    Request(Reset),
-    /// What T3 shows now: the agent's thread, and the replacement's new one.
+    /// `agent restart`.
+    Restart,
+    /// What T3 shows of the agent's thread now.
     Look {
-        agent: Observed<Option<ThreadObservation>>,
-        successor: Observed<bool>,
-        next: Identity,
-    },
-    /// A fresh start's plan (handoff and identities, without a step yet),
-    /// and the agent's thread as it is right after gathering it.
-    Gathered {
-        plan: Result<Replacement, String>,
         agent: Observed<Option<ThreadObservation>>,
         next: Identity,
     },
     /// What sending the current step's command got.
     Sent { outcome: Dispatched, next: Identity },
-    /// For a replacement saved before steps: whether the handoff is in the new thread.
-    LookedUp {
-        found: Result<bool, String>,
-        next: Identity,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Effect {
     /// Save the lifecycle. Effects after it run only once it is saved.
     Commit,
-    /// Save the lifecycle together with the agent, its workers and its
-    /// never-sent updates moving from the old thread to the new one.
-    Rebind,
     /// Send the creation, exactly.
     SendCreate(Command),
-    /// Send this order under this identity.
-    Send(Order, Identity),
-    /// Gather the handoff, then look at the agent's thread again.
-    Gather,
-    /// Look for the handoff in the new thread.
-    LookUp,
-    /// A turn may be running: the reset waits for it to end.
+    /// Stop the agent thread's session under this identity.
+    Stop(Identity),
+    /// A turn may be running: the restart waits for it to end.
     Deferred,
     /// The operation is finished.
     Done,
@@ -212,10 +97,10 @@ pub enum Effect {
     Failed(String),
 }
 
-const NOT_CURRENT: &str = "T3's thread list is not current; the reset is retried";
+const NOT_CURRENT: &str = "T3's thread list is not current; the restart is retried";
 const GONE: &str = "The app agent's thread is gone";
 
-/// The agent's thread as a reset may act on it: only a current observation.
+/// The agent's thread as a restart may act on it: only a current observation.
 fn now(agent: &Observed<Option<ThreadObservation>>) -> Result<&ThreadObservation, &'static str> {
     match agent {
         Observed::Current {
@@ -250,24 +135,6 @@ fn report(state: Lifecycle, effect: Effect) -> Reduction<Lifecycle, Effect> {
 
 fn fault(state: Lifecycle, what: &str) -> Reduction<Lifecycle, Effect> {
     Reduction::same(state, Disposition::ProtocolFault(what.into()))
-}
-
-/// A replacement at `step`, keeping the operation's error and failures.
-fn replacing(
-    replacement: Replacement,
-    step: Step,
-    error: Option<String>,
-    failures: u32,
-) -> Lifecycle {
-    Lifecycle::Replacing {
-        replacement: Replacement {
-            step: Some(step),
-            delivery: Delivery::Queued,
-            ..replacement
-        },
-        error,
-        failures,
-    }
 }
 
 pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
@@ -334,33 +201,28 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
             ),
         ),
 
-        // A request. A newer one replaces a queued one.
-        (Ready { .. } | ResetQueued { .. }, Event::Request(reset)) => effects(
-            ResetQueued {
-                reset,
+        // A request. One already queued stays as it is.
+        (Ready { .. }, Event::Restart) => effects(
+            RestartQueued {
                 error: None,
                 failures: 0,
             },
             vec![Effect::Commit],
         ),
-        (state @ Creating { .. }, Event::Request(_)) => Reduction {
+        (state @ RestartQueued { .. }, Event::Restart) => {
+            Reduction::same(state, Disposition::Duplicate)
+        }
+        (state @ Creating { .. }, Event::Restart) => Reduction {
             state,
             effects: vec![Effect::Failed(
                 "The app's agent is still being created".into(),
             )],
             disposition: Disposition::NotApplicable,
         },
-        (state @ Restarting { .. }, Event::Request(_)) => Reduction {
+        (state @ Restarting { .. }, Event::Restart) => Reduction {
             state,
             effects: vec![Effect::Failed(
                 "A restart of this agent is already under way".into(),
-            )],
-            disposition: Disposition::Busy,
-        },
-        (state @ Replacing { .. }, Event::Request(_)) => Reduction {
-            state,
-            effects: vec![Effect::Failed(
-                "A fresh start of this agent is already under way".into(),
             )],
             disposition: Disposition::Busy,
         },
@@ -371,23 +233,14 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
         }
 
         // Restart.
-        (
-            state @ ResetQueued {
-                reset: Reset::Restart,
-                ..
-            },
-            Event::Look { agent, next, .. },
-        ) => match now(&agent) {
+        (state @ RestartQueued { .. }, Event::Look { agent, next }) => match now(&agent) {
             Err(why) => fail(state, why),
             Ok(o) if o.busy() => report(state, Effect::Deferred),
             Ok(o) if o.stopped() => {
                 effects(Ready { refresh: true }, vec![Effect::Commit, Effect::Done])
             }
             Ok(_) => {
-                let ResetQueued {
-                    error, failures, ..
-                } = state
-                else {
+                let RestartQueued { error, failures } = state else {
                     unreachable!()
                 };
                 effects(
@@ -396,7 +249,7 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
                         error,
                         failures,
                     },
-                    vec![Effect::Commit, Effect::Send(Order::Stop, next)],
+                    vec![Effect::Commit, Effect::Stop(next)],
                 )
             }
         },
@@ -411,7 +264,7 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
                 let Restarting { stop, .. } = &state else {
                     unreachable!()
                 };
-                let send = Effect::Send(Order::Stop, stop.clone());
+                let send = Effect::Stop(stop.clone());
                 report(state, send)
             }
         },
@@ -431,11 +284,7 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
                 ..
             },
         ) => effects(
-            ResetQueued {
-                reset: Reset::Restart,
-                error,
-                failures,
-            },
+            RestartQueued { error, failures },
             vec![Effect::Commit, Effect::Failed(detail)],
         ),
         (
@@ -446,343 +295,7 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
             },
         ) => fail(state, detail),
 
-        // Fresh start: gather the handoff, then look again right before stopping.
-        (
-            state @ ResetQueued {
-                reset: Reset::Fresh { .. },
-                ..
-            },
-            Event::Look { agent, .. },
-        ) => match now(&agent) {
-            Err(why) => fail(state, why),
-            Ok(o) if o.busy() => report(state, Effect::Deferred),
-            Ok(_) => report(state, Effect::Gather),
-        },
-        (
-            ResetQueued {
-                reset: Reset::Fresh { note },
-                error,
-                failures,
-            },
-            Event::Gathered { plan, agent, next },
-        ) => {
-            let state = ResetQueued {
-                reset: Reset::Fresh { note: note.clone() },
-                error: error.clone(),
-                failures,
-            };
-            let plan = match plan {
-                Ok(plan) => plan,
-                Err(detail) => return fail(state, detail),
-            };
-            match now(&agent) {
-                Err(why) => fail(state, why),
-                Ok(o) if o.busy() => report(state, Effect::Deferred),
-                Ok(o) => {
-                    let plan = Replacement {
-                        note,
-                        step: None,
-                        delivery: Delivery::Queued,
-                        ..plan
-                    };
-                    let (step, order) = if o.stopped() {
-                        (
-                            Step::Rename {
-                                command: next.clone(),
-                            },
-                            Order::Rename,
-                        )
-                    } else {
-                        (
-                            Step::Stop {
-                                command: next.clone(),
-                            },
-                            Order::Stop,
-                        )
-                    };
-                    effects(
-                        replacing(plan, step, error, failures),
-                        vec![Effect::Commit, Effect::Send(order, next)],
-                    )
-                }
-            }
-        }
-
-        (
-            Replacing {
-                replacement,
-                error,
-                failures,
-            },
-            Event::Look {
-                agent,
-                successor,
-                next,
-            },
-        ) => match replacement.step.clone() {
-            Some(Step::Stop { command }) => {
-                let state = Replacing {
-                    replacement: replacement.clone(),
-                    error: error.clone(),
-                    failures,
-                };
-                match now(&agent) {
-                    Err(why) => fail(state, why),
-                    // A turn started before the stop took: wait for it, then
-                    // gather a handoff that includes it.
-                    Ok(o) if o.busy() => effects(
-                        ResetQueued {
-                            reset: Reset::Fresh {
-                                note: replacement.note,
-                            },
-                            error,
-                            failures,
-                        },
-                        vec![Effect::Commit, Effect::Deferred],
-                    ),
-                    Ok(o) if o.stopped() => effects(
-                        replacing(
-                            replacement,
-                            Step::Rename {
-                                command: next.clone(),
-                            },
-                            error,
-                            failures,
-                        ),
-                        vec![Effect::Commit, Effect::Send(Order::Rename, next)],
-                    ),
-                    Ok(_) => report(state, Effect::Send(Order::Stop, command)),
-                }
-            }
-            Some(Step::Rename { command }) => report(
-                Replacing {
-                    replacement,
-                    error,
-                    failures,
-                },
-                Effect::Send(Order::Rename, command),
-            ),
-            Some(Step::Create { command }) => match successor {
-                Observed::Current { value: true, .. } => effects(
-                    replacing(
-                        replacement,
-                        Step::Handoff {
-                            command: next.clone(),
-                        },
-                        error,
-                        failures,
-                    ),
-                    vec![Effect::Rebind, Effect::Send(Order::Handoff, next)],
-                ),
-                Observed::Current { value: false, .. } => report(
-                    Replacing {
-                        replacement,
-                        error,
-                        failures,
-                    },
-                    Effect::Send(Order::Create, command),
-                ),
-                _ => fail(
-                    Replacing {
-                        replacement,
-                        error,
-                        failures,
-                    },
-                    NOT_CURRENT,
-                ),
-            },
-            Some(Step::Handoff { command }) => report(
-                Replacing {
-                    replacement,
-                    error,
-                    failures,
-                },
-                Effect::Send(Order::Handoff, command),
-            ),
-            // Saved before steps: stopped and renamed already.
-            None => match successor {
-                Observed::Current { value: true, .. }
-                    if replacement.delivery == Delivery::OutcomeUnknown =>
-                {
-                    effects(
-                        Replacing {
-                            replacement,
-                            error,
-                            failures,
-                        },
-                        vec![Effect::Rebind, Effect::LookUp],
-                    )
-                }
-                Observed::Current { value: true, .. } => effects(
-                    replacing(
-                        replacement,
-                        Step::Handoff {
-                            command: next.clone(),
-                        },
-                        error,
-                        failures,
-                    ),
-                    vec![Effect::Rebind, Effect::Send(Order::Handoff, next)],
-                ),
-                Observed::Current { value: false, .. } => effects(
-                    replacing(
-                        replacement,
-                        Step::Create {
-                            command: next.clone(),
-                        },
-                        error,
-                        failures,
-                    ),
-                    vec![Effect::Commit, Effect::Send(Order::Create, next)],
-                ),
-                _ => fail(
-                    Replacing {
-                        replacement,
-                        error,
-                        failures,
-                    },
-                    NOT_CURRENT,
-                ),
-            },
-        },
-
-        (
-            Replacing {
-                replacement,
-                error,
-                failures,
-            },
-            Event::Sent { outcome, next },
-        ) => {
-            let Some(step) = replacement.step.clone() else {
-                return fault(
-                    Replacing {
-                        replacement,
-                        error,
-                        failures,
-                    },
-                    "a send answered for a replacement without a step",
-                );
-            };
-            match outcome {
-                Dispatched::Accepted(_) => match step {
-                    Step::Stop { .. } => effects(
-                        replacing(
-                            replacement,
-                            Step::Rename {
-                                command: next.clone(),
-                            },
-                            error,
-                            failures,
-                        ),
-                        vec![Effect::Commit, Effect::Send(Order::Rename, next)],
-                    ),
-                    Step::Rename { .. } => effects(
-                        replacing(
-                            replacement,
-                            Step::Create {
-                                command: next.clone(),
-                            },
-                            error,
-                            failures,
-                        ),
-                        vec![Effect::Commit, Effect::Send(Order::Create, next)],
-                    ),
-                    Step::Create { .. } => effects(
-                        replacing(
-                            replacement,
-                            Step::Handoff {
-                                command: next.clone(),
-                            },
-                            error,
-                            failures,
-                        ),
-                        vec![Effect::Rebind, Effect::Send(Order::Handoff, next)],
-                    ),
-                    Step::Handoff { .. } => {
-                        effects(Ready { refresh: false }, vec![Effect::Commit, Effect::Done])
-                    }
-                },
-                // T3 said no: nothing of this step happened. A refused stop
-                // ends the attempt before anything changed; any later step
-                // tries again under a new identity.
-                Dispatched::Refused(detail) => match step {
-                    Step::Stop { .. } => effects(
-                        ResetQueued {
-                            reset: Reset::Fresh {
-                                note: replacement.note,
-                            },
-                            error,
-                            failures,
-                        },
-                        vec![Effect::Commit, Effect::Failed(detail)],
-                    ),
-                    Step::Rename { .. } => effects(
-                        replacing(replacement, Step::Rename { command: next }, error, failures),
-                        vec![Effect::Commit, Effect::Failed(detail)],
-                    ),
-                    Step::Create { .. } => effects(
-                        replacing(replacement, Step::Create { command: next }, error, failures),
-                        vec![Effect::Commit, Effect::Failed(detail)],
-                    ),
-                    Step::Handoff { .. } => effects(
-                        replacing(
-                            replacement,
-                            Step::Handoff { command: next },
-                            error,
-                            failures,
-                        ),
-                        vec![Effect::Commit, Effect::Failed(detail)],
-                    ),
-                },
-                Dispatched::NotSent(detail) | Dispatched::Unknown(detail) => fail(
-                    Replacing {
-                        replacement,
-                        error,
-                        failures,
-                    },
-                    detail,
-                ),
-            }
-        }
-
-        (
-            Replacing {
-                replacement,
-                error,
-                failures,
-            },
-            Event::LookedUp { found, next },
-        ) if replacement.step.is_none() => match found {
-            Ok(true) => effects(Ready { refresh: false }, vec![Effect::Commit, Effect::Done]),
-            Ok(false) => effects(
-                replacing(
-                    replacement,
-                    Step::Handoff {
-                        command: next.clone(),
-                    },
-                    error,
-                    failures,
-                ),
-                vec![Effect::Commit, Effect::Send(Order::Handoff, next)],
-            ),
-            Err(detail) => fail(
-                Replacing {
-                    replacement,
-                    error,
-                    failures,
-                },
-                detail,
-            ),
-        },
-
-        (state, Event::Gathered { .. }) => {
-            fault(state, "a handoff gathered outside a queued fresh start")
-        }
         (state, Event::Sent { .. }) => fault(state, "a send answered with nothing sent"),
-        (state, Event::LookedUp { .. }) => {
-            fault(state, "a look-up answered with nothing looked for")
-        }
         (state, Event::Create { .. }) => Reduction {
             state,
             effects: vec![],
@@ -794,18 +307,6 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
 /// What must hold for one lifecycle.
 pub fn violations(state: &Lifecycle) -> Vec<Violation> {
     let mut found = vec![];
-    if let Lifecycle::Replacing { replacement, .. } = state {
-        if replacement.previous == replacement.thread_id {
-            found.push(Violation(
-                "a replacement replaces its thread with itself".into(),
-            ));
-        }
-        if replacement.step.is_some() && replacement.delivery != Delivery::Queued {
-            found.push(Violation(
-                "a stepped replacement carries a legacy delivery".into(),
-            ));
-        }
-    }
     if let Lifecycle::Creating {
         command: Some(command),
     } = state
