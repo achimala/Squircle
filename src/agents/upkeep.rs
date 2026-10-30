@@ -127,6 +127,7 @@ impl Agents {
         let event = m26::Event::Checked {
             thread: thread.clone(),
             reading: wanted.clone(),
+            latest: row["latest"].as_str().map(Into::into),
             compact,
         };
         match self.run_upkeep(&agent.project_id, event).await? {
