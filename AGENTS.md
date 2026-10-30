@@ -2,6 +2,8 @@
 
 Read [README.md](README.md), then only the linked detail relevant to the task. Do not load every document by default.
 
+Reviews and new code follow [engineering preferences](docs/engineering-preferences.md).
+
 ## Preserve these decisions
 
 - **2026-10-05:** replace the Hermes client integration with a fresh native client for the user's already running, unmodified T3 Code server. T3 owns agents, threads and execution. Do not fork T3 or create another agent backend. See [native migration](docs/t3-native-migration.md).
