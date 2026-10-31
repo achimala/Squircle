@@ -212,27 +212,47 @@ impl Tasks {
     }
 
     /// Puts a question to the user on task `id` for `thread`, which gets the
-    /// answer. Holds the task at needs you from `observed`, like an explicit
-    /// status.
+    /// answer, with `files` (screenshots, clips, documents) copied into the
+    /// task's media for it. Holds the task at needs you from `observed`, like
+    /// an explicit status.
     pub async fn ask(
         &self,
         id: &str,
         text: &str,
         options: Vec<String>,
+        files: &[PathBuf],
         thread: &str,
         observed: Option<Signals>,
     ) -> Result<(Task, Question)> {
+        ensure!(
+            files.iter().all(|f| f.is_absolute()),
+            "Pass absolute file paths"
+        );
+        self.get(id)?;
+        let dir = self.media_dir(id)?;
+        let mut media = Vec::new();
+        for file in files {
+            match media::add_in(&dir, id, file, None) {
+                Ok(m) => media.push(m),
+                Err(e) => {
+                    media.iter().for_each(media::remove);
+                    return Err(e);
+                }
+            }
+        }
         let question = uuid::Uuid::new_v4().to_string();
         let event = Event::Ask {
             id: id.into(),
             question: question.clone(),
             text: text.into(),
             options,
+            media: media.iter().map(|m| m.id.clone()).collect(),
             thread: thread.into(),
             observed,
             now: crate::model::now(),
         };
-        self.owner
+        let asked = self
+            .owner
             .ask(move |s| {
                 s.apply(vec![event])?;
                 s.book
@@ -240,7 +260,11 @@ impl Tasks {
                     .question(&question)
                     .ok_or_else(|| anyhow!("No question {question}"))
             })
-            .await
+            .await;
+        if asked.is_err() {
+            media.iter().for_each(media::remove);
+        }
+        asked
     }
 
     /// The user's answer, or with `None` the asker withdrawing it.

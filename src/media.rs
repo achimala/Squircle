@@ -233,6 +233,14 @@ fn store_in(
     Ok(media)
 }
 
+/// Takes back a medium just stored (its file and its record), when what it
+/// was stored for failed.
+pub fn remove(media: &Media) {
+    // Already gone is as good as removed.
+    let _ = fs::remove_file(media.file.with_extension("json"));
+    let _ = fs::remove_file(&media.file);
+}
+
 /// A media file was replaced in place by a smaller one: its record says so.
 /// Files without a record beside them (not yet filed) are left as they are.
 pub fn resized(file: &Path, bytes: u64) {

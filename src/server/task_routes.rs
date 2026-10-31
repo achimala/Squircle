@@ -100,9 +100,21 @@ pub(super) fn task_view(state: &AppState, task: &tasks::Task) -> Value {
         }
         None => json!({"id": id, "state": "missing"}),
     }).collect();
-    let media: Vec<Value> = state.tasks.as_ref().map(|t| t.media(&task.id)).unwrap_or_default().into_iter()
-        .map(|m| json!({"id": m.id, "kind": m.kind, "name": m.name, "caption": m.caption, "content_type": m.content_type,
-                        "bytes": m.bytes, "created_at": m.created_at}))
+    // An open question shows its own media; the task lists them once it is closed.
+    let asking: Vec<&String> = task
+        .questions
+        .iter()
+        .filter(|q| q.open())
+        .flat_map(|q| &q.media)
+        .collect();
+    let media: Vec<Value> = state
+        .tasks
+        .as_ref()
+        .map(|t| t.media(&task.id))
+        .unwrap_or_default()
+        .iter()
+        .filter(|m| !asking.contains(&&m.id))
+        .map(media_view)
         .collect();
     let mut value = serde_json::to_value(task).unwrap_or(Value::Null);
     value["subtasks"] = json!(
@@ -115,6 +127,12 @@ pub(super) fn task_view(state: &AppState, task: &tasks::Task) -> Value {
     value["builds"] = json!(builds);
     value["media"] = json!(media);
     value
+}
+
+/// A task's medium as the phone reads it (the file is served by ID).
+pub(super) fn media_view(m: &crate::media::Media) -> Value {
+    json!({"id": m.id, "kind": m.kind, "name": m.name, "caption": m.caption, "content_type": m.content_type,
+           "bytes": m.bytes, "created_at": m.created_at})
 }
 
 /// The app a request is about: a T3 project ID, or any of its threads.

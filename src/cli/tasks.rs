@@ -90,7 +90,7 @@ pub(super) enum TaskCommand {
         )]
         history_before: Option<String>,
     },
-    /// Ask the user a question about a work item or sub-task, instead of asking in chat: it waits on their phone with everything else waiting on them (and notifies them), the task shows needs you, and the answer comes back to you as an [answer] message. End your turn after asking unless other work needs no answer.
+    /// Ask the user a question about a work item or sub-task, instead of asking in chat: it waits on their phone with everything else waiting on them (and notifies them), the task shows needs you, and the answer comes back to you as an [answer] message. Attach the screenshot or clip it is about with --file rather than describing it or pointing at the task's media: the user sees only what the question carries. End your turn after asking unless other work needs no answer.
     Ask {
         /// The work item or sub-task it is about.
         id: String,
@@ -104,6 +104,12 @@ pub(super) enum TaskCommand {
             help = "A choice to offer as a button (repeat, up to 6); the user can always type their own"
         )]
         options: Vec<String>,
+        #[arg(
+            long = "file",
+            value_name = "PATH",
+            help = "A screenshot or clip (png, jpg, mp4, mov, m4v) or document (pdf, md, txt, json, csv) the question is about, shown on the question card (repeat for several)"
+        )]
+        files: Vec<PathBuf>,
     },
     /// Take back a question (from task ask) that no longer matters.
     Withdraw {
@@ -234,11 +240,16 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
             thread,
             question,
             options,
+            files,
         } => {
+            let files = files
+                .iter()
+                .map(std::path::absolute)
+                .collect::<std::io::Result<Vec<_>>>()?;
             post(
                 cli,
                 &format!("/v1/tasks/{}/questions", task_id(id)?),
-                json!({"thread": thread, "question": question, "options": options}),
+                json!({"thread": thread, "question": question, "options": options, "files": files}),
             )
             .await?
         }

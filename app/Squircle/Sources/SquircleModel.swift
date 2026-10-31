@@ -1977,6 +1977,18 @@ final class SquircleModel {
             (try? await client.downloadTaskMedia(taskID: task, id: media, to: destination)) != nil
         }
     }
+    /// A task's picture or a clip's poster, with enough pixels for `height` points.
+    func taskThumbnail(task: String, media: AppTask.Media, height: CGFloat) async -> UIImage? {
+        let data: Data?
+        if media.kind == "video" {
+            guard let url = await taskVideo(task: task, media: media.id) else { return nil }
+            data = await ConversationMedia.poster(of: url)
+        } else {
+            data = await taskMediaData(task: task, media: media.id)
+        }
+        guard let data else { return nil }
+        return await Downsample.image(data) { height * 3 / max(1, $0.height) }
+    }
     func previewData(for metadata: AppMetadata) async throws -> Data {
         guard let client else { throw ClientError.configuration }; let version = metadata.preview?.id ?? ""
         if let cached = previewCache.value(for: metadata.id), cached.version == version { return cached.data }

@@ -20,6 +20,8 @@ struct WaitingList: Decodable, Equatable {
         let itemAsk: String?
         let text: String
         let options: [String]
+        /// The screenshots, clips and documents it is about, kept with its task.
+        let media: [AppTask.Media]
         /// The worker that asked; nil for the app's agent.
         let from: String?
         let threadID: String?
@@ -76,7 +78,8 @@ struct WaitingList: Decodable, Equatable {
         case "question":
             guard let id = value["id"].string, let task = value["task_id"].string, let text = value["text"].string else { return nil }
             return .question(Question(id: id, taskID: task, ask: value["ask"].string ?? "", itemAsk: value["item_ask"].string,
-                                      text: text, options: value["options"].array.compactMap(\.string), from: value["from"].string,
+                                      text: text, options: value["options"].array.compactMap(\.string),
+                                      media: value["media"].array.compactMap(Self.media), from: value["from"].string,
                                       threadID: value["thread_id"].string,
                                       askedAt: value["asked_at"].double.map(Date.init(timeIntervalSince1970:))))
         case "request":
@@ -86,6 +89,11 @@ struct WaitingList: Decodable, Equatable {
         default:
             return nil
         }
+    }
+
+    private static func media(_ value: JSONValue) -> AppTask.Media? {
+        guard let id = value["id"].string, let kind = value["kind"].string else { return nil }
+        return AppTask.Media(id: id, kind: kind, caption: value["caption"].string ?? "", name: value["name"].string, bytes: value["bytes"].double)
     }
 
     /// Without the items in `hidden` (answered here, not yet gone from the Mac's list).
