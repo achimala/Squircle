@@ -461,7 +461,6 @@ pub fn import_inspected(store: &Store, inspection: &Inspection, name: &str) -> R
             mode: BuildMode::Archive,
             export_options: Some(export_options),
             allow_provisioning_updates: true,
-            capture_preview: true,
             request_id: None,
             no_overlay: false,
             thread: None,

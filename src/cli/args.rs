@@ -35,9 +35,6 @@ pub(super) enum Commands {
     /// Initialize local state and separate control/diagnostic credentials.
     Init,
     /// Run the local HTTP service in the foreground. Does not configure Tailscale.
-    #[command(
-        after_help = "Set SQUIRCLE_SIMULATOR_ID to the UUID of a dedicated existing iPhone simulator to enable build previews. Captures install and freshly launch only the target app on that simulator."
-    )]
     Serve {
         #[arg(long, default_value = "127.0.0.1:8787")]
         listen: SocketAddr,
@@ -75,11 +72,6 @@ pub(super) enum Commands {
     Build {
         #[command(subcommand)]
         command: BuildCommand,
-    },
-    /// Capture actual pixels from an app on a dedicated iOS simulator.
-    Preview {
-        #[command(subcommand)]
-        command: PreviewCommand,
     },
     /// Register apps, update their summary, and publish real screenshots after UI work.
     App {

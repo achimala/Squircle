@@ -28,20 +28,18 @@ final class ScreenshotBinding {
 
     deinit { loading?.cancel(); restoring?.cancel() }
 
-    /// The Mac catalog's published preview wins; then the newest build
-    /// capture; then the newest simulator screenshot T3 took in the app's
-    /// threads (the Mac picks only those, never an image an agent read).
+    /// The Mac catalog's published preview wins; then the newest simulator
+    /// screenshot T3 took in the app's threads (the Mac picks only those,
+    /// never an image an agent read).
     /// Only an app with none of these shows "No screenshot yet".
     func update(model: SquircleModel, project: AppProject) {
         let metadata = model.metadata(for: project).flatMap { $0.preview == nil ? nil : $0 }
-        let build = metadata == nil ? model.builds(for: project).first(where: { $0.previewAvailable }) : nil
         // Threads move on often; look for a newer capture at most every few minutes.
         let latest = model.sessions(for: project).map(\.updatedAt).max()
         let version = latest.map { String(Int($0.timeIntervalSince1970 / 300)) } ?? "none"
         let published: String? = metadata.flatMap { record in record.preview.map { "app:\(record.id):\($0.id)" } }
-        let captured: String? = build.map { "build:\($0.id):\($0.previewCapturedAt?.timeIntervalSince1970 ?? 0)" }
         let threads: String = latest == nil ? "missing" : Self.capturePrefix + "\(project.id):\(version)"
-        let key = published ?? captured ?? threads
+        let key = published ?? threads
         guard key != sourceKey else { return }
         sourceKey = key
         loading?.cancel()
@@ -67,7 +65,6 @@ final class ScreenshotBinding {
             do {
                 let data: Data
                 if let metadata { data = try await model.previewData(for: metadata) }
-                else if let build { data = try await model.previewData(for: build) }
                 else { data = try await model.threadScreenshot(for: project, version: version) }
                 let image = await Self.decode(data)
                 guard let self, !Task.isCancelled, self.sourceKey == key else { return }

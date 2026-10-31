@@ -129,77 +129,17 @@ pub(super) async fn start(
     start_build(state, body(request)?).await.map(Json)
 }
 
-pub(super) async fn capture_preview(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    input: std::result::Result<Json<PreviewRequest>, JsonRejection>,
-) -> ApiResult<(StatusCode, Json<Value>)> {
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(start_preview(state, id, body(input)?).await?),
-    ))
-}
-
-pub(super) async fn download_preview(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<Response> {
-    let path = {
-        let job = state
-            .jobs
-            .get(&id)
-            .ok_or_else(|| ApiError::missing(format!("No build {id}")))?
-            .job;
-        let path = job
-            .preview()
-            .and_then(|preview| preview.artifact())
-            .map(|artifact| artifact.path.clone())
-            .ok_or_else(|| ApiError::missing("This build has no captured preview"))?;
-        let expected = state
-            .files
-            .job_dir(&id)
-            .map_err(ApiError::missing)?
-            .join("preview.png");
-        if path != expected {
-            return Err(ApiError::internal(
-                "Preview artifact is outside its build directory",
-            ));
-        }
-        path
-    };
-    // Do not serve symlink substitutions or arbitrary paths from edited records.
-    let file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
-        .await
-        .map_err(ApiError::missing)?;
-    let metadata = file.metadata().await.map_err(ApiError::internal)?;
-    if !metadata.is_file() || metadata.len() > 32 * 1024 * 1024 {
-        return Err(ApiError::internal("Invalid preview artifact"));
-    }
-    Ok((
-        [
-            (header::CONTENT_TYPE, "image/png"),
-            (header::CACHE_CONTROL, "no-store"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
-        Body::from_stream(ReaderStream::new(file)),
-    )
-        .into_response())
-}
-
 pub(super) async fn cancel(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (job_state, operation) = state
+    let (job_state, asked) = state
         .jobs
         .cancel(&id)
         .await
         .ok_or_else(|| ApiError::missing(format!("No build {id}")))?;
     Ok(Json(success(
-        json!({"build_id":id,"cancel_requested":operation.is_some(),"state":job_state}),
+        json!({"build_id":id,"cancel_requested":asked,"state":job_state}),
     )))
 }
 

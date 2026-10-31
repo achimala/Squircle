@@ -285,10 +285,6 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     let canInstall: Bool
     let bundleID: String?
     let request: AppBuildRequest?
-    let previewAvailable: Bool
-    let previewState: String?
-    let previewError: String?
-    let previewCapturedAt: Date?
     let updatedAt: Date
     /// The service's error for a job that didn't succeed.
     let error: String?
@@ -302,7 +298,7 @@ struct AppBuild: Identifiable, Decodable, Equatable {
     var appProject: String? { mainProject ?? request?.project }
 
     var needsPolling: Bool {
-        status == "queued" || status == "running" || previewState == "pending" || previewState == "running"
+        status == "queued" || status == "running"
     }
 
     enum CodingKeys: String, CodingKey {
@@ -316,10 +312,6 @@ struct AppBuild: Identifiable, Decodable, Equatable {
         let build_number: String?
         let ipa_path: String?
         let bundle_id: String?
-        let preview_path: String?
-        let preview_state: String?
-        let preview_error: String?
-        let preview_captured_at: Double?
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -331,10 +323,6 @@ struct AppBuild: Identifiable, Decodable, Equatable {
         bundleID = output?.bundle_id
         version = [output?.version, output?.build_number.map { "(\($0))" }].compactMap { $0 }.joined(separator: " ")
         canInstall = status == "succeeded" && output?.ipa_path != nil
-        previewState = output?.preview_state
-        previewError = output?.preview_error
-        previewCapturedAt = output?.preview_captured_at.map { Date(timeIntervalSince1970: $0) }
-        previewAvailable = !(output?.preview_path ?? "").isEmpty && (previewState == nil || previewState == "succeeded")
         date = Date(timeIntervalSince1970: try values.decode(Double.self, forKey: .createdAt))
         updatedAt = (try values.decodeIfPresent(Double.self, forKey: .updatedAt)).map(Date.init(timeIntervalSince1970:)) ?? date
         error = try values.decodeIfPresent(String.self, forKey: .error)

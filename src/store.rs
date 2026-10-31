@@ -1,7 +1,7 @@
 use crate::actor::{Owner, Published, Snapshot};
 use crate::model::{
-    BuildOrigin, BuildState, Diagnostic, DiagnosticKind, Job, JobPhase, PreviewState,
-    SCHEMA_VERSION, Settings, Ticket, now, token,
+    BuildOrigin, BuildState, Diagnostic, DiagnosticKind, Job, JobPhase, SCHEMA_VERSION, Settings,
+    Ticket, now, token,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Serialize, de::DeserializeOwned};
@@ -71,6 +71,44 @@ impl Store {
             "control and diagnostic tokens must differ"
         );
         Ok(Self { root, settings })
+    }
+
+    /// Build recipes saved before the service stopped capturing previews
+    /// itself (2026-10-31) carry `capture_preview`, which recipes no longer
+    /// accept: the service removes it from every job and app record once, at
+    /// startup, before loading them. Delete this when every data directory
+    /// has been opened by a service from after that date.
+    pub fn drop_capture_preview(&self) -> Result<()> {
+        for (directory, file, recipe) in [
+            ("jobs", "job.json", "request"),
+            ("apps", "app.json", "build_request"),
+        ] {
+            let Ok(entries) = fs::read_dir(self.root.join(directory)) else {
+                continue;
+            };
+            for entry in entries {
+                let entry = entry?;
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_none_or(|id| validate_id(id).is_err())
+                {
+                    continue;
+                }
+                let path = entry.path().join(file);
+                // An unreadable record is reported by whatever loads it.
+                let Ok(mut record) = read_json::<Value>(&path) else {
+                    continue;
+                };
+                let removed = record[recipe]
+                    .as_object_mut()
+                    .and_then(|r| r.remove("capture_preview"));
+                if removed.is_some() {
+                    atomic_json(&path, &record)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Keeps `url` as the service's public URL for later starts.
@@ -293,7 +331,7 @@ impl Store {
 
 /// Build jobs as the service sees them, with one owner: each job's record
 /// (committed, or a terminal result the disk refused), its revision, and
-/// the live operation (build or preview) that alone may change it. Every
+/// the live build that alone may change it. Every
 /// view reads the index the owner publishes; nothing rescans the jobs
 /// directory after startup.
 pub struct Jobs {
@@ -301,7 +339,7 @@ pub struct Jobs {
     views: Snapshot<Views>,
 }
 
-/// What readers see: every job, and how many builds and previews are live.
+/// What readers see: every job, and how many builds are live.
 #[derive(Clone, Default)]
 struct Views {
     jobs: HashMap<String, Arc<JobView>>,
@@ -312,7 +350,7 @@ struct JobIndex {
     store: Store,
     entries: HashMap<String, JobEntry>,
     leases: u64,
-    /// The service is stopping: no new builds or previews.
+    /// The service is stopping: no new builds.
     closed: bool,
     views: Views,
     published: Published<Views>,
@@ -336,19 +374,12 @@ pub enum Record {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OperationKind {
-    Build,
-    Preview,
-}
-
 struct Operation {
-    kind: OperationKind,
     lease: u64,
     cancel: watch::Sender<bool>,
 }
 
-/// The right to run a job's build or preview and commit its progress.
+/// The right to run a job's build and commit its progress.
 /// Cancellation reaches the job through `cancelled`. One dropped before
 /// `finish` (its runner panicked or went away) tells the owner, which ends
 /// the operation as interrupted.
@@ -390,10 +421,8 @@ impl Serialize for JobView {
 
 #[derive(Debug)]
 pub enum AdmitError {
-    /// Sixteen builds and previews are already queued or running.
+    /// Sixteen builds are already queued or running.
     Full,
-    /// This job already has a build or preview in progress.
-    Busy,
     /// The job is unknown, or cannot run this operation.
     Refused(String),
     Persist(anyhow::Error),
@@ -403,7 +432,7 @@ pub enum AdmitError {
     Duplicate(Box<JobView>),
 }
 
-/// Live operations at once, across builds and previews.
+/// Builds queued or running at once.
 pub const MAX_OPERATIONS: usize = 16;
 
 impl Jobs {
@@ -416,13 +445,6 @@ impl Jobs {
         }
         let mut entries = HashMap::new();
         for mut job in jobs {
-            if let Some(preview) = job.preview().filter(|p| p.in_progress()) {
-                let next = preview
-                    .failed("Service stopped during preview capture; no automatic retry was made");
-                job.set_preview(next);
-                job.updated_at = now();
-                store.save_job(&job)?;
-            }
             if !job.state().terminal() {
                 job.phase = JobPhase::Interrupted { message: "Service stopped during this job. Inspect artifacts/processes before submitting new work; no automatic retry was made.".into() };
                 job.updated_at = now();
@@ -495,14 +517,13 @@ impl Jobs {
             .map(|v| (**v).clone())
     }
 
-    /// Builds and previews queued or running.
     /// One item each time a job, or the live operations, change.
     pub fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
         use futures_util::StreamExt;
         self.views.changes().boxed()
     }
 
-    /// Resolves once no build or preview is running.
+    /// Resolves once no build is running.
     pub async fn idle(&self) {
         self.views.wait_for(|views| views.operations == 0).await;
     }
@@ -530,7 +551,7 @@ impl Jobs {
                     return Err(AdmitError::Full);
                 }
                 index.store.save_job(&job).map_err(AdmitError::Persist)?;
-                let (operation, lease) = index.lease(&job.id, OperationKind::Build, owner);
+                let (operation, lease) = index.lease(&job.id, owner);
                 let id = job.id.clone();
                 index.entries.insert(
                     id.clone(),
@@ -564,48 +585,6 @@ impl Jobs {
                 );
                 index.publish(&id);
                 Ok(())
-            })
-            .await
-    }
-
-    /// Queues a new preview of a succeeded project build, keeping its
-    /// current image until the capture replaces it.
-    pub async fn begin_preview(&self, id: &str) -> std::result::Result<(Job, Lease), AdmitError> {
-        let (id, owner) = (id.to_string(), self.owner.clone());
-        self.owner
-            .ask(move |index| {
-                if index.closed {
-                    return Err(AdmitError::Closed);
-                }
-                let operations = index.operations();
-                let entry = index
-                    .entries
-                    .get(&id)
-                    .ok_or_else(|| AdmitError::Refused(format!("No build {id}")))?;
-                if entry.operation.is_some() {
-                    return Err(AdmitError::Busy);
-                }
-                if operations >= MAX_OPERATIONS {
-                    return Err(AdmitError::Full);
-                }
-                if entry.job.request().is_none() || entry.job.preview().is_none() {
-                    return Err(AdmitError::Refused(
-                        "Preview requires a succeeded project build with a simulator build recipe"
-                            .into(),
-                    ));
-                }
-                let mut job = entry.job.clone();
-                let queued = job.preview().map(PreviewState::queued).unwrap_or_default();
-                job.set_preview(queued);
-                job.updated_at = now();
-                index.store.save_job(&job).map_err(AdmitError::Persist)?;
-                let (operation, lease) = index.lease(&id, OperationKind::Preview, owner);
-                let entry = index.entries.get_mut(&id).expect("jobs are never removed");
-                entry.job = job.clone();
-                entry.revision += 1;
-                entry.operation = Some(operation);
-                index.publish(&id);
-                Ok((job, lease))
             })
             .await
     }
@@ -660,24 +639,23 @@ impl Jobs {
             .await
     }
 
-    /// Asks a job's live operation to stop. None for an unknown job; false
+    /// Asks a job's live build to stop. None for an unknown job; false
     /// when nothing is running.
-    pub async fn cancel(&self, id: &str) -> Option<(BuildState, Option<OperationKind>)> {
+    pub async fn cancel(&self, id: &str) -> Option<(BuildState, bool)> {
         let id = id.to_string();
         self.owner
             .ask(move |index| {
                 let entry = index.entries.get(&id)?;
-                let kind = entry
+                let asked = entry
                     .operation
                     .as_ref()
-                    .filter(|o| o.cancel.send(true).is_ok())
-                    .map(|o| o.kind);
-                Some((entry.job.state(), kind))
+                    .is_some_and(|o| o.cancel.send(true).is_ok());
+                Some((entry.job.state(), asked))
             })
             .await
     }
 
-    /// For the service's exit: refuses new builds and previews, then asks
+    /// For the service's exit: refuses new builds, then asks
     /// every live one to stop, in one turn, so none is admitted after.
     pub async fn close(&self) {
         self.owner
@@ -695,12 +673,7 @@ impl Jobs {
 
 impl JobIndex {
     /// `owner` is this index's own handle, for the lease to tell when dropped.
-    fn lease(
-        &mut self,
-        id: &str,
-        kind: OperationKind,
-        owner: Owner<JobIndex>,
-    ) -> (Operation, Lease) {
+    fn lease(&mut self, id: &str, owner: Owner<JobIndex>) -> (Operation, Lease) {
         self.leases += 1;
         let (cancel, cancelled) = watch::channel(false);
         let lease = Lease {
@@ -711,7 +684,6 @@ impl JobIndex {
         };
         (
             Operation {
-                kind,
                 lease: self.leases,
                 cancel,
             },
@@ -981,7 +953,6 @@ mod tests {
             updated_at: 1,
             origin: BuildOrigin::Imported,
             phase: JobPhase::Succeeded {
-                preview: PreviewState::Absent,
                 output: BuildOutput {
                     archive_path: None,
                     ipa_path: Some("/Example.ipa".into()),
@@ -1155,10 +1126,6 @@ mod tests {
         };
         let queued = project("k")?;
         let lease = jobs.admit(queued.clone()).await.unwrap();
-        assert!(matches!(
-            jobs.begin_preview(&queued.id).await,
-            Err(AdmitError::Busy)
-        ));
         assert_eq!(
             jobs.with_request_id("k").map(|v| v.job.id),
             Some(queued.id.clone())
@@ -1170,7 +1137,7 @@ mod tests {
         // Cancellation reaches the live operation.
         assert_eq!(
             jobs.cancel(&queued.id).await,
-            Some((BuildState::Queued, Some(OperationKind::Build)))
+            Some((BuildState::Queued, true))
         );
         assert!(*lease.cancelled.borrow());
         // The disk refuses the terminal write: the result is still what readers see.

@@ -115,10 +115,7 @@ pub(super) async fn start_build(state: AppState, mut request: BuildRequest) -> A
                 }
             };
             job.phase = match result {
-                Ok(output) => JobPhase::Succeeded {
-                    output,
-                    preview: PreviewState::Absent,
-                },
+                Ok(output) => JobPhase::Succeeded { output },
                 Err(error) if *receiver.borrow() => JobPhase::Cancelled {
                     message: Some(format!("{error:#}")),
                 },
@@ -126,22 +123,6 @@ pub(super) async fn start_build(state: AppState, mut request: BuildRequest) -> A
                     message: format!("{error:#}"),
                 },
             };
-            if request.capture_preview && job.set_preview(PreviewState::Absent.capturing()) {
-                job.updated_at = now();
-                let capture = match state.jobs.commit(&lease, &job).await {
-                    Ok(()) => match preview::simulator_id(None) {
-                        Ok(simulator) => {
-                            preview::capture(&job, &dir, &simulator, receiver.clone()).await
-                        }
-                        Err(error) => Err(error),
-                    },
-                    Err(error) => {
-                        state.draining.store(true, Ordering::Release);
-                        Err(error.context("Could not persist preview state"))
-                    }
-                };
-                finish_preview(&mut job, capture);
-            }
         }
         job.updated_at = now();
         if let Err(error) = state.jobs.finish(lease, &job).await {
@@ -151,7 +132,6 @@ pub(super) async fn start_build(state: AppState, mut request: BuildRequest) -> A
             );
             state.draining.store(true, Ordering::Release);
         }
-        // Before the slot frees, so no recapture of this job is building.
         xcode::shed(dir.clone(), job.request().map(|r| r.mode.clone())).await;
         let app = build_app(&state, &job).await;
         if let Some(push) = &state.push {
@@ -227,14 +207,8 @@ pub(super) async fn tell_agent(state: &AppState, job: &Job, app: Option<&apps::A
 pub(super) fn admit_error(error: AdmitError) -> ApiError {
     match error {
         AdmitError::Full => ApiError::bad(format!(
-            "Build/preview queue is full ({MAX_OPERATIONS} jobs); wait or cancel a job"
+            "Build queue is full ({MAX_OPERATIONS} jobs); wait or cancel a job"
         )),
-        AdmitError::Busy => ApiError::new(
-            StatusCode::CONFLICT,
-            "preview_in_progress",
-            "This build already has work in progress",
-            "Poll build status before recapturing.",
-        ),
         AdmitError::Refused(message) => ApiError::bad(message),
         AdmitError::Persist(error) => ApiError::internal(format!("{error:#}")),
         AdmitError::Closed => ApiError::unavailable(),
@@ -243,75 +217,6 @@ pub(super) fn admit_error(error: AdmitError) -> ApiError {
             prior.job.id
         )),
     }
-}
-
-/// A capture's result on the job; a failed capture keeps the prior image.
-pub(super) fn finish_preview(job: &mut Job, capture: Result<preview::Capture>) {
-    let Some(current) = job.preview() else { return };
-    let next = current.finish(capture.map(|c| PreviewArtifact {
-        path: c.path,
-        captured_at: c.captured_at,
-        source: Some(c.source),
-    }));
-    job.set_preview(next);
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PreviewRequest {
-    pub(super) simulator: Option<String>,
-}
-
-pub(super) async fn start_preview(
-    state: AppState,
-    id: String,
-    input: PreviewRequest,
-) -> ApiResult<Value> {
-    let simulator = preview::simulator_id(input.simulator.as_deref()).map_err(ApiError::bad)?;
-    if state.draining.load(Ordering::Acquire) {
-        return Err(ApiError::unavailable());
-    }
-    if state.jobs.get(&id).is_none() {
-        return Err(ApiError::missing(format!("No build {id}")));
-    }
-    let directory = state.files.job_dir(&id).map_err(ApiError::internal)?;
-    let (mut job, lease) = state.jobs.begin_preview(&id).await.map_err(admit_error)?;
-    let response = state.jobs.get(&id);
-    tokio::spawn(async move {
-        let cancel = lease.cancelled.clone();
-        let lane = state.clone();
-        in_build_lane(&lane, cancel, move |admitted| async move {
-            let receiver = lease.cancelled.clone();
-            let result = if !admitted || *receiver.borrow() {
-                Err(anyhow::anyhow!("Preview cancelled before capture"))
-            } else {
-                let capturing = job
-                    .preview()
-                    .map(PreviewState::capturing)
-                    .unwrap_or_default();
-                job.set_preview(capturing);
-                job.updated_at = now();
-                match state.jobs.commit(&lease, &job).await {
-                    Ok(()) => preview::capture(&job, &directory, &simulator, receiver).await,
-                    Err(error) => {
-                        state.draining.store(true, Ordering::Release);
-                        Err(error.context("Could not persist preview Running state"))
-                    }
-                }
-            };
-            finish_preview(&mut job, result);
-            job.updated_at = now();
-            if let Err(error) = state.jobs.finish(lease, &job).await {
-                eprintln!("Cannot persist preview of {id}: {error:#}. Service paused.");
-                state.draining.store(true, Ordering::Release);
-            } else {
-                build_app(&state, &job).await;
-            }
-            xcode::shed(directory, job.request().map(|r| r.mode.clone())).await;
-        })
-        .await;
-    });
-    Ok(success(json!({"job":response})))
 }
 
 /// Best-effort submission-time observations. Builds still use the working tree;
@@ -414,17 +319,14 @@ pub(super) fn import_ipa(
         created_at: now(),
         updated_at: now(),
         origin: BuildOrigin::Imported,
-        phase: JobPhase::Succeeded {
-            output,
-            preview: PreviewState::Absent,
-        },
+        phase: JobPhase::Succeeded { output },
     };
     // Work admitted before shutdown may finish. Publication (`Jobs::insert`)
     // occurs only after the copied IPA has been synced and its metadata validated.
     Ok(job)
 }
 
-/// Runs `work` in the build lane: one build or preview at a time, in
+/// Runs `work` in the build lane: one build at a time, in
 /// order. Its argument says whether it got there; a job cancelled while it
 /// waits runs `work(false)` at once, outside the lane, to record that.
 async fn in_build_lane<F, Fut>(

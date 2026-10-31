@@ -45,7 +45,6 @@ fn request(root: &std::path::Path) -> BuildRequest {
         export_options: None,
         request_id: Some("same-request".into()),
         allow_provisioning_updates: false,
-        capture_preview: false,
         no_overlay: false,
         thread: None,
     }

@@ -6,7 +6,7 @@ use crate::{
     agents::Agents,
     apps, artifact,
     model::*,
-    preview, projects,
+    projects,
     push::Push,
     simpool::Pool,
     sims::{Exit, Sims},
@@ -94,7 +94,7 @@ pub struct AppState {
     diagnostics: Arc<Lane>,
     /// Build jobs: records, unpersisted results and live operations.
     jobs: Arc<Jobs>,
-    /// Builds and previews, one at a time.
+    /// Builds, one at a time.
     builds: Arc<Lane>,
     /// Xcode inspections running now; more than two are refused, not queued.
     inspections: Arc<AtomicUsize>,
@@ -143,6 +143,7 @@ impl AppState {
     /// Loads the job index; work a previous service left unfinished is
     /// recorded as interrupted. Call inside the runtime.
     pub fn new(store: Store, public_url: Option<String>) -> Result<Self> {
+        store.drop_capture_preview()?;
         Ok(Self {
             jobs: Arc::new(Jobs::open(&store)?),
             files: Arc::new(store.clone()),

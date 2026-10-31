@@ -26,11 +26,6 @@ pub(super) enum BuildCommand {
         allow_provisioning_updates: bool,
         #[arg(
             long,
-            help = "Capture simulator pixels after building; service needs SQUIRCLE_SIMULATOR_ID. Preview failure preserves the IPA."
-        )]
-        preview: bool,
-        #[arg(
-            long,
             help = "Leave out the Squircle debug overlay that device builds otherwise carry (never in App Store exports)"
         )]
         no_overlay: bool,
@@ -67,7 +62,7 @@ pub(super) enum BuildCommand {
     },
     /// Delete finished builds' DerivedData, which nothing reads again.
     #[command(
-        after_help = "Archive builds keep their archive (app, dSYMs for symbolication), exported IPA, logs and job.json; their DerivedData and every preview rebuild's go. Simulator builds keep theirs (their app lives there). Queued and running builds, and builds capturing a preview, are skipped. The service does this itself as each build finishes; this clears builds from before.\n  --dry-run    list what would go and its size (deletes nothing)"
+        after_help = "Archive builds keep their archive (app, dSYMs for symbolication), exported IPA, logs and job.json; their DerivedData goes. Simulator builds keep theirs (their app lives there). Queued and running builds are skipped. The service does this itself as each build finishes; this clears builds from before.\n  --dry-run    list what would go and its size (deletes nothing)"
     )]
     Prune {
         #[arg(long)]
@@ -86,25 +81,6 @@ pub(super) enum Mode {
     Simulator,
 }
 
-#[derive(Subcommand)]
-pub(super) enum PreviewCommand {
-    /// Reuse this job's simulator app, or rebuild its current project source for an archive. Installs and launches only that app on the selected simulator.
-    Capture {
-        build_id: String,
-        #[arg(
-            long,
-            help = "Dedicated simulator UUID; defaults to service SQUIRCLE_SIMULATOR_ID. Never selects 'booted'."
-        )]
-        simulator: Option<String>,
-        #[arg(
-            long,
-            default_value_t = 1900,
-            help = "Seconds to wait; timeout does not cancel capture"
-        )]
-        timeout: u64,
-    },
-}
-
 pub(super) async fn run(cli: &Cli, command: &BuildCommand) -> Result<Option<Value>> {
     let data = match command {
         BuildCommand::Start {
@@ -115,7 +91,6 @@ pub(super) async fn run(cli: &Cli, command: &BuildCommand) -> Result<Option<Valu
             export_options,
             request_id,
             allow_provisioning_updates,
-            preview,
             no_overlay,
             task,
             thread,
@@ -134,7 +109,6 @@ pub(super) async fn run(cli: &Cli, command: &BuildCommand) -> Result<Option<Valu
                     .transpose()?,
                 request_id: request_id.clone(),
                 allow_provisioning_updates: *allow_provisioning_updates,
-                capture_preview: *preview,
                 no_overlay: *no_overlay,
                 thread: thread.clone(),
             };
@@ -161,7 +135,7 @@ pub(super) async fn run(cli: &Cli, command: &BuildCommand) -> Result<Option<Valu
         }
         BuildCommand::Wait { build_id, timeout } => {
             valid_id(build_id)?;
-            poll(cli, build_id, deadline(*timeout)?, WaitFor::Build).await?
+            poll(cli, build_id, deadline(*timeout)?).await?
         }
 
         BuildCommand::Cancel { build_id } => {
@@ -196,9 +170,7 @@ pub(super) async fn run(cli: &Cli, command: &BuildCommand) -> Result<Option<Valu
             let (mut builds, mut bytes, mut failed) = (Vec::new(), 0u64, Vec::new());
             let mut seen = std::collections::HashSet::new();
             for job in jobs {
-                let busy = matches!(job.state(), BuildState::Queued | BuildState::Running)
-                    || job.preview().is_some_and(PreviewState::in_progress);
-                if busy {
+                if matches!(job.state(), BuildState::Queued | BuildState::Running) {
                     continue;
                 }
                 let spent = squircle::xcode::spent(
@@ -228,38 +200,6 @@ pub(super) async fn run(cli: &Cli, command: &BuildCommand) -> Result<Option<Valu
         }
         BuildCommand::Import { ipa } => {
             post(cli, "/v1/import", json!({"ipa":ipa.canonicalize()?})).await?
-        }
-    };
-    Ok(Some(data))
-}
-
-pub(super) async fn preview(cli: &Cli, command: &PreviewCommand) -> Result<Option<Value>> {
-    let data = match command {
-        PreviewCommand::Capture {
-            build_id,
-            simulator,
-            timeout,
-        } => {
-            valid_id(build_id)?;
-            if let Some(simulator) = simulator {
-                uuid::Uuid::parse_str(simulator).context("Simulator ID must be a UUID")?;
-            }
-            let deadline = deadline(*timeout)?;
-            let submitted = tokio::time::timeout_at(
-                deadline,
-                post(
-                    cli,
-                    &format!("/v1/builds/{build_id}/preview"),
-                    json!({"simulator":simulator}),
-                ),
-            )
-            .await;
-            match submitted {
-                Err(_) => WaitFor::Preview.timed_out(),
-                Ok(Err(error)) => return Err(error),
-                Ok(Ok(value)) if value["ok"] == false => value,
-                Ok(Ok(_)) => poll(cli, build_id, deadline, WaitFor::Preview).await?,
-            }
         }
     };
     Ok(Some(data))

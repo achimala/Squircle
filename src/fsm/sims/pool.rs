@@ -9,7 +9,7 @@
 //! Anything not proven is the user's and is never touched.
 //!
 //! Protection comes from explicit observed state, never a display label: a
-//! simulator a session reserves, the preview's, one with a T3 device
+//! simulator a session reserves, one with a T3 device
 //! session of a thread that is busy, waiting on the user, of unknown state,
 //! or not Squircle's; one an agent used outside a session while that agent
 //! may still be working; and every one while T3's activity log, which
@@ -249,8 +249,6 @@ pub struct Facts<'a> {
     pub activity_complete: bool,
     /// When each simulator was first seen booted and free.
     pub idle_since: &'a HashMap<String, f64>,
-    /// Never touched (the preview capture's `SQUIRCLE_SIMULATOR_ID`).
-    pub reserved: &'a [String],
     pub policy: Policy,
     /// `sim cleanup` and a lease ending: no idle wait.
     pub now_please: bool,
@@ -348,7 +346,6 @@ pub fn plan(facts: &Facts) -> Vec<Row> {
             let deletable = device.state == "Shutdown"
                 && lease.is_none()
                 && facts.activity_complete
-                && !facts.reserved.contains(&device.udid)
                 && !device.kept(facts.keep)
                 && !facts
                     .t3_sessions
@@ -386,14 +383,6 @@ pub fn plan(facts: &Facts) -> Vec<Row> {
                 false,
                 None,
                 "leased through squircle sim start".into(),
-            )
-        } else if facts.reserved.contains(&device.udid) {
-            row(
-                "reserved",
-                None,
-                false,
-                None,
-                "the preview capture's simulator".into(),
             )
         } else if let Some(thread) = session {
             let held = working_hold && ours && facts.activity_complete;
@@ -593,7 +582,6 @@ mod tests {
             thread: &thread,
             activity_complete: true,
             idle_since: &HashMap::new(),
-            reserved: &[],
             policy: POLICY,
             now_please: true,
             keep: &[],

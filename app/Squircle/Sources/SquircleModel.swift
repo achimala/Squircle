@@ -1981,9 +1981,6 @@ final class SquircleModel {
         let data = try await client.projectScreenshot(projectID: project.id)
         previewCache.set((version, data), for: key); return data
     }
-    func previewData(for build: AppBuild) async throws -> Data {
-        guard let client else { throw ClientError.configuration }; return try await client.fetchBuildPreview(id:build.id)
-    }
     func startBuild(for project: AppProject) async -> AppBuild? {
         guard let client, let request = project.buildRequest else { error = "Import this app’s Xcode build recipe first."; return nil }
         buildingProjectIDs.insert(project.id); defer { buildingProjectIDs.remove(project.id) }

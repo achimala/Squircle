@@ -309,10 +309,6 @@ final class SquircleClient {
         try await bytes(request(["v1", "t3", "threads", threadID, "media", id, "poster"]))
     }
 
-    func fetchBuildPreview(id: String) async throws -> Data {
-        try await fetchPNG(["v1", "builds", id, "preview"])
-    }
-
     private func fetchPNG(_ path: [String], query: [URLQueryItem] = []) async throws -> Data {
         var request = try request(path, query: query)
         request.setValue("image/png", forHTTPHeaderField: "Accept")

@@ -23,7 +23,6 @@ pub mod notes;
 pub mod origin;
 pub mod overlay;
 pub mod perf;
-pub mod preview;
 mod process;
 pub mod projects;
 pub mod push;

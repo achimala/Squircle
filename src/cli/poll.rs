@@ -1,68 +1,32 @@
 use super::*;
 
-#[derive(Clone, Copy)]
-pub(super) enum WaitFor {
-    Build,
-    Preview,
+fn timed_out() -> Value {
+    failure(
+        "wait_timeout",
+        "Wait timed out; the build was not cancelled",
+        "Call build status or wait again with the same build ID.",
+    )
 }
-impl WaitFor {
-    pub(super) fn timed_out(self) -> Value {
-        match self {
-            Self::Build => failure(
-                "wait_timeout",
-                "Wait timed out; the build was not cancelled",
-                "Call build status or wait again with the same build ID.",
-            ),
-            Self::Preview => failure(
-                "wait_timeout",
-                "Preview wait timed out; accepted capture was not cancelled",
-                "Call build status or build cancel with the same build ID; do not resubmit blindly.",
-            ),
-        }
+
+/// The build's final answer, or None while it is queued or running.
+fn terminal(response: Value, build_id: &str) -> Option<Value> {
+    if response["ok"] == false {
+        return Some(response);
     }
-    fn terminal(self, response: Value, build_id: &str) -> Option<Value> {
-        if response["ok"] == false {
-            return Some(response);
-        }
-        let job = &response["data"]["job"];
-        match self {
-            Self::Build => {
-                let state = job["state"].as_str().unwrap_or("");
-                let preview_busy = matches!(
-                    job["output"]["preview_state"].as_str(),
-                    Some("pending" | "running")
-                );
-                if state == "succeeded" && !preview_busy {
-                    return Some(response);
-                }
-                if ["failed", "cancelled", "interrupted"].contains(&state) {
-                    let mut error = failure(
-                        "build_not_succeeded",
-                        format!("Build {build_id} is {state}"),
-                        "Read build status and build log before retrying.",
-                    );
-                    error["data"] = response["data"].clone();
-                    return Some(error);
-                }
-            }
-            Self::Preview => match job["output"]["preview_state"].as_str() {
-                Some("succeeded") => return Some(response),
-                Some("failed") => {
-                    let mut error = failure(
-                        "preview_failed",
-                        job["output"]["preview_error"]
-                            .as_str()
-                            .unwrap_or("Preview failed"),
-                        "Inspect build log and simulator; the signed IPA is unchanged.",
-                    );
-                    error["data"] = response["data"].clone();
-                    return Some(error);
-                }
-                _ => {}
-            },
-        }
-        None
+    let state = response["data"]["job"]["state"].as_str().unwrap_or("");
+    if state == "succeeded" {
+        return Some(response);
     }
+    if ["failed", "cancelled", "interrupted"].contains(&state) {
+        let mut error = failure(
+            "build_not_succeeded",
+            format!("Build {build_id} is {state}"),
+            "Read build status and build log before retrying.",
+        );
+        error["data"] = response["data"].clone();
+        return Some(error);
+    }
+    None
 }
 
 pub(super) fn deadline(seconds: u64) -> Result<tokio::time::Instant> {
@@ -70,19 +34,17 @@ pub(super) fn deadline(seconds: u64) -> Result<tokio::time::Instant> {
     Ok(tokio::time::Instant::now() + Duration::from_secs(seconds))
 }
 
-/// Follows the build until `policy` says it is done: each request is
+/// Follows the build until it is done: each request is
 /// answered by the service once the build's status changes, so nothing is
 /// fetched on a timer. The caller's `--timeout` bounds the whole wait,
-/// requests included. Completion and failure policy stay distinct;
-/// submission is outside this loop and is never repeated.
+/// requests included. Submission is outside this loop and is never repeated.
 pub(super) async fn poll(
     cli: &Cli,
     build_id: &str,
     deadline: tokio::time::Instant,
-    policy: WaitFor,
 ) -> Result<Value> {
     let path = format!("/v1/builds/{build_id}");
-    follow(build_id, deadline, policy, |held| {
+    follow(build_id, deadline, |held| {
         let path = &path;
         async move { get_changed(cli, path, held.as_deref()).await }
     })
@@ -94,7 +56,6 @@ pub(super) async fn poll(
 async fn follow<F, Fut>(
     build_id: &str,
     deadline: tokio::time::Instant,
-    policy: WaitFor,
     mut fetch: F,
 ) -> Result<Value>
 where
@@ -105,9 +66,9 @@ where
     loop {
         let (response, etag) = match tokio::time::timeout_at(deadline, fetch(held.take())).await {
             Ok(response) => response?,
-            Err(_) => return Ok(policy.timed_out()),
+            Err(_) => return Ok(timed_out()),
         };
-        if let Some(done) = policy.terminal(response, build_id) {
+        if let Some(done) = terminal(response, build_id) {
             return Ok(done);
         }
         held = Some(etag.context("The service's build status has no ETag")?);
@@ -125,7 +86,7 @@ mod tests {
     async fn the_deadline_ends_a_wait_whose_request_hangs() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut asked = vec![];
-        let result = follow("b", deadline, WaitFor::Build, |held| {
+        let result = follow("b", deadline, |held| {
             asked.push(held.clone());
             async move {
                 match held {

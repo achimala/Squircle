@@ -83,13 +83,11 @@ struct AppBuildRequest: Codable, Equatable {
     let mode: String
     let exportOptions: String?
     let allowProvisioningUpdates: Bool
-    var capturePreview: Bool
     var requestID: String?
 
     enum CodingKeys: String, CodingKey {
         case project, scheme, configuration, mode
         case exportOptions = "export_options", allowProvisioningUpdates = "allow_provisioning_updates", requestID = "request_id"
-        case capturePreview = "capture_preview"
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -99,7 +97,6 @@ struct AppBuildRequest: Codable, Equatable {
         mode = try values.decode(String.self, forKey: .mode)
         exportOptions = try values.decodeIfPresent(String.self, forKey: .exportOptions)
         allowProvisioningUpdates = try values.decodeIfPresent(Bool.self, forKey: .allowProvisioningUpdates) ?? false
-        capturePreview = try values.decodeIfPresent(Bool.self, forKey: .capturePreview) ?? false
         requestID = try values.decodeIfPresent(String.self, forKey: .requestID)
     }
     var key: String { project + "\u{1f}" + scheme }
@@ -110,7 +107,6 @@ struct AppBuildRequest: Codable, Equatable {
     func freshSubmission(id: String = UUID().uuidString.lowercased()) -> Self {
         var request = self
         request.requestID = id
-        request.capturePreview = true
         return request
     }
 }

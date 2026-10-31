@@ -56,7 +56,7 @@ const BLOCKING_METHODS: [&str; 4] = ["lock", "lock_shared", "recv", "recv_timeou
 /// Where production code waits on the clock: the policy rule each one is.
 /// Adding a wait means adding it here, with the rule the user chose; a wait
 /// that isn't a rule should wait for its event instead.
-const POLICY_CLOCKS: [(&str, usize, &str); 11] = [
+const POLICY_CLOCKS: [(&str, usize, &str); 10] = [
     (
         "src/agents/lifecycle.rs",
         1,
@@ -73,11 +73,6 @@ const POLICY_CLOCKS: [(&str, usize, &str); 11] = [
         "T3 reconnect pacing (nothing announces T3 listening)",
     ),
     ("src/agents/upkeep.rs", 1, "the compaction idle threshold"),
-    (
-        "src/preview.rs",
-        1,
-        "settle before a preview screenshot (no event says an app has drawn)",
-    ),
     (
         "src/push/delivery.rs",
         3,
