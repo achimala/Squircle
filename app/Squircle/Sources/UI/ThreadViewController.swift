@@ -1031,7 +1031,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // Embedded, its task's header names it already.
         let header: [ThreadItem] = threadTitle.isEmpty || embedded ? [] : [.header(threadTitle)]
         let messages = displayedMessages(content.messages)
-        let rows = resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
+        let rows = resolve(ThreadItem.items(messages: messages, running: content.running || debugRunning, expanded: expanded,
                                             builds: model.builds, changes: content.changes,
                                             simulators: content.simulators, thread: currentSessionID))
         var placed = ThreadItem.placing(openQuestions, in: rows)
@@ -1282,6 +1282,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         var messages = messages
         #if DEBUG
         if let debugReply { messages += debugReply }
+        messages += debugSent
         #endif
         guard let pending = pendingSend, !messages.contains(where: { $0.id == pending.messageID }) else { return messages }
         var message = ChatMessage(id: pending.messageID, role: "user", content: pending.text,
@@ -2029,7 +2030,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             return
         }
         let source = composer.textOrigin(in: view)
-        switch model.startSend(text, in: project, from: conversation) {
+        #if DEBUG
+        let start = debugRehearsing ? debugRehearse(text) : model.startSend(text, in: project, from: conversation)
+        #else
+        let start = model.startSend(text, in: project, from: conversation)
+        #endif
+        switch start {
         case .refused(let reason):
             model.error = reason
         case .started(let messageID, let outcome):
@@ -2087,6 +2093,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                              width: textFrame.width, height: textFrame.height)
         flyer.addSubview(words)
         view.insertSubview(flyer, aboveSubview: composer)
+        #if DEBUG
+        debugFlyer = flyer
+        #endif
         // Start with the first line of text exactly where it was typed.
         let offset = CGPoint(x: words.frame.minX + inset.left, y: words.frame.minY + inset.top)
         flyer.frame.origin = CGPoint(x: source.x - offset.x, y: source.y - offset.y)
@@ -2147,6 +2156,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// app's agent answer a made-up message in three paragraphs, to watch
     /// its bubbles land.
     private var debugReply: [ChatMessage]?
+    /// `debugFilm`'s messages and turn, shown here only: nothing reaches T3.
+    private var debugSent: [ChatMessage] = []
+    private var debugRunning = false
+    private var debugRehearsing = false
+    private weak var debugFlyer: UIView?
     func debugReplyArrives() {
         let now = ISODate.format(.now)
         debugReply = [ChatMessage(id: "debug-ask", role: "user", content: "How did the chat stage go?", createdAt: now),
@@ -2227,6 +2241,118 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         composer.text = text
         send()
     }
+    /// `debugFilm`'s send: shown as T3 would show it, never sent. T3 takes
+    /// it a moment later (its copy replaces the pending one) and the turn
+    /// goes live.
+    private func debugRehearse(_ text: String) -> SendStart {
+        let id = "film-" + UUID().uuidString.lowercased()
+        debugSent.append(ChatMessage(id: id, role: "user", content: text, createdAt: ISODate.format(.now)))
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(ProcessInfo.processInfo.environment["SQUIRCLE_FILM_ACCEPT_MS"] ?? "") ?? 180))
+            guard let self, let index = debugSent.firstIndex(where: { $0.id == id }) else { return }
+            debugSent[index] = ChatMessage(id: id, role: "user", content: text, createdAt: ISODate.format(.now.addingTimeInterval(1)))
+            debugRunning = true
+            render()
+        }
+        let conversation = conversation
+        return .started(messageID: id, outcome: Task { .accepted(messageID: id, conversation: conversation) })
+    }
+
+    /// Verification only: `SQUIRCLE_SEND_FILM=1` (with `SQUIRCLE_APP`)
+    /// films sends at the bottom, slightly and far above it, short and
+    /// long, with the keyboard up and while a reply lands, each into its
+    /// own 60 fps recording and a per-frame trace (tmp/sendfilm), never
+    /// sending anything to T3. `SQUIRCLE_FILM_CASES=a,b` films only those.
+    func debugFilm(recorderWindow: UIWindow) async {
+        struct Case { let name: String; let up: CGFloat; let text: String; var keyboard = false; var landing = false }
+        let short = "Looks good, ship it"
+        let long = "Can you make the build sheet follow dark mode, and stack the simulators into one deck when there are two or more of them?"
+        let all = [Case(name: "bottom-short", up: 0, text: short), Case(name: "up10", up: 10, text: short),
+                   Case(name: "up30", up: 30, text: short), Case(name: "up55", up: 55, text: short),
+                   Case(name: "up70", up: 70, text: short), Case(name: "far", up: 900, text: short),
+                   Case(name: "bottom-long", up: 0, text: long), Case(name: "up40-long", up: 40, text: long),
+                   Case(name: "keyboard", up: 0, text: short, keyboard: true), Case(name: "keyboard-up40", up: 40, text: long, keyboard: true),
+                   Case(name: "landing", up: 0, text: short, landing: true)]
+        let wanted = ProcessInfo.processInfo.environment["SQUIRCLE_FILM_CASES"].map { Set($0.split(separator: ",").map(String.init)) }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("sendfilm")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        debugRehearsing = true
+        for c in all where wanted?.contains(c.name) ?? true {
+            debugRunning = false
+            render()
+            if c.keyboard { composer.input.becomeFirstResponder() } else { view.endEditing(true) }
+            try? await Task.sleep(for: .seconds(1.2))
+            sentBelow = nil
+            scrollToBottom()
+            // Left where a finger leaves it: still following within 60 points of the end.
+            let bottom = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
+            table.contentOffset.y = max(-table.contentInset.top, bottom - c.up)
+            pinToBottom = bottom - table.contentOffset.y < 60
+            renderJump()
+            try? await Task.sleep(for: .seconds(0.8))
+            guard let recorder = ScreenRecorder(below: recorderWindow, rate: 60) else { NSLog("SENDFILM no recorder"); return }
+            var trace = "t,offset,offsetModel,flyX,flyY,flyW,flyH,bubX,bubY,bubW,bubH,bubAlpha,prevY,composerY,composerH,insetBottom,contentH,jumpAlpha,pinned\n"
+            let started = CACurrentMediaTime()
+            let link = CADisplayLink(target: DisplayLinkProxy { [weak self] _ in
+                guard let self else { return }
+                trace += debugTraceRow(at: CACurrentMediaTime() - started)
+            }, selector: #selector(DisplayLinkProxy.tick(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            link.add(to: .main, forMode: .common)
+            try? await Task.sleep(for: .seconds(0.4))
+            if c.landing {
+                let now = ISODate.format(.now)
+                debugSent.append(ChatMessage(id: "film-reply-" + UUID().uuidString, role: "assistant", content: """
+                    The chat stage is in: the agent's replies are bubbles now, one per paragraph.
+
+                    Still to check: the landing haptic on a real reply, and dark mode.
+
+                    I'll send you a build once Tasks is merged too.
+                    """, createdAt: now))
+                debugRunning = false
+                render()
+                try? await Task.sleep(for: .seconds(0.3))
+            }
+            NSLog("SENDFILM send %@ at %.3f", c.name, CACurrentMediaTime() - started)
+            debugSend(c.text)
+            try? await Task.sleep(for: .seconds(c.landing ? 2.4 : 1.6))
+            link.invalidate()
+            let output = await recorder.finish()
+            let movie = folder.appendingPathComponent(c.name + ".mp4")
+            try? FileManager.default.removeItem(at: movie)
+            if let url = output?.url { try? FileManager.default.moveItem(at: url, to: movie) }
+            try? trace.write(to: folder.appendingPathComponent(c.name + ".csv"), atomically: true, encoding: .utf8)
+            NSLog("SENDFILM done %@ %@", c.name, folder.path)
+        }
+        view.endEditing(true)
+        NSLog("SENDFILM finished %@", folder.path)
+    }
+
+    /// One frame of `debugFilm`'s trace, from what is on screen (presentation layers).
+    private func debugTraceRow(at time: Double) -> String {
+        let root = view.layer.presentation() ?? view.layer
+        func onScreen(_ view: UIView?) -> CGRect? {
+            guard let view, let layer = view.layer.presentation() else { return nil }
+            return layer.convert(layer.bounds, to: root)
+        }
+        let offset = table.layer.presentation()?.bounds.minY ?? table.contentOffset.y
+        let fly = onScreen(debugFlyer)
+        var bubble: CGRect?, alpha: CGFloat = -1, previous: CGFloat?
+        if let id = debugSent.last(where: { $0.role == "user" })?.id, let path = dataSource.indexPath(for: id) {
+            if let cell = table.cellForRow(at: path) as? MessageCell {
+                bubble = onScreen(cell.bubble)
+                alpha = CGFloat(cell.contentView.layer.presentation()?.opacity ?? -1)
+            }
+            if path.row > 0, let cell = table.cellForRow(at: IndexPath(row: path.row - 1, section: 0)) { previous = onScreen(cell)?.minY }
+        }
+        let composerRect = onScreen(composer) ?? .zero
+        func f(_ v: CGFloat?) -> String { v.map { String(format: "%.2f", $0) } ?? "" }
+        let cells = [f(offset), f(table.contentOffset.y), f(fly?.minX), f(fly?.minY), f(fly?.width), f(fly?.height),
+                     f(bubble?.minX), f(bubble?.minY), f(bubble?.width), f(bubble?.height), f(alpha), f(previous),
+                     f(composerRect.minY), f(composerRect.height), f(table.contentInset.bottom), f(table.contentSize.height),
+                     f(CGFloat(jump.layer.presentation()?.opacity ?? 0)), pinToBottom ? "1" : "0"]
+        return String(format: "%.4f,", time) + cells.joined(separator: ",") + "\n"
+    }
     /// Verification only: hands the live line to a new task and back.
     func debugLens() {
         guard let cell = table.visibleCells.compactMap({ $0 as? LiveCell }).first else { return }
@@ -2241,6 +2367,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.layoutIfNeeded()
         (table.cellForRow(at: index) as? SummaryCell)?.celebrate()
     }
+    #else
+    private let debugRunning = false
     #endif
 
     override func accessibilityPerformEscape() -> Bool {

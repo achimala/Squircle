@@ -28,8 +28,11 @@ final class ScreenRecorder: CaptureProducer {
     /// The frame the encoder is drawing; ticks until it finishes are skipped.
     private var drawing: Task<Void, Never>?
     private let touches: TouchTracker
+    /// Frames a second: 30, or every frame for verification films.
+    private let rate: Float
 
-    init?(below overlay: UIWindow) {
+    init?(below overlay: UIWindow, rate: Float = 30) {
+        self.rate = rate
         guard let screen = overlay.windowScene?.screen, let server = RenderServer.shared,
               let display = RenderServer.displayName(of: screen) else { return nil }
         // The display's own orientation, long side at most 1280 pixels, even
@@ -52,7 +55,7 @@ final class ScreenRecorder: CaptureProducer {
         touches = TouchTracker(origin: started)
         touches.attach(to: overlay.windowScene?.windows.filter { $0 !== overlay } ?? [])
         let link = CADisplayLink(target: DisplayLinkProxy { [weak self] _ in self?.tick() }, selector: #selector(DisplayLinkProxy.tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30, preferred: 30)
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: rate, preferred: rate)
         link.add(to: .main, forMode: .common)
         self.link = link
         tick()
@@ -60,7 +63,7 @@ final class ScreenRecorder: CaptureProducer {
 
     private func tick() {
         let now = CACurrentMediaTime() - started
-        guard drawing == nil, now - lastTick >= 1.0 / 30 * 0.9, let overlay, let screen else { return }
+        guard drawing == nil, now - lastTick >= 1.0 / Double(rate) * 0.9, let overlay, let screen else { return }
         // Each window's points to the recording's pixels, in the display's orientation.
         let interface = screen.coordinateSpace, space = screen.fixedCoordinateSpace
         let origin = interface.convert(CGPoint.zero, to: space)
