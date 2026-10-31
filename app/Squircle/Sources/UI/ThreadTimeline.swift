@@ -126,6 +126,8 @@ enum ThreadItem: Equatable {
     case figure(id: String, shots: [Shot])
     /// A table in the agent's text; `quiet` in a note rather than an answer.
     case table(id: String, table: MarkdownTable, quiet: Bool)
+    /// A PDF or text file the agent's text links; opens in the viewer.
+    case document(id: String, path: String)
     case summary(TurnSummary)
     /// What the turn changed in the project; opens its diff.
     case changes(TurnChanges, turn: String)
@@ -147,7 +149,7 @@ enum ThreadItem: Equatable {
         case .thought(let message): return message.id
         case .step(let message, _, _): return message.id
         case .earlier(let turn, _): return "earlier:" + turn
-        case .gallery(let id, _), .figure(let id, _), .table(let id, _, _): return id
+        case .gallery(let id, _), .figure(let id, _), .table(let id, _, _), .document(let id, _): return id
         case .summary(let summary): return "summary:" + summary.turn
         case .build(let build, let turn): return "build:\(turn):\(build.id)"
         case .changes(_, let turn): return "changes:" + turn
@@ -468,6 +470,8 @@ enum ThreadItem: Equatable {
                 rows.append(row(part))
             case .table(let table):
                 rows.append(.table(id: "table:\(message.id)#\(index)", table: table, quiet: quiet))
+            case .document(let path):
+                rows.append(.document(id: "document:\(message.id)#\(index)", path: path))
             case .media(let media):
                 let shot = Shot(step: "file:" + media.path, index: 0, title: "", video: media.video, path: media.path)
                 // Pictures with nothing between them share one figure.

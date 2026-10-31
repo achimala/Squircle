@@ -287,6 +287,24 @@ final class SquircleClient {
         try await download(request(["v1", "t3", "threads", threadID, "media", id]), to: destination)
     }
 
+    /// A document an agent linked in a thread, streamed to `destination`.
+    func downloadDocument(threadID: String, path: String, to destination: URL) async throws {
+        try await download(request(["v1", "t3", "threads", threadID, "document"], query: [URLQueryItem(name: "path", value: path)]),
+                           to: destination)
+    }
+
+    /// A linked document's size, without its bytes.
+    func documentSize(threadID: String, path: String) async throws -> Int {
+        let request = try request(["v1", "t3", "threads", threadID, "document"], query: [URLQueryItem(name: "path", value: path)],
+                                  method: "HEAD")
+        return try await transport("Squircle") {
+            let (_, response) = try await session.data(for: request)
+            try validate(response, service: "Squircle")
+            guard response.expectedContentLength >= 0 else { throw ClientError.response("Squircle") }
+            return Int(response.expectedContentLength)
+        }
+    }
+
     private func download(_ request: URLRequest, to destination: URL) async throws {
         try await transport("Squircle") {
             let (file, response) = try await session.download(for: request)
@@ -355,7 +373,11 @@ final class SquircleClient {
             url.appendPathComponent(component)
         }
         guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw ClientError.configuration }
-        if !query.isEmpty { parts.queryItems = query }
+        if !query.isEmpty {
+            parts.queryItems = query
+            // The service reads + as a space.
+            parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+        }
         guard let endpoint = parts.url else { throw ClientError.configuration }
         var request = URLRequest(url: endpoint)
         request.httpMethod = method

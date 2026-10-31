@@ -885,6 +885,23 @@ final class ChangesCell: TimelineCell {
     }
 }
 
+/// A PDF or text file the agent linked: a file row that opens the viewer.
+final class DocumentCell: TimelineCell {
+    let row = FileRowView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
+            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14)
+        ])
+    }
+}
+
 /// A build in the conversation: what it is, where it stands, and Install.
 final class BuildCell: TimelineCell {
     var onInstall: ((AppBuild) -> Void)?

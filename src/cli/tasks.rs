@@ -67,7 +67,7 @@ pub(super) enum TaskCommand {
         #[arg(long)]
         remove: bool,
     },
-    /// Attach a screenshot or clip (png, jpg, mp4, mov, m4v); the phone shows it on the task.
+    /// Attach a screenshot or clip (png, jpg, mp4, mov, m4v), or a document (pdf, md, txt, json, csv); the phone shows it on the task and opens documents in a viewer.
     Attach {
         id: String,
         #[arg(long)]

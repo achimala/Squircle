@@ -154,6 +154,9 @@ extension Markdown {
         case text(AttributedString)
         case media(MediaReference)
         case table(MarkdownTable)
+        /// A PDF or text file the text links, by path: a file row after
+        /// the text that links it, which keeps its words.
+        case document(String)
     }
 
     private static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic", "webp"]
@@ -163,15 +166,18 @@ extension Markdown {
     /// or a link straight to an image or video file), and at its tables, so
     /// each shows in place. The alt text is a caption and is dropped; the
     /// rest of its paragraph stays. Web URLs and anything in code stay text.
+    /// Each document it links (once) follows the text linking it.
     static func segments(_ text: String) -> [Segment] {
         let parsed = parse(text)
         var segments: [Segment] = []
         var start = parsed.startIndex
+        var documents: [String] = [], linked = Set<String>()
         func flush(to end: AttributedString.Index) {
             let piece = AttributedString(parsed[start..<end])
             start = end
-            guard !String(piece.characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            segments.append(.text(piece))
+            if !String(piece.characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { segments.append(.text(piece)) }
+            segments += documents.map(Segment.document)
+            documents = []
         }
         var table: TableCells?
         func finish() {
@@ -190,6 +196,9 @@ extension Markdown {
                 continue
             }
             finish()
+            if let url = run.link, url.scheme == nil || url.isFileURL, DocumentSource.isDocument(url.path), linked.insert(url.path).inserted {
+                documents.append(url.path)
+            }
             guard let url = run.imageURL ?? run.link, let media = reference(url) else { continue }
             // A link with emphasis inside is several runs, one picture.
             if case .media(media)? = segments.last, start == run.range.lowerBound { start = run.range.upperBound; continue }
