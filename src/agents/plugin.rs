@@ -1,5 +1,8 @@
 use super::*;
 
+/// T3's built-in Claude provider instance, and its driver.
+const CLAUDE: &str = "claudeAgent";
+
 pub(super) const PLUGIN_FILES: [(&str, &str); 4] = [
     (
         ".claude-plugin/plugin.json",
@@ -31,6 +34,10 @@ pub async fn setup(root: &Path, server: &str, remove: bool) -> Result<Value> {
     let client = T3::connect(T3Config::load(root)?).await?;
     let settings = client.call("server.getSettings", json!({})).await?;
     let instances = &settings["providerInstances"];
+    ensure!(
+        instances.is_object(),
+        "T3's settings have no providerInstances; Squircle needs the current T3"
+    );
     let plugin = root.join("plugin").join("squircle");
     if remove {
         let removed = instances.get(INSTANCE).is_some();
@@ -67,26 +74,34 @@ pub async fn setup(root: &Path, server: &str, remove: bool) -> Result<Value> {
                 .replace("{{VERSION}}", env!("CARGO_PKG_VERSION")),
         )?;
     }
-    // The built-in Claude's binary and home: T3 0.1.0 keeps them as the
-    // `claudeAgent` provider instance, older T3 under `providers`.
-    let claude = [
-        &instances["claudeAgent"]["config"],
-        &settings["providers"]["claudeAgent"],
-        &instances[INSTANCE]["config"],
-    ];
+    // The built-in Claude's binary and home, as T3 runs it: its `claudeAgent`
+    // instance. An absent instance or key is T3's default (`claude` on PATH,
+    // the default home), which this instance then gets too.
+    let builtin = match &instances[CLAUDE] {
+        Value::Null => &Value::Null,
+        builtin => {
+            ensure!(
+                builtin["driver"] == CLAUDE,
+                "T3's {CLAUDE} provider instance has driver {}, not {CLAUDE}",
+                builtin["driver"]
+            );
+            &builtin["config"]
+        }
+    };
     let mut config = serde_json::Map::new();
     for key in ["binaryPath", "homePath"] {
-        if let Some(value) = claude
-            .iter()
-            .find_map(|c| c[key].as_str().filter(|v| !v.is_empty()))
-        {
-            config.insert(key.into(), json!(value));
+        match &builtin[key] {
+            Value::Null => {}
+            Value::String(value) if value.is_empty() => {}
+            Value::String(value) => {
+                config.insert(key.into(), json!(value));
+            }
+            other => bail!("T3's {CLAUDE} {key} is not a string: {other}"),
         }
     }
     let launch = format!("--plugin-dir {} --agent squircle:app-agent", quote(&plugin));
     config.insert("launchArgs".into(), json!(launch));
-    let instance =
-        json!({"driver": "claudeAgent", "displayName": "Squircle agent", "config": config});
+    let instance = json!({"driver": CLAUDE, "displayName": "Squircle agent", "config": config});
     client
         .call(
             "server.updateSettings",

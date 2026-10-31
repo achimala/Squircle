@@ -1,5 +1,5 @@
 //! `squircle history`: search and show an app's past where it already lives.
-//! T3 owns conversations (its `state.sqlite`, read-only through the system
+//! T3 owns conversations (its `statev2.sqlite`, read-only through
 //! `t3db`), Squircle owns tasks and builds, git owns commits and the
 //! project's Markdown docs. Nothing is copied or indexed: each search reads
 //! the sources on the fly (tens of milliseconds for messages, a few hundred

@@ -284,9 +284,10 @@ mod tests {
         assert!(format!("{error:#}").contains("limit"), "{error:#}");
     }
     /// Sanitized projection fixture: V2 tables beside the 0.0.45 ones T3
-    /// leaves in the same file. Checks SQLite JSON typing, IDs, limits,
-    /// literal search terms, the V2 / 0.0.45 merge and every query against
-    /// the same schema.
+    /// leaves in the same file, with a competing project, a deleted thread
+    /// and a deleted project. Checks every query against the same schema:
+    /// SQLite JSON typing, IDs, limits, literal search terms, the V2 / 0.0.45
+    /// merge, and exactly which rows each scope excludes.
     #[test]
     fn projection_queries_preserve_json_and_scope() {
         let db = Connection::open_in_memory().unwrap();
@@ -319,46 +320,138 @@ mod tests {
                 '{"nativeThreadRef":{"driver":"claudeAgent","nativeId":"session-1"}}','claudeAgent','squircle');
             insert into orchestration_v2_projection_provider_turns values ('pt','t','pth','n',null,1,'completed','2026-10-19','2026-10-19',
                 '{"tokenUsage":{"usedTokens":1200,"updatedAt":"2026-10-19T00:00:01Z"}}');
+
+            -- Competitors that match the same IDs, terms and tools: project q's
+            -- thread u, project p's deleted thread x, and a deleted project r.
+            insert into projection_projects values ('q','Rival','/rival',null);
+            insert into projection_projects values ('r','Gone','/gone','2026-10-01');
+            insert into projection_threads values ('u','q','rival',null,null,'2026-10-18','2026-10-20',null,null);
+            insert into projection_threads values ('x','p','test_name gone',null,'/app/gone','2026-10-18','2026-10-19',null,'2026-10-19');
+            insert into orchestration_v2_projection_threads values ('u','q','test_name rival','claudeAgent','auto','default',null,'2026-10-18','2026-10-20',null,null,
+                '{"branch":"rival","worktreePath":"/rival/work"}','claudeAgent');
+            insert into orchestration_v2_projection_threads values ('x','p','test_name gone','claudeAgent','auto','default',null,'2026-10-18','2026-10-19',null,'2026-10-19',
+                '{"worktreePath":"/app/gone"}','claudeAgent');
+            insert into orchestration_v2_projection_messages values ('n','u',null,null,'user',0,'2026-10-18T00','2026-10-18','{"text":"test_name rival"}');
+            insert into orchestration_v2_projection_messages values ('n0','u',null,null,'assistant',0,'2026-10-18T00:30','2026-10-18','{"text":"test_name rival reply"}');
+            insert into orchestration_v2_projection_messages values ('xm','x',null,null,'user',0,'2026-10-18','2026-10-18','{"text":"test_name gone"}');
+            insert into projection_thread_activities values ('b','u',1,'2026-10-20','turn','tool.completed',null,'test_name rival',
+                '{"toolCallId":"call","data":{"toolName":"mcp__t3-code__device_screenshot","result":{"content":[{"type":"image","source":{"media_type":"image/png","data":"DDDD"}}]}}}');
+            insert into projection_thread_activities values ('c','x',1,'2026-10-19','turn','tool.completed',null,'test_name gone',
+                '{"toolCallId":"call","data":{"toolName":"mcp__t3-code__device_screenshot","result":{"content":[{"type":"image","source":{"media_type":"image/png","data":"FFFF"}}]}}}');
+            insert into orchestration_v2_projection_turn_items values ('j1','u','r2',null,null,null,null,1,'command_execution','completed','2026-10-20',
+                '{"title":"rival","startedAt":"2026-10-20","input":"xcodebuild test_name","output":"ok","nativeItemRef":{"nativeId":"toolu_1"}}');
+            insert into orchestration_v2_projection_turn_items values ('j2','u','r2',null,null,null,null,2,'dynamic_tool','completed','2026-10-20',
+                '{"title":"rival","toolName":"mcp__t3-code__device_screenshot","input":{"deviceId":"E"},"output":{"content":[{"type":"image","data":"CCCC","mimeType":"image/png"}]},"nativeItemRef":{"nativeId":"toolu_2"}}');
+            insert into orchestration_v2_projection_turn_items values ('j3','u','r2',null,null,null,null,3,'dynamic_tool','completed','2026-10-20',
+                '{"title":"rival","toolName":"Read","input":{"file_path":"/tmp/rival.png"},"viewedImagePath":"/tmp/rival.png","output":{"type":"image"},"nativeItemRef":{"nativeId":"toolu_3"}}');
+            insert into orchestration_v2_projection_turn_items values ('j4','u','r2',null,null,null,null,4,'command_execution','completed','2026-10-20',
+                '{"title":"rival","input":"ls","output":""}');
+            insert into orchestration_v2_projection_turn_items values ('k1','x','r3',null,null,null,null,1,'dynamic_tool','completed','2026-10-19',
+                '{"title":"test_name gone","toolName":"mcp__t3-code__device_screenshot","output":{"content":[{"type":"image","data":"EEEE","mimeType":"image/png"}]}}');
+            insert into orchestration_v2_projection_provider_turns values ('pu','u','pthu','n',null,1,'completed','2026-10-21','2026-10-21',
+                '{"tokenUsage":{"usedTokens":9999,"updatedAt":"2026-10-21T00:00:01Z"}}');
         "#).unwrap();
         let text = |s: &str| SqlValue::Text(s.into());
         let read = |sql: &str, params: Vec<SqlValue>| {
             read_rows(&db, sql, params, MAX_OUTPUT, || false).unwrap()
         };
-        for (sql, params) in [
-            (sql::CURRENT_STEP, vec![text("t")]),
-            (sql::SIMULATOR_COMMANDS, vec![text("")]),
-            (sql::STEPS, vec![text("t"), SqlValue::Null]),
-            (sql::IMAGES, vec![text("t"), text("call")]),
-            (sql::IMAGES, vec![text("t"), text("toolu_2")]),
-            (sql::VIEWED, vec![text("t"), text("toolu_3")]),
-            (sql::PROJECT_SCREENSHOTS, vec![text("p")]),
-            (
+        let column = |rows: &[Value], key: &str| -> Vec<Value> {
+            rows.iter().map(|r| r[key].clone()).collect()
+        };
+        // Thread-scoped reads see t's rows only, never u's under the same call IDs.
+        let current = read(sql::CURRENT_STEP, vec![text("t")]);
+        assert_eq!(current.len(), 3, "{current:?}");
+        assert!(current.iter().all(|r| r["title"] != "rival"), "{current:?}");
+        assert_eq!(
+            column(&read(sql::STEPS, vec![text("t"), SqlValue::Null]), "id"),
+            [json!("toolu_1"), json!("toolu_2"), json!("toolu_3")]
+        );
+        assert!(read(sql::STEPS, vec![text("t"), text("2026-10-19")]).is_empty());
+        assert_eq!(
+            column(&read(sql::IMAGES, vec![text("t"), text("call")]), "data"),
+            [json!("AAAA")]
+        );
+        assert_eq!(
+            column(&read(sql::IMAGES, vec![text("t"), text("toolu_2")]), "data"),
+            [json!("BBBB")]
+        );
+        assert_eq!(
+            column(
+                &read(sql::VIEWED, vec![text("t"), text("toolu_3")]),
+                "viewed"
+            ),
+            [json!("/tmp/five.png")]
+        );
+        assert_eq!(
+            column(
+                &read(sql::MESSAGES, vec![text("t"), 10.into()]),
+                "message_id"
+            ),
+            [json!("m"), json!("m0")]
+        );
+        let reading = read(sql::CONTEXT_READING, vec![text("t")]);
+        assert_eq!(
+            (&reading[0]["used"], &reading[0]["latest"]),
+            (&json!(1200), &json!("m"))
+        );
+        // Simulator commands span threads but only simctl/xcodebuild/agent-device, after ?1.
+        assert_eq!(
+            column(&read(sql::SIMULATOR_COMMANDS, vec![text("")]), "thread"),
+            [json!("t"), json!("u")]
+        );
+        assert_eq!(
+            column(
+                &read(sql::SIMULATOR_COMMANDS, vec![text("2026-10-19")]),
+                "thread"
+            ),
+            [json!("u")]
+        );
+        // Projects: each thread's own, never a deleted project or thread.
+        assert_eq!(
+            column(&read(sql::THREAD_PROJECT, vec![text("t")]), "project_id"),
+            [json!("p")]
+        );
+        assert_eq!(
+            column(&read(sql::THREAD_PROJECT, vec![text("u")]), "project_id"),
+            [json!("q")]
+        );
+        assert_eq!(
+            column(&read(sql::PROJECT, vec![text("p")]), "title"),
+            [json!("App")]
+        );
+        assert!(read(sql::PROJECT, vec![text("r")]).is_empty());
+        let mut places = column(&read(sql::PROJECT_PLACES, vec![]), "place");
+        places.sort_by_key(|p| p.to_string());
+        assert_eq!(
+            places,
+            [
+                json!("/app"),
+                json!("/app/work"),
+                json!("/rival"),
+                json!("/rival/work")
+            ]
+        );
+        assert_eq!(
+            column(
+                &read(sql::ACTIVITY, vec![text("a"), 100.into()]),
+                "thread_id"
+            ),
+            [json!("t")]
+        );
+        assert_eq!(
+            column(
+                &read(sql::ACTIVITY, vec![text("i1"), 100.into()]),
+                "thread_id"
+            ),
+            [json!("t")]
+        );
+        assert_eq!(
+            read(
                 sql::SCREENSHOT_DATA,
-                vec![text("a"), text("$.data.result.content[0]")],
-            ),
-            (
-                sql::SCREENSHOT_DATA_V2,
-                vec![text("i2"), text("$.output.content[1]")],
-            ),
-            (sql::THREAD_PROJECT, vec![text("t")]),
-            (sql::PROJECT, vec![text("p")]),
-            (sql::PROJECT_PLACES, vec![]),
-            (sql::MESSAGE, vec![text("m")]),
-            (sql::THREAD, vec![text("t")]),
-            (sql::MESSAGES, vec![text("t"), 1.into()]),
-            (sql::ACTIVITY, vec![text("a"), 100.into()]),
-            (sql::ACTIVITY, vec![text("i1"), 100.into()]),
-            (sql::CONTEXT_READING, vec![text("t")]),
-        ] {
-            let rows = read(sql, params);
-            assert!(
-                !rows.is_empty()
-                    && rows
-                        .iter()
-                        .all(|r| r.as_object().unwrap().values().any(|v| !v.is_null())),
-                "{sql}"
-            );
-        }
+                vec![text("a"), text("$.data.result.content[0]")]
+            )[0]["data"],
+            "AAAA"
+        );
         let steps = read(sql::STEPS, vec![text("t"), SqlValue::Null]);
         assert_eq!(steps[0]["id"], "toolu_1");
         assert_eq!(
@@ -382,10 +475,12 @@ mod tests {
             read(sql::IMAGES, vec![text("t"), text("toolu_2")])[0]["data"],
             "BBBB"
         );
+        // Project p's screenshots: not q's, nor its deleted thread's.
         let shots = read(sql::PROJECT_SCREENSHOTS, vec![text("p")]);
+        assert_eq!(column(&shots, "head"), [json!("BBBB"), json!("AAAA")]);
         assert_eq!(
-            (&shots[0]["src"], &shots[0]["path"], &shots[0]["head"]),
-            (&json!("v2"), &json!("$.output.content[1]"), &json!("BBBB"))
+            (&shots[0]["src"], &shots[0]["path"], &shots[1]["src"]),
+            (&json!("v2"), &json!("$.output.content[1]"), &json!("v1"))
         );
         assert_eq!(
             read(
@@ -394,7 +489,8 @@ mod tests {
             )[0]["data"],
             "BBBB"
         );
-        // One thread, its V2 metadata; a message T3 imported once.
+        // One thread, its V2 metadata; a message T3 imported once, its
+        // neighbours from its own thread (u's reply falls between).
         let thread = read(sql::THREAD, vec![text("t")]);
         assert_eq!(
             (
@@ -424,6 +520,7 @@ mod tests {
                 ],
             );
             assert_eq!(rows.len(), expected, "{terms}: {rows:?}");
+            assert!(rows.iter().all(|r| r["thread"] == "t"), "{terms}: {rows:?}");
         }
     }
 }
