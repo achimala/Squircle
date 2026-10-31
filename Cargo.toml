@@ -32,7 +32,7 @@ serde_json = "1"
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 tower = { version = "0.5", features = ["util"] }
 url = "2"
@@ -49,3 +49,5 @@ syn = { version = "2", features = ["full", "visit"] }
 tokio = { version = "1", features = ["test-util"] }
 http-body-util = "0.1"
 tempfile = "3"
+# A local TLS peer for the T3 socket test.
+tokio-rustls = { version = "0.26", default-features = false }

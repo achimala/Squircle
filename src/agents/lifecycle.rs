@@ -49,12 +49,7 @@ impl Agents {
                 },
             ) => agent,
             Some(agent) => {
-                // A thread T3 has not sent yet may just be new: wait for it a moment.
-                let row = match self.thread(&agent.thread_id) {
-                    None => self.wait_thread(&agent.thread_id).await.ok(),
-                    row => row,
-                };
-                if row.is_some_and(|row| row["archivedAt"].is_null()) {
+                if self.wait_thread(&agent.thread_id).await?.is_some() {
                     return Ok(agent);
                 }
                 // Archived or deleted in T3: start a new agent.
@@ -117,7 +112,7 @@ impl Agents {
                     m14::Effect::Commit => {}
                     m14::Effect::SendCreate(command) => {
                         next = Some(m14::Event::Sent {
-                            outcome: client.dispatch(&command).await,
+                            outcome: self.dispatch_creation(client, thread, &command).await,
                             next: identity(),
                         });
                     }
@@ -401,11 +396,14 @@ impl Agents {
                 Err(error) => return Dispatched::NotSent(format!("{error:#}")),
                 Ok(projection) => {
                     match crate::fsm::coordinator::thread::live_session(&projection) {
-                        Some(session) => {
+                        Ok(Some(session)) => {
                             json!({"type": "provider-session.detach", "threadId": thread,
                                             "providerSessionId": session, "reason": "Stopped by Squircle"})
                         }
-                        None => return Dispatched::Accepted(json!({"stopped": "nothing to stop"})),
+                        Ok(None) => {
+                            return Dispatched::Accepted(json!({"stopped": "nothing to stop"}));
+                        }
+                        Err(error) => return Dispatched::NotSent(error),
                     }
                 }
             },

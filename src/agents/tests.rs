@@ -5,6 +5,13 @@
 use super::*;
 use std::sync::Mutex;
 
+/// T3's event sequence, shared by every fake: what it answers an accepted
+/// command with, and what numbers shell items the tests don't number.
+pub(super) fn next_sequence() -> u64 {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A protocol 2 shell row: `status` is `idle` or the latest run's.
 fn thread(run: Option<&str>, status: &str, needs: bool) -> Value {
     json!({
@@ -53,6 +60,44 @@ async fn a_metadata_snapshot_keeps_the_threads_and_archiving_removes_one() {
             value: None
         }
     );
+}
+
+/// A shell item that isn't protocol 2 is refused unapplied (its
+/// connection then ends, leaving the shell unknown); a thread T3 accepted but hasn't shown yet is waited for, and
+/// is gone once the shell has moved past its creation without it.
+#[tokio::test]
+async fn only_a_caught_up_current_shell_says_a_thread_is_gone() {
+    let temp = tempfile::tempdir().unwrap();
+    let (agents, _) = fake_agents(temp.path(), temp.path(), vec![]).await;
+    let refused = agents
+        .owner
+        .ask(|s| {
+            s.consume_shell(
+                &json!({"kind": "snapshot", "snapshot": {"snapshotSequence": 9,
+                "projects": [], "threads": [{"id": "a", "projectId": "p"}]}}),
+            )
+        })
+        .await;
+    assert!(refused.is_err());
+    assert_eq!(agents.shell().thread("a"), None);
+
+    let created = next_sequence() + 100;
+    agents
+        .owner
+        .ask(move |s| {
+            s.shell_mut().created.insert("new".into(), created);
+            s.publish();
+        })
+        .await;
+    assert_eq!(agents.observe("new"), Observed::Unavailable);
+    let mut waiting = Box::pin(agents.wait_thread("new"));
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    // An event past its creation, and the thread isn't there.
+    agents
+        .consume_shell(&json!({"kind": "project.removed", "sequence": created, "projectId": "x"}))
+        .await;
+    assert_eq!(waiting.await.unwrap(), None);
+    assert!(agents.shell().created.is_empty());
 }
 
 fn event(key: &str) -> WorkerEvent {
@@ -277,7 +322,7 @@ impl Peer for Fake {
             if failure == Some(true) {
                 return Dispatched::Unknown("T3 did not answer".into());
             }
-            Dispatched::Accepted(json!({"sequence": 1}))
+            Dispatched::Accepted(json!({"sequence": next_sequence()}))
         })
     }
     fn snapshot<'a>(&'a self, tag: &'a str, _: Value) -> crate::push::BoxFuture<'a, Result<Value>> {

@@ -284,7 +284,8 @@ fn holds(known: &HeaderValue, etag: &[u8]) -> bool {
 
 /// The ETag a GET asked to wait past: `If-None-Match` with `Prefer:
 /// wait-for-change` holds the reply until it would differ, instead of an
-/// immediate 304. Nothing but a change (or the client leaving) ends it.
+/// immediate 304. Nothing but a change, the client leaving or shutdown
+/// ends it.
 pub(super) fn waits_past(headers: &HeaderMap) -> Option<HeaderValue> {
     let wait = headers
         .get_all(header::HeaderName::from_static("prefer"))

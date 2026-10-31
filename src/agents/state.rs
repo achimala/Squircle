@@ -93,60 +93,79 @@ impl State {
     /// shell holds every thread that is neither archived nor deleted: an
     /// archived thread leaves it (`thread.removed`), so to this service it is
     /// gone. A snapshot that names `resolvedRepositoryIdentityRoots` is only
-    /// a refresh of those projects' metadata, with no threads.
-    pub(super) fn consume_shell(&mut self, item: &Value) {
+    /// a refresh of those projects' metadata, with no threads. An item that
+    /// isn't what protocol 2 says is refused unapplied: the connection ends
+    /// and the shell stays unknown until a new one sends its snapshot.
+    pub(super) fn consume_shell(&mut self, item: &Value) -> Result<()> {
+        let malformed = || format!("T3 sent a malformed shell item: {}", item["kind"]);
         let shell = self.shell_mut();
-        let keyed = |list: &Value| -> HashMap<String, Arc<Value>> {
-            list.as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| Some((v["id"].as_str()?.to_string(), Arc::new(v.clone()))))
-                .collect()
-        };
         match item["kind"].as_str() {
             Some("snapshot") if item.get("resolvedRepositoryIdentityRoots").is_some() => {
-                shell.projects.extend(keyed(&item["snapshot"]["projects"]));
+                let projects = keyed(&item["snapshot"]["projects"]).with_context(malformed)?;
+                shell.projects.extend(projects);
             }
             Some("snapshot") => {
                 let snapshot = &item["snapshot"];
-                shell.threads = keyed(&snapshot["threads"]);
-                shell.projects = keyed(&snapshot["projects"]);
+                let (Some(threads), Some(projects), Some(sequence)) = (
+                    keyed(&snapshot["threads"]).filter(|t| t.values().all(|t| shell_row(t))),
+                    keyed(&snapshot["projects"]),
+                    snapshot["snapshotSequence"].as_u64(),
+                ) else {
+                    bail!(malformed());
+                };
+                shell.threads = threads;
+                shell.projects = projects;
+                shell.sequence = sequence;
                 shell.link = Link::Current {
                     epoch: shell.link.epoch(),
                 };
             }
-            Some("thread.updated") if item["location"] == "archive" => {
-                if let Some(id) = item["thread"]["id"].as_str() {
-                    shell.threads.remove(id);
+            Some(
+                kind
+                @ ("thread.updated" | "thread.removed" | "project.updated" | "project.removed"),
+            ) => {
+                let sequence = item["sequence"].as_u64().with_context(malformed)?;
+                match kind {
+                    "thread.updated" => {
+                        let thread = &item["thread"];
+                        let id = thread["id"]
+                            .as_str()
+                            .filter(|_| shell_row(thread))
+                            .with_context(malformed)?;
+                        if item["location"] == "archive" {
+                            shell.threads.remove(id);
+                        } else {
+                            shell
+                                .threads
+                                .insert(id.to_string(), Arc::new(thread.clone()));
+                        }
+                    }
+                    "thread.removed" => {
+                        let id = item["threadId"].as_str().with_context(malformed)?;
+                        if item["location"] != "archive" {
+                            shell.threads.remove(id);
+                        }
+                    }
+                    "project.updated" => {
+                        let project = &item["project"];
+                        let id = project["id"].as_str().with_context(malformed)?;
+                        shell
+                            .projects
+                            .insert(id.to_string(), Arc::new(project.clone()));
+                    }
+                    _ => {
+                        let id = item["projectId"].as_str().with_context(malformed)?;
+                        shell.projects.remove(id);
+                    }
                 }
-            }
-            Some("thread.updated") => {
-                if let Some(id) = item["thread"]["id"].as_str() {
-                    shell
-                        .threads
-                        .insert(id.to_string(), Arc::new(item["thread"].clone()));
-                }
-            }
-            Some("project.updated") => {
-                if let Some(id) = item["project"]["id"].as_str() {
-                    shell
-                        .projects
-                        .insert(id.to_string(), Arc::new(item["project"].clone()));
-                }
-            }
-            Some("thread.removed") if item["location"] != "archive" => {
-                if let Some(id) = item["threadId"].as_str() {
-                    shell.threads.remove(id);
-                }
-            }
-            Some("project.removed") => {
-                if let Some(id) = item["projectId"].as_str() {
-                    shell.projects.remove(id);
-                }
+                shell.sequence = shell.sequence.max(sequence);
             }
             _ => {}
         }
+        let sequence = shell.sequence;
+        shell.created.retain(|_, at| *at > sequence);
         self.publish();
+        Ok(())
     }
 
     /// Follows workers in T3's shell: a reserved worker whose thread has
@@ -500,4 +519,18 @@ impl State {
         })?;
         Ok(())
     }
+}
+
+/// A list of shell rows by ID; `None` unless every one has a string ID.
+fn keyed(list: &Value) -> Option<HashMap<String, Arc<Value>>> {
+    list.as_array()?
+        .iter()
+        .map(|v| Some((v["id"].as_str()?.to_string(), Arc::new(v.clone()))))
+        .collect()
+}
+
+/// Whether a thread row says what its run is doing: a row without its
+/// status would read as stopped.
+fn shell_row(row: &Value) -> bool {
+    row["id"].is_string() && row["status"].is_string()
 }

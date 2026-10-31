@@ -21,7 +21,7 @@ pub(super) async fn list(State(state): State<AppState>) -> ApiResult<Json<Value>
 
 /// A build's status. Asked to wait past the ETag the client holds
 /// (`waits_past`), it answers once the status differs, as the job, its
-/// launch evidence or its agent change.
+/// launch evidence or its agent change, or as shutdown begins.
 pub(super) async fn status(
     State(state): State<AppState>,
     Path(id): Path<String>,

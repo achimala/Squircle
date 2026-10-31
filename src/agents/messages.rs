@@ -28,7 +28,9 @@ impl Agents {
         note: Option<(Note, Value)>,
     ) -> Result<()> {
         let client = self.ready().await?;
-        self.wait_thread(thread_id).await?;
+        self.wait_thread(thread_id)
+            .await?
+            .with_context(|| format!("T3 has no thread {thread_id}"))?;
         let purpose = format!(
             "send {thread_id} {}\n{text}",
             note.as_ref().map_or("user", |(note, _)| note.kind())

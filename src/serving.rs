@@ -5,9 +5,10 @@
 //! Tailscale proxy) or stops sending an upload kept a stopped service alive,
 //! and its data-directory lock, indefinitely. Here shutdown is a sequence:
 //! stop accepting and close idle connections; fail request bodies still being
-//! read; run the service's own wind-down; wait for handlers already running
-//! (their own work, which ends); then drop every connection that remains,
-//! which only peer-paced response streams can be.
+//! read and end requests waiting for a change; run the service's own
+//! wind-down; wait for handlers already running (their own work, which
+//! ends); then drop every connection that remains, which only peer-paced
+//! response streams can be.
 
 use axum::{
     Router,
@@ -33,16 +34,17 @@ use tower::ServiceExt;
 
 /// Serves `app` until `signal` resolves, then shuts down as described above;
 /// `wind_down` gets what the signal resolved to, and runs while in-flight
-/// handlers may still finish.
+/// handlers may still finish. `closing` is cancelled as shutdown begins:
+/// a handler waiting for a change (not doing its own work) ends on it.
 pub async fn serve<S, F>(
     listener: TcpListener,
     app: Router,
     signal: impl Future<Output = S>,
+    closing: CancellationToken,
     wind_down: impl FnOnce(S) -> F,
 ) where
     F: Future<Output = ()>,
 {
-    let closing = CancellationToken::new();
     let cut = CancellationToken::new();
     let connections = TaskTracker::new();
     let handlers = TaskTracker::new();
