@@ -13,31 +13,24 @@ final class RequestCard {
     /// The next question slid in and the card's height changed.
     var onResize: (() -> Void)?
 
-    private let title = Theme.label("", Theme.Text.body, lines: 2)
-    private let detail = Theme.label("", Theme.Text.mono, color: .secondaryLabel, lines: 4)
-    private let buttons = UIStackView()
+    /// The question card's layout, on the card's glass.
+    private let card = WaitingItemView(filled: false)
+    /// Who asks: the conversation's own agent, said and shown.
+    var asker = (name: "Your agent asks", jelly: JellyLook.agent(.needsYou))
     private var renderedID: String?
     private let drafts: QuestionAnswers
 
     init(drafts: QuestionAnswers) {
         self.drafts = drafts
-        detail.lineBreakMode = .byTruncatingTail
-        buttons.spacing = Theme.Space.row
-        buttons.axis = .vertical
-        buttons.distribution = .fill
-        let stack = UIStackView(arrangedSubviews: [title, detail, buttons])
-        stack.axis = .vertical
-        stack.spacing = Theme.Space.row
-        stack.setCustomSpacing(Theme.Space.rowPad, after: detail)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        view.contentView.addSubview(stack)
+        card.translatesAutoresizingMaskIntoConstraints = false
+        view.contentView.addSubview(card)
         view.accessibilityIdentifier = "thread.request"
         view.isHidden = true
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: view.contentView.topAnchor, constant: Theme.Space.card.top),
-            stack.bottomAnchor.constraint(equalTo: view.contentView.bottomAnchor, constant: -Theme.Space.card.bottom),
-            stack.leadingAnchor.constraint(equalTo: view.contentView.leadingAnchor, constant: Theme.Space.card.left),
-            stack.trailingAnchor.constraint(equalTo: view.contentView.trailingAnchor, constant: -Theme.Space.card.right)
+            card.topAnchor.constraint(equalTo: view.contentView.topAnchor, constant: Theme.Space.card.top),
+            card.bottomAnchor.constraint(equalTo: view.contentView.bottomAnchor, constant: -Theme.Space.card.bottom),
+            card.leadingAnchor.constraint(equalTo: view.contentView.leadingAnchor, constant: Theme.Space.card.left),
+            card.trailingAnchor.constraint(equalTo: view.contentView.trailingAnchor, constant: -Theme.Space.card.right)
         ])
     }
 
@@ -69,48 +62,14 @@ final class RequestCard {
     /// Where Waiting on you took you.
     func mark() { view.layer.markSpot(in: view.traitCollection) }
 
-    private func button(_ title: String, subtitle: String? = nil, prominent: Bool, leading: Bool = false,
-                        action: @escaping () -> Void) -> UIButton {
-        let button = Theme.glassButton(title: title, prominent: prominent, identifier: "thread.request.\(title)")
-        button.configuration?.subtitle = subtitle
-        button.configuration?.titleLineBreakMode = .byWordWrapping
-        button.configuration?.subtitleLineBreakMode = .byTruncatingTail
-        button.configuration?.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes; attributes.font = Theme.Text.line; return attributes
-        }
-        if leading {
-            button.configuration?.titleAlignment = .leading
-            button.contentHorizontalAlignment = .leading
-        }
-        button.addAction(UIAction { _ in Theme.selectionHaptic(); action() }, for: .touchUpInside)
-        buttons.addArrangedSubview(button)
-        return button
-    }
-
     private func renderApproval(_ current: PendingRequest) {
-        buttons.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        title.text = current.title
-        let text = current.prompt
-        if let stack = title.superview as? UIStackView {
-            stack.insertArrangedSubview(detail, at: 1)
-            stack.setCustomSpacing(Theme.Space.row, after: title)
-            stack.setCustomSpacing(Theme.Space.rowPad, after: detail)
+        card.show(context: asker.name, asker: asker.jelly, question: current.title, detail: current.prompt)
+        let choices = WaitingItemView.decisions(current)
+        card.answers(choices.map(\.answer), busy: false) { [weak self] index in
+            Theme.selectionHaptic()
+            self?.onRespond?(current, choices[index].decision, nil)
         }
-        detail.font = Theme.Text.mono
-        detail.textColor = .secondaryLabel
-        detail.text = text
-        detail.isHidden = text.isEmpty
-        if current.options.isEmpty {
-            _ = button("Decline", prominent: false) { [weak self] in self?.onRespond?(current, "decline", nil) }
-            _ = button("Allow", prominent: true) { [weak self] in self?.onRespond?(current, "accept", nil) }
-        } else {
-            for option in current.options {
-                _ = button(option["label"].string ?? "Choose", subtitle: option["warning"].string,
-                           prominent: ["accept", "acceptForSession", "acceptAlways"].contains(option["decision"].string ?? "")) { [weak self] in
-                    self?.onRespond?(current, option["decision"].string, nil)
-                }
-            }
-        }
+        card.reply(placeholder: nil, text: "", busy: false, edit: { _ in }) { _ in }
     }
 
     /// One of the agent's questions at a time, answered by tapping a choice
@@ -126,23 +85,12 @@ final class RequestCard {
             slide.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
             view.contentView.layer.add(slide, forKey: "question")
         }
-        buttons.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let questions = form.questions
-        var caption = (form.question["header"].string ?? "Question").uppercased()
-        if questions.count > 1 { caption += "  ·  \(form.index + 1) OF \(questions.count)" }
-        if let stack = title.superview as? UIStackView {
-            stack.insertArrangedSubview(detail, at: 0)
-            stack.setCustomSpacing(Theme.Space.tight, after: detail)
-            stack.setCustomSpacing(Theme.Space.rowPad, after: title)
-        }
-        detail.font = Theme.Text.caption
-        detail.textColor = .secondaryLabel
-        detail.text = caption
-        detail.isHidden = false
-        title.text = form.question["question"].string ?? "The agent has a question"
+        let context = [asker.name, form.question["header"].string].compactMap { $0 }.joined(separator: " · ")
+        card.show(context: context, asker: asker.jelly, question: WaitingItemView.title(form), detail: nil)
         // Each tap reads the draft as it is then (typing changes it in between).
         func step(_ make: (QuestionForm) -> QuestionForm.Step) {
             let now = QuestionForm(questions: current.questions, draft: drafts[key])
+            Theme.selectionHaptic()
             switch make(now) {
             case .edit(let draft):
                 drafts[key] = draft
@@ -150,40 +98,13 @@ final class RequestCard {
                 renderQuestion(current, advancing: advanced)
                 if advanced { onResize?() }
             case .send(let answers):
-                buttons.arrangedSubviews.forEach { $0.isUserInteractionEnabled = false }
+                card.isUserInteractionEnabled = false
                 onRespond?(current, nil, answers)
             }
         }
-        for (index, option) in form.options.enumerated() {
-            _ = button(option.label, subtitle: option.detail, prominent: option.picked, leading: true) { step { $0.choose(index) } }
-        }
-        let field = UITextField()
-        field.placeholder = "Something else…"
-        field.text = form.draft.text
-        field.font = Theme.Text.body
-        field.returnKeyType = .send
-        field.accessibilityIdentifier = "thread.request.other"
-        field.addAction(UIAction { [weak self, weak field] _ in self?.drafts[key].text = field?.text ?? "" }, for: .editingChanged)
-        field.addAction(UIAction { [weak field] _ in
-            let text = field?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !text.isEmpty { field?.resignFirstResponder(); step { $0.reply(text) } }
-        }, for: .editingDidEndOnExit)
-        let wrap = UIView()
-        wrap.backgroundColor = Theme.codeFill
-        wrap.layer.cornerRadius = Theme.Space.tap / 2
-        wrap.layer.cornerCurve = .continuous
-        field.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(field)
-        NSLayoutConstraint.activate([
-            wrap.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
-            field.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: Theme.Space.group),
-            field.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -Theme.Space.group),
-            field.centerYAnchor.constraint(equalTo: wrap.centerYAnchor)
-        ])
-        buttons.addArrangedSubview(wrap)
-        if form.multiple {
-            let next = button(form.isLast ? "Send" : "Next", prominent: true) { step { $0.confirm() } }
-            next.isEnabled = form.canConfirm
-        }
+        card.isUserInteractionEnabled = true
+        card.form(form, busy: false) { index in step { index < form.options.count ? $0.choose(index) : $0.confirm() } }
+        card.reply(placeholder: "Something else…", text: form.draft.text, busy: false,
+                   edit: { [weak self] text in self?.drafts[key].text = text }) { text in step { $0.reply(text) } }
     }
 }

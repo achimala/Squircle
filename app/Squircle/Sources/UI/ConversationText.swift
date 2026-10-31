@@ -18,7 +18,7 @@ final class ConversationText {
             text = NSAttributedString(string: message.content, attributes: [.font: Theme.Text.body, .foregroundColor: UIColor.label])
         case .note, .thought, .action, .agent:
             text = Markdown.render(markdown(message), font: Theme.Text.line, color: .secondaryLabel)
-        case .answer:
+        case .answer, .received:
             text = Markdown.render(markdown(message), font: Theme.Text.body, color: message.failed ? Theme.failure : .label)
         case .update:
             let font = Theme.Text.line
@@ -42,12 +42,35 @@ final class ConversationText {
         switch style {
         case .user: "user"
         case .answer: "answer"
+        case .received: "received"
         case .note: "note"
         case .thought: "thought"
         case .update: "update"
         case .action: "action"
         case .agent: "agent"
         }
+    }
+
+    private var cut: [String: (source: AnyHashable, pieces: [ChatMessage])] = [:]
+
+    /// The app agent's answer as received bubbles, one per paragraph
+    /// (`Markdown.paragraphs`). While it still streams, its last paragraph
+    /// waits: every one before it is final once the next has begun.
+    func bubbles(_ message: ChatMessage) -> [ChatMessage] {
+        let source: AnyHashable = [message.markdown.map(AnyHashable.init) ?? AnyHashable(message.content), AnyHashable(message.isStreaming)]
+        if let cached = cut[message.id], cached.source == source { return cached.pieces }
+        var paragraphs = Markdown.paragraphs(markdown(message))
+        if message.isStreaming { paragraphs.removeLast(min(1, paragraphs.count)) }
+        let pieces = paragraphs.enumerated().map { index, paragraph in
+            var piece = message
+            // The first keeps the message's identity.
+            if index > 0 { piece.id = message.id + "¶\(index)" }
+            piece.content = String(paragraph.characters)
+            piece.markdown = paragraph
+            return piece
+        }
+        cut[message.id] = (source, pieces)
+        return pieces
     }
 
     private func markdown(_ message: ChatMessage) -> AttributedString {
