@@ -180,7 +180,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         home.addSubview(grid)
         [connection, add].forEach(home.addSubview)
         grid.addSubview(waitingList)
-        waitingList.onOpen = { [weak self] project, task in self?.presentTasks(project: project, focus: task) }
+        waitingList.onResize = { [weak self] in self?.relayout() }
         waitingList.onJump = { [weak self] project, item in self?.jump(to: item, project: project) }
         connection.showsMenuAsPrimaryAction = true
         add.addAction(UIAction { [weak self] _ in self?.presentImport() }, for: .touchUpInside)
@@ -638,7 +638,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         // Controls rise in with transforms; `place` keeps their resting spot exact.
         let safe = view.safeAreaInsets
-        let button = Theme.Space.tap, inset = Theme.Space.group
+        let button = Theme.Space.tap, inset = Theme.Space.margin
         connection.place(in: CGRect(x: inset, y: safe.top + Theme.Space.tight, width: button, height: button))
         add.place(in: CGRect(x: bounds.width - inset - button, y: safe.top + Theme.Space.tight, width: button, height: button))
         applyScene()
@@ -652,10 +652,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private func makeLayout() -> StageLayout {
         var layout = StageLayout(size: view.bounds.size, safe: view.safeAreaInsets, reducedMotion: Motion.reduced)
         let width = view.bounds.width - 2 * StageLayout.gridMargin
-        if !waitingList.isEmpty, width > 0 {
-            layout.waiting = waitingList.systemLayoutSizeFitting(CGSize(width: width, height: 0), withHorizontalFittingPriority: .required,
-                                                                 verticalFittingPriority: .fittingSizeLevel).height.rounded(.up) + Theme.Space.section
-        }
+        if !waitingList.isEmpty, width > 0 { layout.waiting = waitingList.height(width: width) + Theme.Space.section }
         return layout
     }
 
@@ -813,10 +810,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// (straight from Home, it goes back to Home).
     func jump(to item: WaitingList.Item, project id: String) {
         guard presentedViewController == nil, let project = projects.first(where: { $0.id == id }) else { return }
-        guard let thread = item.threadID else {
-            if case .task(let task) = item { presentTasks(project: id, focus: task.taskID) }
-            return
-        }
+        guard let thread = item.threadID else { return }
         Theme.openHaptic()
         view.endEditing(true)
         if thread == model.agentThreadID(for: project) {
@@ -890,7 +884,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             let task = model.waiting.apps.first { $0.projectID == id }?.items.lazy.compactMap { item -> String? in
                 switch item {
                 case .question(let question): question.threadID == target.thread ? question.taskID : nil
-                case .task(let task): task.threadID == target.thread ? task.taskID : nil
                 case .request(let request): request.threadID == target.thread ? self.model.tasks(for: resolved.project).tasks
                     .first { $0.allThreads.contains { $0.id == request.threadID } }?.id : nil
                 }
@@ -1504,6 +1497,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if !CATransform3DEqualToTransform(cell.layer.transform, transform) { cell.layer.transform = transform }
             cell.update(\.alpha, to: layout.recedeAlpha(progress: a))
             cell.captionAlpha = project.id == selectedID ? (1 - a * 4).clamped() : 1
+            // Its agent plays only while Home is the route: leaving stops it
+            // in the same frame, before Home fades.
+            cell.live = route == .grid
         }
         dock.update(\.alpha, to: a)
         dock.update(\.isUserInteractionEnabled, to: route.app != nil && a > 0.5)
@@ -1670,6 +1666,8 @@ final class GridCell: UIControl {
     private let peek = JellyView(.agent(.working), canvas: .roomy(GridCell.peekSize))
     private static let peekSize = Theme.Glyph.home
     private var peeking = false
+    /// Home is the route: the peeking agent may play.
+    var live = true { didSet { if live != oldValue { peek.animates = peeking && live } } }
 
     init(id: String) {
         self.id = id
@@ -1717,7 +1715,7 @@ final class GridCell: UIControl {
     private func setPeeking(_ on: Bool) {
         guard on != peeking else { return }
         peeking = on
-        peek.animates = on
+        peek.animates = on && live
         let down = CGAffineTransform(translationX: 0, y: Self.peekSize * 0.75)
         if on, peek.isHidden {
             peek.isHidden = false

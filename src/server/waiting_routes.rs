@@ -137,23 +137,16 @@ pub(super) async fn respond_request(
     Ok(Json(success(json!({"answered": r.request_id}))))
 }
 
-/// Everything waiting on the user across apps, for the phone: open
-/// questions in the tracker, threads' own questions and approvals in T3,
-/// and needs-you tasks neither of those covers. Per app, oldest first.
+/// Everything waiting on the user across apps, for the phone: only what
+/// blocks an agent until the user acts, open questions in the tracker and
+/// threads' own questions and approvals in T3. A task at needs you with only
+/// a note is not listed; it stays in the app's tasks. Per app, oldest first.
 pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     let agents = agents(&state)?;
     let tasks = tasks_of(&state)?;
     let threads = agents.waiting_threads();
     let requests =
         futures_util::future::join_all(threads.iter().map(|t| agents.pending(&t.thread_id))).await;
-    let requests: Vec<(&crate::agents::WaitingThread, String, Value)> = threads
-        .iter()
-        .zip(requests)
-        .filter_map(|(thread, pending)| {
-            let (request, item) = pending.ok().flatten()?;
-            Some((thread, request, item))
-        })
-        .collect();
     let mut apps: BTreeMap<String, Vec<(u64, Value)>> = BTreeMap::new();
     let all = tasks.all();
     // The most specific task linking a thread: a sub-task before its work item.
@@ -162,11 +155,10 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
             .filter(|t| t.status.open() && t.threads.iter().any(|x| x == thread))
             .max_by_key(|t| t.parent_id.is_some())
     };
-    let waiting: std::collections::HashSet<&str> = requests
-        .iter()
-        .map(|(t, _, _)| t.thread_id.as_str())
-        .collect();
-    for (thread, request, item) in &requests {
+    for (thread, pending) in threads.iter().zip(requests) {
+        let Some((request, item)) = pending.ok().flatten() else {
+            continue;
+        };
         let task = linking(&thread.thread_id);
         apps.entry(thread.project_id.clone()).or_default().push((
             0,
@@ -178,49 +170,25 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
             }),
         ));
     }
-    for project in all
-        .iter()
-        .map(|t| t.project_id.clone())
-        .collect::<std::collections::BTreeSet<_>>()
-    {
-        // Open questions wherever their task sits: aging into History does
-        // not take back what the agent is still waiting on.
-        for item in tasks.list(&project) {
-            let active = item.archived_at.is_none();
-            for task in std::iter::once(&item).chain(item.subtasks.iter()) {
-                for question in task.questions.iter().filter(|q| q.open()) {
-                    let from = agents
-                        .coordinator_of(&question.thread_id)
-                        .and(agents.worker_title(&question.thread_id));
-                    apps.entry(project.clone()).or_default().push((
-                        question.asked_at,
-                        json!({
-                            "kind": "question", "id": question.id, "task_id": task.id, "ask": task.ask,
-                            "item_ask": task.parent_id.as_ref().map(|_| item.ask.clone()),
-                            "text": question.text, "options": question.options, "from": from,
-                            "thread_id": question.thread_id,
-                            "asked_at": question.asked_at,
-                        }),
-                    ));
-                }
-                let covered = task.questions.iter().any(|q| q.open())
-                    || task.threads.iter().any(|t| waiting.contains(t.as_str()))
-                    || task
-                        .subtasks
-                        .iter()
-                        .any(|s| s.status == tasks::Status::NeedsYou);
-                if active && task.status == tasks::Status::NeedsYou && !covered {
-                    apps.entry(project.clone()).or_default().push((
-                        task.updated_at,
-                        json!({
-                            "kind": "task", "task_id": task.id, "ask": task.ask, "note": task.note,
-                            "item_ask": task.parent_id.as_ref().map(|_| item.ask.clone()),
-                            "thread_id": task.threads.last(),
-                        }),
-                    ));
-                }
-            }
-        }
+    // Open questions wherever their task sits: aging into History does not
+    // take back what the agent is still waiting on.
+    for (task, question) in tasks.asking() {
+        let from = agents
+            .coordinator_of(&question.thread_id)
+            .and(agents.worker_title(&question.thread_id));
+        let item_ask = task
+            .parent_id
+            .as_ref()
+            .and_then(|p| all.iter().find(|t| &t.id == p))
+            .map(|item| item.ask.clone());
+        apps.entry(task.project_id.clone()).or_default().push((
+            question.asked_at,
+            json!({
+                "kind": "question", "id": question.id, "task_id": task.id, "ask": task.ask,
+                "item_ask": item_ask, "text": question.text, "options": question.options,
+                "from": from, "thread_id": question.thread_id, "asked_at": question.asked_at,
+            }),
+        ));
     }
     let count: usize = apps.values().map(Vec::len).sum();
     let apps: Vec<Value> = apps

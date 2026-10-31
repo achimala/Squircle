@@ -14,15 +14,16 @@ final class WaitingAnswers {
     init(model: SquircleModel) { self.model = model }
 
     /// Draws `item` into `view`. `about`: say which task it's for (where
-    /// that isn't right above it). `changed` runs when a request with
-    /// several questions moves to its next one in place.
-    func configure(_ view: WaitingItemView, _ item: WaitingList.Item, about: Bool, changed: @escaping () -> Void = {}) {
+    /// that isn't right above it), after `app`'s name when given (Home).
+    /// `changed` runs when a request with several questions moves to its
+    /// next one in place.
+    func configure(_ view: WaitingItemView, _ item: WaitingList.Item, about: Bool, app: String? = nil, changed: @escaping () -> Void = {}) {
         let id = item.id
         view.itemID = id
         let busy = model.answering.contains(id)
         switch item {
         case .question(let question):
-            let context = about ? [question.from, question.ask].compactMap { $0 }.joined(separator: " · ") : question.from ?? ""
+            let context = about ? [app, question.from, question.ask].compactMap { $0 }.joined(separator: " · ") : question.from ?? ""
             view.show(context: context, worker: question.from == nil ? nil : question.threadID, title: question.text, detail: nil)
             view.choices(question.options.map { ($0, nil, false) }, busy: busy) { [weak self] index in
                 self?.send(question, question.options[index])
@@ -30,7 +31,7 @@ final class WaitingAnswers {
             view.reply(placeholder: "Reply…", text: drafts[id].text, busy: busy,
                        edit: { [weak self] text in self?.drafts[id].text = text }) { [weak self] text in self?.send(question, text) }
         case .request(let request):
-            let context = (about ? [request.title, request.ask] : [request.worker ? request.title : nil])
+            let context = (about ? [app, request.title, request.ask] : [request.worker ? request.title : nil])
                 .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
             if request.pending.isQuestion {
                 question(view, request, context: context, id: id, busy: busy, changed: changed)
@@ -51,10 +52,6 @@ final class WaitingAnswers {
                 }
                 view.reply(placeholder: nil, text: "", busy: busy, edit: { _ in }) { _ in }
             }
-        case .task(let task):
-            view.show(context: about ? task.itemAsk ?? "" : "", worker: nil, title: task.ask, detail: task.note.isEmpty ? nil : task.note, titleLines: 3)
-            view.choices([], busy: busy) { _ in }
-            view.reply(placeholder: nil, text: "", busy: busy, edit: { _ in }) { _ in }
         }
     }
 
@@ -106,8 +103,8 @@ final class WaitingAnswers {
 
 /// One thing waiting on you: who asks, the question in full, its answers
 /// as plain glass buttons side by side (wrapping only when they don't
-/// fit), and a reply field. `compact` (Home): smaller, answers in one row
-/// that scrolls sideways, no field.
+/// fit), and a reply field. `compact` (Home): the question in three lines,
+/// no detail and no field.
 final class WaitingItemView: UIView {
     /// The item drawn, so a late redraw never lands on a reused view.
     var itemID: String?
@@ -116,8 +113,6 @@ final class WaitingItemView: UIView {
     private let jelly = JellyView(.worker("", .needsYou), canvas: .roomy(Theme.Glyph.line))
     private let title = Theme.label("", Theme.Text.body, lines: 0)
     private let detail = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 4)
-    private let buttons = UIStackView()
-    private let buttonScroll = UIScrollView()
     private let flow = AnswerFlow()
     /// Its width before it is laid out, for a table measuring its cell.
     var fitWidth: CGFloat {
@@ -134,8 +129,7 @@ final class WaitingItemView: UIView {
         self.compact = compact
         super.init(frame: .zero)
         if compact {
-            title.font = Theme.Text.line
-            title.numberOfLines = 2
+            title.numberOfLines = 3
             context.numberOfLines = 1
         }
         jelly.translatesAutoresizingMaskIntoConstraints = false
@@ -143,7 +137,6 @@ final class WaitingItemView: UIView {
         let about = UIStackView(arrangedSubviews: [jelly, context])
         about.spacing = Theme.Space.glyphGap
         about.alignment = .center
-        buttons.spacing = Theme.Space.row
         field.font = Theme.Text.body
         field.returnKeyType = .send
         field.accessibilityIdentifier = "waiting.reply"
@@ -166,34 +159,14 @@ final class WaitingItemView: UIView {
             field.trailingAnchor.constraint(equalTo: fieldWrap.trailingAnchor, constant: -Theme.Space.group),
             field.centerYAnchor.constraint(equalTo: fieldWrap.centerYAnchor)
         ])
-        let answers: UIView
-        if compact {
-            // Side by side, scrolling sideways past the edge when they don't fit.
-            buttons.alignment = .center
-            buttonScroll.showsHorizontalScrollIndicator = false
-            buttonScroll.clipsToBounds = false
-            buttons.translatesAutoresizingMaskIntoConstraints = false
-            buttonScroll.addSubview(buttons)
-            NSLayoutConstraint.activate([
-                buttons.topAnchor.constraint(equalTo: buttonScroll.contentLayoutGuide.topAnchor),
-                buttons.bottomAnchor.constraint(equalTo: buttonScroll.contentLayoutGuide.bottomAnchor),
-                buttons.leadingAnchor.constraint(equalTo: buttonScroll.contentLayoutGuide.leadingAnchor),
-                buttons.trailingAnchor.constraint(equalTo: buttonScroll.contentLayoutGuide.trailingAnchor),
-                buttons.heightAnchor.constraint(equalTo: buttonScroll.frameLayoutGuide.heightAnchor),
-                buttonScroll.heightAnchor.constraint(equalToConstant: 36)
-            ])
-            answers = buttonScroll
-            fieldWrap.isHidden = true
-        } else {
-            answers = flow
-        }
-        let stack = UIStackView(arrangedSubviews: [about, title, detail, answers, fieldWrap])
+        fieldWrap.isHidden = compact
+        let stack = UIStackView(arrangedSubviews: [about, title, detail, flow, fieldWrap])
         stack.axis = .vertical
-        stack.spacing = compact ? Theme.Space.tight : Theme.Space.row
+        stack.spacing = Theme.Space.row
         stack.setCustomSpacing(Theme.Space.tight, after: about)
-        stack.setCustomSpacing(compact ? Theme.Space.row : Theme.Space.rowPad, after: title)
-        stack.setCustomSpacing(compact ? Theme.Space.row : Theme.Space.rowPad, after: detail)
-        stack.setCustomSpacing(Theme.Space.row, after: answers)
+        stack.setCustomSpacing(Theme.Space.rowPad, after: title)
+        stack.setCustomSpacing(Theme.Space.rowPad, after: detail)
+        stack.setCustomSpacing(Theme.Space.row, after: flow)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -228,31 +201,20 @@ final class WaitingItemView: UIView {
     /// that sends a multi-select question's picks; its index is after the options.
     func choices(_ options: [(String, String?, Bool)], busy: Bool, confirm: (String, Bool)? = nil, choose: @escaping (Int) -> Void) {
         onChoose = choose
-        buttons.arrangedSubviews.forEach { $0.removeFromSuperview() }
         var made: [UIButton] = []
         var options = options
         if let confirm { options.append((confirm.0, nil, true)) }
         for (index, option) in options.enumerated() {
             let button = Theme.glassButton(title: option.0, prominent: option.2, identifier: "waiting.option.\(option.0)")
-            button.configuration?.subtitle = compact ? nil : option.1
-            button.configuration?.titleLineBreakMode = compact ? .byTruncatingTail : .byWordWrapping
+            button.configuration?.subtitle = option.1
+            button.configuration?.titleLineBreakMode = .byWordWrapping
             button.configuration?.titleAlignment = .center
-            if compact {
-                button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.bubble.top, leading: Theme.Space.bubble.left,
-                                                                              bottom: Theme.Space.bubble.bottom, trailing: Theme.Space.bubble.right)
-                button.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-                    var attributes = attributes
-                    attributes.font = Theme.Text.lineStrong
-                    return attributes
-                }
-            }
             button.isEnabled = !busy && (confirm == nil || index < options.count - 1 || confirm!.1)
             button.addAction(UIAction { [weak self] _ in self?.onChoose?(index) }, for: .touchUpInside)
-            if compact { buttons.addArrangedSubview(button) } else { made.append(button) }
+            made.append(button)
         }
-        if !compact { flow.set(made) }
-        (compact ? buttonScroll : flow).isHidden = options.isEmpty
-        if compact { buttonScroll.contentOffset.x = 0 }
+        flow.set(made)
+        flow.isHidden = options.isEmpty
     }
 
     /// A reply field showing `text`, or none without a placeholder (never
@@ -360,111 +322,115 @@ final class WaitingCell: UITableViewCell {
 }
 
 /// Everything waiting on you across apps, at the top of Home above the
-/// devices: each app's name, then what waits there (a few, then how many
-/// more), answerable with a tap where the answers are a few choices.
+/// devices: one question or approval at a time, the next a swipe sideways
+/// under the finger (native paging), answerable in place. It keeps the
+/// tallest one's height however many wait, so the devices stay put.
 /// Tapping a question's text opens the conversation that asked it, at the
-/// spot; a needs-you task opens the app's Tasks sheet at it.
+/// spot.
 @MainActor
-final class HomeWaitingView: UIView {
-    /// Opens an app's Tasks sheet, at an item's task when it has one.
-    var onOpen: ((_ project: String, _ task: String?) -> Void)?
+final class HomeWaitingView: UIView, UIScrollViewDelegate {
     /// Opens the thread that asked, where it asked.
     var onJump: ((_ project: String, _ item: WaitingList.Item) -> Void)?
+    /// Its height changed (a request moved on to its next question).
+    var onResize: (() -> Void)?
     private let answers: WaitingAnswers
-    private let stack = UIStackView()
-    private var shown: (list: WaitingList, busy: Set<String>)?
-    /// Each app shows this many, then "N more".
-    private static let perApp = 2
+    private let heading = Theme.label("Waiting on you", Theme.Text.caption, color: .secondaryLabel)
+    private let count = Theme.label("", Theme.Text.caption, color: .tertiaryLabel)
+    private let pages = UIScrollView()
+    private var cards: [(id: String, view: HomeWaitingCard)] = []
+    private var shown: (list: [(project: String, item: WaitingList.Item)], busy: Set<String>)?
 
     init(model: SquircleModel) {
         answers = WaitingAnswers(model: model)
         super.init(frame: .zero)
         accessibilityIdentifier = "home.waiting"
-        stack.axis = .vertical
-        stack.spacing = 0
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor)
-        ])
+        heading.accessibilityTraits = .header
+        pages.isPagingEnabled = true
+        pages.showsHorizontalScrollIndicator = false
+        pages.alwaysBounceHorizontal = false
+        // The next one shows past the margin, so there is something to swipe to.
+        pages.clipsToBounds = false
+        pages.delegate = self
+        [heading, count, pages].forEach(addSubview)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    var isEmpty: Bool { stack.arrangedSubviews.isEmpty }
+    var isEmpty: Bool { cards.isEmpty }
+
+    /// One page: a card and the gap after it.
+    private var step: CGFloat { bounds.width + Theme.Space.row }
+    private var headingHeight: CGFloat { ceil(Theme.Text.caption.lineHeight) }
+
+    /// Its height at `width`: the heading and the tallest card.
+    func height(width: CGFloat) -> CGFloat {
+        guard !cards.isEmpty else { return 0 }
+        return headingHeight + Theme.Space.row + cards.map { $0.view.height(width: width) }.max()!
+    }
 
     /// The list, its apps in Home's order. True when what shows changed.
     @discardableResult
     func update(_ list: WaitingList, order: [String], busy: Set<String>) -> Bool {
-        var list = list
-        list.apps.sort { (order.firstIndex(of: $0.projectID) ?? .max) < (order.firstIndex(of: $1.projectID) ?? .max) }
-        // Questions first: a needs-you task can wait in Tasks, an agent can't.
-        list.apps = list.apps.map { app in
-            let asks = app.items.filter { if case .task = $0 { false } else { true } }
-            return WaitingList.App(projectID: app.projectID, name: app.name, items: asks + app.items.filter { if case .task = $0 { true } else { false } })
+        let rank = { (id: String) in order.firstIndex(of: id) ?? .max }
+        let items = list.apps.sorted { rank($0.projectID) < rank($1.projectID) }
+            .flatMap { app in app.items.map { (project: app.projectID, item: $0) } }
+        if let shown, shown.busy == busy, shown.list.elementsEqual(items, by: { $0.project == $1.project && $0.item == $1.item }) {
+            return false
         }
-        if let shown, shown.list == list, shown.busy == busy { return false }
-        shown = (list, busy)
-        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        guard list.count > 0 else { return true }
-        let heading = Theme.label("Waiting on you", Theme.Text.caption, color: .secondaryLabel)
-        heading.accessibilityTraits = .header
-        let count = Theme.label("\(list.count)", Theme.Text.caption, color: .tertiaryLabel)
-        let top = UIStackView(arrangedSubviews: [heading, count, UIView()])
-        top.spacing = Theme.Space.tight
-        top.alignment = .firstBaseline
-        stack.addArrangedSubview(top)
-        stack.setCustomSpacing(Theme.Space.row, after: top)
-        for app in list.apps {
-            let name = Theme.label(app.name ?? "App", Theme.Text.caption, color: .secondaryLabel)
-            stack.addArrangedSubview(spaced(name, top: Theme.Space.rowPad))
-            for item in app.items.prefix(Self.perApp) {
-                stack.addArrangedSubview(row(item, project: app.projectID))
+        shown = (items, busy)
+        // The one showing stays showing; answered, the next takes its place.
+        let current = page
+        let showing = cards.indices.contains(current) ? cards[current].id : nil
+        cards.forEach { $0.view.removeFromSuperview() }
+        cards = items.map { project, item in
+            let card = HomeWaitingCard()
+            answers.configure(card.item, item, about: true, app: list.apps.first { $0.projectID == project }?.name ?? "App") { [weak self] in
+                self?.onResize?()
             }
-            if app.items.count > Self.perApp {
-                let more = UIButton(configuration: .plain())
-                more.configuration?.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.row, leading: 0, bottom: Theme.Space.tight, trailing: 0)
-                more.configuration?.attributedTitle = AttributedString("\(app.items.count - Self.perApp) more in Tasks", attributes: AttributeContainer([
-                    .font: Theme.Text.caption, .foregroundColor: Theme.accent]))
-                more.contentHorizontalAlignment = .leading
-                more.addAction(UIAction { [weak self] _ in self?.onOpen?(app.projectID, nil) }, for: .touchUpInside)
-                stack.addArrangedSubview(more)
-            }
+            card.addAction(UIAction { [weak self] _ in self?.onJump?(project, item) }, for: .touchUpInside)
+            pages.addSubview(card)
+            return (item.id, card)
         }
+        let target = showing.flatMap { id in cards.firstIndex { $0.id == id } } ?? min(current, max(0, cards.count - 1))
+        setNeedsLayout()
+        layoutIfNeeded()
+        pages.contentOffset.x = CGFloat(target) * step
+        showCount()
         return true
     }
 
-    private func spaced(_ view: UIView, top: CGFloat) -> UIView {
-        let wrap = UIView()
-        view.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(view)
-        NSLayoutConstraint.activate([
-            view.topAnchor.constraint(equalTo: wrap.topAnchor, constant: top),
-            view.bottomAnchor.constraint(equalTo: wrap.bottomAnchor),
-            view.leadingAnchor.constraint(equalTo: wrap.leadingAnchor),
-            view.trailingAnchor.constraint(equalTo: wrap.trailingAnchor)
-        ])
-        return wrap
+    /// The card under the finger's page.
+    private var page: Int {
+        guard step > 0 else { return 0 }
+        return max(0, min(cards.count - 1, Int((pages.contentOffset.x / step).rounded())))
     }
 
-    /// One item: tapping beside its answers opens where it was asked (a
-    /// needs-you task, in the app's Tasks).
-    private func row(_ item: WaitingList.Item, project: String) -> UIView {
-        let control = HomeWaitingRow()
-        answers.configure(control.item, item, about: true) { [weak self] in self?.superview?.setNeedsLayout() }
-        control.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
-            if case .task(let task) = item { onOpen?(project, task.taskID) } else { onJump?(project, item) }
-        }, for: .touchUpInside)
-        return control
+    private func showCount() {
+        count.text = cards.count > 1 ? "\(page + 1) of \(cards.count)" : nil
+        accessibilityValue = count.text
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) { showCount() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let width = bounds.width, line = headingHeight
+        let headingWidth = ceil(heading.sizeThatFits(CGSize(width: width, height: line)).width)
+        heading.frame = CGRect(x: 0, y: 0, width: headingWidth, height: line)
+        count.frame = CGRect(x: headingWidth + Theme.Space.tight, y: 0, width: max(0, width - headingWidth - Theme.Space.tight), height: line)
+        let top = line + Theme.Space.row
+        pages.frame = CGRect(x: 0, y: top, width: step, height: max(0, bounds.height - top))
+        for (index, card) in cards.enumerated() {
+            card.view.frame = CGRect(x: CGFloat(index) * step, y: 0, width: width, height: card.view.height(width: width))
+        }
+        pages.contentSize = CGSize(width: CGFloat(cards.count) * step, height: pages.bounds.height)
     }
 }
 
-private final class HomeWaitingRow: UIControl {
+/// One page of Home's deck: the shared card, which opens where it was
+/// asked when tapped beside its answers.
+private final class HomeWaitingCard: UIControl {
     let item = WaitingItemView(compact: true)
 
     override init(frame: CGRect) {
@@ -472,8 +438,8 @@ private final class HomeWaitingRow: UIControl {
         item.translatesAutoresizingMaskIntoConstraints = false
         addSubview(item)
         NSLayoutConstraint.activate([
-            item.topAnchor.constraint(equalTo: topAnchor, constant: Theme.Space.row),
-            item.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.tight),
+            item.topAnchor.constraint(equalTo: topAnchor),
+            item.bottomAnchor.constraint(equalTo: bottomAnchor),
             item.leadingAnchor.constraint(equalTo: leadingAnchor),
             item.trailingAnchor.constraint(equalTo: trailingAnchor)
         ])
@@ -483,6 +449,12 @@ private final class HomeWaitingRow: UIControl {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    func height(width: CGFloat) -> CGFloat {
+        item.fitWidth = width
+        return item.systemLayoutSizeFitting(CGSize(width: width, height: 0), withHorizontalFittingPriority: .required,
+                                            verticalFittingPriority: .fittingSizeLevel).height.rounded(.up)
+    }
 
     @objc private func tapped() { sendActions(for: .touchUpInside) }
 }

@@ -77,7 +77,9 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   T3's `runtime-request.respond`); the app agent then gets an `[answer]` note.
 - **One list.** `GET /v1/waiting` gives, per app with an agent: open tracker
   questions, threads' own pending questions and approvals (from each
-  needs-you thread's projection), and needs-you tasks neither covers.
+  needs-you thread's projection). **2026-10-31 (user: "it should just have
+  blocking questions"):** only what blocks an agent; a task at needs you
+  with only a note is no longer listed (it stays a row in Tasks).
 - **On the phone (2026-10-26, user: "the questions should show inline in
   the sheet in needs you. And the global needs you stuff across the apps
   should just be its own piece of UI on the Home Screen"; this replaced a
@@ -86,14 +88,14 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   item with a question is in Needs you whatever its status): the question
   in full, options as glass buttons in a row (wrapping only when they
   don't fit), a reply field; a worker's approval
-  with its choices; a question about a sub-task names it; a needs-you
-  sub-task shows under its item and opens its page; a question no task
+  with its choices; a question about a sub-task names it; a question no task
   claims leads the section. The item's page shows its open questions under
   its note. Answered ones leave at once and the task moves on as the Mac
-  says. Home lists everything waiting across apps above the devices
-  (plain text, "Waiting on you" and a count, then each app's name and its
-  first two items, questions before needs-you tasks, then "N more in
-  Tasks"): few-choice answers are buttons right there.
+  says. Home shows everything waiting across apps above the devices as
+  the design deck's **B · Deck** (2026-10-31): "Waiting on you" and
+  "N of M", then one shared question card at a time, its app's name first,
+  the next a native page swipe sideways; it keeps the tallest card's height
+  so the devices stay put, and answers there like anywhere.
   **2026-10-31 (user-requested): tapping a question's text opens the
   conversation that asked it at the spot**: the app's agent, or a worker's
   thread pushed over it (from Home, it covers the agent and Back goes
@@ -106,7 +108,7 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   crossfade, touches pass). A thread's own question or approval is its
   newest thing: the jump lands at the end and marks the card over the
   field. Tapping a question's text in the Tasks sheet's Needs you does the
-  same; a needs-you task still opens Tasks at its task.
+  same.
   The counts strip and the checklist button open Tasks as before.
 - **Notifications.** A new tracker question, and a worker's question or
   approval ("“title” asks: …"), go out through `src/push` with

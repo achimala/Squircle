@@ -1,9 +1,9 @@
 import Foundation
 
 /// Everything waiting on you across apps, as the Mac lists it
-/// (`GET /v1/waiting`): questions agents put in the tracker, threads' own
-/// questions and approvals, and needs-you tasks neither covers. Per app,
-/// oldest first.
+/// (`GET /v1/waiting`): only what blocks an agent until you act, questions
+/// agents put in the tracker and threads' own questions and approvals. Per
+/// app, oldest first.
 struct WaitingList: Decodable, Equatable {
     struct App: Equatable {
         let projectID: String
@@ -36,26 +36,15 @@ struct WaitingList: Decodable, Equatable {
         let pending: PendingRequest
     }
 
-    /// A task that needs you for something only it says (its note).
-    struct NeedsYou: Equatable {
-        let taskID: String
-        let ask: String
-        let itemAsk: String?
-        let note: String
-        let threadID: String?
-    }
-
     enum Item: Equatable {
         case question(Question)
         case request(Request)
-        case task(NeedsYou)
 
         /// The thread that asked: where it shows in a conversation.
         var threadID: String? {
             switch self {
             case .question(let q): q.threadID
             case .request(let r): r.threadID
-            case .task: nil
             }
         }
 
@@ -64,7 +53,6 @@ struct WaitingList: Decodable, Equatable {
             switch self {
             case .question(let q): "q." + q.id
             case .request(let r): "r." + r.pending.id
-            case .task(let t): "t." + t.taskID
             }
         }
     }
@@ -95,10 +83,6 @@ struct WaitingList: Decodable, Equatable {
             guard let thread = value["thread_id"].string, let request = value["request_id"].string else { return nil }
             return .request(Request(threadID: thread, title: value["title"].string ?? "", worker: value["worker"].bool,
                                     ask: value["ask"].string, pending: PendingRequest(id: request, item: value["item"])))
-        case "task":
-            guard let task = value["task_id"].string else { return nil }
-            return .task(NeedsYou(taskID: task, ask: value["ask"].string ?? "", itemAsk: value["item_ask"].string,
-                                  note: value["note"].string ?? "", threadID: value["thread_id"].string))
         default:
             return nil
         }
