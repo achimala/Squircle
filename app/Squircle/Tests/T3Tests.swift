@@ -241,8 +241,13 @@ final class NativeStateTests: XCTestCase {
         return (model, draft)
     }
     @MainActor
-    private func start(_ model: SquircleModel, _ text: String, from id: ConversationID) throws -> Task<SendOutcome, Never> {
-        guard case .started(_, let outcome) = model.startSend(text, in: project, from: id) else { throw XCTSkip("Send refused") }
+    private func start(_ model: SquircleModel, _ text: String, from id: ConversationID,
+                       file: StaticString = #filePath, line: UInt = #line) throws -> Task<SendOutcome, Never> {
+        let result = model.startSend(text, in: project, from: id)
+        guard case .started(_, let outcome) = result else {
+            XCTFail("Send refused: \(result)", file: file, line: line)
+            throw CancellationError()
+        }
         return outcome
     }
 

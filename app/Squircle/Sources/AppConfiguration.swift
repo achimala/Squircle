@@ -120,6 +120,8 @@ enum ClientError: LocalizedError {
     case http(String, Int)
     case backend(String, Int, String)
     case connection(String)
+    /// The Mac's service lacks a route this app needs.
+    case incompatible(String)
 
     var errorDescription: String? {
         switch self {
@@ -132,6 +134,7 @@ enum ClientError: LocalizedError {
             return "\(service) could not complete the request (HTTP \(status))."
         case .connection(let service): return "Couldn’t reach \(service). Check that your Mac and Tailscale are online."
         case .backend(_, _, let message): return message
+        case .incompatible(let route): return "The Mac’s Squircle service doesn’t match this app (it has no \(route)). Update Squircle on the Mac."
         }
     }
 

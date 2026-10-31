@@ -1,7 +1,9 @@
 # Native Squircle iPhone client
 
-UIKit/Core Animation client for the user's existing stock **T3 Code 0.0.45**
-server. T3 owns agent processes, projects, threads, live activity and persistence.
+UIKit/Core Animation client for the user's existing stock **T3 Code 0.1.0**
+server (orchestration protocol 2 only), and the matching Squircle service from
+the same checkout: the app expects the service's current routes and says so when
+the Mac runs one that lacks them. T3 owns agent processes, projects, threads, live activity and persistence.
 Squircle's Rust service owns builds, installation links, app metadata and launch
 diagnostics. The Hermes integration has been removed from the active target.
 
@@ -79,6 +81,19 @@ xcodebuild -project app/Squircle/Squircle.xcodeproj -scheme Squircle \
 
 The unit tests run in seconds and never touch T3, agents or a simulator stream.
 Check live behavior by running the app and looking at it.
+
+### Live Activity and push are off by default
+
+What a default build leaves out, on purpose: `project.yml` builds the
+`SquircleWidgets` extension (the Live Activity) on its own without embedding it
+in the app, and signs the app with `Resources/Squircle.entitlements`, which has
+no push entitlement. Builds therefore show no Live Activity and get no push
+notifications. Both need profiles that Xcode's automatic signing makes only with
+an Apple account signed in to Xcode; the Mac's Xcode has none, so signed builds
+use the team's wildcard profile. To turn them on, sign in to Xcode, add the
+APNs key to the service, add the `SquircleWidgets` dependency to the
+`Squircle` target and point `CODE_SIGN_ENTITLEMENTS` at
+`Resources/SquirclePush.entitlements` (both spelled out in `project.yml`).
 
 ## Interface (0.3.0)
 

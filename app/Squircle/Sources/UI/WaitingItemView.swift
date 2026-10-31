@@ -3,18 +3,15 @@ import UIKit
 /// Answering what waits on you, wherever it shows (the Tasks sheet under
 /// its task, a work item's page, Home): questions agents put in the tracker
 /// (choices as buttons, or type a reply), workers' own questions and
-/// approvals (answered straight to the worker), and needs-you tasks. An
-/// answered one leaves every list at once.
+/// approvals (answered straight to the worker), and needs-you tasks. What
+/// you've answered so far lives in the model's `QuestionAnswers`, shared
+/// with the conversation's card; an answered one leaves every list at once.
 @MainActor
 final class WaitingAnswers {
     private let model: SquircleModel
-    /// A thread's request with several questions: the answers so far, by item.
-    private var progress: [String: [String: JSONValue]] = [:]
+    private var drafts: QuestionAnswers { model.questionAnswers }
 
     init(model: SquircleModel) { self.model = model }
-
-    /// Forgets the answers so far of requests no longer listed.
-    func keep(_ ids: Set<String>) { progress = progress.filter { ids.contains($0.key) } }
 
     /// Draws `item` into `view`. `about`: say which task it's for (where
     /// that isn't right above it). `changed` runs when a request with
@@ -30,7 +27,8 @@ final class WaitingAnswers {
             view.choices(question.options.map { ($0, nil, false) }, busy: busy) { [weak self] index in
                 self?.send(question, question.options[index])
             }
-            view.reply(placeholder: "Reply…", busy: busy) { [weak self] text in self?.send(question, text) }
+            view.reply(placeholder: "Reply…", text: drafts[id].text, busy: busy,
+                       edit: { [weak self] text in self?.drafts[id].text = text }) { [weak self] text in self?.send(question, text) }
         case .request(let request):
             let context = (about ? [request.title, request.ask] : [request.worker ? request.title : nil])
                 .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
@@ -51,46 +49,48 @@ final class WaitingAnswers {
                         if let decision = options[index]["decision"].string { self?.decide(request, decision) }
                     }
                 }
-                view.reply(placeholder: nil, busy: busy) { _ in }
+                view.reply(placeholder: nil, text: "", busy: busy, edit: { _ in }) { _ in }
             }
         case .task(let task):
             view.show(context: about ? task.itemAsk ?? "" : "", worker: nil, title: task.ask, detail: task.note.isEmpty ? nil : task.note, titleLines: 3)
             view.choices([], busy: busy) { _ in }
-            view.reply(placeholder: nil, busy: busy) { _ in }
+            view.reply(placeholder: nil, text: "", busy: busy, edit: { _ in }) { _ in }
         }
     }
 
-    /// A thread's questions one at a time; the last answer sends them all.
+    /// A thread's questions one at a time, from the shared draft; the last
+    /// answer sends them all.
     private func question(_ view: WaitingItemView, _ request: WaitingList.Request, context: String, id: String, busy: Bool,
                           changed: @escaping () -> Void) {
-        let questions = request.pending.questions
-        let answers = progress[id] ?? [:]
-        let index = min(answers.count, max(0, questions.count - 1))
-        let question = questions.isEmpty ? JSONValue.null : questions[index]
-        let key = question["id"].string ?? question["header"].string ?? "answer"
-        var title = question["question"].string ?? "A question for you"
-        if questions.count > 1 { title = "\(index + 1) of \(questions.count) · " + title }
+        let form = QuestionForm(questions: request.pending.questions, draft: drafts[id])
+        var title = form.question["question"].string ?? "A question for you"
+        if form.questions.count > 1 { title = "\(form.index + 1) of \(form.questions.count) · " + title }
         view.show(context: context, worker: request.worker ? request.threadID : nil, title: title, detail: nil)
-        let options = question["options"].array
-        let answer: (String) -> Void = { [weak self, weak view] value in
+        // Each tap reads the draft as it is then (typing changes it in between).
+        let step: ((QuestionForm) -> QuestionForm.Step) -> Void = { [weak self, weak view] make in
             guard let self else { return }
-            var answers = answers
-            answers[key] = .string(value)
-            Theme.selectionHaptic()
-            if answers.count >= questions.count {
-                Task { await self.model.respond(request, answers: answers) }
-            } else {
-                progress[id] = answers
+            let now = QuestionForm(questions: request.pending.questions, draft: drafts[id])
+            switch make(now) {
+            case .edit(let draft):
+                let advanced = draft.answers.count != now.draft.answers.count
+                if advanced { Theme.selectionHaptic() }
+                drafts[id] = draft
                 if let view, view.itemID == id {
                     self.question(view, request, context: context, id: id, busy: false, changed: changed)
-                    changed()
+                    if advanced { changed() }
                 }
+            case .send(let answers):
+                Theme.selectionHaptic()
+                Task { await self.model.respond(request, answers: answers) }
             }
         }
-        view.choices(options.map { ($0["label"].string ?? $0.string ?? "Option", $0["description"].string, false) }, busy: busy) { index in
-            answer(options[index]["value"].string ?? options[index]["label"].string ?? options[index].string ?? "")
+        let confirm = form.multiple ? (form.isLast ? "Send" : "Next", form.canConfirm) : nil
+        let count = form.options.count
+        view.choices(form.options.map { ($0.label, $0.detail, $0.picked) }, busy: busy, confirm: confirm) { index in
+            step { index < count ? $0.choose(index) : $0.confirm() }
         }
-        view.reply(placeholder: "Something else…", busy: busy, send: answer)
+        view.reply(placeholder: "Something else…", text: form.draft.text, busy: busy,
+                   edit: { [weak self] text in self?.drafts[id].text = text }) { text in step { $0.reply(text) } }
     }
 
     private func send(_ question: WaitingList.Question, _ text: String) {
@@ -128,6 +128,7 @@ final class WaitingItemView: UIView {
     private let fieldWrap = UIView()
     private var onChoose: ((Int) -> Void)?
     private var onSend: ((String) -> Void)?
+    private var onEdit: ((String) -> Void)?
 
     init(compact: Bool = false) {
         self.compact = compact
@@ -151,9 +152,9 @@ final class WaitingItemView: UIView {
             let text = field.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !text.isEmpty else { return }
             field.resignFirstResponder()
-            field.text = nil
             onSend?(text)
         }, for: .editingDidEndOnExit)
+        field.addAction(UIAction { [weak self] _ in self?.onEdit?(self?.field.text ?? "") }, for: .editingChanged)
         fieldWrap.backgroundColor = .tertiarySystemFill
         fieldWrap.layer.cornerRadius = 20
         fieldWrap.layer.cornerCurve = .continuous
@@ -223,10 +224,14 @@ final class WaitingItemView: UIView {
     }
 
     /// Answers as buttons, side by side: (title, subtitle, prominent).
-    func choices(_ options: [(String, String?, Bool)], busy: Bool, choose: @escaping (Int) -> Void) {
+    /// `confirm`: a last button (its title, and whether it can be tapped)
+    /// that sends a multi-select question's picks; its index is after the options.
+    func choices(_ options: [(String, String?, Bool)], busy: Bool, confirm: (String, Bool)? = nil, choose: @escaping (Int) -> Void) {
         onChoose = choose
         buttons.arrangedSubviews.forEach { $0.removeFromSuperview() }
         var made: [UIButton] = []
+        var options = options
+        if let confirm { options.append((confirm.0, nil, true)) }
         for (index, option) in options.enumerated() {
             let button = Theme.glassButton(title: option.0, prominent: option.2, identifier: "waiting.option.\(option.0)")
             button.configuration?.subtitle = compact ? nil : option.1
@@ -240,7 +245,7 @@ final class WaitingItemView: UIView {
                     return attributes
                 }
             }
-            button.isEnabled = !busy
+            button.isEnabled = !busy && (confirm == nil || index < options.count - 1 || confirm!.1)
             button.addAction(UIAction { [weak self] _ in self?.onChoose?(index) }, for: .touchUpInside)
             if compact { buttons.addArrangedSubview(button) } else { made.append(button) }
         }
@@ -249,9 +254,12 @@ final class WaitingItemView: UIView {
         if compact { buttonScroll.contentOffset.x = 0 }
     }
 
-    /// A reply field, or none without a placeholder (never when compact).
-    func reply(placeholder: String?, busy: Bool, send: @escaping (String) -> Void) {
+    /// A reply field showing `text`, or none without a placeholder (never
+    /// when compact). `edit` gets each change; the text stays after a send.
+    func reply(placeholder: String?, text: String, busy: Bool, edit: @escaping (String) -> Void, send: @escaping (String) -> Void) {
         onSend = send
+        onEdit = edit
+        if field.text != text { field.text = text }
         field.placeholder = placeholder
         field.isEnabled = !busy
         fieldWrap.isHidden = compact || placeholder == nil
@@ -392,7 +400,6 @@ final class HomeWaitingView: UIView {
         list.apps.sort { (order.firstIndex(of: $0.projectID) ?? .max) < (order.firstIndex(of: $1.projectID) ?? .max) }
         if let shown, shown.list == list, shown.busy == busy { return false }
         shown = (list, busy)
-        answers.keep(Set(list.apps.flatMap { $0.items.map(\.id) }))
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard list.count > 0 else { return true }
         let heading = Theme.label("Waiting on you", Theme.font(.footnote, 13, .semibold), color: Theme.accent)

@@ -395,8 +395,8 @@ struct AppTask: Decodable, Equatable, Identifiable {
     let updatedAt: Double
     let archivedAt: Double?
     /// The service's revision of this task; an edit's receipt names the
-    /// revision that holds it. Nil from an older service.
-    let revision: UInt64?
+    /// revision that holds it.
+    let revision: UInt64
     let threads: [Thread]
     let builds: [Build]
     let media: [Media]

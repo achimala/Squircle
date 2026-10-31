@@ -11,9 +11,9 @@ final class SquircleModel {
     var openConversation: ConversationID? { open }
     var selectedSessionID: String? { open?.threadID }
     private(set) var sessions: [ChatSession] = [] { didSet { if sessions != oldValue { changed() } } }
-    private(set) var builds: [AppBuild] = [] { didSet { changed() } }
+    private(set) var builds: [AppBuild] = [] { didSet { buildsGeneration += 1; changed() } }
     private(set) var projects: [AppProject] = [] { didSet { if projects != oldValue { changed() } } }
-    private(set) var appMetadata: [AppMetadata] = [] { didSet { changed() } }
+    private(set) var appMetadata: [AppMetadata] = [] { didSet { metadataGeneration += 1; changed() } }
     private(set) var selectedProjectID: String? { didSet { changed() } }
     private(set) var buildingProjectIDs = Set<String>() { didSet { changed() } }
     /// The connection as screens show it, from M01's state.
@@ -103,6 +103,8 @@ final class SquircleModel {
     /// Items you answered here that the Mac still lists; and ones on their way.
     private var answeredHere: Set<String> = [] { didSet { if answeredHere != oldValue { changed() } } }
     private(set) var answering: Set<String> = [] { didSet { if answering != oldValue { changed() } } }
+    /// Answers you're giving, the same in the conversation and in Waiting on you.
+    let questionAnswers = QuestionAnswers()
     /// Everything waiting on you, less what you just answered.
     var waiting: WaitingList { waitingList.without(answeredHere) }
     private var historyLoads: Set<String> = []
@@ -639,9 +641,10 @@ final class SquircleModel {
     /// order stays on the phone.
     private var rehearsedOrder: [String]? = ProcessInfo.processInfo.environment["SQUIRCLE_STRESS"] == "1" ? [] : nil
     #endif
-    /// Bumped when Home's order is adopted from the Mac's reply, so a list
-    /// read before it can't put the old order back.
-    private var catalogGeneration = 0
+    /// Bumped on every write of `builds` and `appMetadata`, so a list read
+    /// before a newer one landed (another refresh, Home's order from the
+    /// Mac's reply) can't put the old one back.
+    private var buildsGeneration = 0, metadataGeneration = 0
     #if DEBUG
     /// `SQUIRCLE_DEMO_APPS=1`: made-up apps kept on the phone, so arranging
     /// Home on a simulator touches nobody's real catalog.
@@ -1357,7 +1360,7 @@ final class SquircleModel {
                 guard let client else { command(.answered(id: id, attempt: 0, .refused(ClientError.configuration.localizedDescription))); return }
                 do {
                     let revision = try await client.updateTask(id: task, status: status, toTop: toTop)
-                    command(.answered(id: id, attempt: 0, .accepted(.object(revision.map { ["revision": .number(Double($0))] } ?? [:]))))
+                    command(.answered(id: id, attempt: 0, .accepted(.object(["revision": .number(Double(revision))]))))
                 } catch { command(.answered(id: id, attempt: 0, .service(error))) }
                 await readTasks(containing: task)
             }
@@ -1367,7 +1370,6 @@ final class SquircleModel {
                 guard let client else { command(.answered(id: id, attempt: 0, .refused(ClientError.configuration.localizedDescription))); return }
                 do {
                     let catalog = try await client.orderApps(ids)
-                    catalogGeneration += 1
                     if catalog != appMetadata { appMetadata = catalog }
                     command(.answered(id: id, attempt: 0, .accepted(.null)))
                 } catch { command(.answered(id: id, attempt: 0, .service(error))) }
@@ -1640,8 +1642,8 @@ final class SquircleModel {
             await refreshServices()
             for waiter in noticeWaiters.values { waiter.wake.yield() }
             return
-        case .changed("builds", _): await refreshCatalog(builds: true, apps: false)
-        case .changed("apps", _): await refreshCatalog(builds: false, apps: true)
+        case .changed("builds", _): await refreshBuilds()
+        case .changed("apps", _): await refreshApps()
         case .changed("agents", _): if let known = try? await client.agents() { adopt(known) }
         case .changed("sims", _): await refreshSimulators()
         case .changed("waiting", _): await refreshWaiting()
@@ -1714,8 +1716,9 @@ final class SquircleModel {
         let thread = selectedSessionID.flatMap { id in
             needs.contains { if case .conversation(let c) = $0 { return c.threadID == id }; return false } ? id : nil
         }
-        async let catalog = refreshCatalog(builds: true, apps: true)
-        async let a = try? client.agents()
+        async let buildsFailure = refreshBuilds()
+        async let appsFailure = refreshApps()
+        async let a: Result<AgentDirectory, Error> = { do { return .success(try await client.agents()) } catch { return .failure(error) } }()
         async let sims = try? client.simulatorSessions()
         async let waitingNow = try? client.waiting()
         async let lists: [(String, AppTasks)] = withTaskGroup(of: (String, AppTasks)?.self) { group in
@@ -1725,26 +1728,39 @@ final class SquircleModel {
             return lists
         }
         async let published: [JSONValue]? = { guard let thread else { return nil }; return try? await client.threadMedia(threadID: thread) }()
-        let failure = await catalog
-        if let known = await a { adopt(known) }
+        let agents = await a
+        if case .success(let known) = agents { adopt(known) }
+        let buildsError = await buildsFailure, appsError = await appsFailure
+        var failure = buildsError ?? appsError
+        if failure == nil, case .failure(let error) = agents { failure = error }
         if let active = await sims { adoptSimulators(active) }
         if let list = await waitingNow { adoptWaiting(list) }
         for (app, list) in await lists { adoptTasks(list, for: app) }
         if let thread, let media = await published { adoptMedia(media, for: thread) }
         return failure
     }
-    /// The build list and Home's catalog, or either. Returns why they
-    /// couldn't be fetched (T3 chat stays usable without the service).
+    /// The build list. Returns why it couldn't be fetched (T3 chat stays
+    /// usable without the service). Only what was asked for is written,
+    /// and only if nothing newer landed meanwhile.
     @discardableResult
-    private func refreshCatalog(builds wantBuilds: Bool, apps wantApps: Bool) async -> Error? {
+    private func refreshBuilds() async -> Error? {
         guard let client else { return nil }
-        let generation = catalogGeneration, held = (builds, appMetadata)
+        let seen = buildsGeneration
         do {
-            async let b = wantBuilds ? client.builds() : held.0
-            async let m = wantApps ? client.fetchAppMetadata() : held.1
-            let (newBuilds, newMetadata) = try await (b, m)
-            if newBuilds != builds { builds = newBuilds }
-            if newMetadata != appMetadata, generation == catalogGeneration { appMetadata = newMetadata }
+            let fetched = try await client.builds()
+            if seen == buildsGeneration, fetched != builds { builds = fetched }
+            reconcileProjects()
+            return nil
+        } catch { return error }
+    }
+    /// Home's catalog, like `refreshBuilds`.
+    @discardableResult
+    private func refreshApps() async -> Error? {
+        guard let client else { return nil }
+        let seen = metadataGeneration
+        do {
+            let fetched = try await client.fetchAppMetadata()
+            if seen == metadataGeneration, fetched != appMetadata { appMetadata = fetched }
             reconcileProjects()
             if commands.appOrder != nil { command(.appsObserved(order: appMetadata.map(\.id))) }
             return nil
@@ -1758,13 +1774,15 @@ final class SquircleModel {
         // Once the Mac stops listing what you answered, it is the Mac's again.
         let listed = Set(list.apps.flatMap { $0.items.map(\.id) })
         answeredHere.formIntersection(listed)
+        let open = (observedRequests.map(\.id) + commands.answering).map(QuestionAnswers.key(request:))
+        questionAnswers.keep(listed.union(open).union(answering))
     }
     private func refreshWaiting() async {
         guard let client, let list = try? await client.waiting() else { return }
         adoptWaiting(list)
     }
-    /// Your answer to a question in the tracker. The row leaves at once and
-    /// comes back only if the Mac refuses it.
+    /// Your answer to a question in the tracker. The row leaves once the Mac
+    /// takes it; your answer stays in its draft until then.
     func answer(_ question: WaitingList.Question, text: String) async {
         let item = WaitingList.Item.question(question).id
         await sendAnswer(item) { try await $0.answerQuestion(id: question.id, text: text) }
@@ -1781,7 +1799,7 @@ final class SquircleModel {
         #if DEBUG
         // `SQUIRCLE_DRY_ANSWERS=1`: answers leave the list here and reach nobody,
         // for trying it on a simulator against the real list.
-        if ProcessInfo.processInfo.environment["SQUIRCLE_DRY_ANSWERS"] == "1" { answeredHere.insert(item); return }
+        if ProcessInfo.processInfo.environment["SQUIRCLE_DRY_ANSWERS"] == "1" { answeredHere.insert(item); questionAnswers.accepted(item); return }
         #endif
         guard let client, !answering.contains(item) else { return }
         answering.insert(item)
@@ -1789,6 +1807,7 @@ final class SquircleModel {
         do {
             try await send(client)
             answeredHere.insert(item)
+            questionAnswers.accepted(item)
         } catch {
             self.error = error.localizedDescription
         }
@@ -1934,12 +1953,12 @@ final class SquircleModel {
         let tasks = asks.enumerated().map { index, item in
             let threads = item.3.enumerated().map { ["id": "demo-worker-\(index)-\($0.offset)", "title": $0.element.0, "state": $0.element.1] }
             let subtasks = item.4.enumerated().map { offset, sub in
-                ["id": "demo-\(index)-\(offset)", "ask": sub.0, "status": sub.1, "note": sub.2, "order": Double(offset), "updated_at": 0,
+                ["id": "demo-\(index)-\(offset)", "ask": sub.0, "status": sub.1, "note": sub.2, "order": Double(offset), "updated_at": 0, "revision": 1,
                  "threads": [] as [Any], "builds": [] as [Any], "media": [] as [Any], "parent_id": "demo-\(index)"] as [String: Any]
             }
             let media = (0..<item.5).map { ["id": "demo-media-\(index)-\($0)", "kind": "image", "caption": ""] }
             return ["id": "demo-\(index)", "ask": item.0, "status": item.1, "note": item.2, "order": Double(index),
-                    "updated_at": 0, "threads": threads, "builds": [], "media": media, "subtasks": subtasks] as [String: Any]
+                    "updated_at": 0, "revision": 1, "threads": threads, "builds": [], "media": media, "subtasks": subtasks] as [String: Any]
         }
         let data = try? JSONSerialization.data(withJSONObject: ["tasks": tasks, "history": []])
         return data.flatMap { try? JSONDecoder().decode(AppTasks.self, from: $0) }
