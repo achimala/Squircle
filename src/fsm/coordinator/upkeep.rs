@@ -9,7 +9,11 @@
 //! answer lost to a disconnect or a restart is settled by sending that same
 //! command again (T3 answers a known ID from its receipt), never a second
 //! one. A reading counts as acted on only once T3 accepted it, and one T3
-//! refused is not tried again. An automatic compaction repeats while it
+//! refused is not tried again. Each answer names its command: one for any
+//! other (an earlier compaction answered again, or a superseded one)
+//! changes nothing. The owner runs one compaction per app at a time, from
+//! the decision to T3's answer, so a manual and an automatic one never
+//! overlap. An automatic compaction repeats while it
 //! still shrinks the context; once one leaves it about as large, the next
 //! waits for new work on the thread (a message after the compaction's own)
 //! or a manual compaction. Compaction is the only thing upkeep does: the
@@ -93,10 +97,17 @@ pub enum Event {
         latest: Option<String>,
         compact: Command,
     },
-    /// `agent compact` for an agent eligible now.
-    Manual { thread: String, compact: Command },
-    /// What sending the record's command got.
-    Sent(Dispatched),
+    /// `agent compact` for an agent eligible now, on its latest `reading`.
+    Manual {
+        thread: String,
+        reading: Reading,
+        compact: Command,
+    },
+    /// What sending the command with this `command` ID got.
+    Sent {
+        command: String,
+        outcome: Dispatched,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -167,33 +178,32 @@ pub fn reduce(state: Option<Record>, event: Event) -> Reduction<Option<Record>, 
             }
             (_, Some(wanted)) => compact_now(thread, wanted, compact),
         },
-        Event::Manual { thread, compact } => match current(&thread, state.clone()) {
+        Event::Manual {
+            thread,
+            reading,
+            compact,
+        } => match current(&thread, state.clone()) {
             Some(Record {
                 intent: Intent::Unknown { command, .. },
                 ..
             }) => Reduction::applied(state, vec![Effect::Send(command)]),
-            _ => compact_now(
-                thread,
-                Reading {
-                    origin: Origin::Manual,
-                    at: None,
-                    tokens: 0,
-                },
-                compact,
-            ),
+            _ => compact_now(thread, reading, compact),
         },
-        Event::Sent(outcome) => {
+        Event::Sent {
+            command: answered,
+            outcome,
+        } => {
             let Some(Record {
                 thread,
                 intent: Intent::Unknown {
                     reading, command, ..
                 },
             }) = state
+                .clone()
+                .filter(|r| matches!(&r.intent, Intent::Unknown { command, .. } if command.id() == Some(&answered)))
             else {
-                return Reduction::same(
-                    state,
-                    ProtocolFault("a compaction answered that was not sent".into()),
-                );
+                // Not the pending compaction: one already settled, answered again, or superseded.
+                return Reduction::same(state, Stale);
             };
             let intent = match outcome {
                 Dispatched::Accepted(_) => Intent::Applied {
@@ -264,8 +274,27 @@ mod tests {
         if checked.effects.is_empty() {
             return false;
         }
-        *state = reduce(state.take(), Event::Sent(Dispatched::Accepted(json!({})))).state;
+        *state = reduce(state.take(), accepted(next)).state;
         true
+    }
+
+    fn accepted(command: &str) -> Event {
+        Event::Sent {
+            command: command.into(),
+            outcome: Dispatched::Accepted(json!({})),
+        }
+    }
+
+    fn manual(at: &str, compact: &str) -> Event {
+        Event::Manual {
+            thread: "t".into(),
+            reading: Reading {
+                origin: Origin::Manual,
+                at: Some(at.into()),
+                tokens: 330_000,
+            },
+            compact: command(compact),
+        }
     }
 
     #[test]
@@ -282,15 +311,61 @@ mod tests {
         // Grew, nothing new: stop.
         assert!(!check(&mut state, "r5", 330_000, "c4", "c5"));
         // A manual compaction starts it again.
-        state = reduce(
-            state,
-            Event::Manual {
-                thread: "t".into(),
-                compact: command("m1"),
-            },
-        )
-        .state;
-        state = reduce(state, Event::Sent(Dispatched::Accepted(json!({})))).state;
+        state = reduce(state, manual("r5", "m1")).state;
+        state = reduce(state, accepted("m1")).state;
         assert!(check(&mut state, "r6", 330_000, "m1", "c6"));
+    }
+
+    /// Answers arrive late, twice, or for a compaction since replaced: only
+    /// the pending command's own answer settles it, and nothing is a fault.
+    #[test]
+    fn overlapping_compactions_settle_only_by_their_own_answers() {
+        let pending = |state: &Option<Record>| match state {
+            Some(Record {
+                intent: Intent::Unknown { command, .. },
+                ..
+            }) => command.id().map(str::to_owned),
+            _ => None,
+        };
+        let auto = Event::Checked {
+            thread: "t".into(),
+            reading: reading("r1", 400_000),
+            latest: Some("user1".into()),
+            compact: command("c1"),
+        };
+        let r = reduce(None, auto);
+        assert_eq!(r.effects, [Effect::Commit, Effect::Send(command("c1"))]);
+        // A manual one while it is unanswered sends that same command, not a second.
+        let r = reduce(r.state, manual("r1", "m1"));
+        assert_eq!(r.effects, [Effect::Send(command("c1"))]);
+        let r = reduce(r.state, accepted("c1"));
+        assert!(matches!(
+            r.state,
+            Some(Record {
+                intent: Intent::Applied { .. },
+                ..
+            })
+        ));
+        // The second send's receipt changes nothing.
+        let again = reduce(r.state.clone(), accepted("c1"));
+        assert_eq!(again.disposition, Disposition::Stale);
+        assert!(again.effects.is_empty());
+        assert_eq!(again.state, r.state);
+        // A new manual one is pending; a late answer for c1 must not settle it.
+        let r = reduce(again.state, manual("r1", "m1"));
+        assert_eq!(pending(&r.state).as_deref(), Some("m1"));
+        let late = reduce(
+            r.state,
+            Event::Sent {
+                command: "c1".into(),
+                outcome: Dispatched::Unknown("closed".into()),
+            },
+        );
+        assert_eq!(late.disposition, Disposition::Stale);
+        assert_eq!(pending(&late.state).as_deref(), Some("m1"));
+        let mut state = reduce(late.state, accepted("m1")).state;
+        // The reading the manual one compacted is not compacted again.
+        assert!(!check(&mut state, "r1", 400_000, "m1", "c2"));
+        assert!(check(&mut state, "r2", 380_000, "m1", "c2"));
     }
 }

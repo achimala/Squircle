@@ -203,6 +203,8 @@ pub enum Rank {
     AgentOp,
     /// Delivering queued wake-ups.
     AgentFlush,
+    /// One compaction per app, from its decision to T3's answer.
+    Compaction,
     /// Admitting simulator starts.
     SimStart,
     /// One simulator pool plan-and-apply.
