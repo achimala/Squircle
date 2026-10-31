@@ -780,9 +780,12 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         for group in groups {
             var ids = list.tasks.filter { task in
                 guard found(task) else { return false }
-                // Anything with a question for you is in Needs you.
+                // Needs you is what you can answer here, nothing else: a task
+                // whose question hasn't reached the phone yet waits in In progress.
                 if task.status.open, asked[task.id] != nil { return group == .status(.needsYou) }
                 return switch group {
+                case .status(.needsYou): false
+                case .status(.inProgress): task.status == .inProgress || task.status == .needsYou
                 case .status(let status): task.status == status
                 default: !task.status.open
                 }
@@ -1074,18 +1077,14 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
     func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
         guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id), task.status.open else { return nil }
-        let done = UIContextualAction(style: .normal, title: "Done") { [weak self] _, _, finish in self?.set(task, .done); finish(true) }
-        done.backgroundColor = Theme.success
-        let drop = UIContextualAction(style: .destructive, title: "Drop") { [weak self] _, _, finish in self?.set(task, .dropped); finish(true) }
-        drop.backgroundColor = Theme.failure
+        let done = UIContextualAction(style: .normal, title: nil) { [weak self] _, _, finish in self?.set(task, .done); finish(true) }
+        let drop = UIContextualAction(style: .destructive, title: nil) { [weak self] _, _, finish in self?.set(task, .dropped); finish(true) }
+        for (action, symbol, title, color) in [(done, "checkmark", "Done", Theme.success), (drop, "xmark", "Drop", Theme.failure)] {
+            action.image = SwipeLabel.image(symbol: symbol, title: title, in: tableView.traitCollection)
+            action.backgroundColor = color
+            action.accessibilityLabel = title
+        }
         return UISwipeActionsConfiguration(actions: [drop, done])
-    }
-
-    func tableView(_ tableView: UITableView, leadingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id), task.status.open else { return nil }
-        let top = UIContextualAction(style: .normal, title: "Top") { [weak self] _, _, finish in self?.set(task, toTop: true); finish(true) }
-        top.backgroundColor = Theme.accent
-        return UISwipeActionsConfiguration(actions: [top])
     }
 
     /// Long press: any status, to bring one back, or Move to Top.
@@ -1820,10 +1819,11 @@ final class WorkItemPage: UIView {
         slot.frame = CGRect(x: 0, y: below, width: bounds.width, height: max(0, bounds.height - below))
     }
 
-    /// Every status, ticked at `current`, for a page's status and a Done row's menu.
+    /// Every status you can set, ticked at `current`, for a page's status
+    /// and a row's menu. Not needs you: only a question or approval makes it.
     static func statusMenu(current: AppTask.Status, set: @escaping (AppTask.Status) -> Void) -> UIMenu {
         let statuses: [(AppTask.Status, String)] = [
-            (.needsYou, "hand.raised"), (.inProgress, "hammer"), (.readyToTry, "shippingbox"),
+            (.inProgress, "hammer"), (.readyToTry, "shippingbox"),
             (.queued, "tray"), (.done, "checkmark"), (.dropped, "xmark")]
         return UIMenu(options: .displayInline, children: statuses.map { value, symbol in
             UIAction(title: value == .dropped ? "Drop" : name(value), image: UIImage(systemName: symbol),
@@ -2273,5 +2273,26 @@ final class TaskStrip: UIControl {
             parts.addArrangedSubview(part)
         }
         accessibilityLabel = "Tasks: " + texts.joined(separator: ", ")
+    }
+}
+
+/// A row's swipe action, drawn rather than left to UIKit's white title: its
+/// glyph in Body over its label in Caption, both in `onAccent` on the
+/// action's state colour, which reads in light and dark.
+private enum SwipeLabel {
+    static func image(symbol: String, title: String, in traits: UITraitCollection) -> UIImage? {
+        let ink = Theme.onAccent.resolvedColor(with: traits)
+        guard let glyph = UIImage(systemName: symbol, withConfiguration: Theme.symbol(Theme.Text.body))?
+            .withTintColor(ink, renderingMode: .alwaysOriginal) else { return nil }
+        let text = NSAttributedString(string: title, attributes: [
+            .font: Theme.Text.caption, .foregroundColor: ink])
+        let label = text.size()
+        let size = CGSize(width: ceil(max(glyph.size.width, label.width)),
+                          height: ceil(glyph.size.height + Theme.Space.tight + label.height))
+        let format = UIGraphicsImageRendererFormat(for: traits)
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            glyph.draw(at: CGPoint(x: (size.width - glyph.size.width) / 2, y: 0))
+            text.draw(at: CGPoint(x: (size.width - label.width) / 2, y: glyph.size.height + Theme.Space.tight))
+        }.withRenderingMode(.alwaysOriginal)
     }
 }

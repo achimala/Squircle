@@ -23,13 +23,13 @@ task's; `task update ID --under ITEM|none` moves a misfiled ask. Existing
 
 **Roll-up** (`rollup` in `src/fsm/tasks/`): a work item with sub-tasks takes
 the roll-up of its sub-tasks and its own linked work whenever a sub-task's
-status changes (or its own linked work has news): any needs you → needs you;
-any in progress, or some finished and some still queued → in progress; all
+status changes (or its own linked work has news): any in progress, or some finished and some still queued → in progress; all
 queued → queued; else any ready to try → ready to try; all closed → done if
 the user closed the last one, ready to try if the agent or linked work did
 (the user decides done), dropped if all were dropped. A status set on the
 work item explicitly holds until then. A closed work item reopens only when
-a sub-task has work again (added, queued, in progress, needs you). Closing a
+a sub-task has work again (added, queued, in progress, asked about). Needs
+you is not rolled up but shown (below). Closing a
 work item (done or dropped) closes its open sub-tasks the same way. Sub-tasks
 don't age on their own: they move to History with their work item, and any
 change to one touches its work item.
@@ -41,6 +41,41 @@ new work item; never under an unrelated one; track your own breakdown as
 sub-tasks. The note lists open work items with their open sub-tasks (`·`
 lines). (Fresh agents' handoffs, which listed every open item, went with
 fresh starts on 2026-10-30: the agent keeps one thread.)
+
+## Needs you is derived, never set (2026-10-31, user decision)
+
+User, on the Tasks outline: "Needs you is really bad here it is completely
+unclear what needs me or what I need to do." Its Needs you group held work
+items with no question at all, only a title and "0/2": 13 tasks across
+Squircle and LanguageApp were kept at needs you with nothing open, set by
+hand by an agent (`task update --status needs_you --note ...`) or left
+behind after a question was answered or withdrawn. So:
+
+- **A task is kept at a stage** (`Stage`: queued, in progress, ready to try,
+  done, dropped) and **shows as needs you** (`Book::shown`) exactly while
+  something waits on the user: an open question on it or one of its
+  sub-tasks, or, while it is open, a linked thread T3 shows waiting on a
+  question or approval of its own (the same threads Home's Waiting on you
+  lists). When the last of those is answered or withdrawn it shows its stage
+  again; an answer also sets it in progress, since the asker goes on.
+- **It can't be set.** `task add|sub add|update --status needs_you`, and the
+  phone, are refused with a message pointing to `task ask` (the value is
+  hidden from the CLI's choices). The status menu on the phone has no Needs
+  you.
+- **Migrated once.** Records kept at needs you load as the stage their
+  linked work implies, else the last other status in their history, else in
+  progress (a history entry by `auto` records it), and the service saves
+  that at startup (`Event::Migrate`, which also rolls up work items among
+  them). Checked on a copy of the Mac's `tasks.json` (456 tasks): the 13
+  stale ones came back as ready to try, in progress or queued, none showed
+  needs you, and a second read had nothing left to migrate.
+- **On the phone**, Needs you holds only work items with something to answer
+  in the waiting list, each followed by its questions and approvals as the
+  [question card](design/README.md#the-question-card) in its compact form:
+  who asks, the question in three lines (tap it to open the conversation at
+  the spot), what it is about as a short strip, the answers and a write-in
+  row. A task that shows needs you but whose question hasn't reached the
+  phone yet sits in In progress until it does.
 
 ## Questions and what waits on you (2026-10-26, user decision)
 
@@ -59,9 +94,9 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   attach`'s checks; they are stored in the task's media folder and listed by
   ID on the question (`media`), shown on the question card and not among the
   task's own media while it is open (after that they are the task's). While one is open the task
-  is held at needs you (linked work can't move it off; an explicit open
-  status is refused; closing the task withdraws it). Answering the last open
-  one moves it to in progress. `task withdraw QUESTION_ID` takes one back.
+  shows as needs you (since 2026-10-31 derived, above: linked work and an
+  explicit status move only the stage under it; closing the task withdraws
+  it). Answering one moves the task to in progress. `task withdraw QUESTION_ID` takes one back.
 - **The answer goes back as a message.** The phone answers with `POST
   /v1/questions/{id}/answer`; the asking thread gets an `[answer]` note
   (`squircle-answer`, label "Answered") through the outbox; when a worker

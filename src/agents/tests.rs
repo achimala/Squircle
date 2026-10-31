@@ -828,7 +828,7 @@ async fn an_answer_saved_before_a_restart_is_delivered_once() {
         .unwrap();
     let (_, question) = agents
         .tasks
-        .ask(&task.id, "Red or blue?", vec![], &[], "w1", None)
+        .ask(&task.id, "Red or blue?", vec![], &[], "w1")
         .await
         .unwrap();
     agents

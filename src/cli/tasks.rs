@@ -90,7 +90,7 @@ pub(super) enum TaskCommand {
         )]
         history_before: Option<String>,
     },
-    /// Ask the user a question about a work item or sub-task, instead of asking in chat: it waits on their phone with everything else waiting on them (and notifies them), the task shows needs you, and the answer comes back to you as an [answer] message. Attach the screenshot or clip it is about with --file rather than describing it or pointing at the task's media: the user sees only what the question carries. End your turn after asking unless other work needs no answer.
+    /// Ask the user a question about a work item or sub-task, instead of asking in chat: it waits on their phone with everything else waiting on them (and notifies them), the task shows needs you until it is answered or withdrawn (the only way a task needs the user), and the answer comes back to you as an [answer] message. Attach the screenshot or clip it is about with --file rather than describing it or pointing at the task's media: the user sees only what the question carries. End your turn after asking unless other work needs no answer.
     Ask {
         /// The work item or sub-task it is about.
         id: String,
