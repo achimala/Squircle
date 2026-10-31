@@ -54,7 +54,7 @@ struct JellyLook: Hashable {
 struct JellyPose {
     var lid: CGFloat = 1, happy: CGFloat = 0, squint: CGFloat = 0, worry: CGFloat = 0
     var gaze = CGPoint.zero
-    var yaw: CGFloat = -0.3, pitch: CGFloat = -0.4, roll: CGFloat = 0
+    var yaw = JellyBody.yaw, pitch = JellyBody.pitch, roll: CGFloat = 0
     var squash: CGFloat = 0
     /// Points up, as a fraction of its size.
     var hop: CGFloat = 0
@@ -168,8 +168,55 @@ struct JellyCanvas: Hashable {
         guard look.traits.sprout.x > 0 else { return self }
         var c = self; c.top += JellyTraits.crown; return c
     }
-    /// The body's frame within `bounds`.
+    /// The body's frame within `bounds`. Every jelly's body bottom sits on
+    /// one line near its bottom (`baseline`), whatever its build or sprout,
+    /// and the reference body is centred in it, so owners lay a jelly out by
+    /// this square: its centre on the text's visual centre.
     var body: CGRect { CGRect(x: size * side, y: size * top, width: size, height: size) }
+    /// Where the body's visible bottom sits, the same for every build.
+    func baseline(_ role: JellyLook.Role) -> CGFloat { body.midY + JellyBody.reference(role) * size }
+}
+
+/// The body as the shader draws it at rest (turned by `JellyBody.yaw` and
+/// `.pitch`, a rounded box): how far its visible bottom reaches below its
+/// centre, as a fraction of its size. A tall build reaches further than a
+/// squat one, so each is placed by its bottom, not its centre: the sprout
+/// grows up into the room above and never moves the body.
+enum JellyBody {
+    static let yaw: CGFloat = -0.3, pitch: CGFloat = -0.4
+
+    /// The shader's `cubeD` at rest, seen from the front: half its height
+    /// on screen (the box's inner half-extents turned, plus its rounding).
+    static func reach(_ look: SIMD4<Float>) -> CGFloat {
+        let aspect = CGFloat(look.y).squareRoot(), round = CGFloat(look.w)
+        let half = (y: 0.5 / aspect, z: 0.4)
+        return abs(cos(pitch)) * (half.y - round) + abs(sin(pitch)) * (half.z - round) + round
+    }
+
+    /// Half its width on screen, the same way: so a row of them can stand
+    /// a set gap apart, wide or narrow.
+    static func halfWidth(_ look: SIMD4<Float>) -> CGFloat {
+        let aspect = CGFloat(look.y).squareRoot(), round = CGFloat(look.w)
+        let half = (x: 0.5 * aspect, y: 0.5 / aspect, z: 0.4)
+        return abs(cos(yaw)) * (half.x - round) + abs(sin(yaw) * sin(pitch)) * (half.y - round)
+            + abs(sin(yaw) * cos(pitch)) * (half.z - round) + round
+    }
+
+    /// The reach every body of a role is placed by: the bare agent's own;
+    /// for workers a square build of middling roundness, so their bodies,
+    /// tall or squat, centre on average and share one bottom.
+    static func reference(_ role: JellyLook.Role) -> CGFloat {
+        switch role {
+        case .agent: reach(JellyTraits.plain.look)
+        case .worker:
+            reach(SIMD4(1, 1, JellyTraits.workerEyes, JellyTraits.roundness.reduce(0, +) / Float(JellyTraits.roundness.count)))
+        }
+    }
+
+    /// Where its centre goes so its bottom sits on `baseline`.
+    static func centre(_ look: JellyLook, on baseline: CGFloat, size: CGFloat) -> CGFloat {
+        baseline - reach(look.traits.look) * size
+    }
 }
 
 extension JellyRenderer {
@@ -195,7 +242,9 @@ extension JellyRenderer {
             strength *= 0.5
         }
         let s = canvas.size
-        let center = CGPoint(x: canvas.body.midX, y: canvas.body.midY - pose.hop * s)
+        // Placed by its bottom: every build on the same line, hopping up from it.
+        let rest = JellyBody.centre(look, on: canvas.baseline(look.role), size: s)
+        let center = CGPoint(x: canvas.body.midX, y: rest - pose.hop * s)
         return JellyUniforms(
             tint: SIMD4(Float(r), Float(g), Float(b), Float(strength)),
             fill: SIMD4(1, 1, 1, 0),
@@ -462,6 +511,9 @@ final class JellyView: UIView {
         show(frames[index])
     }
 
+    /// Held: keeps the frame it shows and stops counting as playing.
+    fileprivate func hold() { playing = false }
+
     /// Ranked before others for the budget: needs you first, then nearest the top.
     fileprivate var urgency: Int { look.mood == .needsYou ? 0 : 1 }
 }
@@ -502,17 +554,49 @@ final class JellyDirector {
 
     var motionAllowed: Bool { active && !Motion.reduced && !ProcessInfo.processInfo.isLowPowerModeEnabled }
 
+    /// A screen is moving (a push, a pop, a back swipe): every jelly holds
+    /// the frame it shows and no jelly clock runs. Their slow display links
+    /// (15 and 30 fps) and the hero's Metal presents otherwise pace the whole
+    /// main thread's frames down with them: a phone recording showed the
+    /// transitions at 40 Hz on a 120 Hz display while the hero was live.
+    private var held = false {
+        didSet {
+            guard held != oldValue else { return }
+            if held {
+                link?.invalidate()
+                link = nil
+                for view in views.values.compactMap(\.view) { view.hold() }
+            } else {
+                needsUpdate()
+            }
+            heroes = heroes.filter { $0.value.hero != nil }
+            for hero in heroes.values.compactMap(\.hero) { hero.heldChanged() }
+        }
+    }
+    var isHeld: Bool { held }
+    /// Springs animating now (`SpringDriver`), and a finger dragging a screen.
+    var springs = 0 { didSet { held = springs > 0 || dragging } }
+    var dragging = false { didSet { held = springs > 0 || dragging } }
+    private struct WeakHero { weak var hero: JellyHero? }
+    private var heroes: [ObjectIdentifier: WeakHero] = [:]
+    func add(_ hero: JellyHero) { heroes[ObjectIdentifier(hero)] = WeakHero(hero: hero) }
+
     func add(_ view: JellyView) { views[ObjectIdentifier(view)] = Weak(view: view) }
 
     /// Something changed: decide on the next frame (and keep ticking while any play).
     func needsUpdate() {
-        guard link == nil else { return }
+        guard link == nil, !held else { return }
         let link = CADisplayLink(target: DisplayLinkProxy { [weak self] link in self?.tick(link) },
                                  selector: #selector(DisplayLinkProxy.tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 10, maximum: 30, preferred: Float(JellyPose.fps))
+        // The display's full range, its frames taken at 15 fps (`tick`): a
+        // link asking for less pulled the whole display down to 80 Hz on the
+        // phone, with every other animation ticking at 40.
+        link.preferredFrameRateRange = Motion.displayRange
         link.add(to: .main, forMode: .common)
         self.link = link
+        lastTick = 0
     }
+    private var lastTick: CFTimeInterval = 0
 
     /// On screen, in a window, not hidden or faded out, not under a sheet.
     static func visible(_ view: UIView) -> Bool {
@@ -531,6 +615,8 @@ final class JellyDirector {
     }
 
     private func tick(_ link: CADisplayLink) {
+        guard link.targetTimestamp - lastTick >= 1 / JellyPose.fps - 0.002 else { return }
+        lastTick = link.targetTimestamp
         views = views.filter { $0.value.view != nil }
         let all = views.values.compactMap(\.view)
         let allowed = motionAllowed
@@ -580,6 +666,8 @@ final class JellyDirector {
         var problem: String?
         if playing.count > Self.budget { problem = "\(playing.count) jellies playing (budget \(Self.budget))" }
         if let stray = playing.first(where: { !Self.visible($0) }) { problem = "jelly playing off screen: \(stray.look.role) \(stray.look.mood)" }
+        if held, let hero = heroes.values.compactMap(\.hero).first(where: \.debugLive) { problem = "hero drawing while screens move: \(hero.look.mood)" }
+        if held, link != nil { problem = "jelly clock running while screens move" }
         let now = CACurrentMediaTime()
         guard problem != nil else { debugSince = nil; return nil }
         if debugSince == nil { debugSince = now }
@@ -628,6 +716,7 @@ final class JellyHero: UIView {
         layer.addSublayer(metal)
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.drawn = nil; self.wake() }
         let center = NotificationCenter.default
+        JellyDirector.shared.add(self)
         #if DEBUG
         JellyDirector.shared.debugAdd(self)
         #endif
@@ -690,16 +779,22 @@ final class JellyHero: UIView {
         JellyDirector.shared.motionAllowed && (look.mood.loops || clock - moodStart < JellyPose.period(look.mood))
     }
 
+    /// The director's hold changed: it stops where it is, or carries on.
+    func heldChanged() { wake() }
+    /// Its cell was shown again (configured, out of the table's spares).
+    func refresh() { wake() }
+
     /// Ticks while it moves on screen; otherwise draws its still once.
     private func wake() {
-        guard window != nil, inSight, UIApplication.shared.applicationState != .background else {
+        guard window != nil, inSight, !JellyDirector.shared.isHeld, UIApplication.shared.applicationState != .background else {
             link?.invalidate(); link = nil
             return
         }
         if link == nil {
             let link = CADisplayLink(target: DisplayLinkProxy { [weak self] link in self?.tick(link) },
                                      selector: #selector(DisplayLinkProxy.tick(_:)))
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 24, maximum: 60, preferred: 30)
+            // The display's full range, drawn at 30 fps (`tick`): see the director's link.
+            link.preferredFrameRateRange = Motion.displayRange
             link.add(to: .main, forMode: .common)
             self.link = link
         }
@@ -707,6 +802,7 @@ final class JellyHero: UIView {
 
     private func tick(_ link: CADisplayLink) {
         let now = link.targetTimestamp
+        if let last, now - last < 1 / Self.fps - 0.002 { return }
         let dt = min(0.1, max(0, now - (last ?? now)))
         last = now
         clock += dt
@@ -730,8 +826,12 @@ final class JellyHero: UIView {
         }
     }
 
+    private static let fps: Double = 30
+
     private func draw(_ pose: JellyPose) {
-        guard bounds.width > 0, let pipeline = JellyRenderer.pipeline, let queue = JellyRenderer.queue else { return }
+        // Out of sight after all (its cell in the table's spares, a sheet
+        // over it): nothing to present, which the compositor would drop.
+        guard bounds.width > 0, JellyDirector.visible(self), let pipeline = JellyRenderer.pipeline, let queue = JellyRenderer.queue else { return }
         var u = JellyRenderer.uniforms(pose, look, canvas: canvas.fitting(look), scale: metal.contentsScale, traits: traitCollection)
         if let drawn, drawn.isClose(to: u) { return }
         guard let drawable = metal.nextDrawable(), let commands = queue.makeCommandBuffer() else { return }

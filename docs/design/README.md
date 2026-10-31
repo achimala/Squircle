@@ -316,8 +316,9 @@ sheet (under its task) and on Home (`WaitingItemView`, shared):
 - **Who asks**, on one Caption line led by their jelly in the glyph slot:
   "LanguageApp · Once this all gets merged…" on Home and in Tasks, "Your
   agent asks" or the worker's name in the chat.
-- **The question** in Body, regular weight, in full in the chat and Tasks
-  and three lines on Home (tap it to open it where it was asked).
+- **The question** in Body, regular weight, in full in the chat and on a
+  task's page, and three lines in Tasks' Needs you (the compact card, with
+  its write-in row) and on Home (tap it to open it where it was asked).
 - **The answers** are a list, not a cloud of capsules. Each answer is a row:
   its mark in the glyph slot and its label in Body, wrapping as long as it
   needs to. A second line holds the option's description in Line.
@@ -444,6 +445,13 @@ Approved by the user ("Sprouts stuff lgtm for now"), built in stage 1:
 - **The face shows status**, the same on every jelly: working, needs you,
   done, idle, failed (`> <`). Colour is state.
 - At 20 points in lines and rows, canvases leave room above for the sprout.
+- **Laid out by the body** (user, 2026-10-31: "don't allow the antenna
+  things to offset them"): every worker's body bottom sits on one baseline
+  whatever its build (squat, square, tall), the sprout only grows up into
+  the room above, and the body square is centred on the cap-height centre of
+  the text beside it, never on the text's frame (`JellyBody`,
+  `UILabel.centred(on:)`). In the counts capsule the bodies are sized so a
+  full sprout still fits inside it.
 
 ![All 20 sprouts](img/sprouts-all.jpg)
 
@@ -482,7 +490,15 @@ are clearly visible and part of the task list."
 - **Threads on no task**: working ones show at the foot; idle ones fold
   into "Not on a task N". History stays a folded line at the foot.
 - **Questions sit under their task** as the
-  [question card](#the-question-card).
+  [question card](#the-question-card), compact in the overview. Needs you
+  holds only work items with something to answer there (2026-10-31: needs
+  you is derived from open questions and approvals, never set; see
+  [tasks](../task-tracking.md#needs-you-is-derived-never-set-2026-10-31-user-decision)).
+- **Row swipe actions** (2026-10-31, user: "lol what is this illegible",
+  a white Top pill with white text): swipe left for Drop and Done, each its
+  glyph in Body over its label in Caption, in `onAccent` on `failure` and
+  `success`, so both read in light and dark. No leading swipe: Move to Top
+  is in the long-press menu only.
 
 ![Tasks A](img/tasks-a.jpg)
 

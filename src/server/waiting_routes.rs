@@ -34,16 +34,8 @@ pub(super) async fn ask_task(
             r.thread
         )));
     }
-    let observed = task_signals(&state, &current);
     let (task, question) = tasks
-        .ask(
-            &id,
-            &r.question,
-            r.options,
-            &r.files,
-            &r.thread,
-            Some(observed),
-        )
+        .ask(&id, &r.question, r.options, &r.files, &r.thread)
         .await
         .map_err(task_error)?;
     if let Some(push) = &state.push {

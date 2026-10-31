@@ -455,7 +455,7 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate, UIScrollViewDelega
     private func run() {
         guard link == nil, !held else { return }
         let link = CADisplayLink(target: DisplayLinkProxy { [weak self] link in self?.tick(link) }, selector: #selector(DisplayLinkProxy.tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        link.preferredFrameRateRange = Motion.displayRange
         link.add(to: .main, forMode: .common)
         self.link = link
         lastTimestamp = nil

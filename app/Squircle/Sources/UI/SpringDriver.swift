@@ -67,15 +67,21 @@ final class SpringDriver {
 
     private func startLink() {
         guard link == nil else { return }
-        let proxy = DisplayLinkProxy { [weak self] link in self?.tick(link) }
+        let proxy = DisplayLinkProxy { [weak self] link in
+            // Let go mid-animation: its link stops with it.
+            guard let self else { link.invalidate(); JellyDirector.shared.springs -= 1; return }
+            tick(link)
+        }
         let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.tick(_:)))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+        link.preferredFrameRateRange = Motion.displayRange
         link.add(to: .main, forMode: .common)
         self.link = link
         lastTimestamp = nil
+        JellyDirector.shared.springs += 1
     }
 
     private func stopLink() {
+        if link != nil { JellyDirector.shared.springs -= 1 }
         link?.invalidate()
         link = nil
         lastTimestamp = nil
@@ -172,6 +178,7 @@ enum DisplayFrame {
             waiting.append(continuation)
             guard link == nil else { return }
             let link = CADisplayLink(target: DisplayLinkProxy { _ in DisplayFrame.tick() }, selector: #selector(DisplayLinkProxy.tick(_:)))
+            link.preferredFrameRateRange = Motion.displayRange
             link.add(to: .main, forMode: .common)
             Self.link = link
         }
