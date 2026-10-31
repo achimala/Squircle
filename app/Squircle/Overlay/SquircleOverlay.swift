@@ -169,7 +169,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     /// Up to three of the agent's running workers, as small sprouts tucked
     /// in beside the jelly once its line is absorbed; each fades in and
     /// out on its own spring.
-    private let crew = (0..<3).map { _ in (view: JellyView(.worker("", .working), slot: Theme.Glyph.live), shown: SpringDriver()) }
+    private let crew = (0..<3).map { _ in (view: JellyView(.worker("", .working), canvas: .roomy(Theme.Glyph.line)), shown: SpringDriver()) }
     private var bubblePan: UIPanGestureRecognizer!
     /// Drags the status line into the jelly (docks it).
     private var pillPan: UIPanGestureRecognizer!
@@ -729,7 +729,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let inward: CGFloat = right ? -1 : 1
         for (index, sprout) in crew.enumerated() {
             let shown = (sprout.shown.value * showing).clamped(-0.2, 1.2)
-            let size = Theme.Glyph.live * CGFloat.lerp(0.3, 1, shown.clamped())
+            let size = Theme.Glyph.line * CGFloat.lerp(0.3, 1, shown.clamped())
             let center = CGPoint(x: creature.midX + inward * (creature.width * 0.5 + 2 + 13 * CGFloat(index)),
                                  y: creature.maxY - 6 - (index == 1 ? 3 : 0))
             sprout.view.bounds = CGRect(x: 0, y: 0, width: size, height: size)

@@ -105,12 +105,14 @@ enum Theme {
         static let tap: CGFloat = 44
     }
 
-    /// The squares jellies stand in, and the only jelly sizes: lines, rows
-    /// and captions (the glyph slot); the live line, the counts capsule and
-    /// the overlay's crew; the agent peeking on Home. The whole figure,
-    /// sprout included, fits its square, body centred (`JellyBody.size`).
+    /// Jelly body sizes, about the size of the text's glyphs beside them:
+    /// Line and Body text (worker lines, Tasks rows, a worker's live line),
+    /// Caption text (the counts capsule, a question's asker, simulator
+    /// captions); the app agent's own live line and its peek on Home. The
+    /// sprout and hop stand out of the body; the row reserves their room
+    /// (`JellyBody.room`).
     enum Glyph {
-        static let line: CGFloat = 20, live: CGFloat = 28, home: CGFloat = 26
+        static let line: CGFloat = 16, caption: CGFloat = 11, live: CGFloat = 28, home: CGFloat = 26
     }
 
     /// A thread's preview, portrait at the device's ratio: at the right of a
@@ -327,6 +329,12 @@ extension CALayer {
         nod.duration = nod.settlingDuration
         add(nod, forKey: "nod")
     }
+}
+
+extension UIFont {
+    /// From a line's top to the middle of its capitals: where a glyph or
+    /// jelly beside it centres.
+    var capCentre: CGFloat { ascender - capHeight / 2 }
 }
 
 extension UILabel {

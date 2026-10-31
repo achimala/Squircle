@@ -692,8 +692,9 @@ private final class PiP: UIView {
         guard labelled?.0 != title || labelled?.1 != jelly else { return }
         labelled = (title, jelly)
         let text = NSMutableAttributedString()
-        if let attachment = NSTextAttachment.jelly(jelly, slot: Theme.Glyph.line, font: caption.font, traits: traitCollection) {
+        if let attachment = JellyAttachment.make(jelly, size: Theme.Glyph.caption, font: caption.font, traits: traitCollection) {
             text.append(NSAttributedString(attachment: attachment))
+            text.append(NSAttributedString(string: " "))
         }
         text.append(NSAttributedString(string: title))
         caption.attributedText = text

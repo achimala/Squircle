@@ -20,8 +20,7 @@ struct JellyTraits: Hashable {
     static let workerEyes: Float = 1.5
     /// Sprouts the shader draws (antenna, leaves, ears, tuft, bun, …).
     static let kinds = 20
-    /// Room a sprout takes above the body, as a fraction of its size (the
-    /// tallest, a stalk, reaches 0.49 at rest, measured 2026-10-31).
+    /// Room a sprout takes above the body, as a fraction of its size.
     static let crown: CGFloat = 0.5
 
     static let leans: [Float] = [-1, -0.5, 0, 0.5, 1]

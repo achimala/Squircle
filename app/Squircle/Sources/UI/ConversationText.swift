@@ -119,7 +119,7 @@ final class ConversationText {
         style.tabStops = [NSTextTab(textAlignment: .natural, location: Theme.Space.indent)]
         style.headIndent = Theme.Space.indent
         style.paragraphSpacing = Theme.Space.tight
-        // Every line keeps the font's height: a jelly fits its slot, never pushing the lines apart.
+        // Every line keeps the font's height: a jelly never pushes the lines apart (its row reserves its room).
         style.minimumLineHeight = ceil(font.lineHeight)
         style.maximumLineHeight = ceil(font.lineHeight)
         return style
@@ -205,7 +205,7 @@ final class ConversationText {
         // A line about a worker leads with the worker itself: its jelly, in
         // the state it is in now (a still; the Tasks row is where it moves).
         if let worker = line.thread?.raw, let mood = workerMood(line),
-           let attachment = NSTextAttachment.jelly(.worker(worker, mood), slot: Theme.Glyph.line, font: font, traits: traits) {
+           let attachment = JellyAttachment.make(.worker(worker, mood), size: Theme.Glyph.line, font: font, traits: traits) {
             text.insert(NSAttributedString(string: "\t", attributes: [.font: font]), at: 0)
             text.insert(NSAttributedString(attachment: attachment), at: 0)
         } else if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: Theme.symbol(font))?
