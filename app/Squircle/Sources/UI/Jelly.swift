@@ -552,6 +552,25 @@ final class JellyDirector {
     }
 
     #if DEBUG
+    private var debugHeroes: [ObjectIdentifier: () -> JellyHero?] = [:]
+    func debugAdd(_ hero: JellyHero) { debugHeroes[ObjectIdentifier(hero)] = { [weak hero] in hero } }
+
+    private var debugHeroSince: CFTimeInterval?
+
+    /// Stress audit, with every screen at rest: a hero drawing off screen
+    /// (its screen covered, slid away or parked), held as long as a small
+    /// one may be.
+    func debugHeroViolation() -> String? {
+        debugHeroes = debugHeroes.filter { $0.value() != nil }
+        guard let stray = debugHeroes.values.compactMap({ $0() }).first(where: { $0.debugLive && !Self.visible($0) }) else {
+            debugHeroSince = nil
+            return nil
+        }
+        let now = CACurrentMediaTime()
+        if debugHeroSince == nil { debugHeroSince = now }
+        return now - (debugHeroSince ?? now) > 2.5 / JellyPose.fps ? "hero drawing off screen: \(stray.look.role) \(stray.look.mood)" : nil
+    }
+
     /// Stress audit: more playing than the budget, or one playing off screen.
     /// Held for more than two of its ticks: a picture slid or scrolled
     /// away stops on the next tick, a 15th of a second later.
@@ -573,7 +592,8 @@ final class JellyDirector {
 /// The hero: the conversation's own agent, by its live step, drawn live by
 /// the shader every frame (30 fps) while it is on screen. It squashes when
 /// touched. Still under Reduce Motion and Low Power Mode, and paused away
-/// from the screen. Only one is on screen at a time.
+/// from the screen: out of a window, or not `inSight` (its screen covered or
+/// slid away, as the route says). Only one is on screen at a time.
 @MainActor
 final class JellyHero: UIView {
     var look: JellyLook {
@@ -584,6 +604,8 @@ final class JellyHero: UIView {
             wake()
         }
     }
+    /// Its screen is showing, from the route; covered, it doesn't draw.
+    var inSight = true { didSet { if inSight != oldValue { wake() } } }
     let canvas: JellyCanvas
     private let metal = CAMetalLayer()
     private var link: CADisplayLink?
@@ -606,6 +628,9 @@ final class JellyHero: UIView {
         layer.addSublayer(metal)
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.drawn = nil; self.wake() }
         let center = NotificationCenter.default
+        #if DEBUG
+        JellyDirector.shared.debugAdd(self)
+        #endif
         observers = [UIAccessibility.reduceMotionStatusDidChangeNotification, Notification.Name.NSProcessInfoPowerStateDidChange,
                      UIApplication.didBecomeActiveNotification, UIApplication.didEnterBackgroundNotification].map { name in
             Task { [weak self] in
@@ -667,7 +692,7 @@ final class JellyHero: UIView {
 
     /// Ticks while it moves on screen; otherwise draws its still once.
     private func wake() {
-        guard window != nil, UIApplication.shared.applicationState != .background else {
+        guard window != nil, inSight, UIApplication.shared.applicationState != .background else {
             link?.invalidate(); link = nil
             return
         }

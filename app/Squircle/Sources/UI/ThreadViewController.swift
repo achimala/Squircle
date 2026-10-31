@@ -145,9 +145,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private let composer: Composer
     private lazy var picker = AttachmentPicker(host: self) { [weak self] attachment in self?.model.attach(attachment) }
     private let notice = Theme.label("", Theme.Text.line, color: Theme.failure, lines: 3)
-    private lazy var requestCard = RequestCard(drafts: model.questionAnswers)
     /// Answers the questions shown in the conversation, as Waiting on you does.
     private lazy var answers = WaitingAnswers(model: model)
+    private lazy var requestCard = RequestCard(answers: answers)
     private var request: UIVisualEffectView { requestCard.view }
 
     private var flyingID: String?
@@ -252,6 +252,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         self.project = project
         self.conversation = sessionID.map { .thread($0, appID: project.id) } ?? .draft(UUID(), appID: project.id, agent: agent)
         self.active = !ahead
+        // Made ahead, it waits off screen until its host shows it.
+        self.inSight = !ahead
         super.init(nibName: nil, bundle: nil)
         heights = Self.heightCache.value(for: conversation) ?? [:]
     }
@@ -462,9 +464,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         view.addSubview(more)
         [back, tasks, builds, more].forEach { $0.isHidden = !topControls.contains($0) }
 
-        requestCard.onRespond = { [weak self] request, decision, answers in
-            Task { await self?.model.respond(to: request, decision: decision, answers: answers) }
-        }
         requestCard.onResize = { [weak self] in
             guard let self else { return }
             view.setNeedsLayout()
@@ -660,16 +659,21 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let alpha = ((progress - 0.55) / 0.45).clamped()
         for control in [back, tasks, more, builds] { control.update(\.alpha, to: alpha) }
         jump.update(\.alpha, to: jumpShown ? alpha : 0)
-        let shown = progress > 0.001
-        if shown != onScreen {
-            onScreen = shown
+        inSight = progress > 0.001
+    }
+    /// Some of this conversation is in sight, as its host's route says: live
+    /// simulators stream and its jelly draws only then.
+    var inSight = true {
+        didSet {
+            guard inSight != oldValue else { return }
             // `visibleCells` lays the table out first; only simulators need it.
-            if hasSimulators { for case let cell as SimulatorCell in table.visibleCells { cell.showing = shown } }
+            if hasSimulators { for case let cell as SimulatorCell in table.visibleCells { cell.showing = inSight } }
+            liveCell?.inSight = inSight
             setNeedsMediaPass()
         }
     }
-    /// Some of this conversation is in sight; live simulators stream only then.
-    private var onScreen = true
+    /// The live line's cell, whose jelly follows `inSight`.
+    private weak var liveCell: LiveCell?
 
     // MARK: Content
 
@@ -695,23 +699,37 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         taskFreshness = nil
     }
 
-    /// Closed and off screen, kept to be shown again: it lets go of the
-    /// model and of the simulators it showed.
-    func park() {
-        Self.heightCache.set(heights, for: conversation)
+    /// Out of sight for a while (a page swiped past, a thread over it): it
+    /// lets go of the model and of the simulators it showed, and keeps its
+    /// draft, folds and place for `reveal`.
+    func hide() {
         deactivate()
         view.endEditing(true)
         if !reportedSimulators.isEmpty { host?.conversation(self, showsSimulators: []) }
         reportedSimulators = []
     }
 
+    /// In sight again, as it was left; what changed meanwhile already in place.
+    func reveal() {
+        guard !tornDown, !active else { return }
+        buildRows()
+        reactivate()
+        renderSend()
+    }
+
+    /// Closed and off screen, kept to be opened again (`resume`); its host
+    /// brings it back into sight.
+    func park() {
+        Self.heightCache.set(heights, for: conversation)
+        hide()
+        inSight = false
+    }
+
     /// Parked, it opens again as a new page would: at the bottom, its turns
     /// folded, the field empty, what changed meanwhile already in place.
     func resume() {
         guard !tornDown, !active else { return }
-        // Whatever of a page made ahead is not built yet is built now.
-        if preparedHeight != nil, items.isEmpty { renderItems() }
-        finishRows()
+        buildRows()
         expanded = []
         composer.text = ""
         pinToBottom = true
@@ -723,6 +741,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         reactivate()
         scrollToBottom()
         renderSend()
+    }
+
+    /// Whatever of a page made ahead is not built yet is built now.
+    private func buildRows() {
+        if preparedHeight != nil, items.isEmpty { renderItems() }
+        finishRows()
     }
     /// A parked page put to use for another thread of the app: its view,
     /// controls and the table's cells stay; everything of the old thread
@@ -1497,7 +1521,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .live(let status):
             let jelly = host?.showsAgentJelly == true
                 ? isAgent ? JellyLook.agent(.working) : conversation.threadID.map { JellyLook.worker($0, .working) } : nil
-            (cell as? LiveCell)?.configure(status, jelly: jelly)
+            guard let cell = cell as? LiveCell else { return }
+            cell.configure(status, jelly: jelly)
+            cell.inSight = inSight
+            liveCell = cell
         case .changes(let changes, _):
             (cell as? ChangesCell)?.configure(changes)
         case .build(let build, _):
@@ -1510,7 +1537,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             let tappable = !use.live || host?.expandsSimulators == true
             let poster = use.recordingID.flatMap { StepImages.data(for: "poster:" + $0, index: 0) }
             cell.configure(use, feeds: simulatorFeeds, video: stepID.flatMap(StepVideos.url(for:)), poster: poster, tappable: tappable)
-            cell.showing = onScreen
+            cell.showing = inSight
             cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
         case .question(let item, _):
             guard let cell = cell as? QuestionCell else { return }
@@ -1552,7 +1579,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// the conversation is out of sight.
     private func mediaPass() {
         // Only a page in sight shows live simulators.
-        if onScreen { reportVisibleSimulators() } else if !reportedSimulators.isEmpty {
+        if inSight { reportVisibleSimulators() } else if !reportedSimulators.isEmpty {
             reportedSimulators = []
             host?.conversation(self, showsSimulators: [])
         }
@@ -1560,7 +1587,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // there when it slides in.
         let preloading = !active && !covered
         // Each load is for this thread as it is now, whatever opens later.
-        guard onScreen || preloading, view.window != nil, table.bounds.height > 0,
+        guard inSight || preloading, view.window != nil, table.bounds.height > 0,
               let thread = conversation.threadID else { media.seen([:]); return }
         let top = table.contentOffset.y + table.contentInset.top
         let bottom = max(top, table.contentOffset.y + table.bounds.height - table.contentInset.bottom)
@@ -1633,7 +1660,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// The turn's block showing simulator `id`, while it is on screen.
     func simulatorSpot(_ id: String) -> MediaSpot? {
-        guard onScreen else { return nil }
+        guard inSight else { return nil }
         return simulatorCell(id)?.spot
     }
 
@@ -2061,7 +2088,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         defer { applyFocus() }
         requestCard.asker = isAgent || conversation.threadID == nil ? ("Your agent asks", .agent(.needsYou))
             : (threadTitle.isEmpty ? "Asks you" : threadTitle, .worker(conversation.threadID ?? "", .needsYou))
-        guard let change = requestCard.show(debugRequest ?? model.requests.first) else { return }
+        let current = debugRequest ?? model.requests.first
+        guard let change = requestCard.show(current, busy: current.map(model.sending) ?? false) else { return }
         view.setNeedsLayout()
         guard change == .appeared, !Motion.reduced else { return }
         // The card rises out of the message field.
