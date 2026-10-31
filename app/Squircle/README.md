@@ -103,7 +103,9 @@ portraits (`DeviceStage` renders them once with SceneKit; nothing draws
 continuously), the app's conversations (`ThreadViewController`, full height)
 and `SimulatorDock`, the PiP/deck of simulators the app's agents are using.
 `MediaViewer` brings pictures, clips and live simulators large from wherever
-they show and flicks them back.
+they show and flicks them back; in a conversation it pages sideways through
+all its pictures and clips, scrolling the conversation behind it so each
+goes home to its own spot.
 `ThreadViewController` is also the overlay's conversation; each host states
 what it can do through `ConversationHost` (the overlay shows live simulators
 as previews). `SimulatorFeeds` shares one T3 H.264 stream per simulator while
