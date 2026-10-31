@@ -1735,6 +1735,12 @@ final class WorkItemPage: UIView {
         config.imagePadding = Theme.Space.tight
         config.preferredSymbolConfigurationForImage = Theme.symbol(Theme.Text.line)
         config.image = UIImage(systemName: "chevron.down")
+        config.titleLineBreakMode = .byTruncatingTail
+        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = Theme.Text.line
+            return attributes
+        }
         status.configuration = config
         status.showsMenuAsPrimaryAction = true
         status.contentHorizontalAlignment = .leading
@@ -1883,8 +1889,8 @@ final class WorkItemPage: UIView {
         guard content != shown else { return }
         let was = shown
         shown = content
-        status.configuration?.attributedTitle = AttributedString(Self.name(content.status), attributes: AttributeContainer([
-            .font: Theme.Text.line, .foregroundColor: Self.color(content.status)]))
+        status.configuration?.title = Self.name(content.status)
+        status.configuration?.baseForegroundColor = Self.color(content.status)
         status.tintColor = Self.color(content.status)
         status.menu = UIMenu(children: [
             UIAction(title: "Move to Front", image: UIImage(systemName: "arrow.left.to.line")) { [weak self] _ in self?.onTop?() },

@@ -524,10 +524,13 @@ are clearly visible and part of the task list."
 **Built to this deck** (the prototype predates it and uses neutral system
 colours and its own sizes):
 
-- **Type**: the ask is Body 17 (not 16 semibold); a row's second line and
-  thread lines are Line 15, with the thread's title in Line strong; section
-  labels are Caption 13 in secondary (not 12 in state colours); a page's ask
-  is Title 22.
+- **Type**: a row's title is Body 17 (not 16 semibold); a row's second line
+  and thread lines are Line 15, with the thread's title in Line strong;
+  section labels are Caption 13 in secondary (not 12 in state colours). A
+  page's heading is the agent-written title in Title 22, with the user's
+  words quoted beneath it in Body 17 secondary (2026-10-31, user-requested;
+  a task with no title yet shows its ask as the heading and no quote; see
+  [titles](../task-tracking.md#titles-2026-10-31-user-decision)).
 - **Status**: [status symbols](#glyphs-and-jellies) in the 20-point slot,
   replacing the filled red, green and blue discs. Threads show their Sprout
   in the same slot (not 16 to 24-point sprouts).
