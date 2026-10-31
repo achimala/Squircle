@@ -492,8 +492,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
                      subtasks: task.subtasks.map { .init(id: $0.id, ask: $0.ask, note: $0.note, status: $0.status, opens: $0.mainThread != nil) },
                      threads: task.allThreads.filter { $0.state != "missing" },
                      media: ([task] + task.subtasks).flatMap { owner in owner.media.map { WorkItemPage.Picture(task: owner.id, media: $0) } },
-                     // Its sub-tasks that need you are in its checklist already.
-                     asks: (asked[task.id] ?? []).filter { if case .task = $0 { false } else { true } }.map { item in
+                     asks: (asked[task.id] ?? []).map { item in
                          var about = false
                          if case .question(let question) = item { about = question.taskID != task.id }
                          return .init(item: item, busy: model.answering.contains(item.id), last: false, about: about)
@@ -509,21 +508,16 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         list = model.tasks(for: project)
         // The threads open tasks link to, ready before one is tapped.
         model.prefetch(threads: list.tasks.filter { $0.status.open }.flatMap(\.allThreads).map(\.id))
-        // What waits on you here, by the work item it's about. Needs-you
-        // work items are rows already, their sub-tasks show under them; a
-        // question nothing claims leads Needs you.
-        let waiting = model.waiting.apps.first { $0.projectID == project.id }?.items.filter {
-            if case .task(let task) = $0 { !list.tasks.contains { $0.id == task.taskID } } else { true }
-        } ?? []
+        // What waits on you here, by the work item it's about; a question
+        // nothing claims leads Needs you.
+        let waiting = model.waiting.apps.first { $0.projectID == project.id }?.items ?? []
         var loose: [WaitingList.Item] = []
         asked = [:]
         for item in waiting {
             let owner: AppTask? = switch item {
             case .question(let question): list.tasks.first { $0.id == question.taskID || $0.subtasks.contains { $0.id == question.taskID } }
             case .request(let request): list.tasks.first { task in task.status.open && task.allThreads.contains { $0.id == request.threadID } }
-            case .task(let task): list.tasks.first { $0.subtasks.contains { $0.id == task.taskID } }
             }
-            if case .task = item, owner == nil { continue }
             if let owner, owner.status.open { asked[owner.id, default: []].append(item) } else { loose.append(item) }
         }
         let words = query.lowercased().split(separator: " ")
@@ -790,22 +784,16 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard let id = dataSource.itemIdentifier(for: indexPath), id != Self.searchRow else { return }
-        // A sub-task that needs you opens its work item's page.
-        switch asks[id]?.item {
-        case .task(let sub)?:
-            list.tasks.first { $0.subtasks.contains { $0.id == sub.taskID } }.map { showItem($0.id) }
-            return
-        case let item? where item.threadID != nil:
+        if let item = asks[id]?.item, item.threadID != nil {
             onJump?(item)
             return
-        default: break
         }
         showItem(id)
     }
 
     func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
         guard let id = dataSource.itemIdentifier(for: indexPath) else { return false }
-        if let item = asks[id]?.item { if case .task = item { return true }; return item.threadID != nil }
+        if let item = asks[id]?.item { return item.threadID != nil }
         return id != Self.searchRow
     }
 
