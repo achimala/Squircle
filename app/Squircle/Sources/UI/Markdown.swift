@@ -208,6 +208,31 @@ extension Markdown {
         return segments
     }
 
+    /// Top-level blocks, one per bubble: a paragraph, a whole list, a code
+    /// block, a quote. A heading, and a paragraph ending in a colon, join
+    /// the block after them. Blank lines inside a list or a code fence never
+    /// cut: the parse holds each as one block.
+    static func paragraphs(_ text: AttributedString) -> [AttributedString] {
+        var pieces: [AttributedString] = []
+        var piece = text.startIndex, block = text.startIndex
+        var current: (id: Int, header: Bool)?
+        for (intent, range) in text.runs[\.presentationIntent] {
+            // Components run from the innermost block out.
+            let outer = intent?.components.last
+            let id = outer?.identity ?? -1
+            if current?.id == id { continue }
+            if let current, !current.header,
+               !String(text[block..<range.lowerBound].characters).trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix(":") {
+                pieces.append(AttributedString(text[piece..<range.lowerBound]))
+                piece = range.lowerBound
+            }
+            block = range.lowerBound
+            current = (id, { if case .header = outer?.kind { true } else { false } }())
+        }
+        if piece < text.endIndex { pieces.append(AttributedString(text[piece..<text.endIndex])) }
+        return pieces.filter { !String($0.characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
     /// A local file path to an image or video, else nil.
     private static func reference(_ url: URL) -> MediaReference? {
         guard url.scheme == nil || url.isFileURL else { return nil }

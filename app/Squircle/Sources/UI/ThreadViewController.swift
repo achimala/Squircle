@@ -164,6 +164,41 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private static let heightCache = RecentCache<ConversationID, [String: CGFloat]>(limit: 16)
     private var items: [ThreadItem] = [] { didSet { openTurns = Self.openTurns(in: items) } }
     private var itemsByID: [String: ThreadItem] = [:]
+    /// The room around each row, from its neighbours (`halfGap`).
+    private var gaps: [String: RowGap] = [:]
+
+    /// What a row is, for the room around it.
+    private enum RowKind { case sent, received, text, line, card, media }
+    private func kind(_ item: ThreadItem) -> RowKind {
+        switch item {
+        case .user: .sent
+        // What you attached sits right above your words.
+        case .gallery(let id, _) where id.hasPrefix("gallery:sent:"): .sent
+        case .answer: isAgent ? .received : .text
+        case .header, .agentMessage, .note, .thought: .text
+        case .update, .action, .step, .earlier, .summary, .changes, .live, .document: .line
+        case .build, .question: .card
+        case .gallery, .figure, .table, .simulator: .media
+        }
+    }
+
+    /// Half the deck's gap between two neighbouring rows (each row keeps its
+    /// half): 4 between one sender's bubbles, 8 between lines and between
+    /// pictures, 24 before your message, 16 between anything else.
+    private static func halfGap(_ above: RowKind?, _ below: RowKind?) -> CGFloat {
+        guard let above, let below else { return Theme.Space.tight }
+        switch (above, below) {
+        case (.sent, .sent), (.received, .received): return Theme.Space.tight / 2
+        case (_, .sent): return Theme.Space.section / 2
+        case (.line, .line), (.media, .media): return Theme.Space.row / 2
+        default: return Theme.Space.group / 2
+        }
+    }
+
+    /// The app agent's received bubbles still to land, in order. The first
+    /// rises while `riser` runs; the rest wait unseen in their places.
+    private var landing: [String] = []
+    private var riser: (id: String, view: UIView, animator: UIViewPropertyAnimator)?
     /// Each expanded turn's summary row and the row its turn ends at (its
     /// answer or the next message; nil: the end of the conversation), found
     /// when the rows change so scrolling only measures them.
@@ -516,11 +551,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         // Bounds and centre: the overlay's handle may be shifting them.
-        let x = overlayLayout?.inset ?? 16, y = safeArea.top + (overlayLayout?.inset ?? 4)
-        back.place(in: CGRect(x: x, y: y, width: 44, height: 44))
-        tasks.place(in: CGRect(x: x + 54, y: y, width: 44, height: 44))
-        builds.place(in: CGRect(x: x + 108, y: y, width: 44, height: 44))
-        more.place(in: CGRect(x: view.bounds.width - x - 44, y: y, width: 44, height: 44))
+        // On the margin, a row's gap apart.
+        let x = overlayLayout?.inset ?? Theme.Space.margin, y = safeArea.top + (overlayLayout?.inset ?? Theme.Space.tight)
+        let size = Theme.Space.tap, stride = size + Theme.Space.row
+        back.place(in: CGRect(x: x, y: y, width: size, height: size))
+        tasks.place(in: CGRect(x: x + stride, y: y, width: size, height: size))
+        builds.place(in: CGRect(x: x + 2 * stride, y: y, width: size, height: size))
+        more.place(in: CGRect(x: view.bounds.width - x - size, y: y, width: size, height: size))
         layoutConversation()
     }
 
@@ -670,6 +707,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         conversation = .thread(sessionID, appID: project.id)
         items = []
         itemsByID = [:]
+        gaps = [:]
+        landing = []
         expanded = []
         liveTurn = nil
         stickyTurn = nil
@@ -919,7 +958,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let rows = resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
                                             builds: model.builds, changes: content.changes,
                                             simulators: content.simulators, thread: currentSessionID))
-        return (header + ThreadItem.placing(openQuestions, in: rows), messages)
+        var placed = ThreadItem.placing(openQuestions, in: rows)
+        // The app's agent texts you: one received bubble per paragraph.
+        if isAgent {
+            placed = placed.flatMap { item -> [ThreadItem] in
+                guard case .answer(let message) = item else { return [item] }
+                return rowText.bubbles(message).map(ThreadItem.answer)
+            }
+        }
+        return (header + placed, messages)
     }
 
     private func renderItems(animated: Bool = false) {
@@ -940,15 +987,24 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         itemsByID = [:]
         var ids: [String] = []
         for item in next where itemsByID[item.id] == nil { itemsByID[item.id] = item; ids.append(item.id) }
+        let previousGaps = gaps
+        let kinds = ids.map { kind(itemsByID[$0]!) }
+        gaps = Dictionary(uniqueKeysWithValues: ids.indices.map { index in
+            (ids[index], RowGap(top: Self.halfGap(index > 0 ? kinds[index - 1] : nil, kinds[index]),
+                                bottom: Self.halfGap(kinds[index], index + 1 < kinds.count ? kinds[index + 1] : nil)))
+        })
         hasSimulators = false; hasLiveSimulator = false
         for case .simulator(let use) in next { hasSimulators = true; hasLiveSimulator = hasLiveSimulator || use.live }
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
         snapshot.appendItems(ids)
-        let changed = ids.filter { previous[$0] != nil && previous[$0] != itemsByID[$0] }
+        // A row whose neighbours changed takes its new room.
+        let changed = ids.filter { previous[$0] != nil && (previous[$0] != itemsByID[$0] || previousGaps[$0] != gaps[$0]) }
         for id in changed { guesses[id] = nil }
         let reflowed = changed.filter { !restyledInPlace($0) }
         let inserted = first ? [] : ids.filter { previous[$0] == nil }
+        let arrived = isAgent ? inserted.filter { if case .answer = itemsByID[$0] { true } else { false } } : []
+        if !arrived.isEmpty, !Motion.reduced { landing += arrived }
         let removed = previous.keys.filter { itemsByID[$0] == nil }.count
         // Rows arriving or leaving while the agent works slide into place;
         // only streaming text, which just grows, updates without animation.
@@ -988,7 +1044,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // A message in flight scrolls the conversation on its own spring.
         // Pinned, the conversation follows new content on one spring.
         if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && view.window != nil) }
-        if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted) }
+        if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted.filter { !arrived.contains($0) }) }
+        if !arrived.isEmpty {
+            // Under Reduce Motion they are simply there, with one tap.
+            if Motion.reduced { Theme.openHaptic() } else { landNext() }
+        }
         updateSticky()
         setNeedsMediaPass()
         // The threads its lines open, newest first, ready before one is tapped.
@@ -1144,6 +1204,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// it: the same ID, so the row stays put when T3's copy replaces it.
     private func displayedMessages(_ messages: [ChatMessage]) -> [ChatMessage] {
         var messages = messages
+        #if DEBUG
+        if let debugReply { messages += debugReply }
+        #endif
         guard let pending = pendingSend, !messages.contains(where: { $0.id == pending.messageID }) else { return messages }
         var message = ChatMessage(id: pending.messageID, role: "user", content: pending.text,
                                   createdAt: ISODate.format(.now))
@@ -1161,6 +1224,36 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                   let cell = table.cellForRow(at: index) as? SummaryCell else { return }
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             cell.celebrate()
+        }
+    }
+
+    /// The next of the agent's bubbles lands: it rises on the same spring as
+    /// your sent bubble, with a soft tap, and the one after it starts once
+    /// it settles. One gone or out of sight is simply there.
+    private func landNext() {
+        guard riser == nil else { return }
+        table.layoutIfNeeded()
+        while let id = landing.first {
+            guard let path = dataSource.indexPath(for: id), let cell = table.cellForRow(at: path) else {
+                landing.removeFirst()
+                continue
+            }
+            let view = cell.contentView
+            view.alpha = 1
+            view.transform = CGAffineTransform(translationX: 0, y: Theme.Space.group).scaledBy(x: 0.97, y: 0.97)
+            Theme.openHaptic()
+            let animator = UIViewPropertyAnimator(duration: 0.5, dampingRatio: 0.84) { view.transform = .identity }
+            animator.addCompletion { [weak self] _ in
+                view.transform = .identity
+                guard let self, riser?.id == id else { return }
+                riser = nil
+                landing.removeAll { $0 == id }
+                // Next frame: a cell reused mid-rise finishes it from inside the table's own layout.
+                Task { [weak self] in await DisplayFrame.next(); self?.landNext() }
+            }
+            riser = (id, view, animator)
+            animator.startAnimation()
+            return
         }
     }
 
@@ -1319,12 +1412,21 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func configure(_ cell: UITableViewCell, with item: ThreadItem) {
+        (cell as? TimelineCell)?.gap = gaps[item.id] ?? .line
+        if let riser, riser.view === cell.contentView, riser.id != item.id {
+            // Reused for another row mid-rise: that bubble has landed.
+            riser.animator.stopAnimation(false)
+            riser.animator.finishAnimation(at: .end)
+        }
+        // Your message in flight, and the agent's bubbles waiting to land, keep their place unseen.
+        if cell is MessageCell {
+            cell.contentView.alpha = item.id == flyingID || (landing.contains(item.id) && riser?.id != item.id) ? 0 : 1
+        }
         switch item {
         case .header(let title):
             (cell as? HeaderCell)?.configure(title)
         case .user(let message):
             (cell as? MessageCell)?.configure(message, style: .user, rendered: rowText.message(message, style: .user), expanded: true)
-            cell.contentView.alpha = message.id == flyingID ? 0 : 1
         case .update(let message):
             (cell as? MessageCell)?.configure(message, style: .update, rendered: rowText.message(message, style: .update), expanded: true)
         case .agentMessage(let message):
@@ -1335,7 +1437,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             let message = ChatMessage(id: line.id, role: "tool", content: "")
             (cell as? MessageCell)?.configure(message, style: .action, rendered: ConversationText.action(line, expanded: open, traits: view.traitCollection), expanded: open)
         case .answer(let message):
-            (cell as? MessageCell)?.configure(message, style: .answer, rendered: rowText.message(message, style: .answer), expanded: true)
+            let style: MessageCell.Style = isAgent ? .received : .answer
+            (cell as? MessageCell)?.configure(message, style: style, rendered: rowText.message(message, style: style), expanded: true)
         case .note(let message):
             (cell as? MessageCell)?.configure(message, style: .note, rendered: rowText.message(message, style: .note), expanded: expanded.contains(message.id))
         case .thought(let message):
@@ -1385,8 +1488,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
         case .question(let item, _):
             guard let cell = cell as? QuestionCell else { return }
-            cell.item.fitWidth = QuestionCell.itemWidth(table.bounds.width)
-            answers.configure(cell.item, item, about: true) { [weak self] in
+            answers.configure(cell.item, item, about: false) { [weak self] in
                 // The next of several questions: the row takes its new height.
                 UIView.performWithoutAnimation { self?.table.performBatchUpdates(nil) }
             }
@@ -1931,6 +2033,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var debugRequest: PendingRequest?
     private func renderRequest() {
         defer { applyFocus() }
+        requestCard.asker = isAgent || conversation.threadID == nil ? ("Your agent asks", .agent(.needsYou))
+            : (threadTitle.isEmpty ? "Asks you" : threadTitle, .worker(conversation.threadID ?? "", .needsYou))
         guard let change = requestCard.show(debugRequest ?? model.requests.first) else { return }
         view.setNeedsLayout()
         guard change == .appeared, !Motion.reduced else { return }
@@ -1958,13 +2062,35 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     #if DEBUG
     /// Verification only: a sample agent question, never sent to T3.
+    #if DEBUG
+    /// Verification only: `SQUIRCLE_DEMO_REPLY=1` (with `SQUIRCLE_APP`) has the
+    /// app's agent answer a made-up message in three paragraphs, to watch
+    /// its bubbles land.
+    private var debugReply: [ChatMessage]?
+    func debugReplyArrives() {
+        let now = ISODate.format(.now)
+        debugReply = [ChatMessage(id: "debug-ask", role: "user", content: "How did the chat stage go?", createdAt: now),
+                      ChatMessage(id: "debug-reply", role: "assistant", content: """
+            The chat stage is in: the agent's replies are bubbles now, one per paragraph.
+
+            Still to check:
+
+            - the landing haptic on a real reply
+            - dark mode
+
+            I'll send you a build once Tasks is merged too.
+            """, createdAt: now)]
+        render()
+    }
+    #endif
     func debugShowQuestion() {
         debugRequest = PendingRequest(id: "debug", item: ["id": "debug-question", "type": "user_input_request", "requestId": "debug", "questions": [
+            ["id": "media", "header": "Media", "question": "What should appear inline?", "multiSelect": true, "options": [
+                ["label": "Screenshots (Recommended)", "description": "What the simulator showed at each step, in a row that scrolls sideways"],
+                ["label": "Recordings"], ["label": "Diffs"]]],
             ["id": "effects", "header": "Effects", "question": "How bold should the glass effects be?", "multiSelect": false, "options": [
                 ["label": "Bold and flashy", "description": "Flowing spectrum glow, shimmer and ripples"],
-                ["label": "Calm", "description": "Soft shimmer, restrained glow"]]],
-            ["id": "media", "header": "Media", "question": "What should appear inline?", "multiSelect": true, "options": [
-                ["label": "Screenshots"], ["label": "Recordings"], ["label": "Diffs"]]]]])
+                ["label": "Calm", "description": "Soft shimmer, restrained glow"]]]]])
         renderRequest()
     }
     /// Verification only: `SQUIRCLE_MEDIA=N` scrolls to the Nth newest row
