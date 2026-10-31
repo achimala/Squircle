@@ -287,9 +287,10 @@ final class MessageCell: TimelineCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let (fitted, pad) = textFrame(width: contentView.bounds.width)
-        var frame = fitted
-        frame.size.height = max(0, contentView.bounds.height - frame.minY - pad - gap.bottom)
+        // The text's own measured size, never what is left of the row: a
+        // row taking new room around it (a neighbour arriving) resizes on
+        // the table's animation, and its bubble must not squash meanwhile.
+        let (frame, pad) = textFrame(width: contentView.bounds.width)
         text.frame = frame
         let around = frame.insetBy(dx: -Theme.Space.bubble.left, dy: -pad)
         if hasBubble { bubble.frame = around }
@@ -305,6 +306,26 @@ final class MessageCell: TimelineCell {
     var quoteFrame: CGRect? {
         guard hasQuote, !quoteLabel.isHidden else { return nil }
         return quoteLabel.frame.union(quoteRule.frame)
+    }
+
+    /// The quote and its rule drawn afresh where they sit (in the content's
+    /// space), for your message's flight: nothing has to reach the screen
+    /// first, as a snapshot would need.
+    func quoteCopy() -> UIView? {
+        guard let frame = quoteFrame else { return nil }
+        let copy = UIView(frame: frame)
+        copy.isUserInteractionEnabled = false
+        let rule = UIView(frame: quoteRule.frame.offsetBy(dx: -frame.minX, dy: -frame.minY))
+        rule.backgroundColor = quoteRule.backgroundColor
+        rule.layer.cornerRadius = quoteRule.layer.cornerRadius
+        let label = UILabel(frame: quoteLabel.frame.offsetBy(dx: -frame.minX, dy: -frame.minY))
+        label.font = quoteLabel.font
+        label.textColor = quoteLabel.textColor
+        label.numberOfLines = quoteLabel.numberOfLines
+        label.lineBreakMode = quoteLabel.lineBreakMode
+        label.attributedText = quoteLabel.attributedText
+        [rule, label].forEach(copy.addSubview)
+        return copy
     }
 
     /// Where the row's words sit on screen: its bubble, or its text.

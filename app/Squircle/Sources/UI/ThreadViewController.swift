@@ -152,7 +152,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private lazy var requestCard = RequestCard(answers: answers)
     private var request: UIVisualEffectView { requestCard.view }
 
+    /// Your message rising out of the field: its row stays unseen while
+    /// `flyer`, drawn above the field, rides it (`placeFlyer`).
     private var flyingID: String?
+    private var flyer: (view: UIView, fill: UIView, from: CGPoint)?
     /// The message you are replying to: its row and the words quoted, shown
     /// over the field until you send or cancel.
     private var reply: (row: String, quote: String)? {
@@ -681,7 +684,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
-            if pinned { scrollToBottom() }
+            // Your message rising: the end it follows moved (the field
+            // folding up), so the one spring takes it there; outside a
+            // flight, it moves with whatever moved the field (the keyboard).
+            if pinned, flyingID != nil { UIView.performWithoutAnimation { scrollToBottom(animated: true) } } else if pinned { scrollToBottom() }
         }
     }
 
@@ -778,6 +784,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// brings it back into sight.
     func park() {
         Self.heightCache.set(heights, for: conversation)
+        land()
         hide()
         inSight = false
     }
@@ -1062,7 +1069,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // Embedded, its task's header names it already.
         let header: [ThreadItem] = threadTitle.isEmpty || embedded ? [] : [.header(threadTitle)]
         let messages = displayedMessages(content.messages)
-        let rows = reserving(resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
+        let rows = reserving(resolve(ThreadItem.items(messages: messages, running: content.running || debugRunning, expanded: expanded,
                                                       builds: model.builds, changes: content.changes,
                                                       simulators: content.simulators, thread: currentSessionID)))
         var placed = ThreadItem.placing(openQuestions, in: rows)
@@ -1164,7 +1171,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             }
             snapshot.reconfigureItems(reflowed.filter { !away.contains($0) })
             dataSource.apply(snapshot, animatingDifferences: true) { [weak self] in
-                guard let self, pinToBottom, flyingID == nil else { return }
+                guard let self, pinToBottom else { return }
                 scrollToBottom(animated: true)
             }
         } else if covered, !active {
@@ -1185,9 +1192,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 table.layoutIfNeeded()
             }
         }
-        // A message in flight scrolls the conversation on its own spring.
         // Pinned, the conversation follows new content on one spring.
-        if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && view.window != nil) }
+        if pinToBottom { scrollToBottom(animated: !first && view.window != nil) }
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted.filter { !arrived.contains($0) }) }
         if !arrived.isEmpty {
             // Under Reduce Motion they are simply there, with one tap.
@@ -1350,6 +1356,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         var messages = messages
         #if DEBUG
         if let debugReply { messages += debugReply }
+        messages += debugSent
         #endif
         guard let pending = pendingSend, !messages.contains(where: { $0.id == pending.messageID }) else { return messages }
         var message = ChatMessage(id: pending.messageID, role: "user", content: pending.text,
@@ -1456,7 +1463,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// past its end (blank) or show older rows until something scrolled it.
     /// One at its end before that pass stays at its end.
     private func keepEnd(_ wasAtEnd: Bool) {
-        guard wasAtEnd, pinToBottom, flyingID == nil, !scrollSpring.isAnimating, !table.isTracking, !table.isDecelerating else { return }
+        guard wasAtEnd, pinToBottom, !scrollSpring.isAnimating, !table.isTracking, !table.isDecelerating else { return }
         let bottom = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
         if abs(table.contentOffset.y - bottom) > 0.5 { table.contentOffset.y = bottom }
     }
@@ -1481,6 +1488,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        placeFlyer()
         updateSticky()
         setNeedsMediaPass()
         guard scrollView.isTracking || scrollView.isDecelerating else { return }
@@ -2106,7 +2114,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // The agent reads what you answer as a blockquote before your words.
         let quoted = reply
         let text = quoted.map { Reply.compose(quote: $0.quote, text: typed) } ?? typed
-        switch model.startSend(text, in: project, from: conversation) {
+        #if DEBUG
+        let start = debugRehearsing ? debugRehearse(text) : model.startSend(text, in: project, from: conversation)
+        #else
+        let start = model.startSend(text, in: project, from: conversation)
+        #endif
+        switch start {
         case .refused(let reason):
             model.error = reason
         case .started(let messageID, let outcome):
@@ -2117,12 +2130,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             // the field; reading further up, you stay where you are and it
             // lands below.
             let following = pinToBottom
-            flyingID = following && !Motion.reduced ? messageID : nil
             if !following { sentBelow = messageID }
+            land()
+            flyingID = following && !Motion.reduced ? messageID : nil
             composer.text = ""
             reply = nil
             render()
             if following { flySend(id: messageID, from: source) } else { renderJump() }
+            // A long message's field folds back to one line on the same spring.
+            UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.84, initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState]) { self.view.layoutIfNeeded() }
             follow(outcome, text: typed, reply: quoted)
         }
     }
@@ -2143,59 +2160,103 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// As in Messages: your words become their bubble right where you typed
     /// them and the bubble rises out of the field into place while the
     /// conversation makes room. The text sits inside the bubble throughout.
+    /// The bubble is placed every frame where its row is now, plus what is
+    /// left (`rise`, 1 to 0) of the way from where you typed: the
+    /// conversation can scroll, grow or follow a new end meanwhile and the
+    /// bubble still lands exactly on its row.
     private func flySend(id: String, from source: CGPoint) {
-        view.layoutIfNeeded()
         let start = table.contentOffset.y
+        // Laid out at the end once, so the row is measured and drawn.
         scrollToBottom()
-        let end = table.contentOffset.y
-        guard !Motion.reduced, let index = dataSource.indexPath(for: id),
-              let cell = table.cellForRow(at: index) as? MessageCell else { flyingID = nil; return }
-        cell.contentView.alpha = 1
+        guard let index = dataSource.indexPath(for: id), let cell = table.cellForRow(at: index) as? MessageCell else { flyingID = nil; return }
         cell.layoutIfNeeded()
-        let bubble = cell.bubble.convert(cell.bubble.bounds, to: view)
-        let textFrame = cell.text.convert(cell.text.bounds, to: view)
-        let inset = cell.text.textContainerInset
-        guard let words = cell.text.snapshotView(afterScreenUpdates: true) else { flyingID = nil; return }
+        // The row's own text, set the same way: drawn with the bubble, so
+        // nothing has to reach the screen first (a snapshot would show the
+        // end for a frame).
+        let words = UITextView()
+        words.isEditable = false
+        words.isScrollEnabled = false
+        words.isUserInteractionEnabled = false
+        words.backgroundColor = .clear
+        words.clipsToBounds = false
+        words.textContainer.lineFragmentPadding = cell.text.textContainer.lineFragmentPadding
+        words.textContainerInset = cell.text.textContainerInset
+        words.attributedText = cell.text.attributedText
         // A reply's quote rides over its bubble.
-        let quoteFrame = cell.quoteFrame
-        let quote = quoteFrame.flatMap { cell.contentView.resizableSnapshotView(from: $0, afterScreenUpdates: true, withCapInsets: .zero) }
-        cell.contentView.alpha = 0
+        let quote = cell.quoteCopy()
         table.contentOffset.y = start
+        table.layoutIfNeeded()
+        guard let bubble = bubbleFrame(of: cell) else { flyingID = nil; return }
 
-        let flyer = UIView(frame: bubble)
-        flyer.isUserInteractionEnabled = false
+        let view = UIView(frame: bubble)
+        view.isUserInteractionEnabled = false
         let fill = Theme.glassSurface(cornerRadius: Theme.Radius.large, tint: Theme.userGlass)
-        fill.frame = flyer.bounds
-        flyer.addSubview(fill)
-        words.frame = CGRect(x: textFrame.minX - bubble.minX, y: textFrame.minY - bubble.minY,
-                             width: textFrame.width, height: textFrame.height)
-        flyer.addSubview(words)
-        if let quote, let quoteFrame {
-            let origin = cell.contentView.convert(quoteFrame.origin, to: view)
-            quote.frame = CGRect(origin: CGPoint(x: origin.x - bubble.minX, y: origin.y - bubble.minY), size: quoteFrame.size)
-            flyer.addSubview(quote)
+        fill.frame = view.bounds
+        view.addSubview(fill)
+        words.frame = cell.text.convert(cell.text.bounds, to: cell.bubble)
+        view.addSubview(words)
+        if let quote {
+            quote.frame.origin.x -= cell.bubble.frame.minX
+            quote.frame.origin.y -= cell.bubble.frame.minY
+            view.addSubview(quote)
         }
-        view.insertSubview(flyer, aboveSubview: composer)
-        // Start with the first line of text exactly where it was typed.
-        let offset = CGPoint(x: words.frame.minX + inset.left, y: words.frame.minY + inset.top)
-        flyer.frame.origin = CGPoint(x: source.x - offset.x, y: source.y - offset.y)
-        fill.transform = CGAffineTransform(scaleX: 0.94, y: 0.9)
+        self.view.insertSubview(view, aboveSubview: composer)
+        #if DEBUG
+        debugFlyer = view
+        #endif
+        // It starts with the first line of text exactly where it was typed.
+        let inset = cell.text.textContainerInset
+        let typed = CGPoint(x: bubble.minX + words.frame.minX + inset.left, y: bubble.minY + words.frame.minY + inset.top)
+        flyer = (view, fill, CGPoint(x: source.x - typed.x, y: source.y - typed.y))
         composer.holdsPlaceholder = true
+        rise.set(1)
+        rise.animate(to: 0)
+        scrollToBottom(animated: true)
+    }
 
-        let rise = UIViewPropertyAnimator(duration: 0.5, dampingRatio: 0.84) {
-            flyer.frame.origin = bubble.origin
-            fill.transform = .identity
-            self.table.contentOffset.y = end
-        }
-        rise.addCompletion { [weak self] _ in
-            flyer.removeFromSuperview()
-            guard let self else { return }
-            composer.revealPlaceholder()
-            if flyingID == id { flyingID = nil }
-            if let index = dataSource.indexPath(for: id) { table.cellForRow(at: index)?.contentView.alpha = 1 }
-            if pinToBottom { scrollToBottom(animated: true) }
-        }
-        rise.startAnimation()
+    /// The flight's one spring: 1 where you typed, 0 on its row.
+    private lazy var rise: SpringDriver = {
+        let spring = SpringDriver(value: 0)
+        spring.parameters = SpringDriver.Parameters(response: 0.5, damping: 0.84)
+        spring.onChange = { [weak self] _ in self?.placeFlyer() }
+        spring.onRest = { [weak self] _ in self?.land() }
+        return spring
+    }()
+
+    /// The bubble of `cell` on screen, as the table shows it this frame.
+    private func bubbleFrame(of cell: MessageCell) -> CGRect? {
+        // A row the table is moving shows where its animation has it.
+        // A row, or the conversation's scroll, that the table itself is
+        // animating (a batch update resizing rows) shows where its
+        // animation has it; otherwise the values just set are on screen.
+        func shown(_ layer: CALayer) -> CALayer { layer.animationKeys()?.isEmpty == false ? layer.presentation() ?? layer : layer }
+        let row = shown(cell.layer).frame
+        let scroll = shown(table.layer).bounds.origin
+        let bubble = cell.bubble.frame
+        return CGRect(x: table.frame.minX + row.minX + bubble.minX - scroll.x,
+                      y: table.frame.minY + row.minY + bubble.minY - scroll.y, width: bubble.width, height: bubble.height)
+    }
+
+    /// Puts the flying bubble where its row is plus what is left of its way.
+    private func placeFlyer() {
+        guard let flyer, let id = flyingID, let index = dataSource.indexPath(for: id),
+              let cell = table.cellForRow(at: index) as? MessageCell, let bubble = bubbleFrame(of: cell) else { return }
+        let left = rise.value
+        flyer.view.frame = CGRect(x: bubble.minX + flyer.from.x * left, y: bubble.minY + flyer.from.y * left,
+                                  width: bubble.width, height: bubble.height)
+        flyer.fill.transform = CGAffineTransform(scaleX: 1 - 0.06 * left, y: 1 - 0.1 * left)
+    }
+
+    /// The bubble is on its row (or another send or a reload took over):
+    /// the row shows it from here.
+    private func land() {
+        guard let id = flyingID else { return }
+        flyingID = nil
+        rise.stop()
+        flyer?.view.removeFromSuperview()
+        flyer = nil
+        composer.revealPlaceholder()
+        if let index = dataSource.indexPath(for: id) { table.cellForRow(at: index)?.contentView.alpha = 1 }
     }
 
     private var debugRequest: PendingRequest?
@@ -2236,6 +2297,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// app's agent answer a made-up message in three paragraphs, to watch
     /// its bubbles land.
     private var debugReply: [ChatMessage]?
+    /// `debugFilm`'s messages and turn, shown here only: nothing reaches T3.
+    private var debugSent: [ChatMessage] = []
+    private var debugRunning = false
+    private var debugRehearsing = false
+    private weak var debugFlyer: UIView?
     func debugReplyArrives() {
         let now = ISODate.format(.now)
         debugReply = [ChatMessage(id: "debug-ask", role: "user", content: "How did the chat stage go?", createdAt: now),
@@ -2316,6 +2382,121 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         composer.text = text
         send()
     }
+    /// `debugFilm`'s send: shown as T3 would show it, never sent. T3 takes
+    /// it a moment later (its copy replaces the pending one) and the turn
+    /// goes live.
+    private func debugRehearse(_ text: String) -> SendStart {
+        let id = "film-" + UUID().uuidString.lowercased()
+        debugSent.append(ChatMessage(id: id, role: "user", content: text, createdAt: ISODate.format(.now)))
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(ProcessInfo.processInfo.environment["SQUIRCLE_FILM_ACCEPT_MS"] ?? "") ?? 180))
+            guard let self, let index = debugSent.firstIndex(where: { $0.id == id }) else { return }
+            debugSent[index] = ChatMessage(id: id, role: "user", content: text, createdAt: ISODate.format(.now.addingTimeInterval(1)))
+            debugRunning = true
+            render()
+        }
+        let conversation = conversation
+        return .started(messageID: id, outcome: Task { .accepted(messageID: id, conversation: conversation) })
+    }
+
+    /// Verification only: `SQUIRCLE_SEND_FILM=1` (with `SQUIRCLE_APP`)
+    /// films sends at the bottom, slightly and far above it, short and
+    /// long, with the keyboard up and while a reply lands, each into its
+    /// own 60 fps recording and a per-frame trace (tmp/sendfilm), never
+    /// sending anything to T3. `SQUIRCLE_FILM_CASES=a,b` films only those.
+    func debugFilm(recorderWindow: UIWindow) async {
+        struct Case { let name: String; let up: CGFloat; let text: String; var keyboard = false; var landing = false }
+        let short = "Looks good, ship it"
+        let long = "Can you make the build sheet follow dark mode, and stack the simulators into one deck when there are two or more of them?"
+        let all = [Case(name: "bottom-short", up: 0, text: short), Case(name: "up10", up: 10, text: short),
+                   Case(name: "up30", up: 30, text: short), Case(name: "up55", up: 55, text: short),
+                   Case(name: "up70", up: 70, text: short), Case(name: "far", up: 900, text: short),
+                   Case(name: "bottom-long", up: 0, text: long), Case(name: "up40-long", up: 40, text: long),
+                   Case(name: "keyboard", up: 0, text: short, keyboard: true), Case(name: "keyboard-up40", up: 40, text: long, keyboard: true),
+                   Case(name: "landing", up: 0, text: short, landing: true)]
+        let wanted = ProcessInfo.processInfo.environment["SQUIRCLE_FILM_CASES"].map { Set($0.split(separator: ",").map(String.init)) }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("sendfilm")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        debugRehearsing = true
+        for c in all where wanted?.contains(c.name) ?? true {
+            debugRunning = false
+            render()
+            if c.keyboard { composer.input.becomeFirstResponder() } else { view.endEditing(true) }
+            // Typed first, so a long message's field has grown before it is sent.
+            composer.text = c.text
+            try? await Task.sleep(for: .seconds(1.2))
+            sentBelow = nil
+            scrollToBottom()
+            // Left where a finger leaves it: still following within 60 points of the end.
+            let bottom = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
+            table.contentOffset.y = max(-table.contentInset.top, bottom - c.up)
+            pinToBottom = bottom - table.contentOffset.y < 60
+            renderJump()
+            try? await Task.sleep(for: .seconds(0.8))
+            guard let recorder = ScreenRecorder(below: recorderWindow, rate: 60) else { NSLog("SENDFILM no recorder"); return }
+            var trace = "t,offset,offsetModel,flyX,flyY,flyW,flyH,bubX,bubY,bubW,bubH,bubAlpha,prevY,composerY,composerH,insetBottom,contentH,jumpAlpha,pinned,bubModelY,rise\n"
+            let started = CACurrentMediaTime()
+            let link = CADisplayLink(target: DisplayLinkProxy { [weak self] _ in
+                guard let self else { return }
+                trace += debugTraceRow(at: CACurrentMediaTime() - started)
+            }, selector: #selector(DisplayLinkProxy.tick(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            link.add(to: .main, forMode: .common)
+            try? await Task.sleep(for: .seconds(0.4))
+            if c.landing {
+                let now = ISODate.format(.now)
+                debugSent.append(ChatMessage(id: "film-reply-" + UUID().uuidString, role: "assistant", content: """
+                    The chat stage is in: the agent's replies are bubbles now, one per paragraph.
+
+                    Still to check: the landing haptic on a real reply, and dark mode.
+
+                    I'll send you a build once Tasks is merged too.
+                    """, createdAt: now))
+                debugRunning = false
+                render()
+                try? await Task.sleep(for: .seconds(0.3))
+            }
+            NSLog("SENDFILM send %@ at %.3f", c.name, CACurrentMediaTime() - started)
+            send()
+            try? await Task.sleep(for: .seconds(c.landing ? 2.4 : 1.6))
+            link.invalidate()
+            let output = await recorder.finish()
+            let movie = folder.appendingPathComponent(c.name + ".mp4")
+            try? FileManager.default.removeItem(at: movie)
+            if let url = output?.url { try? FileManager.default.moveItem(at: url, to: movie) }
+            try? trace.write(to: folder.appendingPathComponent(c.name + ".csv"), atomically: true, encoding: .utf8)
+            NSLog("SENDFILM done %@ %@", c.name, folder.path)
+        }
+        view.endEditing(true)
+        NSLog("SENDFILM finished %@", folder.path)
+    }
+
+    /// One frame of `debugFilm`'s trace, from what is on screen (presentation layers).
+    private func debugTraceRow(at time: Double) -> String {
+        let root = view.layer.presentation() ?? view.layer
+        func onScreen(_ view: UIView?) -> CGRect? {
+            guard let view, let layer = view.layer.presentation() else { return nil }
+            return layer.convert(layer.bounds, to: root)
+        }
+        let offset = table.layer.presentation()?.bounds.minY ?? table.contentOffset.y
+        let fly = onScreen(debugFlyer)
+        var bubble: CGRect?, alpha: CGFloat = -1, previous: CGFloat?, model: CGFloat?
+        if let id = debugSent.last(where: { $0.role == "user" })?.id, let path = dataSource.indexPath(for: id) {
+            if let cell = table.cellForRow(at: path) as? MessageCell {
+                bubble = onScreen(cell.bubble)
+                model = bubbleFrame(of: cell)?.minY
+                alpha = CGFloat(cell.contentView.layer.presentation()?.opacity ?? -1)
+            }
+            if path.row > 0, let cell = table.cellForRow(at: IndexPath(row: path.row - 1, section: 0)) { previous = onScreen(cell)?.minY }
+        }
+        let composerRect = onScreen(composer) ?? .zero
+        func f(_ v: CGFloat?) -> String { v.map { String(format: "%.2f", $0) } ?? "" }
+        let cells = [f(offset), f(table.contentOffset.y), f(fly?.minX), f(fly?.minY), f(fly?.width), f(fly?.height),
+                     f(bubble?.minX), f(bubble?.minY), f(bubble?.width), f(bubble?.height), f(alpha), f(previous),
+                     f(composerRect.minY), f(composerRect.height), f(table.contentInset.bottom), f(table.contentSize.height),
+                     f(CGFloat(jump.layer.presentation()?.opacity ?? 0)), pinToBottom ? "1" : "0", f(model), f(rise.value)]
+        return String(format: "%.4f,", time) + cells.joined(separator: ",") + "\n"
+    }
     /// Verification only: hands the live line to a new task and back.
     func debugLens() {
         guard let cell = table.visibleCells.compactMap({ $0 as? LiveCell }).first else { return }
@@ -2330,6 +2511,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.layoutIfNeeded()
         (table.cellForRow(at: index) as? SummaryCell)?.celebrate()
     }
+    #else
+    private let debugRunning = false
     #endif
 
     override func accessibilityPerformEscape() -> Bool {

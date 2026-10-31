@@ -349,6 +349,16 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 if let text = environment["SQUIRCLE_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
                 }
+                if environment["SQUIRCLE_SEND_FILM"] == "1", let scene = view.window?.windowScene {
+                    // Above the app's windows, out of the film, as the overlay is.
+                    let top = UIWindow(windowScene: scene)
+                    top.windowLevel = .alert + 2
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(3))
+                        await self?.agent?.debugFilm(recorderWindow: top)
+                        _ = top
+                    }
+                }
                 if environment["SQUIRCLE_DEMO_REPLY"] == "1" {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(4)); self?.agent?.debugReplyArrives() }
                 }

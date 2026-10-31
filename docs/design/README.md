@@ -542,6 +542,14 @@ it has).
 - **Sending keeps your place** (built on main): sending from above the end
   leaves you where you are, your bubble lands below, and the jump button
   shows in the accent until you go down.
+- **Sending is one motion** (built on `send-anim`, filmed frame by frame
+  2026-10-31 in the simulator): your bubble is placed every frame on its
+  own row plus what is left of one spring from where you typed, so the
+  conversation following its end (its scroll spring retargeting when the
+  live line or a reply arrives), a long message's field folding to one line
+  and rows taking new room never move it off its row; it lands exactly
+  there, with no second scroll. DEBUG `SQUIRCLE_SEND_FILM=1` (with
+  `SQUIRCLE_APP`) re-films every case with a per-frame trace, sending nothing.
 - **Swipe between media** (built on main): in the viewer,
   pictures and clips of the conversation page sideways under your finger,
   natively, with one spring and no crossfade.
