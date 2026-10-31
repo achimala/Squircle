@@ -59,7 +59,12 @@ task tracking … Not just plain text. I need to see everything waiting on me."
 - **The answer goes back as a message.** The phone answers with `POST
   /v1/questions/{id}/answer`; the asking thread gets an `[answer]` note
   (`squircle-answer`, label "Answered") through the outbox; when a worker
-  asked, its app agent is told too.
+  asked, its app agent is told too. The answer is saved with its delivery
+  owed (`answered {text, at, owed}`); the service's task loop hands owed
+  answers to the outbox and then clears `owed`, so a restart or failure in
+  between delivers it later, once. The phone sending the same answer again
+  is accepted (a different one is refused). An open question stays in
+  Waiting on you even after its task ages into History.
 - **Agents use it, not chat.** The plugin prompt and the per-turn note say to
   ask only with `task ask` and end the turn; the note lists open questions
   as `?` lines under their task. The app agent's guard refuses Claude's

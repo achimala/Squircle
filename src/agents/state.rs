@@ -432,30 +432,72 @@ impl State {
 
     /// The command for `purpose` a caller waits for: the one saved for it
     /// while T3 left it unanswered, or a new one, saved before it is sent.
+    /// One found again may already have reached T3, so it is marked
+    /// uncertain. A new one is refused while `INTENTS_KEPT` wait for an
+    /// answer: those are never dropped to make room.
     pub(super) fn intent(
         &mut self,
         purpose: String,
         build: impl FnOnce(&Identity) -> Command,
     ) -> Result<Command> {
         self.resolve()?;
-        if let Some(pending) = self
-            .registry()
-            .intents
-            .iter()
-            .find(|p| p.purpose == purpose)
-        {
-            return Ok(pending.command.clone());
+        let intents = &self.registry().intents;
+        if let Some(index) = intents.iter().position(|p| p.purpose == purpose) {
+            let pending = &intents[index];
+            let command = pending.command.clone();
+            if !pending.uncertain {
+                let mut next = self.registry().clone();
+                next.intents[index].uncertain = true;
+                self.commit(next)?;
+            }
+            return Ok(command);
         }
+        ensure!(
+            intents.len() < INTENTS_KEPT,
+            "T3 has not confirmed {} earlier commands. Ask those again with the same text first (each is sent again as itself, never twice):\n{}",
+            intents.len(),
+            intents
+                .iter()
+                .map(|p| p.purpose.lines().next().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
         let command = build(&identity());
         let mut next = self.registry().clone();
         next.intents.push(Pending {
             purpose,
             command: command.clone(),
             at: crate::model::now(),
+            uncertain: false,
         });
-        let excess = next.intents.len().saturating_sub(INTENTS_KEPT);
-        next.intents.drain(..excess);
         self.commit(next)?;
         Ok(command)
+    }
+
+    /// Records what an attempt at a saved command got. T3's answer settles
+    /// it; a lost answer leaves it uncertain; one that never left the
+    /// service drops it only if no attempt may have reached T3.
+    pub(super) fn attempted(&mut self, id: &str, outcome: &Dispatched) -> Result<()> {
+        self.change_if(|registry, _| {
+            let index = registry
+                .intents
+                .iter()
+                .position(|p| p.command.id() == Some(id))?;
+            let uncertain = registry.intents[index].uncertain;
+            match outcome {
+                Dispatched::Accepted(_) | Dispatched::Refused(_) => {
+                    registry.intents.remove(index);
+                }
+                Dispatched::NotSent(_) if !uncertain => {
+                    registry.intents.remove(index);
+                }
+                Dispatched::NotSent(_) | Dispatched::Unknown(_) if uncertain => return None,
+                Dispatched::NotSent(_) | Dispatched::Unknown(_) => {
+                    registry.intents[index].uncertain = true;
+                }
+            }
+            Some(())
+        })?;
+        Ok(())
     }
 }
