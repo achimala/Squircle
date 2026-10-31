@@ -645,6 +645,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         if let problem = JellyDirector.shared.debugViolation() { fail(problem) }
         guard !appSpring.isAnimating, !tasksSpring.isAnimating, !spring.isAnimating, dragging == nil else { return }
+        if let problem = JellyDirector.shared.debugHeroViolation() { fail(problem) }
         let k = tasksSpring.value
         switch route {
         case .grid: if home.isHidden || home.alpha < 0.99 { fail("grid not showing at rest") }
@@ -1648,8 +1649,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         tasks?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - k * a) - (layout.reducedMotion || !overTasks ? 0 : width * 0.3 * t), y: 0))
         thread?.setTransitionProgress(t * a)
         thread?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - t * a), y: 0))
-        // The agent, fully covered and still, may change unseen.
-        agent?.outOfSight = (thread != nil && t >= 1 && !spring.isAnimating || tasks != nil && k >= 1 && !tasksSpring.isAnimating) && dragging == nil
+        // A screen fully covered and still is out of sight: hidden, so its
+        // jellies stop, and the agent may change unseen.
+        let agentCovered = (thread != nil && t >= 1 && !spring.isAnimating || tasks != nil && k >= 1 && !tasksSpring.isAnimating) && dragging == nil
+        let tasksCovered = overTasks && t >= 1 && !spring.isAnimating && dragging == nil
+        agent?.outOfSight = agentCovered
+        agent?.view.update(\.isHidden, to: agentCovered)
+        tasks?.view.update(\.isHidden, to: tasksCovered)
+        tasks?.inSight = a > 0.001 && k > 0.001 && !tasksCovered
 
         // Touches go to the screen the route names, from the first frame of its
         // transition. A conversation on its way out still covers the one

@@ -1478,6 +1478,8 @@ final class SquircleModel {
         await propose(.interrupt(thread: id, turn: run),
                       command: ["type": "run.interrupt", "threadId": .string(id), "runId": .string(run)])
     }
+    /// Whether your answer to `request` is on its way.
+    func sending(_ request: PendingRequest) -> Bool { commands.answering.contains(request.id) }
     /// Answers a request. It leaves `requests` while the answer is on its
     /// way and for good once T3 reports it resolved; back only if T3 refuses.
     /// An approval needs its decision: none is ever assumed.

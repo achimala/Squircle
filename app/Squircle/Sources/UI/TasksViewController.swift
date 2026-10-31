@@ -44,6 +44,9 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     /// Tasks is the screen in front (its host says), so the page in view
     /// may hold its conversation.
     var inFront = false { didSet { if inFront != oldValue { syncConversations() } } }
+    /// Some of Tasks is in sight (its host's route says: not covered by a
+    /// thread at rest); its conversations' jellies draw only then.
+    var inSight = true { didSet { if inSight != oldValue { renderSight() } } }
 
     private let table = UITableView(frame: .zero, style: .grouped)
     private let heading = TasksHeading()
@@ -57,6 +60,9 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     /// mounted page, the one in view in front.
     private var conversations: [String: ThreadViewController] = [:]
     private var frontConversation: String?
+    /// Conversations shown once: since then they come back as they were
+    /// left (`reveal`), never opened anew.
+    private var opened: Set<String> = []
     /// One-thread items whose outline was asked for instead of their conversation.
     private var outlined: Set<String> = []
     private let notice = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
@@ -416,17 +422,29 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             edge.scrollView = openItem.flatMap { pages[$0]?.scroll } ?? table
         }
         syncConversations()
+        renderSight()
+    }
+
+    /// Each conversation is in sight while Tasks is and its page shows in the pager.
+    private func renderSight() {
+        let window = pager.isHidden ? .null : pager.bounds
+        for (id, conversation) in conversations {
+            conversation.inSight = inSight && pages[id].map { $0.frame.intersects(window) } == true
+        }
     }
 
     /// Only the page in view, at rest, with Tasks in front, holds its
-    /// conversation in front; every other one lets go of the model.
+    /// conversation in front; every other one lets go of the model for the
+    /// moment, keeping its draft and place. A conversation opens (at the
+    /// bottom, field empty) only the first time it comes to the front.
     private func syncConversations() {
         let front = inFront && !push.isAnimating && push.value >= 1 && !pager.isTracking && !pager.isDecelerating ? openItem : nil
         let wanted = front.flatMap { conversations[$0] != nil ? $0 : nil }
         guard wanted != frontConversation else { return }
-        if let old = frontConversation.flatMap({ conversations[$0] }) { old.park() }
+        if let old = frontConversation.flatMap({ conversations[$0] }) { old.hide() }
         frontConversation = wanted
-        conversation?.resume()
+        guard let wanted, let conversation else { return }
+        if opened.insert(wanted).inserted { conversation.resume() } else { conversation.reveal() }
     }
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
@@ -578,11 +596,13 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         controller.didMove(toParent: self)
         conversations[id] = controller
         syncConversations()
+        renderSight()
     }
 
     private func dropConversation(_ id: String) {
         guard let controller = conversations.removeValue(forKey: id) else { return }
         if frontConversation == id { frontConversation = nil }
+        opened.remove(id)
         controller.park()
         controller.tearDown()
         controller.willMove(toParent: nil)
@@ -1693,6 +1713,9 @@ final class WorkItemPage: UIView {
     private var showsClosed = false
     private var loads: [Task<Void, Never>] = []
     private var shown: Content?
+    /// What the outline last drew; nil while the conversation shows instead,
+    /// so coming back to the outline draws all of it.
+    private var outline: Content?
     private static let pictureHeight: CGFloat = 220
 
     override init(frame: CGRect) {
@@ -1863,10 +1886,13 @@ final class WorkItemPage: UIView {
         ask.text = content.ask
         if (content.conversation != nil) != (was?.conversation != nil) || was == nil { arrange(conversation: content.conversation != nil) }
         if let conversation = content.conversation {
+            outline = nil
             renderHeader(conversation)
             setNeedsLayout()
             return
         }
+        let drawn = outline
+        outline = content
         note.text = content.note
         note.isHidden = content.note.isEmpty
         install.configuration?.title = content.install
@@ -1875,7 +1901,7 @@ final class WorkItemPage: UIView {
         shipped.isHidden = content.shipped == nil
         install.superview?.isHidden = install.isHidden && shipped.isHidden
 
-        if content.asks != was?.asks {
+        if content.asks != drawn?.asks {
             questions.arrangedSubviews.forEach { $0.removeFromSuperview() }
             for ask in content.asks {
                 let view = WaitingItemView()
@@ -1884,9 +1910,9 @@ final class WorkItemPage: UIView {
             }
             questions.isHidden = content.asks.isEmpty
         }
-        if content.threads != was?.threads || content.earlier != was?.earlier || was?.conversation != nil { renderThreads(content) }
-        if content.subtasks != was?.subtasks || content.closed != was?.closed || was?.conversation != nil { renderSteps(content) }
-        if content.media != was?.media { renderMedia(content) }
+        if content.threads != drawn?.threads || content.earlier != drawn?.earlier { renderThreads(content) }
+        if content.subtasks != drawn?.subtasks || content.closed != drawn?.closed { renderSteps(content) }
+        if content.media != drawn?.media { renderMedia(content) }
     }
 
     /// The outline in the scroll view, or the header over the conversation.

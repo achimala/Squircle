@@ -39,38 +39,73 @@ final class WaitingAnswers {
             let jelly = request.worker ? JellyLook.worker(request.threadID, .needsYou) : .agent(.needsYou)
             view.media([], task: "", documents: model.documents) { _, _ in nil }
             if request.pending.isQuestion {
-                question(view, request, context: context, jelly: jelly, id: id, busy: busy, changed: changed)
+                questions(view, request.pending, context: { _ in context }, jelly: jelly, busy: busy, changed: { if $0 { changed() } }) { [weak self] answers in
+                    guard let self else { return }
+                    Task { await self.model.respond(request, answers: answers) }
+                }
             } else {
-                view.show(context: context, asker: jelly, question: request.pending.title, detail: request.pending.prompt)
-                let choices = WaitingItemView.decisions(request.pending)
-                view.answers(choices.map(\.answer), busy: busy) { [weak self] index in self?.decide(request, choices[index].decision) }
-                view.reply(placeholder: nil, text: "", busy: busy, edit: { _ in }) { _ in }
+                approval(view, request.pending, context: context, jelly: jelly, busy: busy) { [weak self] decision in
+                    guard let self else { return }
+                    Task { await self.model.respond(request, decision: decision) }
+                }
             }
         }
     }
 
+    /// The open conversation's own request, in its request card: `asker`
+    /// heads it, with the question's own header. Answers go to the
+    /// conversation's thread; `changed(advanced)` runs when a step redraws
+    /// it, `advanced` when it moved on to the next question.
+    func configure(_ view: WaitingItemView, open request: PendingRequest, asker: String, jelly: JellyLook, changed: @escaping (Bool) -> Void) {
+        view.itemID = QuestionAnswers.key(request: request.id)
+        let busy = model.sending(request)
+        if request.isQuestion {
+            let context = { (form: QuestionForm) in [asker, form.question["header"].string].compactMap { $0 }.joined(separator: " · ") }
+            questions(view, request, context: context, jelly: jelly, busy: busy, changed: changed) { [weak self] answers in
+                guard let self else { return }
+                Task { await self.model.respond(to: request, answers: answers) }
+            }
+        } else {
+            approval(view, request, context: asker, jelly: jelly, busy: busy) { [weak self] decision in
+                guard let self else { return }
+                Task { await self.model.respond(to: request, decision: decision) }
+            }
+        }
+    }
+
+    /// An approval: its choices as rows, each sending its decision.
+    private func approval(_ view: WaitingItemView, _ request: PendingRequest, context: String, jelly: JellyLook, busy: Bool,
+                          decide: @escaping (String) -> Void) {
+        view.show(context: context, asker: jelly, question: request.title, detail: request.prompt)
+        let choices = WaitingItemView.decisions(request)
+        view.answers(choices.map(\.answer), busy: busy) { index in
+            Theme.selectionHaptic()
+            decide(choices[index].decision)
+        }
+        view.reply(placeholder: nil, text: "", busy: busy, edit: { _ in }) { _ in }
+    }
+
     /// A thread's questions one at a time, from the shared draft; the last
     /// answer sends them all.
-    private func question(_ view: WaitingItemView, _ request: WaitingList.Request, context: String, jelly: JellyLook, id: String,
-                          busy: Bool, changed: @escaping () -> Void) {
-        let form = QuestionForm(questions: request.pending.questions, draft: drafts[id])
-        view.show(context: context, asker: jelly, question: WaitingItemView.title(form), detail: nil)
+    private func questions(_ view: WaitingItemView, _ request: PendingRequest, context: @escaping (QuestionForm) -> String, jelly: JellyLook,
+                           busy: Bool, changed: @escaping (Bool) -> Void, send: @escaping ([String: JSONValue]) -> Void) {
+        let id = QuestionAnswers.key(request: request.id)
+        let form = QuestionForm(questions: request.questions, draft: drafts[id])
+        view.show(context: context(form), asker: jelly, question: WaitingItemView.title(form), detail: nil)
         // Each tap reads the draft as it is then (typing changes it in between).
         let step: ((QuestionForm) -> QuestionForm.Step) -> Void = { [weak self, weak view] make in
             guard let self else { return }
-            let now = QuestionForm(questions: request.pending.questions, draft: drafts[id])
+            let now = QuestionForm(questions: request.questions, draft: drafts[id])
+            Theme.selectionHaptic()
             switch make(now) {
             case .edit(let draft):
-                let advanced = draft.answers.count != now.draft.answers.count
-                Theme.selectionHaptic()
                 drafts[id] = draft
                 if let view, view.itemID == id {
-                    self.question(view, request, context: context, jelly: jelly, id: id, busy: false, changed: changed)
-                    if advanced { changed() }
+                    questions(view, request, context: context, jelly: jelly, busy: busy, changed: changed, send: send)
+                    changed(draft.answers.count != now.draft.answers.count)
                 }
             case .send(let answers):
-                Theme.selectionHaptic()
-                Task { await self.model.respond(request, answers: answers) }
+                send(answers)
             }
         }
         view.form(form, busy: busy) { index in step { index < form.options.count ? $0.choose(index) : $0.confirm() } }
@@ -106,10 +141,6 @@ final class WaitingAnswers {
         Task { await model.answer(question, text: text) }
     }
 
-    private func decide(_ request: WaitingList.Request, _ decision: String) {
-        Theme.selectionHaptic()
-        Task { await model.respond(request, decision: decision) }
-    }
 }
 
 /// The question card, the same in the chat, in Tasks and on Home (and,
@@ -136,6 +167,8 @@ final class WaitingItemView: UIView {
     var itemID: String?
     private let compact: Bool
     private let filled: Bool
+    /// Who asks and the question, above the answers.
+    let head = UIStackView()
     private let context = Theme.label("", Theme.Text.caption, color: .secondaryLabel)
     private let jelly = JellyView(.agent(.needsYou), canvas: .roomy(Theme.Glyph.line))
     private let title = Theme.label("", Theme.Text.body, lines: 0)
@@ -233,10 +266,12 @@ final class WaitingItemView: UIView {
         files.axis = .vertical
         files.isHidden = true
 
-        let stack = UIStackView(arrangedSubviews: [about, title, strip, files, detail, rows, fieldRow, sendRow])
+        [about, title].forEach(head.addArrangedSubview)
+        head.axis = .vertical
+        head.spacing = Theme.Space.tight
+        let stack = UIStackView(arrangedSubviews: [head, strip, files, detail, rows, fieldRow, sendRow])
         stack.axis = .vertical
         stack.spacing = Theme.Space.row
-        stack.setCustomSpacing(Theme.Space.tight, after: about)
         stack.setCustomSpacing(0, after: rows)
         stack.setCustomSpacing(0, after: fieldRow)
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -415,7 +450,7 @@ private final class OptionRow: UIControl {
         let label = Theme.label(text, Theme.Text.body, lines: 0)
         let lines = UIStackView(arrangedSubviews: [label])
         lines.axis = .vertical
-        lines.spacing = 2
+        lines.spacing = Theme.Space.tight
         if let detail = answer.detail, !detail.isEmpty {
             lines.addArrangedSubview(Theme.label(detail, Theme.Text.line, color: .secondaryLabel, lines: 0))
         }
@@ -572,6 +607,9 @@ final class HomeWaitingView: UIView, UIScrollViewDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         let width = bounds.width, line = headingHeight
+        // Nothing waiting: no heading either.
+        heading.isHidden = cards.isEmpty
+        count.isHidden = cards.isEmpty
         let headingWidth = ceil(heading.sizeThatFits(CGSize(width: width, height: line)).width)
         heading.frame = CGRect(x: 0, y: 0, width: headingWidth, height: line)
         count.frame = CGRect(x: headingWidth + Theme.Space.tight, y: 0, width: max(0, width - headingWidth - Theme.Space.tight), height: line)
@@ -585,7 +623,7 @@ final class HomeWaitingView: UIView, UIScrollViewDelegate {
 }
 
 /// One page of Home's deck: the shared card, which opens where it was
-/// asked when tapped beside its answers.
+/// asked when its question is tapped.
 private final class HomeWaitingCard: UIControl {
     let item = WaitingItemView(compact: true)
 
@@ -599,8 +637,8 @@ private final class HomeWaitingCard: UIControl {
             item.leadingAnchor.constraint(equalTo: leadingAnchor),
             item.trailingAnchor.constraint(equalTo: trailingAnchor)
         ])
-        // Taps on the text open it; the answer buttons take their own.
-        item.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+        // Only taps on who asks and the question open it; the answers are theirs.
+        item.head.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
     }
 
     @available(*, unavailable)

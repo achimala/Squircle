@@ -1125,6 +1125,8 @@ final class LiveCell: TimelineCell {
     private var hero: JellyHero?
     private var heroLead: NSLayoutConstraint!
     private static let heroSize = Theme.Glyph.live
+    /// The conversation is in sight: its jelly draws only then.
+    var inSight = true { didSet { renderHero() } }
     /// Where the capsule starts: its mark in the glyph slot (the capsule
     /// leads it by 12) or, with the jelly there instead, its text at
     /// `Space.text` (an empty mark slot puts the text 18 in).
@@ -1166,11 +1168,15 @@ final class LiveCell: TimelineCell {
             }
         }
         hero?.isHidden = jelly == nil
+        renderHero()
         capsule.markSlot = jelly == nil ? nil : 0
         heroLead.constant = jelly == nil ? Self.markLead : Self.jellyLead
         capsule.configure(headline: status.headline, started: status.started)
         accessibilityLabel = status.headline
     }
+
+    /// The jelly draws while it shows and the conversation is in sight.
+    private func renderHero() { hero?.inSight = inSight && hero?.isHidden == false }
 }
 
 /// The live capsule: the app's mark turning while the agent works, the task
