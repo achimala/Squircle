@@ -1,4 +1,3 @@
-#if SQUIRCLE_OVERLAY || DEBUG
 import UIKit
 
 /// The host app as it looks under the overlay, for the message field.
@@ -30,4 +29,3 @@ enum HostCapture {
         model.attach(attachment)
     }
 }
-#endif
