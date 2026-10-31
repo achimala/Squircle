@@ -127,6 +127,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Jump to the latest message, just above the field at the trailing edge.
     private let jump = Theme.glassButton(symbol: "arrow.down", identifier: "thread.jump", accessibilityLabel: "Jump to latest")
     private var jumpShown = false
+    /// Your message sent while you read further up: it lands below, where
+    /// you are left, and the jump button shows in the accent until you go
+    /// down to it.
+    private var sentBelow: String?
     private let clip = UIView()
     private let fade = CAGradientLayer()
     private let table = ConversationTable(frame: .zero, style: .plain)
@@ -433,8 +437,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             guard let self else { return }
             Theme.selectionHaptic()
             pinToBottom = true
+            sentBelow = nil
             scrollToBottom(animated: true)
-            setJumpShown(false)
+            renderJump()
         }, for: .touchUpInside)
         jump.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
         jump.configuration?.contentInsets = .zero
@@ -644,7 +649,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         expanded = []
         composer.text = ""
         pinToBottom = true
+        sentBelow = nil
         jumpShown = false
+        renderJumpTint()
         jump.alpha = 0
         jump.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
         reactivate()
@@ -667,6 +674,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         media.seen([:])
         composer.text = ""
         pinToBottom = true
+        sentBelow = nil
         preparedHeight = 0
         view.setNeedsLayout()
         view.layoutIfNeeded()
@@ -1153,7 +1161,26 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard scrollView.isTracking || scrollView.isDecelerating else { return }
         let bottom = scrollView.contentSize.height + scrollView.contentInset.bottom - scrollView.bounds.height
         pinToBottom = bottom - scrollView.contentOffset.y < 60
-        setJumpShown(bottom - scrollView.contentOffset.y > 320)
+        if pinToBottom { sentBelow = nil }
+        renderJump()
+    }
+
+    /// The jump button shows while you read well above the end, or with
+    /// your own message sent below you; it carries the accent then.
+    private func renderJump() {
+        let bottom = table.contentSize.height + table.contentInset.bottom - table.bounds.height
+        renderJumpTint()
+        setJumpShown(!pinToBottom && (sentBelow != nil || bottom - table.contentOffset.y > 320))
+    }
+
+    private func renderJumpTint() {
+        let color = sentBelow == nil ? UIColor.label : Theme.accent
+        guard jump.tintColor != color else { return }
+        jump.tintColor = color
+        // The glass button draws its symbol in its own colour; this one is
+        // drawn in ours.
+        jump.configuration?.image = UIImage(systemName: "arrow.down")?.withTintColor(color, renderingMode: .alwaysOriginal)
+        jump.accessibilityLabel = sentBelow == nil ? "Jump to latest" : "Sent below, jump to latest"
     }
 
     /// Finds the expanded turn under the top edge and pins its summary there,
@@ -1657,11 +1684,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             Theme.openHaptic()
             // Your pictures show in the conversation from the bytes on hand.
             for (index, image) in field.filter({ $0.capture == nil }).enumerated() { StepImages.set(image.data, for: messageID, index: index) }
-            flyingID = Motion.reduced ? nil : messageID
+            // At the end, the conversation follows your message up out of
+            // the field; reading further up, you stay where you are and it
+            // lands below.
+            let following = pinToBottom
+            flyingID = following && !Motion.reduced ? messageID : nil
+            if !following { sentBelow = messageID }
             composer.text = ""
-            pinToBottom = true
             render()
-            flySend(id: messageID, from: source)
+            if following { flySend(id: messageID, from: source) } else { renderJump() }
             follow(outcome, text: text)
         }
     }
@@ -1776,11 +1807,12 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             }
         }
         guard rows.count >= n, let path = dataSource.indexPath(for: rows[rows.count - n]) else { return }
+        pinToBottom = false
         table.scrollToRow(at: path, at: .middle, animated: false)
+        renderJump()
         // `SQUIRCLE_MEDIA_OPEN=SECONDS`: then opens its first picture, as a tap does.
         guard let delay = ProcessInfo.processInfo.environment["SQUIRCLE_MEDIA_OPEN"].flatMap(Double.init),
               let item = itemsByID[rows[rows.count - n]] else { return }
-        pinToBottom = false
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(delay))
             switch item {
@@ -1804,6 +1836,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard open == "task" else { return }
         try? await Task.sleep(for: .seconds(2))
         (presentedViewController as? StepDetailViewController)?.onOpenTask?()
+    }
+    /// Verification only: scrolls `points` up from where it is, as a finger
+    /// leaving the end would.
+    func debugScrollUp(_ points: CGFloat) {
+        pinToBottom = false
+        table.contentOffset.y = max(-table.contentInset.top, table.contentOffset.y - points)
+        renderJump()
     }
     /// Verification only: types and sends a real message, as the composer does.
     func debugSend(_ text: String) {
