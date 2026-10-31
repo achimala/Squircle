@@ -2170,7 +2170,7 @@ final class TaskStrip: UIControl {
         [surface, parts].forEach { $0.isUserInteractionEnabled = false; $0.translatesAutoresizingMaskIntoConstraints = false }
         addSubview(surface)
         surface.contentView.addSubview(parts)
-        let height = surface.heightAnchor.constraint(equalToConstant: 30)
+        let height = surface.heightAnchor.constraint(equalToConstant: Self.height)
         height.priority = .defaultHigh
         NSLayoutConstraint.activate([
             surface.topAnchor.constraint(equalTo: topAnchor),
@@ -2198,15 +2198,44 @@ final class TaskStrip: UIControl {
 
     private var shown: (texts: [String], crews: [[JellyLook]])?
 
-    /// Counts of open tasks; working and needing you are shown by who is on
-    /// them (up to three of the crew, overlapping), the rest by a dot.
+    private static let height: CGFloat = 30
+    /// A Sprout's body here: its slot (body and sprout) fits the capsule
+    /// with `inset` above and below.
+    private static let inset: CGFloat = 3
+    private static let body = (height - 2 * inset) / (1 + JellyTraits.crown)
+    private static let crewGap: CGFloat = 3
+
+    /// One Sprout in a slot as wide as its body is drawn and as tall as its
+    /// sprout reaches, so the stack spaces bodies evenly and nothing leaves
+    /// the capsule.
+    private static func slot(_ look: JellyLook) -> UIView {
+        let slot = UIView()
+        let jelly = JellyView(look, canvas: JellyCanvas(size: body, side: 0.2, top: 0.42, bottom: 0.14))
+        slot.isUserInteractionEnabled = false
+        [slot, jelly].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        slot.addSubview(jelly)
+        NSLayoutConstraint.activate([
+            slot.widthAnchor.constraint(equalToConstant: (body * CGFloat(look.traits.look.y)).rounded(.up)),
+            slot.heightAnchor.constraint(equalToConstant: body * (1 + JellyTraits.crown)),
+            jelly.widthAnchor.constraint(equalToConstant: body),
+            jelly.heightAnchor.constraint(equalToConstant: body),
+            jelly.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
+            jelly.bottomAnchor.constraint(equalTo: slot.bottomAnchor)
+        ])
+        return slot
+    }
+
+    /// Counts of open tasks; working and needing you are shown by the
+    /// workers on them (up to three Sprouts, overlapping), the rest by a dot.
+    /// With no worker in that state (the app's agent asking, or doing it
+    /// itself) the count gets the dot too: the capsule shows the workers,
+    /// and the agent is never drawn here.
     func configure(_ open: [AppTask]) {
         func count(_ status: AppTask.Status) -> Int { open.filter { $0.status == status }.count }
         func crew(_ state: String, _ mood: JellyLook.Mood) -> [JellyLook] {
             var seen = Set<String>()
             let threads = open.flatMap(\.allThreads).filter { $0.state == state && seen.insert($0.id).inserted }
-            // No worker on it: the app's agent is.
-            return threads.isEmpty ? [.agent(mood)] : threads.prefix(3).map { .worker($0.id, mood) }
+            return threads.prefix(3).map { .worker($0.id, mood) }
         }
         var items: [(Int, String, UIColor, Bool, [JellyLook])] = [
             (count(.needsYou), "needs you", Theme.warning, true, crew("needs-you", .needsYou).prefix(1).map { $0 }),
@@ -2231,15 +2260,10 @@ final class TaskStrip: UIControl {
                 NSLayoutConstraint.activate([dot.widthAnchor.constraint(equalToConstant: 6), dot.heightAnchor.constraint(equalToConstant: 6)])
                 lead = dot
             } else {
-                let group = UIStackView(arrangedSubviews: item.4.map { look in
-                    let jelly = JellyView(look, canvas: JellyCanvas(size: Theme.Glyph.line, side: 0.16, top: 0.42, bottom: 0.14))
-                    jelly.translatesAutoresizingMaskIntoConstraints = false
-                    NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
-                                                 jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line)])
-                    return jelly
-                })
-                // A little crew, shoulder to shoulder.
-                group.spacing = -3
+                let group = UIStackView(arrangedSubviews: item.4.map(Self.slot))
+                // A little crew, shoulder to shoulder: the bodies never overlap.
+                group.spacing = Self.crewGap
+                group.alignment = .bottom
                 lead = group
             }
             let label = Theme.label(texts[index], Theme.Text.caption, color: item.3 ? .label : .secondaryLabel)
