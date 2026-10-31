@@ -965,6 +965,37 @@ final class BuildCell: TimelineCell {
     }
 }
 
+/// A question this thread put to you, where it asked it: a plain card
+/// answered in place, the same as in Waiting on you and Tasks.
+final class QuestionCell: TimelineCell {
+    let item = WaitingItemView()
+    private let card = UIView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        card.backgroundColor = .tertiarySystemFill
+        card.layer.cornerRadius = 18
+        card.layer.cornerCurve = .continuous
+        [card, item].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        contentView.addSubview(card)
+        card.addSubview(item)
+        NSLayoutConstraint.activate([
+            card.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
+            card.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+            card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
+            card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
+            item.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
+            item.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
+            item.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
+            item.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16)
+        ])
+        accessibilityIdentifier = "thread.question"
+    }
+
+    /// Where Waiting on you took you.
+    func mark() { card.layer.markSpot(in: traitCollection) }
+}
+
 /// A finished turn's work, folded into one quiet line.
 final class SummaryCell: TimelineCell {
     /// The line; it pulses when the turn finishes.

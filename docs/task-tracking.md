@@ -92,8 +92,21 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   its note. Answered ones leave at once and the task moves on as the Mac
   says. Home lists everything waiting across apps above the devices
   (plain text, "Waiting on you" and a count, then each app's name and its
-  first two items, then "N more in Tasks"): few-choice answers are buttons
-  right there; tapping an item opens its app's Tasks sheet at its task.
+  first two items, questions before needs-you tasks, then "N more in
+  Tasks"): few-choice answers are buttons right there.
+  **2026-10-31 (user-requested): tapping a question's text opens the
+  conversation that asked it at the spot**: the app's agent, or a worker's
+  thread pushed over it (from Home, it covers the agent and Back goes
+  straight to Home). A tracker question shows in its asking thread as a
+  plain card under that thread's "Asked you" line (or, if that line isn't
+  loaded, at the end of the turn it was asked in, by `asked_at`), answerable
+  in place with the same shared drafts. The conversation waits for T3 to
+  catch up, puts the card low on screen with what led up to it above, holds
+  it there until you scroll, and marks it with a fading accent ring (no
+  crossfade, touches pass). A thread's own question or approval is its
+  newest thing: the jump lands at the end and marks the card over the
+  field. Tapping a question's text in the Tasks sheet's Needs you does the
+  same; a needs-you task still opens Tasks at its task.
   The counts strip and the checklist button open Tasks as before.
 - **Notifications.** A new tracker question, and a worker's question or
   approval ("“title” asks: …"), go out through `src/push` with
@@ -101,6 +114,15 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   that app's Tasks sheet at the task the thread's question is about (Home
   when the payload names no app). Untested on a phone: no APNs key is
   configured yet.
+
+Jump verified 2026-10-31 on a simulator (iOS 27.0, DEBUG build) against
+the live service: LanguageApp's agent question (asked about 50 minutes
+earlier, under the agent's "Asked you" line) from a cold launch, and a
+worker's tracker question, landed at the card with the ring; Back from the
+worker went to Home; answering from the chat card reached the worker. The
+Tasks-sheet tap was built but not driven (the UI runner stalled on the
+sheet). `SQUIRCLE_STRESS=1` with jumps mixed in: violations=0. No question
+older than that was open, so a jump far up a long thread is untested.
 
 Verified 2026-10-26 on a simulator against the live service with
 `SQUIRCLE_DRY_ANSWERS=1` (DEBUG: an answer leaves the list on the phone and

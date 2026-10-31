@@ -66,6 +66,9 @@ final class RequestCard {
         UINotificationFeedbackGenerator().notificationOccurred(.warning)
     }
 
+    /// Where Waiting on you took you.
+    func mark() { view.layer.markSpot(in: view.traitCollection) }
+
     private func button(_ title: String, subtitle: String? = nil, prominent: Bool, leading: Bool = false,
                         action: @escaping () -> Void) -> UIButton {
         let button = Theme.glassButton(title: title, prominent: prominent, identifier: "thread.request.\(title)")

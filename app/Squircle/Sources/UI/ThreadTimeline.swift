@@ -128,6 +128,9 @@ enum ThreadItem: Equatable {
     case build(AppBuild, turn: String)
     /// A simulator the turn used: live now, or its recording.
     case simulator(SimulatorUse)
+    /// A question this thread put to you in the tracker, answerable here,
+    /// where it was asked; `busy` while your answer is on its way.
+    case question(WaitingList.Item, busy: Bool)
     case live(LiveStatus)
 
     var id: String {
@@ -144,8 +147,40 @@ enum ThreadItem: Equatable {
         case .build(let build, let turn): return "build:\(turn):\(build.id)"
         case .changes(_, let turn): return "changes:" + turn
         case .simulator(let use): return "simulator:" + use.id
+        case .question(let item, _): return "ask:" + item.id
         case .live: return "live"
         }
+    }
+
+    /// The thread's open questions put in place: each right after its own
+    /// `task ask` line (the same words, else the last one asked before it),
+    /// or without one in sight, at the end of the turn it was asked in.
+    static func placing(_ questions: [(question: WaitingList.Question, busy: Bool)], in items: [ThreadItem]) -> [ThreadItem] {
+        var items = items
+        for (question, busy) in questions.sorted(by: { ($0.question.askedAt ?? .distantPast) < ($1.question.askedAt ?? .distantPast) }) {
+            let asks = items.indices.compactMap { index -> (index: Int, line: ActionLine)? in
+                guard case .action(let line) = items[index], line.action?.kind == .taskAsk else { return nil }
+                return (index, line)
+            }
+            let asked = question.askedAt
+            var after = asks.first { $0.line.action?.text == question.text }?.index
+            if after == nil, let asked {
+                after = asks.last { $0.line.step.flatMap { date($0.createdAt) }.map { $0 <= asked } ?? false }?.index
+            }
+            if after == nil, let asked {
+                let next = items.indices.first { index in
+                    let head: ChatMessage? = switch items[index] {
+                    case .user(let m), .update(let m), .agentMessage(let m): m
+                    default: nil
+                    }
+                    return head.flatMap { date($0.createdAt) }.map { $0 > asked } ?? false
+                }
+                if let next { after = next - 1 }
+            }
+            let end = items.last?.id == "live" ? items.count - 2 : items.count - 1
+            items.insert(.question(.question(question), busy: busy), at: min(after ?? end, end) + 1)
+        }
+        return items
     }
 
     /// Steps kept in view while a turn is running.
