@@ -15,6 +15,13 @@
 //! sub-tasks takes the roll-up of them and of its own linked work whenever
 //! one of them changes status (`rollup`); an explicit status on it holds
 //! until then. Closing a work item closes its open sub-tasks.
+//!
+//! Needs you (2026-10-31, user: "completely unclear what needs me") is never
+//! stored: a task is kept at a `Stage`, and shows as needs you exactly while
+//! something waits on the user, an open question on it or one of its
+//! sub-tasks, or a linked thread waiting on a question or approval of its
+//! own. Once the last of those is answered or withdrawn it shows its stage
+//! again.
 
 use crate::fsm::core::{BuildID, Disposition, Machine, Reduction, TaskID, ThreadID, Violation};
 use serde::{Deserialize, Serialize};
@@ -26,6 +33,8 @@ use std::collections::BTreeMap;
 pub enum Status {
     Queued,
     InProgress,
+    /// Shown, never set (`Stage`); parsed only to refuse it with the reason.
+    #[value(hide = true)]
     NeedsYou,
     ReadyToTry,
     Done,
@@ -46,7 +55,55 @@ impl Status {
             Self::Dropped => "dropped",
         }
     }
+
+    /// The stage it names; none for needs you, which only something waiting
+    /// on the user makes.
+    pub fn stage(self) -> Option<Stage> {
+        match self {
+            Self::Queued => Some(Stage::Queued),
+            Self::InProgress => Some(Stage::InProgress),
+            Self::NeedsYou => None,
+            Self::ReadyToTry => Some(Stage::ReadyToTry),
+            Self::Done => Some(Stage::Done),
+            Self::Dropped => Some(Stage::Dropped),
+        }
+    }
 }
+
+/// Where a task stands as kept: every status but needs you, which is shown
+/// over it while something waits on the user (`Book::shown`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    Queued,
+    InProgress,
+    ReadyToTry,
+    Done,
+    Dropped,
+}
+
+impl Stage {
+    pub fn open(self) -> bool {
+        !matches!(self, Self::Done | Self::Dropped)
+    }
+}
+
+impl From<Stage> for Status {
+    fn from(stage: Stage) -> Self {
+        match stage {
+            Stage::Queued => Status::Queued,
+            Stage::InProgress => Status::InProgress,
+            Stage::ReadyToTry => Status::ReadyToTry,
+            Stage::Done => Status::Done,
+            Stage::Dropped => Status::Dropped,
+        }
+    }
+}
+
+/// Why needs you can't be set: it only shows while something waits.
+pub const NEEDS_YOU_REFUSED: &str = "needs_you can't be set: a task shows as needs you only while a question or approval waits on the user. \
+Ask with `squircle task ask TASK_ID --thread YOUR_THREAD_ID --question \"...\"` (it clears when they answer, or `task withdraw QUESTION_ID`); \
+for anything else, keep its status and say what it waits on with --note.";
 
 /// Who changed a task: the app's agent, the user on the phone, or Squircle
 /// following its linked workers and builds.
@@ -75,8 +132,8 @@ pub struct Source {
 }
 
 /// A question the agent (or a worker) put to the user on a task, in the
-/// tracker rather than in chat. Asking holds the task at needs you until
-/// every one of its questions is answered or withdrawn.
+/// tracker rather than in chat. The task shows as needs you while one is
+/// open.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Question {
     pub id: String,
@@ -206,28 +263,26 @@ pub struct Signals {
 }
 
 impl Signals {
-    /// The status linked work implies, if any: a question, then work, then
-    /// the newest linked build having succeeded.
-    fn implied(&self) -> Option<Status> {
+    /// The stage linked work implies, if any: work (a worker waiting on the
+    /// user is still at work; that it waits shows as needs you), then the
+    /// newest linked build having succeeded.
+    fn implied(&self) -> Option<Stage> {
         if self
             .workers
             .iter()
-            .any(|w| w.phase == WorkerPhase::NeedsYou)
-        {
-            Some(Status::NeedsYou)
-        } else if self.workers.iter().any(|w| w.phase == WorkerPhase::Working)
+            .any(|w| matches!(w.phase, WorkerPhase::Working | WorkerPhase::NeedsYou))
             || self
                 .builds
                 .iter()
                 .any(|b| matches!(b.phase, BuildPhase::Queued | BuildPhase::Running))
         {
-            Some(Status::InProgress)
+            Some(Stage::InProgress)
         } else if self
             .builds
             .last()
             .is_some_and(|b| b.phase == BuildPhase::Succeeded)
         {
-            Some(Status::ReadyToTry)
+            Some(Stage::ReadyToTry)
         } else {
             None
         }
@@ -235,32 +290,31 @@ impl Signals {
 }
 
 /// What a work item's sub-tasks and its own linked work (`own`) add up to:
-/// a question, then work (also some finished and some still queued), then
-/// queued, then something to try. All closed: done when the user closed the
-/// last one (`by`), ready to try otherwise, dropped if all were dropped.
-fn rollup(statuses: &[Status], own: Option<Status>, by: By) -> Option<Status> {
-    let all: Vec<Status> = statuses.iter().copied().chain(own).collect();
-    let any = |s: Status| all.contains(&s);
+/// work (also some finished and some still queued), then queued, then
+/// something to try. All closed: done when the user closed the last one
+/// (`by`), ready to try otherwise, dropped if all were dropped. (Whether any
+/// of them waits on the user is shown, not rolled up: `Book::shown`.)
+fn rollup(stages: &[Stage], own: Option<Stage>, by: By) -> Option<Stage> {
+    let all: Vec<Stage> = stages.iter().copied().chain(own).collect();
+    let any = |s: Stage| all.contains(&s);
     if all.is_empty() {
         None
-    } else if any(Status::NeedsYou) {
-        Some(Status::NeedsYou)
-    } else if any(Status::InProgress)
-        || (any(Status::Queued) && (any(Status::Done) || any(Status::ReadyToTry)))
+    } else if any(Stage::InProgress)
+        || (any(Stage::Queued) && (any(Stage::Done) || any(Stage::ReadyToTry)))
     {
-        Some(Status::InProgress)
-    } else if any(Status::Queued) {
-        Some(Status::Queued)
-    } else if any(Status::ReadyToTry) {
-        Some(Status::ReadyToTry)
-    } else if any(Status::Done) {
+        Some(Stage::InProgress)
+    } else if any(Stage::Queued) {
+        Some(Stage::Queued)
+    } else if any(Stage::ReadyToTry) {
+        Some(Stage::ReadyToTry)
+    } else if any(Stage::Done) {
         Some(if by == By::User {
-            Status::Done
+            Stage::Done
         } else {
-            Status::ReadyToTry
+            Stage::ReadyToTry
         })
     } else {
-        Some(Status::Dropped)
+        Some(Stage::Dropped)
     }
 }
 
@@ -416,8 +470,8 @@ impl Observation {
         (next, news)
     }
 
-    /// The status the last known state of linked work implies.
-    fn implied(&self, threads: &[String], builds: &[String]) -> Option<Status> {
+    /// The stage the last known state of linked work implies.
+    fn implied(&self, threads: &[String], builds: &[String]) -> Option<Stage> {
         Signals {
             revision: None,
             workers: threads
@@ -453,7 +507,7 @@ struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
     ask: String,
-    status: Status,
+    status: Stage,
     note: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<Source>,
@@ -470,10 +524,14 @@ struct Record {
     history: Vec<Change>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     questions: Vec<Question>,
+    /// Read from a file that kept needs you as its status, and not saved since.
+    #[serde(skip)]
+    migrated: bool,
 }
 
 /// A record as read from disk, including files from before revisions
-/// (2026-10-15), which kept `archived_at` and a `seen` signature instead.
+/// (2026-10-15), which kept `archived_at` and a `seen` signature instead,
+/// and from before needs you was derived (2026-10-31), which could keep it.
 #[derive(Deserialize)]
 struct StoredRecord {
     id: String,
@@ -522,12 +580,33 @@ impl From<StoredRecord> for Record {
                 .next(&s.threads, &s.builds, &Signals::legacy(&s.seen))
                 .0
         });
+        let mut history = s.history;
+        // Needs you as a kept status: the stage linked work implies, else the
+        // last other one it had, else at work. Whatever really waits on the
+        // user still shows as needs you over it.
+        let (status, migrated) = match s.status.stage() {
+            Some(stage) => (stage, false),
+            None => {
+                let stage = observed
+                    .implied(&s.threads, &s.builds)
+                    .or_else(|| history.iter().rev().find_map(|c| c.status.stage()))
+                    .filter(|stage| stage.open())
+                    .unwrap_or(Stage::InProgress);
+                history.push(Change {
+                    at: s.updated_at,
+                    status: stage.into(),
+                    by: By::Auto,
+                    note: s.note.clone(),
+                });
+                (stage, true)
+            }
+        };
         Record {
             id: s.id,
             project_id: s.project_id,
             parent: s.parent,
             ask: s.ask,
-            status: s.status,
+            status,
             note: s.note,
             source: s.source,
             replaced_by: s.replaced_by,
@@ -539,21 +618,23 @@ impl From<StoredRecord> for Record {
             placement,
             revision: s.revision,
             observed,
-            history: s.history,
+            history,
             questions: s.questions,
+            migrated,
         }
     }
 }
 
 impl Record {
-    fn publish(&self) -> Task {
+    /// As readers see it, showing `status` (`Book::shown`).
+    fn publish(&self, status: Status) -> Task {
         Task {
             id: self.id.clone(),
             project_id: self.project_id.clone(),
             parent_id: self.parent.clone(),
             subtasks: vec![],
             ask: self.ask.clone(),
-            status: self.status,
+            status,
             note: self.note.clone(),
             source: self.source.clone(),
             replaced_by: self.replaced_by.clone(),
@@ -577,6 +658,20 @@ impl Record {
         self.questions.iter().any(Question::open)
     }
 
+    /// Whether something of its own waits on the user: an open question, or
+    /// a linked thread last seen waiting on a question or approval. A closed
+    /// task's threads wait on nothing of it.
+    fn waiting(&self) -> bool {
+        self.status.open()
+            && (self.asking()
+                || self.threads.iter().any(|t| {
+                    self.observed
+                        .workers
+                        .get(t)
+                        .is_some_and(|w| w.phase == WorkerPhase::NeedsYou)
+                }))
+    }
+
     /// Any change to the task itself: it counts as touched and leaves History.
     fn touch(&mut self, now: u64) {
         self.updated_at = now;
@@ -584,14 +679,8 @@ impl Record {
         self.revision += 1;
     }
 
-    /// While a question is open the task stays at needs you; closing it
-    /// withdraws its open questions.
-    fn set(&mut self, status: Status, by: By, note: Option<&str>, now: u64) {
-        let status = if self.asking() && status.open() {
-            Status::NeedsYou
-        } else {
-            status
-        };
+    /// Closing it withdraws its open questions.
+    fn set(&mut self, status: Stage, by: By, note: Option<&str>, now: u64) {
         let note = note.map(str::trim);
         if !status.open() {
             for question in self.questions.iter_mut().filter(|q| q.open()) {
@@ -608,7 +697,7 @@ impl Record {
         self.touch(now);
         self.history.push(Change {
             at: now,
-            status,
+            status: status.into(),
             by,
             note: self.note.clone(),
         });
@@ -628,7 +717,7 @@ impl Record {
     /// worker working or asking again), not old work finishing; new work also
     /// brings a task back from History. A replaced one never reopens: its
     /// workers go on with the ask that replaced it. Returns whether anything changed.
-    fn follow(&mut self, signals: &Signals, subtasks: &[Status], now: u64) -> bool {
+    fn follow(&mut self, signals: &Signals, subtasks: &[Stage], now: u64) -> bool {
         let (next, news) = self.observed.next(&self.threads, &self.builds, signals);
         if next == self.observed {
             return false;
@@ -714,11 +803,33 @@ impl Book {
     }
 
     fn publish(&self, record: &Record) -> Task {
-        let mut task = record.publish();
+        let mut task = self.flat(record);
         let mut subtasks: Vec<&Record> = self.children(&record.id).collect();
         subtasks.sort_by(|a, b| a.order.total_cmp(&b.order));
-        task.subtasks = subtasks.into_iter().map(Record::publish).collect();
+        task.subtasks = subtasks.into_iter().map(|t| self.flat(t)).collect();
         task
+    }
+
+    /// A task without its sub-tasks listed.
+    fn flat(&self, record: &Record) -> Task {
+        record.publish(self.shown(record))
+    }
+
+    /// The status a task shows: needs you while it or one of its sub-tasks
+    /// waits on the user, otherwise its stage.
+    fn shown(&self, record: &Record) -> Status {
+        if record.waiting()
+            || (record.status.open() && self.children(&record.id).any(Record::waiting))
+        {
+            Status::NeedsYou
+        } else {
+            record.status.into()
+        }
+    }
+
+    /// Whether it was read with needs you kept as its status and not saved since.
+    pub fn migrated(&self) -> bool {
+        self.tasks.values().any(|t| t.migrated)
     }
 
     fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Record> + 'a {
@@ -727,7 +838,7 @@ impl Book {
             .filter(move |t| t.parent.as_deref() == Some(id))
     }
 
-    fn statuses(&self, id: &str) -> Vec<Status> {
+    fn statuses(&self, id: &str) -> Vec<Stage> {
         self.children(id).map(|t| t.status).collect()
     }
 
@@ -744,7 +855,7 @@ impl Book {
     pub fn question(&self, id: &str) -> Option<(Task, Question)> {
         self.tasks.values().find_map(|t| {
             let q = t.questions.iter().find(|q| q.id == id)?;
-            Some((t.publish(), q.clone()))
+            Some((self.flat(t), q.clone()))
         })
     }
 
@@ -756,7 +867,7 @@ impl Book {
                 t.questions
                     .iter()
                     .filter(|q| q.open())
-                    .map(|q| (t.publish(), q.clone()))
+                    .map(|q| (self.flat(t), q.clone()))
             })
             .collect()
     }
@@ -769,14 +880,14 @@ impl Book {
                 t.questions
                     .iter()
                     .filter(|q| matches!(q.state, QuestionState::Answered { owed: true, .. }))
-                    .map(|q| (t.publish(), q.clone()))
+                    .map(|q| (self.flat(t), q.clone()))
             })
             .collect()
     }
 
     /// Every task, sub-tasks as their own entries.
     pub fn all(&self) -> Vec<Task> {
-        self.tasks.values().map(Record::publish).collect()
+        self.tasks.values().map(|t| self.flat(t)).collect()
     }
 
     /// When the next task ages into History if nothing touches it.
@@ -797,7 +908,7 @@ impl Book {
                     .map_or(t.placement, |p| p.placement);
                 t.watched(placement)
             })
-            .map(Record::publish)
+            .map(|t| self.flat(t))
             .collect()
     }
 
@@ -827,7 +938,7 @@ impl Book {
 
     /// A work item takes the roll-up of its sub-tasks and its own linked
     /// work. A closed one reopens only when a sub-task has work again
-    /// (queued, in progress or needing you); old work finishing leaves it
+    /// (queued or in progress); old work finishing leaves it
     /// closed, and a replaced one stays closed.
     fn rederive(&mut self, id: &str, by: By, now: u64) {
         let statuses = self.statuses(id);
@@ -836,7 +947,7 @@ impl Book {
         };
         let active = statuses
             .iter()
-            .any(|s| matches!(s, Status::Queued | Status::InProgress | Status::NeedsYou));
+            .any(|s| matches!(s, Stage::Queued | Stage::InProgress));
         if !item.status.open() && (!active || item.replaced_by.is_some()) {
             return;
         }
@@ -868,7 +979,7 @@ impl Book {
     }
 
     /// Closing a work item closes its open sub-tasks the same way.
-    fn cascade(&mut self, id: &str, status: Status, by: By, now: u64) {
+    fn cascade(&mut self, id: &str, status: Stage, by: By, now: u64) {
         let open: Vec<String> = self
             .children(id)
             .filter(|t| t.status.open())
@@ -946,8 +1057,9 @@ pub enum Event {
     },
     /// Untouched tasks move into History.
     AgeDue { now: u64 },
-    /// A question to the user on task `id`, from `thread`; it holds the task
-    /// at needs you (from `observed`, like an explicit status) until answered.
+    /// A question to the user on task `id`, from `thread`; the task shows
+    /// as needs you until it is answered or withdrawn. Asking about a closed
+    /// task reopens it: it isn't finished while the user still has to say.
     Ask {
         id: String,
         question: String,
@@ -955,7 +1067,6 @@ pub enum Event {
         options: Vec<String>,
         media: Vec<String>,
         thread: String,
-        observed: Option<Signals>,
         now: u64,
     },
     /// The user's answer to an open question.
@@ -968,6 +1079,9 @@ pub enum Event {
     Withdraw { question: String, now: u64 },
     /// An answered question's answer is queued for its asker.
     Delivered { question: String },
+    /// Saves, once, what was read from a file that kept needs you as a
+    /// status (`Book::migrated`), and rolls up the work items among them.
+    Migrate { now: u64 },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1005,9 +1119,9 @@ fn link(
     changed(book)
 }
 
-/// Answers or withdraws an open question. Once none is left open, a task
-/// held at needs you by its questions goes on (in progress): the asker has
-/// what it waited for.
+/// Answers or withdraws an open question; the task shows its stage again
+/// once nothing else waits on the user. An answer sets an open task in
+/// progress: the asker has what it waited for and goes on.
 fn close_question(
     mut book: Book,
     question: &str,
@@ -1049,11 +1163,12 @@ fn close_question(
         };
         return Reduction::same(book, Disposition::Rejected(reason.into()));
     }
+    let answered = matches!(state, QuestionState::Answered { .. });
     entry.state = state;
     let (id, before) = (task.id.clone(), task.status);
     task.touch(now);
-    if !task.asking() && task.status == Status::NeedsYou {
-        task.set(Status::InProgress, by, None, now);
+    if answered && task.status.open() {
+        task.set(Stage::InProgress, by, None, now);
     }
     let after = task.status;
     book.bubble(&id, after != before, by, now);
@@ -1115,7 +1230,16 @@ impl Machine for M17 {
                     Some(Some((project, None))) => project,
                 };
                 let order = book.next_order(&project, parent.as_deref());
-                let status = status.unwrap_or(Status::Queued);
+                let status = match status.map(Status::stage) {
+                    None => Stage::Queued,
+                    Some(Some(stage)) => stage,
+                    Some(None) => {
+                        return Reduction::same(
+                            book,
+                            Disposition::Rejected(NEEDS_YOU_REFUSED.into()),
+                        );
+                    }
+                };
                 let task = Record {
                     id: id.into(),
                     project_id: project,
@@ -1137,11 +1261,12 @@ impl Machine for M17 {
                     observed: Observation::default(),
                     history: vec![Change {
                         at: now,
-                        status,
+                        status: status.into(),
                         by,
                         note: String::new(),
                     }],
                     questions: vec![],
+                    migrated: false,
                 };
                 let id = task.id.clone();
                 book.tasks.insert(id.clone(), task);
@@ -1158,18 +1283,16 @@ impl Machine for M17 {
                 let Some(current) = book.tasks.get(&id) else {
                     return missing(book, &id);
                 };
-                if current.asking()
-                    && update
-                        .status
-                        .is_some_and(|s| s.open() && s != Status::NeedsYou)
-                {
-                    return Reduction::same(
-                        book,
-                        Disposition::Rejected(format!(
-                            "{id} waits on a question to the user; it stays needs you until they answer (or it is withdrawn)"
-                        )),
-                    );
-                }
+                let stage = match update.status.map(Status::stage) {
+                    None => None,
+                    Some(Some(stage)) => Some(stage),
+                    Some(None) => {
+                        return Reduction::same(
+                            book,
+                            Disposition::Rejected(NEEDS_YOU_REFUSED.into()),
+                        );
+                    }
+                };
                 let (project, old_parent, before) = (
                     current.project_id.clone(),
                     current.parent.clone(),
@@ -1230,12 +1353,12 @@ impl Machine for M17 {
                 }
                 let (status, note) = match &replaced_by {
                     Some(_) => (
-                        Some(Status::Dropped),
+                        Some(Stage::Dropped),
                         update.note.as_deref().or(Some("Replaced by a later ask")),
                     ),
-                    None => (update.status, update.note.as_deref()),
+                    None => (stage, update.note.as_deref()),
                 };
-                if replaced_by.is_some() || status.is_some_and(Status::open) {
+                if replaced_by.is_some() || status.is_some_and(Stage::open) {
                     task.replaced_by = replaced_by;
                 }
                 match status {
@@ -1321,7 +1444,6 @@ impl Machine for M17 {
                 options,
                 media,
                 thread,
-                observed,
                 now,
             } => {
                 let text = text.trim();
@@ -1350,9 +1472,9 @@ impl Machine for M17 {
                     state: QuestionState::Open,
                 });
                 task.touch(now);
-                task.set(Status::NeedsYou, By::Agent, None, now);
-                if let Some(observed) = observed {
-                    task.hold(&observed);
+                if !task.status.open() {
+                    task.replaced_by = None;
+                    task.set(Stage::InProgress, By::Agent, None, now);
                 }
                 let after = task.status;
                 book.bubble(&id, after != before, By::Agent, now);
@@ -1403,6 +1525,27 @@ impl Machine for M17 {
                     None => Reduction::same(book, Disposition::Unchanged),
                 }
             }
+            Event::Migrate { now } => {
+                let migrated: Vec<String> = book
+                    .tasks
+                    .values_mut()
+                    .filter(|t| t.migrated)
+                    .map(|t| {
+                        t.migrated = false;
+                        t.revision += 1;
+                        t.id.clone()
+                    })
+                    .collect();
+                if migrated.is_empty() {
+                    return Reduction::same(book, Disposition::Unchanged);
+                }
+                for id in &migrated {
+                    if book.children(id).next().is_some() {
+                        book.rederive(id, By::Auto, now);
+                    }
+                }
+                changed(book)
+            }
             Event::AgeDue { now } => {
                 let mut any = false;
                 for task in book.tasks.values_mut().filter(|t| t.ages(now)) {
@@ -1434,18 +1577,17 @@ impl Machine for M17 {
             if task
                 .history
                 .last()
-                .is_some_and(|change| change.status != task.status)
+                .is_some_and(|change| change.status != Status::from(task.status))
             {
                 found.push(Violation(format!(
                     "task {} status differs from its last change",
                     task.id
                 )));
             }
-            if task.asking() && task.status != Status::NeedsYou {
+            if task.asking() && !task.status.open() {
                 found.push(Violation(format!(
-                    "task {} has an open question but is {}",
-                    task.id,
-                    task.status.label()
+                    "task {} has an open question but is closed",
+                    task.id
                 )));
             }
             if let Some(parent) = &task.parent {
@@ -1672,7 +1814,6 @@ mod tests {
                     options: vec!["Top".into(), "Bottom".into()],
                     media: Vec::new(),
                     thread: "agent".into(),
-                    observed: None,
                     now,
                 },
             )
@@ -1714,5 +1855,88 @@ mod tests {
             task.questions[1].state,
             QuestionState::Withdrawn { .. }
         ));
+    }
+
+    #[test]
+    fn needs_you_shows_only_while_something_waits_and_is_never_set() {
+        let (book, id) = book();
+        let refused = M17::reduce(
+            book.clone(),
+            Event::Edit {
+                id: id.clone(),
+                update: Update {
+                    status: Some(Status::NeedsYou),
+                    ..Default::default()
+                },
+                by: By::Agent,
+                observed: None,
+                now: 1,
+            },
+        );
+        assert!(matches!(refused.disposition, Disposition::Rejected(_)));
+        // A sub-task's question shows on it and its work item, and leaves with
+        // the question.
+        let sub = TaskID::fresh();
+        let book = step(
+            book,
+            Event::Add {
+                id: sub.clone(),
+                project: "p".into(),
+                ask: "Fold from the bottom".into(),
+                status: None,
+                note: None,
+                by: By::Agent,
+                source: None,
+                threads: vec![],
+                parent: Some(id.clone()),
+                now: 2,
+            },
+        );
+        let book = step(
+            book,
+            Event::Ask {
+                id: sub.to_string(),
+                question: "q".into(),
+                text: "Which edge?".into(),
+                options: vec![],
+                media: vec![],
+                thread: "agent".into(),
+                now: 3,
+            },
+        );
+        assert_eq!(book.get(&id).unwrap().status, Status::NeedsYou);
+        let book = step(
+            book,
+            Event::Withdraw {
+                question: "q".into(),
+                now: 4,
+            },
+        );
+        assert_eq!(book.get(&id).unwrap().status, Status::Queued);
+        // A linked worker waiting on its own question shows, then its finish.
+        let (book, _) = observe(book, &id, worker("1", WorkerPhase::NeedsYou), 5);
+        assert_eq!(book.get(&id).unwrap().status, Status::NeedsYou);
+        let (book, _) = observe(book, &id, worker("1", WorkerPhase::Done), 6);
+        assert_ne!(book.get(&id).unwrap().status, Status::NeedsYou);
+    }
+
+    #[test]
+    fn a_kept_needs_you_reads_back_as_the_stage_before_it() {
+        let json = serde_json::json!({"tasks": {"t": {
+            "id": "t", "project_id": "p", "ask": "Stack the sims", "status": "needs_you",
+            "note": "pick a layout", "threads": [], "builds": [], "order": 1.0,
+            "created_at": 1, "updated_at": 2, "revision": 3,
+            "history": [
+                {"at": 1, "status": "ready_to_try", "by": "auto"},
+                {"at": 2, "status": "needs_you", "by": "agent"}
+            ]
+        }}});
+        let book: Book = serde_json::from_value(json).unwrap();
+        assert!(book.migrated());
+        assert_eq!(book.get("t").unwrap().status, Status::ReadyToTry);
+        let book = step(book, Event::Migrate { now: 9 });
+        assert!(!book.migrated());
+        let saved: Book = serde_json::from_value(serde_json::to_value(&book).unwrap()).unwrap();
+        assert!(!saved.migrated());
     }
 }
