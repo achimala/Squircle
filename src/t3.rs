@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
 
 /// `<data dir>/t3.json`: where T3 is and the service's paired session.
@@ -252,16 +252,7 @@ impl T3 {
         ws.query_pairs_mut()
             .append_pair("wsTicket", ticket)
             .append_pair("orchestrationProtocol", ORCHESTRATION_PROTOCOL);
-        let host = ws.host_str().context("T3's URL has no host")?.to_string();
-        let port = ws.port_or_known_default().context("T3's URL has no port")?;
-        let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
-            .await
-            .context("Cannot reach T3's WebSocket")?;
-        keepalive(&tcp)?;
-        let (socket, _) = tokio_tungstenite::client_async(ws.as_str(), tcp)
-            .await
-            .context("Cannot open T3's WebSocket")?;
-        let (sink, stream) = socket.split();
+        let (sink, stream) = websocket(&ws, None).await?.split();
         Ok(Self::start(config, sink, stream))
     }
 
@@ -419,6 +410,25 @@ fn interrupt(id: &str) -> Message {
     Message::text(json!({"_tag":"Interrupt","requestId":id}).to_string())
 }
 
+/// Opens T3's socket at `ws`: TCP with keepalive, TLS for `wss:` (the
+/// system's web roots unless `tls` says otherwise), then the WebSocket
+/// handshake.
+async fn websocket(
+    ws: &url::Url,
+    tls: Option<tokio_tungstenite::Connector>,
+) -> Result<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>> {
+    let host = ws.host_str().context("T3's URL has no host")?;
+    let port = ws.port_or_known_default().context("T3's URL has no port")?;
+    let tcp = tokio::net::TcpStream::connect((host, port))
+        .await
+        .context("Cannot reach T3's WebSocket")?;
+    keepalive(&tcp)?;
+    let (socket, _) = tokio_tungstenite::client_async_tls_with_config(ws.as_str(), tcp, None, tls)
+        .await
+        .context("Cannot open T3's WebSocket")?;
+    Ok(socket)
+}
+
 /// Keepalive probes on `tcp` (see [`KEEPALIVE`]): after that long without
 /// traffic, a probe every 10 s, and the socket fails after 3 unanswered.
 fn keepalive(tcp: &tokio::net::TcpStream) -> Result<()> {
@@ -451,8 +461,10 @@ fn keepalive(tcp: &tokio::net::TcpStream) -> Result<()> {
     Ok(())
 }
 
-/// The connection's whole lifetime: reads and writes in one task, so a
-/// failure of either half or cancellation ends all of it.
+/// The connection's whole lifetime: one task reads, registers and queues
+/// frames; a writer beside it sends them. A write the peer doesn't take
+/// blocks neither reads nor cancellation: either half ending, or a stop,
+/// ends all of it and drops the socket with any write still pending.
 async fn run<W, R, E>(
     link: Arc<Link>,
     mut sink: W,
@@ -464,36 +476,48 @@ async fn run<W, R, E>(
     R: Stream<Item = Result<Message, E>> + Unpin,
 {
     let mut open = Open::default();
-    loop {
-        tokio::select! {
-            _ = link.stop.cancelled() => {
-                let _ = sink.send(Message::Close(None)).await;
-                break;
+    let (frames, mut sending) = mpsc::channel::<Message>(OUTBOX);
+    let writer = async {
+        while let Some(message) = sending.recv().await {
+            if sink.send(message).await.is_err() {
+                return;
             }
-            Some(outbound) = outgoing.recv() => {
-                let Some(message) = open.take(outbound) else { continue };
-                if sink.send(message).await.is_err() {
-                    break;
+        }
+    };
+    let reader = async {
+        loop {
+            tokio::select! {
+                Some(outbound) = outgoing.recv() => {
+                    let Some(message) = open.take(outbound) else { continue };
+                    // Full: the writer is stuck, so the connection closes.
+                    if frames.try_send(message).is_err() {
+                        return;
+                    }
                 }
-            }
-            incoming = stream.next() => {
-                let Some(Ok(message)) = incoming else { break };
-                let text = match message {
-                    Message::Text(text) => text.to_string(),
-                    Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                    Message::Close(_) => break,
-                    _ => continue,
-                };
-                let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
-                let frames = match frame {
-                    Value::Array(items) => items,
-                    other => vec![other],
-                };
-                for frame in frames {
-                    open.receive(&frame, &link);
+                incoming = stream.next() => {
+                    let Some(Ok(message)) = incoming else { return };
+                    let text = match message {
+                        Message::Text(text) => text.to_string(),
+                        Message::Binary(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                        Message::Close(_) => return,
+                        _ => continue,
+                    };
+                    let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
+                    let frames = match frame {
+                        Value::Array(items) => items,
+                        other => vec![other],
+                    };
+                    for frame in frames {
+                        open.receive(&frame, &link);
+                    }
                 }
             }
         }
+    };
+    tokio::select! {
+        () = link.stop.cancelled() => {}
+        () = writer => {}
+        () = reader => {}
     }
     link.stop.cancel();
     // Close the queue first: a call that registers after the drain below
@@ -729,5 +753,69 @@ mod tests {
         client.link.send(Outbound::Count(reply)).unwrap();
         assert_eq!(count.await.unwrap(), (0, 0));
         drop(server);
+    }
+
+    #[tokio::test]
+    async fn a_stop_interrupts_a_write_the_peer_never_takes() {
+        let sink = Box::pin(futures_util::sink::unfold((), |_, _: Message| {
+            futures_util::future::pending::<Result<(), std::io::Error>>()
+        }));
+        let stream = futures_util::stream::pending::<Result<Message, std::io::Error>>();
+        let client = T3::start(config(), sink, stream);
+        let mut call = Box::pin(client.call("a", json!({})));
+        assert!(futures_util::poll!(call.as_mut()).is_pending());
+        client.link.stop.cancel();
+        client.closed().await;
+        assert!(call.await.is_err());
+    }
+
+    /// A test CA and a `localhost` certificate it signed.
+    const TEST_CA: &str = "-----BEGIN CERTIFICATE-----\nMIIBnTCCAUOgAwIBAgIUID4daZ54NNvMcd9chfOy0G1qgacwCgYIKoZIzj0EAwIw\nGzEZMBcGA1UEAwwQU3F1aXJjbGUgdGVzdCBDQTAgFw0yNjEwMzEwNzUyNDNaGA8y\nMTI2MTAwNzA3NTI0M1owGzEZMBcGA1UEAwwQU3F1aXJjbGUgdGVzdCBDQTBZMBMG\nByqGSM49AgEGCCqGSM49AwEHA0IABOdSuZocLIRwyzUS9W5IksYUFcWTuxyhO9jX\njXCSHADAnPwRXQSzdDc/06RSR4+eDeEsovCrIBrxJkdueGzummGjYzBhMB0GA1Ud\nDgQWBBRJXLOZRgGc8eSRHQhLd64zR4amBTAfBgNVHSMEGDAWgBRJXLOZRgGc8eSR\nHQhLd64zR4amBTAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwICBDAKBggq\nhkjOPQQDAgNIADBFAiA3MMc+Vpygz+iyYMS1VW+P56KFb/YI6YlpEGMhZ2BKNAIh\nAKa3fyhWJbytkNeEk20f/etzWkHc0hInJqjt8A9IG1Oi\n-----END CERTIFICATE-----";
+    const TEST_CERT: &str = "-----BEGIN CERTIFICATE-----\nMIIBrjCCAVSgAwIBAgIURgCQe0eyHyaHBBIKLXkbp/OReO8wCgYIKoZIzj0EAwIw\nGzEZMBcGA1UEAwwQU3F1aXJjbGUgdGVzdCBDQTAgFw0yNjEwMzEwNzUyNDNaGA8y\nMTI2MTAwNzA3NTI0M1owFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0C\nAQYIKoZIzj0DAQcDQgAEtFz7ugULyNMhsG/TUQ23/65kHUzk4as9I8VakrRJbhDH\nAoOPzlIj5NBG2S6Jz+wT340i8scCBwGnCvRk9KpQFKN7MHkwFAYDVR0RBA0wC4IJ\nbG9jYWxob3N0MAwGA1UdEwEB/wQCMAAwEwYDVR0lBAwwCgYIKwYBBQUHAwEwHQYD\nVR0OBBYEFFtJkDGe05b4ideii+0FbT+xt1fZMB8GA1UdIwQYMBaAFElcs5lGAZzx\n5JEdCEt3rjNHhqYFMAoGCCqGSM49BAMCA0gAMEUCIQCF3YVifG6GXMWqiaEpUFoe\nvofpfnRJrUc/9Z01SIqjpwIgYZC98dYff6rcEVEBnrV+BvyYUENX8tLQCA8I89EF\ncdE=\n-----END CERTIFICATE-----";
+    const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyGzCU+bN1xHimV6i\nqdMFxCt50dt2FgxM/+qYN3oobg6hRANCAAS0XPu6BQvI0yGwb9NRDbf/rmQdTOTh\nqz0jxVqStEluEMcCg4/OUiPk0EbZLonP7BPfjSLyxwIHAacK9GT0qlAU\n-----END PRIVATE KEY-----";
+
+    #[tokio::test]
+    async fn a_wss_url_opens_over_tls() {
+        use tokio_rustls::rustls::{
+            self,
+            pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+        };
+        let certs = vec![CertificateDer::from_pem_slice(TEST_CERT.as_bytes()).unwrap()];
+        let key = PrivateKeyDer::from_pem_slice(TEST_KEY.as_bytes()).unwrap();
+        let server = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = acceptor.accept(tcp).await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tls).await.unwrap();
+            let echo = socket.next().await.unwrap().unwrap();
+            socket.send(echo).await.unwrap();
+        });
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_slice(TEST_CA.as_bytes()).unwrap())
+            .unwrap();
+        let client = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let url = url::Url::parse(&format!("wss://localhost:{port}/ws")).unwrap();
+        let mut socket = websocket(
+            &url,
+            Some(tokio_tungstenite::Connector::Rustls(Arc::new(client))),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(socket.get_ref(), MaybeTlsStream::Rustls(_)));
+        socket.send(Message::text("hello")).await.unwrap();
+        assert_eq!(
+            socket.next().await.unwrap().unwrap(),
+            Message::text("hello")
+        );
+        peer.await.unwrap();
     }
 }

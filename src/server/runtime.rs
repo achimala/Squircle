@@ -114,8 +114,9 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
             Exit::Stop
         }
     };
-    let shutdown = state.clone();
-    crate::serving::serve(listener, router(state), signal, |exit| async move {
+    let (shutdown, closing) = (state.clone(), state.closing.clone());
+    let app = router(state);
+    crate::serving::serve(listener, app, signal, closing, |exit| async move {
         eprintln!(
             "{}",
             match exit {

@@ -17,7 +17,9 @@ pub enum Execution {
     Idle,
     /// A run is preparing, queued, starting, running or waiting on the user.
     Running,
-    /// A run status this service does not know; possibly running.
+    /// A run status this service does not know, or none at all, or a
+    /// projection that doesn't say whether a session is attached;
+    /// possibly running.
     Unknown,
 }
 
@@ -62,11 +64,10 @@ impl ThreadObservation {
         let waiting = !row["pendingRuntimeRequest"].is_null() || status == Some("waiting");
         let execution = match status {
             Some("preparing" | "queued" | "starting" | "running" | "waiting") => Execution::Running,
-            None
-            | Some("idle" | "completed" | "interrupted" | "failed" | "cancelled" | "rolled_back") => {
+            Some("idle" | "completed" | "interrupted" | "failed" | "cancelled" | "rolled_back") => {
                 Execution::Stopped
             }
-            Some(_) => Execution::Unknown,
+            _ => Execution::Unknown,
         };
         ThreadObservation {
             turn: row["latestRunId"].as_str().map(str::to_string),
@@ -79,10 +80,14 @@ impl ThreadObservation {
 
     /// Refines a shell observation with the thread's projection: a thread
     /// with no run in progress is `Idle` while a provider session is still
-    /// attached to it.
+    /// attached to it, and `Unknown` if the projection doesn't say.
     pub fn with_sessions(mut self, projection: &Value) -> Self {
-        if self.execution == Execution::Stopped && live_session(projection).is_some() {
-            self.execution = Execution::Idle;
+        if self.execution == Execution::Stopped {
+            self.execution = match live_session(projection) {
+                Ok(None) => Execution::Stopped,
+                Ok(Some(_)) => Execution::Idle,
+                Err(_) => Execution::Unknown,
+            };
         }
         self
     }
@@ -112,11 +117,20 @@ impl ThreadObservation {
     }
 }
 
-/// A provider session T3 still has attached to a thread, from its projection.
-pub fn live_session(projection: &Value) -> Option<&str> {
-    projection["providerSessions"]
-        .as_array()?
+/// A provider session T3 still has attached to a thread, from its
+/// projection; an error if the projection has no well-formed session list,
+/// which proves nothing either way.
+pub fn live_session(projection: &Value) -> Result<Option<&str>, String> {
+    let sessions = projection["providerSessions"]
+        .as_array()
+        .filter(|sessions| {
+            sessions
+                .iter()
+                .all(|s| s["id"].is_string() && s["status"].is_string())
+        })
+        .ok_or("T3's thread projection has no well-formed provider sessions")?;
+    Ok(sessions
         .iter()
         .find(|s| s["status"] != "stopped")
-        .and_then(|s| s["id"].as_str())
+        .and_then(|s| s["id"].as_str()))
 }

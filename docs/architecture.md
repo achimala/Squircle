@@ -172,10 +172,14 @@ drops it (`never_started: true`).
 **Stop before removal (W1).** `thread archive` needs a current shell. A
 session that isn't stopped is stopped first; one that is running or waiting
 on the user needs `--discard`. Files are removed only with a `StopReceipt`,
-which only a current observation of a stopped (or absent) session can mint;
-`wait_stopped` gives up after 30 s and removes nothing. Order: stop → stopped
-→ remove files (`stage: files-removed`) → T3 `thread.archive` →
-`archived`. `thread cleanup` needs the same receipt.
+minted right at removal from a current shell showing no run in progress plus
+the thread's projection showing no provider session attached (or a caught-up
+shell without the thread); a shell row alone, or a projection without a
+well-formed session list, is not proof. An accepted stop waits for the run to
+end (or the connection to drop, removing nothing), then looks again: a
+session the interrupt left attached is detached under a new command. Order:
+stop → stopped and detached → remove files (`stage: files-removed`) → T3
+`thread.archive` → `archived`. `thread cleanup` needs the same receipt.
 
 **Restarts (W1).** `agent restart` queues `lifecycle: restart-queued`
 and runs only when a current observation shows the agent not busy, read again

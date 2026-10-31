@@ -80,6 +80,11 @@ pub(super) struct Shell {
     pub(super) threads: HashMap<String, Arc<Value>>,
     pub(super) projects: HashMap<String, Arc<Value>>,
     pub(super) link: Link,
+    /// T3's sequence the maps reflect: the snapshot's, then each event's.
+    pub(super) sequence: u64,
+    /// Threads whose creation T3 accepted at a sequence the maps don't
+    /// reflect yet: until they do, a missing one is not yet shown, not gone.
+    pub(super) created: HashMap<String, u64>,
 }
 
 /// The shell subscription. Its maps outlive a disconnect, as stale facts.
@@ -112,15 +117,6 @@ impl Link {
     }
 }
 
-/// A receipt if `shell` is current and shows the thread's session stopped,
-/// or no such thread.
-pub(super) fn stopped_in(shell: &Shell, id: &str) -> Option<StopReceipt> {
-    match shell.observe(id).current()? {
-        Some(now) if now.execution != Execution::Stopped => None,
-        _ => Some(StopReceipt(())),
-    }
-}
-
 impl Shell {
     pub(super) fn current(&self) -> bool {
         matches!(self.link, Link::Current { .. })
@@ -129,9 +125,24 @@ impl Shell {
     pub(super) fn offline(&self) -> bool {
         matches!(self.link, Link::Offline { .. })
     }
+    /// Whether T3 has the thread, if the shell can tell: not while it is
+    /// not current, nor while a creation T3 accepted is not shown yet.
+    pub(super) fn has(&self, id: &str) -> Option<bool> {
+        if !self.current() {
+            return None;
+        }
+        if self.threads.contains_key(id) {
+            return Some(true);
+        }
+        match self.created.get(id) {
+            Some(&at) if at > self.sequence => None,
+            _ => Some(false),
+        }
+    }
     pub(super) fn observe(&self, id: &str) -> Observed<Option<ThreadObservation>> {
         let value = self.threads.get(id).map(|t| ThreadObservation::decode(t));
         match self.link {
+            Link::Current { .. } if self.has(id).is_none() => Observed::Unavailable,
             Link::Current { epoch } => Observed::Current { epoch, value },
             Link::Offline { epoch } | Link::Syncing { epoch } if value.is_some() => {
                 Observed::Stale { epoch, value }

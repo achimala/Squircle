@@ -114,9 +114,9 @@ pub(super) struct Removed {
 /// Removes what `inspect` found. Without `discard`, git itself refuses to
 /// drop uncommitted changes, and the branch is deleted only at the tip that
 /// was checked (`branch -D` also refuses one checked out elsewhere).
-/// Proof that T3 reported the worker's session stopped (or no thread at
-/// all) on the live shell; only `Agents::stopped` makes one, and removing a
-/// worker's files takes one.
+/// Proof that T3 showed, just now, no run in progress on the worker's thread
+/// and no provider session attached to it (or no thread at all); only
+/// `Agents::stopped` makes one, and removing a worker's files takes one.
 pub(super) struct StopReceipt(pub(super) ());
 
 pub(super) async fn remove(

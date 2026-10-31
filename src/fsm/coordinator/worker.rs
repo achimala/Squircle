@@ -154,7 +154,8 @@ pub enum ArchiveEvent {
     },
     /// What sending the current step's command got.
     Sent { outcome: Dispatched, next: Identity },
-    /// Whether T3 showed the session stopped after the stop was accepted.
+    /// Whether T3 showed no run in progress after the stop was accepted
+    /// (false: the connection went down first).
     Stopped(bool),
     /// What would stop removal without `discard` (none: merged and clean).
     Inspected {
@@ -176,7 +177,7 @@ pub enum ArchiveEffect {
     /// Save the stage. Effects after it run only once it is saved.
     Commit,
     Send(ArchiveOrder, Identity),
-    /// Wait for T3 to show the session stopped; answer with `Stopped`.
+    /// Wait for T3 to show no run in progress; answer with `Stopped`.
     AwaitStopped,
     /// Inspect the worktree and branch; answer with `Inspected`.
     Inspect,
@@ -295,9 +296,14 @@ pub fn archive(stage: Stage, event: ArchiveEvent) -> Reduction<Stage, ArchiveEff
                 _ => report(stage, E::Inspect),
             }
         }
-        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Sent { outcome, .. }) => {
+        (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Sent { outcome, next }) => {
             match outcome {
-                Dispatched::Accepted(_) => report(stage, E::AwaitStopped),
+                // That stop is done: a further one (a run interrupted, then
+                // its session detached) is its own command.
+                Dispatched::Accepted(_) => to(
+                    Stage::Archiving(S::Stopping { command: next }),
+                    vec![E::Commit, E::AwaitStopped],
+                ),
                 Dispatched::Refused(detail) => {
                     to(Stage::Active, vec![E::Commit, E::Failed(detail)])
                 }
@@ -309,12 +315,13 @@ pub fn archive(stage: Stage, event: ArchiveEvent) -> Reduction<Stage, ArchiveEff
                 ),
             }
         }
+        // No run now; look again, at its session too.
         (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Stopped(true)) => {
-            report(stage, E::Inspect)
+            report(stage, E::Look)
         }
         (stage @ Stage::Archiving(S::Stopping { .. }), ArchiveEvent::Stopped(false)) => report(
             stage,
-            E::Failed("The worker did not stop within 30 seconds; nothing was removed".into()),
+            E::Failed("T3 disconnected before the worker stopped; nothing was removed".into()),
         ),
 
         (
@@ -529,5 +536,31 @@ mod tests {
             (done.state, done.effects),
             (Stage::Archived, vec![E::Commit, E::Done])
         );
+    }
+
+    /// An interrupted run can leave its session attached: after an accepted
+    /// stop the worker is looked at again, and detaching it is a command of
+    /// its own (the interrupt's identity would only replay the interrupt).
+    #[test]
+    fn a_session_left_attached_after_a_stop_is_detached_under_a_new_command() {
+        use ArchiveEffect as E;
+        let stop = look(
+            Stage::Active,
+            seen(Execution::Running, false, false),
+            true,
+            1,
+        );
+        let accepted = archive(
+            stop.state,
+            ArchiveEvent::Sent {
+                outcome: Dispatched::Accepted(serde_json::json!({"sequence": 5})),
+                next: id(2),
+            },
+        );
+        assert_eq!(accepted.effects, vec![E::Commit, E::AwaitStopped]);
+        let ended = archive(accepted.state, ArchiveEvent::Stopped(true));
+        assert_eq!(ended.effects, vec![E::Look]);
+        let detach = look(ended.state, seen(Execution::Idle, false, false), false, 3);
+        assert_eq!(detach.effects, vec![E::Send(ArchiveOrder::Stop, id(2))]);
     }
 }

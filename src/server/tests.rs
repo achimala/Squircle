@@ -135,3 +135,46 @@ async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_dedu
     }
     assert!(!state.files.job_dir(&id).unwrap().join("build.log").exists());
 }
+
+#[tokio::test]
+async fn a_status_waiting_for_a_change_ends_as_shutdown_begins() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(Store::open(dir.path().join("state")).unwrap(), None).unwrap();
+    // Held, so the build is cancelled while queued and never runs.
+    let (entered, holding) = tokio::sync::oneshot::channel();
+    let lane = state.builds.clone();
+    tokio::spawn(async move {
+        lane.run(async {
+            let _ = entered.send(());
+            std::future::pending::<()>().await
+        })
+        .await
+    });
+    holding.await.unwrap();
+    let Json(started) = start(State(state.clone()), Ok(Json(request(dir.path()))))
+        .await
+        .unwrap();
+    let id = started["data"]["job"]["id"].as_str().unwrap().to_owned();
+    let _ = cancel(State(state.clone()), Path(id.clone()))
+        .await
+        .unwrap();
+    // A finished build's status never changes again.
+    let mut changes = state.jobs.changes();
+    while state.files.load_job(&id).unwrap().state() != BuildState::Cancelled {
+        futures_util::StreamExt::next(&mut changes).await.unwrap();
+    }
+    let Json(now) = status(State(state.clone()), Path(id.clone()), HeaderMap::new())
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::IF_NONE_MATCH,
+        etag(&serde_json::to_vec(&now).unwrap()).parse().unwrap(),
+    );
+    headers.insert("prefer", HeaderValue::from_static(WAIT_FOR_CHANGE));
+    let mut waiting = Box::pin(status(State(state.clone()), Path(id), headers));
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    state.closing.cancel();
+    let Json(reply) = waiting.await.unwrap();
+    assert_eq!(reply, now);
+}
