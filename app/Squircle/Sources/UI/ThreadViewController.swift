@@ -136,7 +136,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private let table = ConversationTable(frame: .zero, style: .plain)
     private let composer: Composer
     private lazy var picker = AttachmentPicker(host: self) { [weak self] attachment in self?.model.attach(attachment) }
-    private let notice = Theme.label("", Theme.font(.footnote, 13), color: Theme.failure, lines: 3)
+    private let notice = Theme.label("", Theme.Text.line, color: Theme.failure, lines: 3)
     private lazy var requestCard = RequestCard(drafts: model.questionAnswers)
     /// Answers the questions shown in the conversation, as Waiting on you does.
     private lazy var answers = WaitingAnswers(model: model)
@@ -384,17 +384,17 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         draftScroll.accessibilityIdentifier = "thread.draft"
         // Nothing has been said yet: the app's device stands large above, and
         // the prompt and model chips sit right on top of the composer.
-        let heading = Theme.label("What’s next?", Theme.font(.title1, 28, .bold), lines: 2)
+        let heading = Theme.label("What’s next?", Theme.Text.title, lines: 2)
         heading.translatesAutoresizingMaskIntoConstraints = false
         draftScroll.addSubview(heading)
         let content = draftScroll.contentLayoutGuide, frame = draftScroll.frameLayoutGuide
         NSLayoutConstraint.activate([
             content.widthAnchor.constraint(equalTo: frame.widthAnchor),
             content.heightAnchor.constraint(greaterThanOrEqualTo: frame.heightAnchor),
-            heading.topAnchor.constraint(greaterThanOrEqualTo: content.topAnchor, constant: 20),
-            heading.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            heading.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            heading.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -4)
+            heading.topAnchor.constraint(greaterThanOrEqualTo: content.topAnchor, constant: Theme.Space.margin),
+            heading.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Theme.Space.margin),
+            heading.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Theme.Space.margin),
+            heading.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -Theme.Space.tight)
         ])
         clip.addSubview(draftScroll)
         sticky.isHidden = true
@@ -444,7 +444,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             scrollToBottom(animated: true)
             renderJump()
         }, for: .touchUpInside)
-        jump.configuration?.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+        jump.configuration?.preferredSymbolConfigurationForImage = Theme.symbol(Theme.Text.line)
         jump.configuration?.contentInsets = .zero
         strip.isHidden = true
         strip.addAction(UIAction { [weak self] _ in self?.onTasks?() }, for: .touchUpInside)
@@ -457,13 +457,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             composer.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             composer.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
             composer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
-            jump.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
+            jump.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.rowPad),
             request.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
             request.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12)
         ]
         NSLayoutConstraint.activate(edgeConstraints + [
-            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
-            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.margin),
+            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.margin),
             stripGap, stripCollapsed,
             strip.centerXAnchor.constraint(equalTo: composer.centerXAnchor),
             strip.leadingAnchor.constraint(greaterThanOrEqualTo: composer.leadingAnchor),
@@ -558,7 +558,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let field = strip.isHidden ? composer.frame.minY : strip.frame.minY
         let floor = request.isHidden ? (notice.isHidden ? field : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
-        let insets = UIEdgeInsets(top: controlsBottom + 6, left: 0, bottom: height - floor + 10, right: 0)
+        let insets = UIEdgeInsets(top: controlsBottom + Theme.Space.row, left: 0, bottom: height - floor + Theme.Space.rowPad, right: 0)
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
@@ -887,7 +887,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let symbol = stop ? "stop.fill" : "arrow.up"
         if composer.send.accessibilityValue != symbol {
             composer.send.accessibilityValue = symbol
-            composer.send.configuration?.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: composer.sendSymbolSize, weight: .bold))
+            composer.send.configuration?.image = UIImage(systemName: symbol, withConfiguration: composer.sendSymbol)
             composer.send.accessibilityLabel = stop ? "Stop agent" : "Send message"
         }
     }
@@ -1338,13 +1338,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             (cell as? MessageCell)?.configure(message, style: .note, rendered: rowText.message(message, style: .note), expanded: expanded.contains(message.id))
         case .thought(let message):
             (cell as? MessageCell)?.configure(message, style: .thought, rendered: rowText.message(message, style: .thought), expanded: expanded.contains(message.id))
-        case .step(let message, let first, let last):
-            (cell as? StepCell)?.configure(message, first: first, last: last)
+        case .step(let message):
+            (cell as? StepCell)?.configure(message)
         case .earlier(_, let count):
             (cell as? StepCell)?.configureEarlier(count: count, expanded: count == 0)
         case .gallery(let id, let shots):
             guard let cell = cell as? GalleryCell else { return }
-            cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? 56 : 20, id: id,
+            // Under a step, pictures start where its text does.
+            cell.configure(shots, indent: id.hasPrefix("gallery:earlier:") || itemsByID[String(id.dropFirst(8))] != nil ? Theme.Space.text : Theme.Space.margin, id: id,
                            trailing: id.hasPrefix("gallery:sent:"))
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
         case .figure(_, let shots):
@@ -1375,7 +1376,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
         case .question(let item, _):
             guard let cell = cell as? QuestionCell else { return }
-            cell.item.fitWidth = max(0, table.bounds.width - 60)
+            cell.item.fitWidth = QuestionCell.itemWidth(table.bounds.width)
             answers.configure(cell.item, item, about: true) { [weak self] in
                 // The next of several questions: the row takes its new height.
                 UIView.performWithoutAnimation { self?.table.performBatchUpdates(nil) }
@@ -1550,7 +1551,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         switch item {
         case .agentMessage: return true
         case .action(let line): return opens(item) != nil || line.text?.isEmpty == false || line.step != nil
-        case .step(let message, _, _): return !message.detail.isEmpty || message.step?.diff != nil
+        case .step(let message): return !message.detail.isEmpty || message.step?.diff != nil
         case .earlier, .summary, .note, .changes: return true
         case .update: return opens(item) != nil
         default: return false
@@ -1625,7 +1626,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         guard let id = dataSource.itemIdentifier(for: indexPath), let item = itemsByID[id] else { return }
         switch item {
-        case .step(let message, _, _): showDetail(message)
+        case .step(let message): showDetail(message)
         case .earlier(let turn, _): toggle(turn)
         case .summary(let summary): toggle(summary.turn)
         case .changes(let changes, _): showChanges(changes)
@@ -1888,7 +1889,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
         let flyer = UIView(frame: bubble)
         flyer.isUserInteractionEnabled = false
-        let fill = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
+        let fill = Theme.glassSurface(cornerRadius: Theme.Radius.large, tint: Theme.userGlass)
         fill.frame = flyer.bounds
         flyer.addSubview(fill)
         words.frame = CGRect(x: textFrame.minX - bubble.minX, y: textFrame.minY - bubble.minY,

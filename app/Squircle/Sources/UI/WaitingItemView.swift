@@ -112,10 +112,10 @@ final class WaitingItemView: UIView {
     /// The item drawn, so a late redraw never lands on a reused view.
     var itemID: String?
     private let compact: Bool
-    private let context = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel, lines: 2)
-    private let jelly = JellyView(.worker("", .needsYou), canvas: .roomy(18))
-    private let title = Theme.label("", Theme.font(.body, 17, .semibold), lines: 0)
-    private let detail = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel, lines: 4)
+    private let context = Theme.label("", Theme.Text.caption, color: .secondaryLabel, lines: 2)
+    private let jelly = JellyView(.worker("", .needsYou), canvas: .roomy(Theme.Glyph.line))
+    private let title = Theme.label("", Theme.Text.body, lines: 0)
+    private let detail = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 4)
     private let buttons = UIStackView()
     private let buttonScroll = UIScrollView()
     private let flow = AnswerFlow()
@@ -134,17 +134,17 @@ final class WaitingItemView: UIView {
         self.compact = compact
         super.init(frame: .zero)
         if compact {
-            title.font = Theme.font(.subheadline, 15, .semibold)
+            title.font = Theme.Text.line
             title.numberOfLines = 2
             context.numberOfLines = 1
         }
         jelly.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: 18), jelly.heightAnchor.constraint(equalToConstant: 18)])
+        NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line), jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line)])
         let about = UIStackView(arrangedSubviews: [jelly, context])
-        about.spacing = 6
+        about.spacing = Theme.Space.glyphGap
         about.alignment = .center
-        buttons.spacing = 8
-        field.font = Theme.font(.body, 16)
+        buttons.spacing = Theme.Space.row
+        field.font = Theme.Text.body
         field.returnKeyType = .send
         field.accessibilityIdentifier = "waiting.reply"
         field.addAction(UIAction { [weak self] _ in
@@ -155,15 +155,15 @@ final class WaitingItemView: UIView {
             onSend?(text)
         }, for: .editingDidEndOnExit)
         field.addAction(UIAction { [weak self] _ in self?.onEdit?(self?.field.text ?? "") }, for: .editingChanged)
-        fieldWrap.backgroundColor = .tertiarySystemFill
-        fieldWrap.layer.cornerRadius = 20
+        fieldWrap.backgroundColor = Theme.codeFill
+        fieldWrap.layer.cornerRadius = Theme.Radius.large
         fieldWrap.layer.cornerCurve = .continuous
         field.translatesAutoresizingMaskIntoConstraints = false
         fieldWrap.addSubview(field)
         NSLayoutConstraint.activate([
-            fieldWrap.heightAnchor.constraint(equalToConstant: 40),
-            field.leadingAnchor.constraint(equalTo: fieldWrap.leadingAnchor, constant: 16),
-            field.trailingAnchor.constraint(equalTo: fieldWrap.trailingAnchor, constant: -16),
+            fieldWrap.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
+            field.leadingAnchor.constraint(equalTo: fieldWrap.leadingAnchor, constant: Theme.Space.group),
+            field.trailingAnchor.constraint(equalTo: fieldWrap.trailingAnchor, constant: -Theme.Space.group),
             field.centerYAnchor.constraint(equalTo: fieldWrap.centerYAnchor)
         ])
         let answers: UIView
@@ -189,11 +189,11 @@ final class WaitingItemView: UIView {
         }
         let stack = UIStackView(arrangedSubviews: [about, title, detail, answers, fieldWrap])
         stack.axis = .vertical
-        stack.spacing = compact ? 3 : 6
-        stack.setCustomSpacing(compact ? 2 : 4, after: about)
-        stack.setCustomSpacing(compact ? 8 : 12, after: title)
-        stack.setCustomSpacing(compact ? 8 : 12, after: detail)
-        stack.setCustomSpacing(10, after: answers)
+        stack.spacing = compact ? Theme.Space.tight : Theme.Space.row
+        stack.setCustomSpacing(Theme.Space.tight, after: about)
+        stack.setCustomSpacing(compact ? Theme.Space.row : Theme.Space.rowPad, after: title)
+        stack.setCustomSpacing(compact ? Theme.Space.row : Theme.Space.rowPad, after: detail)
+        stack.setCustomSpacing(Theme.Space.row, after: answers)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -218,7 +218,7 @@ final class WaitingItemView: UIView {
         context.superview?.isHidden = context.isHidden && jelly.isHidden
         title.text = value
         detail.text = more
-        detail.font = monospaced ? Theme.font(.footnote, 12.5, monospaced: true) : Theme.font(.footnote, 13)
+        detail.font = monospaced ? Theme.Text.mono : Theme.Text.line
         // Home keeps to who asks and the question.
         detail.isHidden = compact || (more ?? "").isEmpty
     }
@@ -238,10 +238,11 @@ final class WaitingItemView: UIView {
             button.configuration?.titleLineBreakMode = compact ? .byTruncatingTail : .byWordWrapping
             button.configuration?.titleAlignment = .center
             if compact {
-                button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 14, bottom: 8, trailing: 14)
+                button.configuration?.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.bubble.top, leading: Theme.Space.bubble.left,
+                                                                              bottom: Theme.Space.bubble.bottom, trailing: Theme.Space.bubble.right)
                 button.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
                     var attributes = attributes
-                    attributes.font = Theme.font(.subheadline, 15, .semibold)
+                    attributes.font = Theme.Text.lineStrong
                     return attributes
                 }
             }
@@ -273,7 +274,7 @@ private final class AnswerFlow: UIView {
     var widthHint: CGFloat = 0 { didSet { if widthHint != oldValue, bounds.width == 0 { invalidateIntrinsicContentSize() } } }
     private var items: [UIButton] = []
     private var measured: CGFloat = -1
-    private static let gap: CGFloat = 8
+    private static let gap = Theme.Space.row
 
     func set(_ buttons: [UIButton]) {
         items.forEach { $0.removeFromSuperview() }
@@ -340,10 +341,10 @@ final class WaitingCell: UITableViewCell {
         rule.backgroundColor = .separator
         [item, rule].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         NSLayoutConstraint.activate([
-            item.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 2),
-            item.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
-            item.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 52),
-            item.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            item.topAnchor.constraint(equalTo: contentView.topAnchor),
+            item.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.rowPad),
+            item.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.text),
+            item.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
             rule.leadingAnchor.constraint(equalTo: item.leadingAnchor),
             rule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             rule.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
@@ -410,25 +411,25 @@ final class HomeWaitingView: UIView {
         shown = (list, busy)
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard list.count > 0 else { return true }
-        let heading = Theme.label("Waiting on you", Theme.font(.footnote, 13, .semibold), color: Theme.accent)
+        let heading = Theme.label("Waiting on you", Theme.Text.caption, color: .secondaryLabel)
         heading.accessibilityTraits = .header
-        let count = Theme.label("\(list.count)", Theme.font(.footnote, 13), color: .tertiaryLabel)
+        let count = Theme.label("\(list.count)", Theme.Text.caption, color: .tertiaryLabel)
         let top = UIStackView(arrangedSubviews: [heading, count, UIView()])
-        top.spacing = 5
+        top.spacing = Theme.Space.tight
         top.alignment = .firstBaseline
         stack.addArrangedSubview(top)
-        stack.setCustomSpacing(6, after: top)
+        stack.setCustomSpacing(Theme.Space.row, after: top)
         for app in list.apps {
-            let name = Theme.label(app.name ?? "App", Theme.font(.footnote, 13, .semibold), color: .secondaryLabel)
-            stack.addArrangedSubview(spaced(name, top: 10))
+            let name = Theme.label(app.name ?? "App", Theme.Text.caption, color: .secondaryLabel)
+            stack.addArrangedSubview(spaced(name, top: Theme.Space.rowPad))
             for item in app.items.prefix(Self.perApp) {
                 stack.addArrangedSubview(row(item, project: app.projectID))
             }
             if app.items.count > Self.perApp {
                 let more = UIButton(configuration: .plain())
-                more.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 0, bottom: 4, trailing: 0)
+                more.configuration?.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.row, leading: 0, bottom: Theme.Space.tight, trailing: 0)
                 more.configuration?.attributedTitle = AttributedString("\(app.items.count - Self.perApp) more in Tasks", attributes: AttributeContainer([
-                    .font: Theme.font(.footnote, 13, .semibold), .foregroundColor: Theme.accent]))
+                    .font: Theme.Text.caption, .foregroundColor: Theme.accent]))
                 more.contentHorizontalAlignment = .leading
                 more.addAction(UIAction { [weak self] _ in self?.onOpen?(app.projectID, nil) }, for: .touchUpInside)
                 stack.addArrangedSubview(more)
@@ -471,8 +472,8 @@ private final class HomeWaitingRow: UIControl {
         item.translatesAutoresizingMaskIntoConstraints = false
         addSubview(item)
         NSLayoutConstraint.activate([
-            item.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            item.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            item.topAnchor.constraint(equalTo: topAnchor, constant: Theme.Space.row),
+            item.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.tight),
             item.leadingAnchor.constraint(equalTo: leadingAnchor),
             item.trailingAnchor.constraint(equalTo: trailingAnchor)
         ])

@@ -3,7 +3,7 @@
 Squircle is an early-alpha personal project. Issues and small, focused pull
 requests are welcome; for anything larger, open an issue first so we can agree
 on the direction. [AGENTS.md](AGENTS.md) lists decisions the maintainer has
-made on purpose (one agent per app, T3 owns agents and threads, the Clay look,
+made on purpose (one agent per app, T3 owns agents and threads, the design deck,
 no live 3D, and so on). Changes that reverse one of them need a conversation
 first, not a pull request.
 

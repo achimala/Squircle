@@ -13,8 +13,8 @@ final class ThreadsViewController: UIViewController {
     /// The list, for a host that floats its own controls over it.
     var scrollView: UIScrollView { loadViewIfNeeded(); return scroll }
     private let rows = UIStackView()
-    private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
-    private let titleLabel = Theme.label("Threads", Theme.font(.headline, 17, .semibold))
+    private let notice = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
+    private let titleLabel = Theme.label("Threads", Theme.Text.bodyStrong)
     private let close = Theme.glassButton(symbol: "xmark", identifier: "threads.close", accessibilityLabel: "Close threads")
     private let create = Theme.glassButton(symbol: "square.and.pencil", identifier: "threads.new", accessibilityLabel: "New Thread")
     private var rowViews: [String: ThreadRow] = [:]
@@ -35,7 +35,8 @@ final class ThreadsViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = embedded ? nil : Theme.paper }
+        // Embedded, the Tasks sheet's paper shows through.
+        view.backgroundColor = embedded ? nil : Theme.paper
         titleLabel.textAlignment = .center
         titleLabel.accessibilityTraits = .header
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
@@ -50,29 +51,29 @@ final class ThreadsViewController: UIViewController {
         [close, titleLabel, create].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; header.addSubview($0) }
         [rows, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; scroll.addSubview($0) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: embedded ? view.topAnchor : view.safeAreaLayoutGuide.topAnchor, constant: embedded ? 0 : 18),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
-            header.heightAnchor.constraint(equalToConstant: embedded ? 0 : 44),
+            header.topAnchor.constraint(equalTo: embedded ? view.topAnchor : view.safeAreaLayoutGuide.topAnchor, constant: embedded ? 0 : Theme.Space.group),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.group),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.group),
+            header.heightAnchor.constraint(equalToConstant: embedded ? 0 : Theme.Space.tap),
             close.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             close.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            close.widthAnchor.constraint(equalToConstant: 44), close.heightAnchor.constraint(equalToConstant: 44),
+            close.widthAnchor.constraint(equalToConstant: Theme.Space.tap), close.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
             create.trailingAnchor.constraint(equalTo: header.trailingAnchor),
             create.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            create.widthAnchor.constraint(equalToConstant: 44), create.heightAnchor.constraint(equalToConstant: 44),
+            create.widthAnchor.constraint(equalToConstant: Theme.Space.tap), create.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
             titleLabel.centerXAnchor.constraint(equalTo: header.centerXAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: embedded ? 0 : 14),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: embedded ? 0 : Theme.Space.rowPad),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             rows.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
-            rows.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 12),
-            rows.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -12),
-            notice.topAnchor.constraint(equalTo: rows.bottomAnchor, constant: 20),
-            notice.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 32),
-            notice.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -32),
-            notice.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -40)
+            rows.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: Theme.Space.rowPad),
+            rows.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -Theme.Space.rowPad),
+            notice.topAnchor.constraint(equalTo: rows.bottomAnchor, constant: Theme.Space.section),
+            notice.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: Theme.Space.margin),
+            notice.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -Theme.Space.margin),
+            notice.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -2 * Theme.Space.margin)
         ])
         header.isHidden = embedded
         let refresh = UIRefreshControl()

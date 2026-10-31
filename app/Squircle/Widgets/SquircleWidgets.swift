@@ -4,28 +4,30 @@ import UIKit
 import WidgetKit
 
 // The Live Activity is drawn by the system from SwiftUI; this is the one
-// place Squircle uses it. Colors are the app's Clay palette.
+// place Squircle uses it. Colors are the app's Pearl palette (Theme).
 
 @main
 struct SquircleWidgets: WidgetBundle {
     var body: some Widget { AgentActivity() }
 }
 
-private enum Clay {
-    static let accent = dynamic(rgb(0.71, 0.33, 0.20), rgb(0.94, 0.56, 0.41))
-    static let paper = dynamic(rgb(0.972, 0.957, 0.933), rgb(0.078, 0.070, 0.064))
-    static let success = dynamic(rgb(0.36, 0.53, 0.24), rgb(0.60, 0.78, 0.44))
-    static let warning = dynamic(rgb(0.72, 0.55, 0.06), rgb(0.95, 0.78, 0.34))
+private enum Pearl {
+    static let accent = hex(0x1C1D22, 0xF2F2F5)
+    static let paper = hex(0xF5F5F2, 0x0E0F12)
+    static let working = hex(0x6E56F0, 0x9C8CFF)
+    static let success = hex(0x2F9461, 0x5FD38E)
+    static let warning = hex(0xD08A00, 0xFFC24D)
     /// The Dynamic Island is always black: the dark variants.
-    static let islandAccent = Color(rgb(0.94, 0.56, 0.41))
-    static let islandWarning = Color(rgb(0.95, 0.78, 0.34))
-    static let islandSuccess = Color(rgb(0.60, 0.78, 0.44))
+    static let islandWorking = Color(rgb(0x9C8CFF))
+    static let islandWarning = Color(rgb(0xFFC24D))
+    static let islandSuccess = Color(rgb(0x5FD38E))
 
-    private static func dynamic(_ light: UIColor, _ dark: UIColor) -> Color {
-        Color(UIColor { $0.userInterfaceStyle == .dark ? dark : light })
+    private static func hex(_ light: UInt32, _ dark: UInt32) -> Color {
+        let l = rgb(light), d = rgb(dark)
+        return Color(UIColor { $0.userInterfaceStyle == .dark ? d : l })
     }
-    private static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat) -> UIColor {
-        UIColor(red: r, green: g, blue: b, alpha: 1)
+    private static func rgb(_ v: UInt32) -> UIColor {
+        UIColor(red: CGFloat((v >> 16) & 0xff) / 255, green: CGFloat((v >> 8) & 0xff) / 255, blue: CGFloat(v & 0xff) / 255, alpha: 1)
     }
 }
 
@@ -42,9 +44,9 @@ private enum Tone {
     case working, needsYou, done
     func color(island: Bool) -> Color {
         switch self {
-        case .working: island ? Clay.islandAccent : Clay.accent
-        case .needsYou: island ? Clay.islandWarning : Clay.warning
-        case .done: island ? Clay.islandSuccess : Clay.success
+        case .working: island ? Pearl.islandWorking : Pearl.working
+        case .needsYou: island ? Pearl.islandWarning : Pearl.warning
+        case .done: island ? Pearl.islandSuccess : Pearl.success
         }
     }
     var glyph: String {
@@ -82,8 +84,8 @@ struct AgentActivity: Widget {
         ActivityConfiguration(for: SquircleActivityAttributes.self) { context in
             LockScreenView(app: context.attributes.appName, state: context.state, stale: context.isStale)
                 .widgetURL(link(context.attributes))
-                .activityBackgroundTint(Clay.paper)
-                .activitySystemActionForegroundColor(Clay.accent)
+                .activityBackgroundTint(Pearl.paper)
+                .activitySystemActionForegroundColor(Pearl.accent)
         } dynamicIsland: { context in
             let state = context.state
             let tone = state.tone.color(island: true)

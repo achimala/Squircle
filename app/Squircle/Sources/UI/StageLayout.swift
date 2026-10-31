@@ -12,14 +12,14 @@ struct StageLayout: Equatable {
 
     // MARK: Home grid
 
-    static let gridMargin: CGFloat = 20
-    static let gridGap: CGFloat = 18
+    static let gridMargin = Theme.Space.margin
+    static let gridGap = Theme.Space.group
     /// The app's name beneath each device.
     static let cellCaption: CGFloat = 26
 
     var columns: Int { size.width > 600 ? 3 : 2 }
     /// Just below Home's controls.
-    var homeTop: CGFloat { safe.top + 62 }
+    var homeTop: CGFloat { safe.top + Theme.Space.tight + Theme.Space.tap + Theme.Space.group }
     var gridTop: CGFloat { homeTop + waiting }
     var cellWidth: CGFloat {
         let n = CGFloat(columns)
@@ -27,8 +27,8 @@ struct StageLayout: Equatable {
     }
     /// Narrower than its cell, so a turned device never touches its neighbor.
     var gridPhoneHeight: CGFloat { (cellWidth * 0.82 / PhonePose.aspect).rounded() }
-    var cellHeight: CGFloat { gridPhoneHeight + 12 + Self.cellCaption }
-    var rowPitch: CGFloat { cellHeight + 24 }
+    var cellHeight: CGFloat { gridPhoneHeight + Theme.Space.rowPad + Self.cellCaption }
+    var rowPitch: CGFloat { cellHeight + Theme.Space.section }
 
     /// A cell in the grid's content coordinates.
     func cellFrame(_ index: Int) -> CGRect {
@@ -39,7 +39,7 @@ struct StageLayout: Equatable {
 
     func gridContentHeight(count: Int) -> CGFloat {
         let rows = (max(1, count) + columns - 1) / columns
-        return gridTop + CGFloat(rows) * rowPitch + max(safe.bottom, 16) + 12
+        return gridTop + CGFloat(rows) * rowPitch + max(safe.bottom, Theme.Space.group) + Theme.Space.rowPad
     }
 
     /// The device in a grid cell (`cell` in view coordinates). Each column

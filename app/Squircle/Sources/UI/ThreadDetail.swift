@@ -27,11 +27,11 @@ final class StepDetailViewController: UIViewController {
         if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
         let icon = UIImageView(image: UIImage(systemName: step.symbol.isEmpty ? "wrench.and.screwdriver" : step.symbol))
         icon.tintColor = .secondaryLabel
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .headline)
-        let title = Theme.label(step.content, Theme.font(.headline, 17, .semibold), lines: 3)
+        icon.preferredSymbolConfiguration = Theme.symbol(Theme.Text.body)
+        let title = Theme.label(step.content, Theme.Text.body, lines: 3)
         if let headline { title.attributedText = headline; title.numberOfLines = 4 }
         let header = UIStackView(arrangedSubviews: headline == nil ? [icon, title] : [title])
-        header.spacing = 10
+        header.spacing = Theme.Space.glyphGap
         header.alignment = .firstBaseline
         var stack: [UIView] = [header]
         if let onOpenTask {
@@ -48,20 +48,20 @@ final class StepDetailViewController: UIViewController {
         }
         let top = UIStackView(arrangedSubviews: stack)
         top.axis = .vertical
-        top.spacing = 14
+        top.spacing = Theme.Space.rowPad
         top.alignment = .fill
         let text = UITextView()
         text.isEditable = false
         text.backgroundColor = .clear
-        text.textContainerInset = UIEdgeInsets(top: 4, left: 18, bottom: 40, right: 18)
+        text.textContainerInset = UIEdgeInsets(top: Theme.Space.tight, left: Theme.Space.margin, bottom: 40, right: Theme.Space.margin)
         text.accessibilityIdentifier = "thread.step.detail"
         text.attributedText = body()
         [top, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
-            top.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 30),
-            top.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 22),
-            top.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -22),
-            text.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 14),
+            top.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: Theme.Space.section),
+            top.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.margin),
+            top.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.margin),
+            text.topAnchor.constraint(equalTo: top.bottomAnchor, constant: Theme.Space.rowPad),
             text.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             text.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             text.bottomAnchor.constraint(equalTo: view.bottomAnchor)
@@ -69,7 +69,7 @@ final class StepDetailViewController: UIViewController {
     }
 
     private func body() -> NSAttributedString {
-        let mono = Theme.font(.footnote, 12.5, monospaced: true)
+        let mono = Theme.Text.mono
         if let diff = step.step?.diff {
             return Self.render(diff: diff, font: mono)
         }

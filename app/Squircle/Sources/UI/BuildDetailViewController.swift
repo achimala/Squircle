@@ -15,8 +15,8 @@ final class BuildDetailViewController: UIViewController {
     private let content = UIStackView()
     private let symbol = UIImageView()
     private let spinner = UIActivityIndicatorView(style: .medium)
-    private let statusLabel = Theme.label("", Theme.font(.title2, 24, .bold))
-    private let versionLabel = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
+    private let statusLabel = Theme.label("", Theme.Text.title)
+    private let versionLabel = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
     private let facts = UIStackView()
     private let reason = UIStackView()
     private let logButton = Theme.glassButton(symbol: "doc.plaintext", title: "Full Log", identifier: "build.log")
@@ -40,7 +40,7 @@ final class BuildDetailViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
+        view.backgroundColor = Theme.paper
         navigationItem.title = "Build"
         navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .close, primaryAction: UIAction { [weak self] _ in
             self?.dismiss(animated: true)
@@ -52,27 +52,28 @@ final class BuildDetailViewController: UIViewController {
         install.addAction(UIAction { [weak self] _ in self?.installBuild() }, for: .touchUpInside)
 
         symbol.contentMode = .scaleAspectFit
-        symbol.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 24, weight: .semibold)
+        // The heading's size, in a regular weight (no bold symbols).
+        symbol.preferredSymbolConfiguration = Theme.symbol(Theme.Text.title).applying(UIImage.SymbolConfiguration(weight: .regular))
         spinner.hidesWhenStopped = true
         let glyph = UIView()
         [symbol, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glyph.addSubview($0) }
         let status = UIStackView(arrangedSubviews: [glyph, statusLabel])
-        status.spacing = 10
+        status.spacing = Theme.Space.glyphGap
         status.alignment = .center
         facts.axis = .vertical
-        facts.spacing = 10
+        facts.spacing = Theme.Space.row
         reason.axis = .vertical
-        reason.spacing = 14
+        reason.spacing = Theme.Space.rowPad
         let logRow = UIStackView(arrangedSubviews: [logButton, UIView()])
         content.axis = .vertical
-        content.spacing = 6
+        content.spacing = Theme.Space.row
         content.addArrangedSubview(status)
         content.addArrangedSubview(versionLabel)
-        content.setCustomSpacing(24, after: versionLabel)
+        content.setCustomSpacing(Theme.Space.section, after: versionLabel)
         content.addArrangedSubview(facts)
-        content.setCustomSpacing(28, after: facts)
+        content.setCustomSpacing(Theme.Space.section, after: facts)
         content.addArrangedSubview(reason)
-        content.setCustomSpacing(24, after: reason)
+        content.setCustomSpacing(Theme.Space.section, after: reason)
         content.addArrangedSubview(logRow)
 
         scroll.alwaysBounceVertical = true
@@ -80,20 +81,20 @@ final class BuildDetailViewController: UIViewController {
         content.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(content)
         NSLayoutConstraint.activate([
-            glyph.widthAnchor.constraint(equalToConstant: 30), glyph.heightAnchor.constraint(equalToConstant: 30),
+            glyph.widthAnchor.constraint(equalToConstant: Theme.Space.glyph), glyph.heightAnchor.constraint(equalToConstant: Theme.Space.glyph),
             symbol.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), symbol.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
             spinner.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
             scroll.topAnchor.constraint(equalTo: view.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 12),
-            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 22),
-            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -22),
+            content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: Theme.Space.rowPad),
+            content.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: Theme.Space.margin),
+            content.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -Theme.Space.margin),
             content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -110),
             install.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            install.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-            install.heightAnchor.constraint(greaterThanOrEqualToConstant: 50),
+            install.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -Theme.Space.rowPad),
+            install.heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.Space.tap),
             install.widthAnchor.constraint(greaterThanOrEqualToConstant: 200)
         ])
         setContentScrollView(scroll, for: .top)
@@ -172,13 +173,13 @@ final class BuildDetailViewController: UIViewController {
         renderedFacts = flat
         facts.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for (name, value) in rows {
-            let key = Theme.label(name, Theme.font(.subheadline, 15), color: .secondaryLabel)
+            let key = Theme.label(name, Theme.Text.line, color: .secondaryLabel)
             key.setContentHuggingPriority(.required, for: .horizontal)
             key.setContentCompressionResistancePriority(.required, for: .horizontal)
-            let text = Theme.label(value, Theme.font(.subheadline, 15), lines: 0)
+            let text = Theme.label(value, Theme.Text.line, lines: 0)
             text.textAlignment = .right
             let row = UIStackView(arrangedSubviews: [key, text])
-            row.spacing = 16
+            row.spacing = Theme.Space.group
             row.alignment = .firstBaseline
             facts.addArrangedSubview(row)
         }
@@ -193,18 +194,18 @@ final class BuildDetailViewController: UIViewController {
         reason.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let issues = shown.failure?.errors ?? []
         if !issues.isEmpty {
-            reason.addArrangedSubview(Theme.label(issues.count == 1 ? "Error" : "\(issues.count) errors", Theme.font(.headline, 17, .semibold)))
+            reason.addArrangedSubview(Theme.label(issues.count == 1 ? "Error" : "\(issues.count) errors", Theme.Text.caption, color: .secondaryLabel))
             issues.forEach { reason.addArrangedSubview(issueView($0)) }
         } else if let message = shown.failure?.message ?? fallback {
-            reason.addArrangedSubview(Theme.label("Error", Theme.font(.headline, 17, .semibold)))
-            reason.addArrangedSubview(Theme.label(message, Theme.font(.body, 17), lines: 0))
+            reason.addArrangedSubview(Theme.label("Error", Theme.Text.caption, color: .secondaryLabel))
+            reason.addArrangedSubview(Theme.label(message, Theme.Text.body, lines: 0))
         }
         if let commands = shown.failure?.failedCommands, !commands.isEmpty {
-            let title = Theme.label("Failed commands", Theme.font(.headline, 17, .semibold))
+            let title = Theme.label("Failed commands", Theme.Text.caption, color: .secondaryLabel)
             reason.addArrangedSubview(title)
-            reason.setCustomSpacing(6, after: title)
+            reason.setCustomSpacing(Theme.Space.row, after: title)
             for command in commands {
-                reason.addArrangedSubview(Theme.label(command, Theme.font(.footnote, 13), color: .secondaryLabel, lines: 3))
+                reason.addArrangedSubview(Theme.label(command, Theme.Text.mono, color: .secondaryLabel, lines: 3))
             }
         }
         reason.isHidden = reason.arrangedSubviews.isEmpty
@@ -213,17 +214,17 @@ final class BuildDetailViewController: UIViewController {
     private func issueView(_ issue: BuildFailure.Issue) -> UIView {
         let stack = UIStackView()
         stack.axis = .vertical
-        stack.spacing = 6
-        stack.addArrangedSubview(Theme.label(issue.message, Theme.font(.body, 17, .medium), color: Theme.failure, lines: 0))
+        stack.spacing = Theme.Space.row
+        stack.addArrangedSubview(Theme.label(issue.message, Theme.Text.body, color: Theme.failure, lines: 0))
         if let file = issue.file {
             let place = issue.line.map { "\(file):\($0)" } ?? file
-            let label = Theme.label(place, .monospacedSystemFont(ofSize: 13, weight: .regular), color: .secondaryLabel, lines: 0)
+            let label = Theme.label(place, Theme.Text.mono, color: .secondaryLabel, lines: 0)
             label.lineBreakMode = .byTruncatingHead
             stack.addArrangedSubview(label)
         }
         if let detail = issue.detail {
             if issue.file == nil {
-                stack.addArrangedSubview(Theme.label(detail, Theme.font(.subheadline, 15), color: .secondaryLabel, lines: 0))
+                stack.addArrangedSubview(Theme.label(detail, Theme.Text.line, color: .secondaryLabel, lines: 0))
             } else {
                 stack.addArrangedSubview(CodeExcerpt(detail))
             }
@@ -257,13 +258,13 @@ private final class CodeExcerpt: UIView {
     init(_ text: String) {
         super.init(frame: .zero)
         backgroundColor = Theme.codeFill
-        layer.cornerRadius = 12
+        layer.cornerRadius = Theme.Radius.small
         layer.cornerCurve = .continuous
         clipsToBounds = true
         let scroll = UIScrollView()
         scroll.showsHorizontalScrollIndicator = false
         scroll.alwaysBounceHorizontal = true
-        let label = Theme.label(text, .monospacedSystemFont(ofSize: 12, weight: .regular), color: .label, lines: 0)
+        let label = Theme.label(text, Theme.Text.mono, color: .label, lines: 0)
         [scroll, label].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         addSubview(scroll)
         scroll.addSubview(label)
@@ -272,11 +273,11 @@ private final class CodeExcerpt: UIView {
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.heightAnchor.constraint(equalTo: label.heightAnchor, constant: 20),
-            label.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 10),
-            label.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -10),
-            label.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 12),
-            label.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -12)
+            scroll.heightAnchor.constraint(equalTo: label.heightAnchor, constant: 2 * Theme.Space.row),
+            label.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: Theme.Space.row),
+            label.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -Theme.Space.row),
+            label.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: Theme.Space.rowPad),
+            label.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -Theme.Space.rowPad)
         ])
     }
 
@@ -290,7 +291,7 @@ final class BuildLogViewController: UIViewController {
     private let model: SquircleModel
     private let build: AppBuild
     private let text = UITextView()
-    private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
+    private let notice = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
     private var loader: Task<Void, Never>?
     /// The phone shows at most this much of the end of a log.
     private static let tailBytes = 262_144
@@ -311,7 +312,7 @@ final class BuildLogViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
+        view.backgroundColor = Theme.paper
         navigationItem.title = "Log"
         navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .action, primaryAction: UIAction { [weak self] _ in
             guard let self, let log = text.text, !log.isEmpty else { return }
@@ -322,7 +323,7 @@ final class BuildLogViewController: UIViewController {
         text.isEditable = false
         text.alwaysBounceVertical = true
         text.backgroundColor = .clear
-        text.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 24, right: 12)
+        text.textContainerInset = UIEdgeInsets(top: Theme.Space.rowPad, left: Theme.Space.rowPad, bottom: Theme.Space.section, right: Theme.Space.rowPad)
         text.accessibilityIdentifier = "build.log.text"
         notice.textAlignment = .center
         [text, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
@@ -332,8 +333,8 @@ final class BuildLogViewController: UIViewController {
             text.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             text.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             notice.centerYAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerYAnchor),
-            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
-            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32)
+            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.margin),
+            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.margin)
         ])
         setContentScrollView(text, for: .top)
         notice.text = "Loading…"
@@ -379,7 +380,7 @@ final class BuildLogViewController: UIViewController {
 
     private func append(_ chunk: String, scrollToEnd: Bool) {
         let attributed = NSMutableAttributedString()
-        let font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        let font = Theme.Text.mono
         chunk.enumerateLines { line, _ in
             let failing = line.contains("error: ") || line.hasPrefix("** ") && line.hasSuffix(" FAILED **")
             attributed.append(NSAttributedString(string: line + "\n", attributes: [

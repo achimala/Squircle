@@ -128,13 +128,13 @@ final class CaptureSession {
     }
 
     /// Each frame's time as a bar, late frames (as the recording counted
-    /// them) in crimson, on paper.
+    /// them) in the failure colour, on paper.
     private static func chart(_ gaps: [FrameGap], duration: Double, hitches: String) -> UIImage {
         let size = CGSize(width: 220, height: 160)
         return UIGraphicsImageRenderer(size: size).image { context in
             Theme.paper.setFill()
             context.fill(CGRect(origin: .zero, size: size))
-            let plot = CGRect(x: 10, y: 40, width: size.width - 20, height: size.height - 52)
+            let plot = CGRect(x: Theme.Space.rowPad, y: 40, width: size.width - 2 * Theme.Space.rowPad, height: size.height - 52)
             let periods = gaps.map(\.period).sorted()
             let period = periods.dropFirst(periods.count / 2).first ?? 1.0 / 60
             let ceiling = max(period * 6, 0.1)
@@ -153,10 +153,10 @@ final class CaptureSession {
             }
             // Top left, clear of the field's remove button at the top right.
             let title = NSMutableAttributedString(string: hitches, attributes: [
-                .font: Theme.font(.subheadline, 15, .semibold), .foregroundColor: UIColor.label])
+                .font: Theme.Text.lineStrong, .foregroundColor: UIColor.label])
             title.append(NSAttributedString(string: "  " + Elapsed.clock(duration.rounded()), attributes: [
-                .font: UIFont.monospacedDigitSystemFont(ofSize: 13, weight: .medium), .foregroundColor: UIColor.secondaryLabel]))
-            title.draw(at: CGPoint(x: 10, y: 10))
+                .font: Theme.Text.mono, .foregroundColor: UIColor.secondaryLabel]))
+            title.draw(at: CGPoint(x: Theme.Space.rowPad, y: Theme.Space.rowPad))
         }
     }
 }

@@ -17,6 +17,8 @@ struct JellyUniforms {
     var look: SIMD4<Float> = JellyUniforms.plainLook
     /// A worker's sprout (`JellyTraits`): kind (0 none), lean, scale, -.
     var sprout: SIMD4<Float> = .zero
+    /// The app agent's soap film: amount (0 none), its drift as an angle's cos and sin, -.
+    var film: SIMD4<Float> = .zero
     var center: SIMD2<Float>
     var half: SIMD2<Float>
     var origin: SIMD2<Float>
@@ -34,7 +36,7 @@ struct JellyUniforms {
     static let plainLook = SIMD4<Float>(1, 1, 1, 0.28)
 
     var isFinite: Bool {
-        [tint, fill, face, inverse, creature, pose, gaze, bridge, stubs, look, sprout].allSatisfy { v in (0..<4).allSatisfy { v[$0].isFinite } }
+        [tint, fill, face, inverse, creature, pose, gaze, bridge, stubs, look, sprout, film].allSatisfy { v in (0..<4).allSatisfy { v[$0].isFinite } }
             && [center, half, origin].allSatisfy { $0.x.isFinite && $0.y.isFinite } && pillow.isFinite && opened.isFinite
     }
 
@@ -44,7 +46,7 @@ struct JellyUniforms {
         func near(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Bool { (0..<2).allSatisfy { Swift.abs(a[$0] - b[$0]) < 0.02 } }
         return near(tint, o.tint, 0.002) && near(fill, o.fill, 0.002) && near(inverse, o.inverse, 0.0005)
             && near(face, o.face, 0.003) && near(pose, o.pose, 0.0008) && near(gaze, o.gaze, 0.01)
-            && near(bridge, o.bridge, 0.005) && near(stubs, o.stubs, 0.01) && look == o.look && sprout == o.sprout
+            && near(bridge, o.bridge, 0.005) && near(stubs, o.stubs, 0.01) && look == o.look && sprout == o.sprout && near(film, o.film, 0.002)
             && near(creature, o.creature, 0.05) && near(center, o.center) && near(half, o.half) && near(origin, o.origin)
             && Swift.abs(pillow - o.pillow) < 0.02 && radius == o.radius && dark == o.dark && Swift.abs(opened - o.opened) < 0.002
     }
@@ -106,6 +108,7 @@ enum JellyRenderer {
         float4 stubs;     // stub at the root, stub at the cube, cube scale, -
         float4 look;      // eye spacing, cube aspect, eye size, corner roundness
         float4 sprout;    // kind (0 none), lean, scale, -
+        float4 film;      // soap film amount, drift cos, drift sin, -
         float2 center;
         float2 half_;
         float2 origin;
@@ -198,22 +201,51 @@ enum JellyRenderer {
         return float4(col, clamp(a, 0.0, 1.0));
     }
 
+    // A soap film's colour for light meeting it at cos(angle) `c` where the
+    // film is `d` nanometres thick: two reflections interfering, per channel.
+    static float3 thinFilm(float d, float c) {
+        float ct = sqrt(max(0.0, 1.0 - (1.0 - c * c) / (1.33 * 1.33)));
+        float3 lambda = float3(650.0, 540.0, 460.0);
+        return 0.5 - 0.5 * cos(4.0 * M_PI_F * 1.33 * d * ct / lambda);
+    }
+
     // One material: translucent jelly tinted all through, gently deeper
     // toward its edges, one soft rim of light and one soft warm highlight.
     // Everything added is premultiplied, so nothing is clamped grey.
-    static float4 jelly(float3 n, float3 V, float shape, constant Uniforms& u) {
+    // With a film (the app's agent) the body is nearly clear, a breath of
+    // its state colour, and a soap film over it shows interference colours,
+    // strongest toward the rim and in the highlight, its thickness drifting.
+    // `fp`: where on the body, in units of its size (for the film).
+    static float4 jelly(float3 n, float3 V, float shape, float3 fp, constant Uniforms& u) {
+        float film = u.film.x;
         float3 tint = u.tint.rgb;
-        float s = u.tint.a;
+        float s = u.tint.a * (1.0 - film * (0.5 + 0.15 * u.dark));
         float3 L = normalize(float3(-0.45, -0.8, -0.9));
-        float fres = pow(1.0 - clamp(dot(n, V), 0.0, 1.0), 2.0);
+        float c = clamp(dot(n, V), 0.0, 1.0);
+        float fres = pow(1.0 - c, 2.0);
         float a = s * (0.42 + 0.22 * fres);
-        float3 light = mix(tint, float3(1.0), 0.65);
+        float3 light = mix(tint, float3(1.0), 0.65 + 0.2 * film);
         // Faces turned up are lighter, turned aside a little deeper.
         float3 col = mix(tint, light, max(shape - 1.0, 0.0)) * a * min(shape, 1.0);
         float rim = fres * 0.18 * (0.5 + 0.5 * dot(normalize(n.xy + 1e-5), normalize(L.xy)));
         col += light * rim;
         a += rim;
         float spec = pow(max(dot(reflect(-L, n), V), 0.0), 14.0) * 0.22;
+        if (film > 0.0) {
+            // Thinner toward the top (it drains), with slow low swirls.
+            float2 q = fp.xy + float2(0.08 * u.film.y, 0.06 * u.film.z);
+            float swirl = sin(q.x * 2.3 + 1.4 * sin(q.y * 1.9 + 0.3 * u.film.z)) + 0.6 * sin(q.y * 3.1 - q.x * 1.2 + 0.45 * u.film.y);
+            float d = 540.0 + 70.0 * fp.y + 45.0 * swirl;
+            float3 f = thinFilm(d, c);
+            // Soft colour about a pale grey, never a saturated band.
+            // On a dark page a film shows brighter, as a bubble does against night.
+            float m = dot(f, float3(0.333)), dk = u.dark;
+            f = mix(0.55, 0.42, dk) + mix(0.75, 0.95, dk) * (f - m);
+            float w = film * (0.015 + 0.34 * fres + 1.1 * spec) * (1.0 + 0.5 * dk);
+            col += f * w;
+            a += w * 0.5;
+            spec *= 1.0 - 0.4 * film;
+        }
         col += light * spec;
         a += spec;
         return float4(col, a);
@@ -377,7 +409,7 @@ enum JellyRenderer {
     static float4 shade(float3 pos, float3 n, float dBody, float dHead, float2 rested, float px, Scene sc, constant Uniforms& u) {
         // Faces turned up a touch lighter, so the cube reads as a cube.
         float shape = 1.0 + 0.25 * (-n.y) - 0.1 * abs(n.x);
-        float4 j = jelly(n, float3(0.0, 0.0, -1.0), shape, u);
+        float4 j = jelly(n, float3(0.0, 0.0, -1.0), shape, (pos - sc.cube) / max(sc.s, 1.0), u);
         float3 col = j.rgb;
         float a = j.a;
 
@@ -393,7 +425,7 @@ enum JellyRenderer {
 
         // The head has more body than the slab, so its see-through middle
         // never reads as a dark disc over a dark app.
-        float head = smoothstep(3.0, 0.0, dHead) * u.tint.a * 0.14;
+        float head = smoothstep(3.0, 0.0, dHead) * u.tint.a * 0.14 * (1.0 - 0.5 * u.film.x);
         col += mix(u.tint.rgb, float3(1.0), u.dark > 0.5 ? 0.15 : 0.35) * head;
         a += head;
 

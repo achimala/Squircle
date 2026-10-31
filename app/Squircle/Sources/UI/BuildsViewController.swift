@@ -9,8 +9,8 @@ final class BuildsViewController: UIViewController {
     private var project: AppProject
     private let scroll = UIScrollView()
     private let rows = UIStackView()
-    private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
-    private let titleLabel = Theme.label("Builds", Theme.font(.headline, 17, .semibold))
+    private let notice = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
+    private let titleLabel = Theme.label("Builds", Theme.Text.bodyStrong)
     private let close = Theme.glassButton(symbol: "xmark", identifier: "builds.close", accessibilityLabel: "Close builds")
     private let create = Theme.glassButton(symbol: "hammer", title: "Build", identifier: "project.build")
     private let install = Theme.glassButton(symbol: "arrow.down.circle", title: "Install", prominent: true, identifier: "build.install")
@@ -31,7 +31,7 @@ final class BuildsViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
+        view.backgroundColor = Theme.paper
         titleLabel.textAlignment = .center
         titleLabel.accessibilityTraits = .header
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
@@ -50,37 +50,37 @@ final class BuildsViewController: UIViewController {
         [close, titleLabel, create].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; header.addSubview($0) }
         [rows, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; scroll.addSubview($0) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 18),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 18),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
-            header.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: Theme.Space.group),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.group),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.group),
+            header.heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.Space.tap),
             close.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             close.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            close.widthAnchor.constraint(equalToConstant: 44), close.heightAnchor.constraint(equalToConstant: 44),
+            close.widthAnchor.constraint(equalToConstant: Theme.Space.tap), close.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
             create.trailingAnchor.constraint(equalTo: header.trailingAnchor),
             create.topAnchor.constraint(equalTo: header.topAnchor),
             create.bottomAnchor.constraint(equalTo: header.bottomAnchor),
-            create.heightAnchor.constraint(greaterThanOrEqualToConstant: 44),
+            create.heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.Space.tap),
             titleLabel.centerXAnchor.constraint(equalTo: header.centerXAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: close.trailingAnchor, constant: 8),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: create.leadingAnchor, constant: -8),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 14),
+            titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: close.trailingAnchor, constant: Theme.Space.row),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: create.leadingAnchor, constant: -Theme.Space.row),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: Theme.Space.rowPad),
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             rows.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
-            rows.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 12),
-            rows.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -12),
-            notice.topAnchor.constraint(equalTo: rows.bottomAnchor, constant: 20),
-            notice.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 32),
-            notice.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -32),
+            rows.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: Theme.Space.row),
+            rows.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -Theme.Space.row),
+            notice.topAnchor.constraint(equalTo: rows.bottomAnchor, constant: Theme.Space.section),
+            notice.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: Theme.Space.margin),
+            notice.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -Theme.Space.margin),
             notice.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -110),
             install.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            install.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-            install.heightAnchor.constraint(greaterThanOrEqualToConstant: 50),
+            install.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -Theme.Space.rowPad),
+            install.heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.Space.tap),
             install.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
-            install.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -48)
+            install.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, constant: -2 * Theme.Space.margin)
         ])
         if #available(iOS 26.0, *) {
             let edge = UIScrollEdgeElementContainerInteraction()
@@ -206,8 +206,8 @@ final class BuildRow: UIControl {
     var showsSeparator = true { didSet { separator.isHidden = !showsSeparator } }
     private let symbol = UIImageView()
     private let spinner = UIActivityIndicatorView(style: .medium)
-    private let titleLabel = Theme.label("", Theme.font(.headline, 17, .semibold))
-    private let detailLabel = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel, lines: 2)
+    private let titleLabel = Theme.label("", Theme.Text.body)
+    private let detailLabel = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 2)
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
     private let separator = UIView()
     private let highlight = UIView()
@@ -220,41 +220,42 @@ final class BuildRow: UIControl {
         isAccessibilityElement = true
         accessibilityTraits = .button
         highlight.backgroundColor = Theme.pressedFill
-        highlight.layer.cornerRadius = 18
+        highlight.layer.cornerRadius = Theme.Radius.large
         highlight.layer.cornerCurve = .continuous
         highlight.alpha = 0
         symbol.contentMode = .scaleAspectFit
-        symbol.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .title3)
+        symbol.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         spinner.hidesWhenStopped = true
         chevron.tintColor = .tertiaryLabel
-        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .footnote, scale: .medium)
+        chevron.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         chevron.setContentHuggingPriority(.required, for: .horizontal)
         let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
         text.axis = .vertical
-        text.spacing = 3
+        text.spacing = Theme.Space.tight
         let glyph = UIView()
         [symbol, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glyph.addSubview($0) }
         let content = UIStackView(arrangedSubviews: [glyph, text, chevron])
         content.alignment = .center
-        content.spacing = 14
+        content.spacing = Theme.Space.glyphGap
         content.isUserInteractionEnabled = false
         [highlight, content, separator].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
         separator.backgroundColor = .separator
         NSLayoutConstraint.activate([
-            highlight.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            highlight.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            highlight.topAnchor.constraint(equalTo: topAnchor),
+            highlight.bottomAnchor.constraint(equalTo: bottomAnchor),
             highlight.leadingAnchor.constraint(equalTo: leadingAnchor),
             highlight.trailingAnchor.constraint(equalTo: trailingAnchor),
-            glyph.widthAnchor.constraint(equalToConstant: 30),
-            glyph.heightAnchor.constraint(equalToConstant: 30),
+            glyph.widthAnchor.constraint(equalToConstant: Theme.Space.glyph),
+            glyph.heightAnchor.constraint(equalToConstant: Theme.Space.glyph),
             symbol.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), symbol.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
             spinner.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
-            content.topAnchor.constraint(equalTo: topAnchor, constant: 14),
-            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
-            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 58),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            // With the list's inset, the glyph sits at the margin and the text at 48.
+            content.topAnchor.constraint(equalTo: topAnchor, constant: Theme.Space.rowPad),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.rowPad),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.rowPad),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.rowPad),
+            separator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Theme.Space.glyph + Theme.Space.glyphGap),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.rowPad),
             separator.bottomAnchor.constraint(equalTo: bottomAnchor),
             separator.heightAnchor.constraint(equalToConstant: 1 / max(1, traitCollection.displayScale))
         ])
@@ -266,10 +267,10 @@ final class BuildRow: UIControl {
     /// A build state's symbol and colour; nil while it runs (a spinner shows).
     static func symbol(for status: String) -> (String?, UIColor) {
         switch status {
-        case "succeeded": return ("checkmark.circle.fill", Theme.success)
-        case "failed": return ("xmark.octagon.fill", Theme.failure)
-        case "cancelled", "interrupted": return ("minus.circle.fill", .secondaryLabel)
-        case "queued": return ("clock.fill", .secondaryLabel)
+        case "succeeded": return ("checkmark.circle", Theme.success)
+        case "failed": return ("xmark.octagon", Theme.failure)
+        case "cancelled", "interrupted": return ("minus.circle", .secondaryLabel)
+        case "queued": return ("clock", .secondaryLabel)
         case "running": return (nil, .secondaryLabel)
         default: return ("circle.dashed", .secondaryLabel)
         }

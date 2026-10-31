@@ -231,15 +231,15 @@ struct ImageAttachment: Identifiable, Equatable {
         return UIGraphicsImageRenderer(size: size).image { _ in
             let height = size.width * poster.size.height / max(1, poster.size.width)
             poster.draw(in: CGRect(x: 0, y: -height * 0.06, width: size.width, height: height))
-            let font = UIFont.monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
+            let font = Theme.Text.lineStrong
             let label = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: UIColor.white])
             let icon = UIImage(systemName: "play.fill", withConfiguration: UIImage.SymbolConfiguration(font: font))?
                 .withTintColor(.white, renderingMode: .alwaysOriginal)
             let width = label.size().width + 32
-            let pill = CGRect(x: 8, y: size.height - 34, width: width, height: 26)
+            let pill = CGRect(x: Theme.Space.row, y: size.height - 34, width: width, height: 26)
             UIColor.black.withAlphaComponent(0.6).setFill()
-            UIBezierPath(roundedRect: pill, cornerRadius: 13).fill()
-            icon?.draw(in: CGRect(x: pill.minX + 8, y: pill.midY - 6, width: 12, height: 12))
+            UIBezierPath(roundedRect: pill, cornerRadius: pill.height / 2).fill()
+            icon?.draw(in: CGRect(x: pill.minX + Theme.Space.row, y: pill.midY - 6, width: 12, height: 12))
             label.draw(at: CGPoint(x: pill.minX + 24, y: pill.midY - label.size().height / 2))
         }
     }

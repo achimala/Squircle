@@ -1,33 +1,39 @@
 # Squircle design deck
 
-**Status: proposal, 2026-10-31. Nothing here is built until the user approves
-the whole deck.** Once approved, this page is the design guide every change
-follows. Where it changes an earlier decision in [AGENTS.md](../../AGENTS.md),
-it says so in [Decisions this changes](#decisions-this-changes). Sections
-marked **CHOICE** need the user to pick: Home, the palette, and Tasks.
+**Status: approved by the user, 2026-10-31. This page is the design guide:
+every UI change follows it, and a change to it needs the user's say.** The
+user's picks: the **Pearl** palette, Home's Waiting on you as **B · Deck**,
+Tasks as **A · Outline**, **Sprouts** for workers and the **soap-film** app
+agent. Where it changes an earlier decision in [AGENTS.md](../../AGENTS.md),
+it says so in [Decisions this changes](#decisions-this-changes). The tokens
+live in one place in code, `Theme` (`app/Squircle/Sources/UI/Theme.swift`):
+see [In code](#in-code).
+
+Built in stages: 1, the foundation (tokens, Pearl, the soap-film agent,
+Sprouts); 2, the chat; 3, Home; 4, Tasks and threads.
 
 Every picture below was rendered by the real app with real data on the
 user's own Mac: Squircle's and LanguageApp's real conversations, tasks and
-questions. The "after" screens come from a scratch prototype of this guide in
-the real app code (branch `design-language-mockups`, DEBUG switches
-`SQUIRCLE_BUBBLES`, `SQUIRCLE_HOME`, `SQUIRCLE_PALETTE`), not from hand-made
-mockups. The jellies were rendered by
-the real Metal shader. The one exception is called out where it appears:
-Home's directions add questions answered earlier today, with their real
-text, so that a layout with several questions can be compared.
+questions. The "after" screens come from a scratch prototype (the unmerged
+`design-language-mockups` branch), not from hand-made mockups. The jellies
+were rendered by the real Metal shader. The one exception is called out
+where it appears: Home's directions add questions answered earlier today,
+with their real text, so that a layout with several questions can be
+compared.
 
 1. [Your asks and how the deck answers them](#your-asks-and-how-the-deck-answers-them)
 2. [The rules](#the-rules): type, spacing, glyphs and jellies, colour, surfaces and radii, motion and haptics
 3. [The app agent's chat](#the-app-agents-chat): bubbles per paragraph
 4. [Worked for…](#worked-for) (built)
 5. [The question card](#the-question-card)
-6. [Home and Waiting on you](#home-and-waiting-on-you) (**CHOICE**)
-7. [Palette and the soap-film agent](#palette-and-the-soap-film-agent) (**CHOICE**)
-8. [Worker jellies: Sprouts](#worker-jellies-sprouts) (approved)
-9. [Tasks and threads](#tasks-and-threads) (**CHOICE**)
+6. [Home and Waiting on you](#home-and-waiting-on-you): B · Deck
+7. [Pearl and the soap-film agent](#pearl-and-the-soap-film-agent)
+8. [Worker jellies: Sprouts](#worker-jellies-sprouts)
+9. [Tasks and threads](#tasks-and-threads): A · Outline
 10. [Media and sending](#media-and-sending)
-11. [Decisions this changes](#decisions-this-changes)
-12. [Audit: what is wrong today](#audit-what-is-wrong-today)
+11. [In code](#in-code)
+12. [Decisions this changes](#decisions-this-changes)
+13. [Audit: what was wrong](#audit-what-was-wrong)
 
 ## Your asks and how the deck answers them
 
@@ -36,15 +42,15 @@ text, so that a layout with several questions can be compared.
 | "a big mix of blobby UI but also plain flat icons" | One glyph slot: every line leads with one 20-point glyph. A jelly means an agent; anything else is a flat SF Symbol in the line's own size and weight. No wells, rails, filled circles or card icons. [Glyphs](#glyphs-and-jellies) |
 | "inconsistent margins, spacing. Super ugly." | One 4-point grid, a 20-point margin, and one spacing table for the chat: 4 points between bubbles from the same sender, 8 between lines, 16 between groups, 24 before your message. Every line's text starts at the same x, wrapped lines included. [Spacing](#spacing) |
 | "Sometimes stuff is small text, sometimes medium, sometimes big. Makes no sense." | Six text roles replace eighteen size and weight pairs. One size per line: status words are no longer smaller than the line they sit in. [Type](#type) |
-| "Home Screen has also gotten very ugly with the pile of questions at the top" | Three ways for questions to sit on Home, each answerable in place. [Home](#home-and-waiting-on-you), **CHOICE** |
+| "Home Screen has also gotten very ugly with the pile of questions at the top" | One question at a time on Home, swiped sideways, answerable in place; Home never grows tall. [Home](#home-and-waiting-on-you) |
 | "it should just have blocking questions not every little completed task" | Waiting on you shows only what blocks an agent until you act: open questions and approvals. On today's data, 14 items become 1. [The rule](#the-rule) |
 | "top level agent chat back in message bubbles … A nice haptic as each message comes in. It should split across paragraph boundaries ideally. Idk if t3 can stream to us in paras?" | One received bubble per paragraph, a soft haptic as each lands. T3 sends each reply whole, so the phone splits it as it arrives. [Bubbles](#the-app-agents-chat) |
-| "our orange theme is a bit too Claude … Maybe the top level can be more rainbowy. Like a soap bubble" | Three palettes to replace Clay. The app's agent gets a thin soap film on its own body, never a glow. [Palette](#palette-and-the-soap-film-agent), **CHOICE** |
-| "consolidate everything into one consistent design deck … we track in the repo" | This page, with its images in `docs/design/img/`. One long copy is in `attachments/design-deck/` for reading on the phone. |
+| "our orange theme is a bit too Claude … Maybe the top level can be more rainbowy. Like a soap bubble" | Pearl replaces Clay ("Pearl. Do it"). The app's agent gets a thin soap film on its own body, never a glow. [Pearl](#pearl-and-the-soap-film-agent) |
+| "consolidate everything into one consistent design deck … we track in the repo" | This page, with its images in `docs/design/img/`. |
 | "Question UI there is super duper ugly" | One question card for chat, Tasks and Home: a received bubble with the answers as a list. Long answers wrap, and multi-select has its own marks and a Send button. [Question card](#the-question-card) |
-| Worker variety: "Can we do something to make each worker blob look a little distinct" (Sprouts approved) | Sprouts, folded in as approved. Colour stays state. [Sprouts](#worker-jellies-sprouts) |
+| Worker variety: "Can we do something to make each worker blob look a little distinct" | Sprouts ("Sprouts stuff lgtm"). Colour stays state. [Sprouts](#worker-jellies-sprouts) |
 | "All the spam now on every message with adding tasks and notes … should get folded into the worked for X seconds thing" | Built on main; shown here so the deck has the whole conversation. [Worked for…](#worked-for) |
-| "We need to see each task clearly up front with live status … see the active threads and what they're doing with a small preview … If there's only one thread just show it directly inside the task UI. Shouldn't need a separate thread UI" | Three directions from the Tasks and threads pass, aligned to these rules. Threads nest under their task, with no Threads tab; a task with one thread is that thread. [Tasks](#tasks-and-threads), **CHOICE** |
+| "We need to see each task clearly up front with live status … see the active threads and what they're doing with a small preview … If there's only one thread just show it directly inside the task UI. Shouldn't need a separate thread UI" | A · Outline ("task list A seems best, others too cluttered"). Threads nest under their task, with no Threads tab; a task with one thread is that thread. [Tasks](#tasks-and-threads) |
 | "annoying that I can't swipe horizontally between media" / "sending msg jumps my scroll pos to bottom" | Sending keeps your place: built on main. Media swipe: in progress on `media-swipe`. Both follow the motion rules. [Media and sending](#media-and-sending) |
 
 ## The rules
@@ -175,17 +181,18 @@ the row is 44 points tall. Tapping it opens the list in place, or pushes it.
 
 ### Colour
 
-Colour roles. Names are `Theme`'s; values come from the
-[palette](#palette-and-the-soap-film-agent) the user picks.
+Colour roles. Names are `Theme`'s; the values are
+[Pearl's](#pearl-and-the-soap-film-agent).
 
 | Role | Means | Never |
 | --- | --- | --- |
 | `paper` | Every page's backdrop, sheets included (the Tasks sheet stops being white) | A gradient or glow |
 | `accent` | What you can tap: links, the send button, Install, the "N more" link | Decoration |
-| `working` | An agent at work: its jelly, the "working" word | Identical to `accent` in Pearl only |
+| `working` | An agent at work: its jelly, the "working" word | What you tap (that is the ink `accent`) |
 | `warning` (needs you) | Something waits on you | A heading that waits on nothing |
 | `success` (done) | Finished, ready to try | System green |
 | `failure` | Failed, stopped | System red |
+| `idle` | An idle jelly | Text |
 | `receivedFill` | The agent's bubbles and the question card | Any other card |
 | `userGlass` | Your bubbles' tint | Anything not yours |
 | label / secondary / tertiary | Text, by role | Hand-mixed greys |
@@ -261,7 +268,7 @@ blank lines in the raw text. Each top-level block is one bubble:
 
 ### Where bubbles apply
 
-**Recommended: the app's agent conversation only.** Worker threads keep
+**The app's agent conversation only.** Worker threads keep
 today's plain full-width text. A worker's messages are working notes: long
 Markdown with code, paths and tables that read better across the full width,
 and chopping them into bubbles would turn a log into a wall of grey. The app
@@ -333,58 +340,47 @@ worker's test question. The fix drops that branch in the service and the
 `.task` item in the client. In the Tasks sheet, such a task shows as a plain
 row with its note, never as a question card.
 
-### Directions (CHOICE)
+### B · Deck
 
-The heading becomes a Caption line ("Waiting on you 2", secondary, not
+The heading is a Caption line ("Waiting on you 1 of 7", secondary, not
 accent). Each question is the [question card](#the-question-card) with its
-app's name. Answering it there is the same as answering it anywhere. Tapping
-the question opens the chat at the spot (built: tap-to-jump).
+app's name, one at a time; swipe sideways for the next, under your finger
+with native paging. Home keeps a fixed height however many wait, and the
+devices stay in the same place. Answering it there is the same as answering
+it anywhere. Tapping the question opens the chat at the spot (built:
+tap-to-jump).
 
 ![Home directions A and B](img/home-directions-ab.jpg)
 
-- **A · Stack.** The oldest two questions as cards, then "N more" (opens
-  the first app's Tasks at Needs you). The simplest option, and the usual
-  case: with the rule, Home usually has 0–2.
-- **B · Deck.** One card at a time; swipe sideways for the next ("1 of 7").
-  Home keeps a fixed height however many wait, and the devices stay in the
-  same place.
+B is on the right ("Up next B seems good, don't want it getting crazy tall
+and messy"). Not picked: **A · Stack** (two cards, then "N more") and **C ·
+Next up** (one card, the rest as one line each).
 
-![Home direction C](img/home-direction-c.jpg)
-
-- **C · Next up.** The oldest question as a card, ready to answer. The rest
-  show as one line each (who asks and the question), and tapping one opens
-  it where it was asked. You answer one thing at a time, and still see the
-  queue.
-
-Recommended: **A**. With the rule applied, there are rarely more than two.
-
-## Palette and the soap-film agent
-
-**CHOICE: replace Clay's terracotta.** Each palette has light and dark, an
-accent for what you tap, and five state colours a jelly can be: working,
-needs you, done, failed and idle. The renders below were made by the real
-shader with each palette.
+## Pearl and the soap-film agent
 
 ![Pearl](img/palette-pearl.jpg)
 
-- **Pearl**: ink controls (near-black, near-white in dark), a violet
-  "working", amber, green, red. The calmest: the UI is monochrome and the
-  only colour is state and the agent's film. Most distinct from Claude's
-  orange, and the most "soap bubble". **Recommended.**
+**Pearl** replaces Clay's terracotta: ink controls (near-black, near-white
+in dark), a violet "working", amber, green and red. The UI is monochrome; the
+only colour is state and the agent's film.
 
-![Lagoon](img/palette-lagoon.jpg)
+| Role | Light | Dark |
+| --- | --- | --- |
+| `accent` (ink) | `#1C1D22` | `#F2F2F5` |
+| `onAccent` | `#FFFFFF` | `#0E0F12` |
+| `paper` | `#F5F5F2` | `#0E0F12` |
+| `working` | `#6E56F0` | `#9C8CFF` |
+| `warning` (needs you) | `#D08A00` | `#FFC24D` |
+| `success` (done) | `#2F9461` | `#5FD38E` |
+| `failure` | `#D33A3A` | `#FF6B6B` |
+| `idle` | `#8E8E95` | `#7A7A82` |
+| `receivedFill` | `#E9E9E6` | `#1E1F24` |
+| `userGlass` | `working` at 14% | `working` at 26% |
 
-- **Lagoon**: deep teal for the accent and working, marigold, leaf green
-  and coral. The warmest of the three.
+![Dark: Pearl and the Clay it replaced](img/palettes-dark.jpg)
 
-![Indigo](img/palette-indigo.jpg)
-
-- **Indigo**: indigo for the accent and working, amber, teal-green and
-  rose. The most conventional.
-
-![The palettes on real screens](img/palettes-on-screens.jpg)
-
-![Dark](img/palettes-dark.jpg)
+Not picked: **Lagoon** (deep teal, marigold, leaf, coral) and **Indigo**
+(indigo, amber, teal-green, rose).
 
 ### The app's agent: a soap film
 
@@ -405,15 +401,14 @@ Metal shader (`JellyShader.swift`):
   not the rainbow glow the user rejected (2026-10-05, "harsh, too
   Apple-like") or the coloured gradient glow ("AI slop").
 
-A clip of it working, light and dark, is in
-`attachments/design-deck/palettes/agent-motion.mp4`.
+The app icon and the Live Activity's jellies are drawn by the same shader
+with the film (`Resources/JellyIcon`, `SQUIRCLE_JELLY_GLYPHS`).
 
 ## Worker jellies: Sprouts
 
 ![Sprouts crew](img/sprouts-crew.jpg)
 
-Approved by the user ("Sprouts stuff lgtm for now") and built on the
-`jelly-variety` branch, to ship with this overhaul:
+Approved by the user ("Sprouts stuff lgtm for now"), built in stage 1:
 
 - **Who**: every worker has a sprout on top (20 kinds: antennae, leaves,
   ears and more), plus its lean, sprout size and build. The app's agent
@@ -429,23 +424,19 @@ Approved by the user ("Sprouts stuff lgtm for now") and built on the
 
 ![One face per status](img/sprouts-faces.jpg)
 
-With the soap-film agent, Sprouts need the shader's `film` uniform next to
-their `sprout` uniform when the two branches merge.
-
 ## Tasks and threads
 
-**CHOICE.** This comes from the Tasks and threads design pass (spec:
-`docs/design/tasks-and-threads.md` on `tasks-threads-design`; renders from
-its DEBUG prototype on real LanguageApp and Squircle data). The user asked:
-"We need to see each task clearly up front with live status. When I drill
-into each I want to see the active threads and what they're doing with a
-small preview, then be able to jump into any one. If there's only one
-thread just show it directly inside the task UI. Shouldn't need a separate
-thread UI … threads are clearly visible and part of the task list."
+**A · Outline** ("I think the task list A seems best, others too
+cluttered"). From the Tasks and threads design pass
+([tasks-and-threads.md](tasks-and-threads.md); renders from its DEBUG
+prototype on real LanguageApp and Squircle data). The user asked: "We need
+to see each task clearly up front with live status. When I drill into each I
+want to see the active threads and what they're doing with a small preview,
+then be able to jump into any one. If there's only one thread just show it
+directly inside the task UI. Shouldn't need a separate thread UI … threads
+are clearly visible and part of the task list."
 
 ![Tasks today](img/tasks-before.jpg)
-
-**Common to all three directions:**
 
 - **App, then work items, then sub-tasks, then threads.** A thread sits
   under the task it was spawned for.
@@ -470,28 +461,13 @@ thread UI … threads are clearly visible and part of the task list."
 
 ![Tasks A](img/tasks-a.jpg)
 
-- **A · Outline.** Each overview row carries its live threads nested
-  underneath: a Sprout, the title, what it is doing, a row thumbnail. A work
-  item's page lists threads first, then the open sub-tasks, with closed ones
-  folded. **Its designer recommends A**, with C's grouping on big pages:
-  when an item has many sub-tasks, each live thread sits under its sub-task.
+- **The overview**: each row carries its live threads nested underneath: a
+  Sprout, the title, what it is doing, a row thumbnail.
+- **A work item's page** lists threads first, then the open sub-tasks, with
+  closed ones folded.
 
-![Tasks B](img/tasks-b.jpg)
-
-- **B · Tiles.** Each working thread is a small portrait tile (its
-  simulator or newest picture) with its Sprout standing on it, and the page
-  is a two-column grid of tiles. It only works when every thread has a
-  picture, and most don't (note the empty tiles).
-
-![Tasks C](img/tasks-c.jpg)
-
-- **C · Checklist.** One line of ask and one line of what the lead thread is
-  doing. It fits the most items on a screen (all 10 of LanguageApp's), but
-  hides how many threads an item has. The page is the sub-task checklist
-  with each thread under its sub-task.
-
-**Aligned to this deck when built** (the prototype predates it and uses
-neutral system colours and its own sizes):
+**Built to this deck** (the prototype predates it and uses neutral system
+colours and its own sizes):
 
 - **Type**: the ask is Body 17 (not 16 semibold); a row's second line and
   thread lines are Line 15, with the thread's title in Line strong; section
@@ -503,53 +479,73 @@ neutral system colours and its own sizes):
 - **Nesting**: as in [Glyphs](#glyphs-and-jellies). Thread lines hang at x =
   48 under the ask, with row thumbnails at 24 × 52 and page thumbnails at 56
   × 120.
-- **Colour**: the palette's `working`, `warning`, `success` and `failure`
-  roles, on paper. The Tasks screen is no longer a white sheet.
+- **Colour**: Pearl's `working`, `warning`, `success` and `failure` roles,
+  on paper. The Tasks screen is no longer a white sheet.
 - **Folded lines**: "Earlier threads", "History" and "Not on a task" use
   the folded-line row.
 
-Recommended: **A**, with C's thread-under-sub-task on big task pages.
+Not picked: **B · Tiles** (each thread a portrait tile; most threads have no
+picture) and **C · Checklist** (one line per item, hiding how many threads
+it has).
 
 ## Media and sending
 
 - **Sending keeps your place** (built on main): sending from above the end
   leaves you where you are, your bubble lands below, and the jump button
   shows in the accent until you go down.
-- **Swipe between media** (in progress on `media-swipe`): in the viewer,
+- **Swipe between media** (built on main): in the viewer,
   pictures and clips of the conversation page sideways under your finger,
   natively, with one spring and no crossfade.
 - Inline media drops its card frame: pictures sit on the page at an 8-point
   radius, with 8 points between them.
 
+## In code
+
+`Theme` (`app/Squircle/Sources/UI/Theme.swift`) is the only place these
+values are written; the app and the overlay share it. Nothing else names a
+font size, colour or radius.
+
+| Deck | `Theme` |
+| --- | --- |
+| Title, Body, Body strong, Line, Line strong, Caption, Mono | `Theme.Text.title`, `.body`, `.bodyStrong`, `.line`, `.lineStrong`, `.caption`, `.mono` (`.monoStrong` for a leading figure in a mono line) |
+| A symbol in a line's size and weight | `Theme.symbol(font)` |
+| 4, 8, 12, 16, 20, 24 | `Theme.Space.tight`, `.row`, `.rowPad`, `.group`, `.margin`, `.section` |
+| Glyph slot, its gap, text at 48, one nesting level | `Theme.Space.glyph`, `.glyphGap`, `.text`, `.indent` |
+| Bubble and card padding, a bubble's free side, 44 | `Theme.Space.bubble`, `.card`, `.bubbleFree`, `.tap` |
+| Jellies at 20, 28, 26 | `Theme.Glyph.line`, `.live`, `.home` |
+| Radii 8, 18, capsule | `Theme.Radius.small`, `.large`, `cornerStyle = .capsule` |
+| Colour roles | `Theme.accent`, `.onAccent`, `.paper`, `.working`, `.warning`, `.success`, `.failure`, `.idle`, `.receivedFill`, `.userGlass`, `.codeFill`, `.pressedFill` |
+
+The Live Activity runs in its own extension and repeats Pearl's values
+(`Widgets/SquircleWidgets.swift`).
+
 ## Decisions this changes
 
-Each of these supersedes an entry in [AGENTS.md](../../AGENTS.md) once the
-user approves:
+Each of these supersedes an entry in [AGENTS.md](../../AGENTS.md):
 
 1. **Design A (2026-10-13)**: "conversations read like plain chat … your
    messages keep tinted glass bubbles". The app agent's replies become
    received bubbles, one per paragraph, with a haptic. Worker threads stay
    plain chat.
-2. **Clay (2026-10-14)**: terracotta on cream is replaced by the chosen
-   palette.
+2. **Clay (2026-10-14)**: terracotta on cream is replaced by Pearl.
 3. **Jelly crew (2026-10-15)**: "the app's agent is the plain full jelly".
    It gets the soap film. In its live line it is 28 points, not 34–40.
    Workers become Sprouts (approved).
 4. **Waiting on you (2026-10-26)**: "everything waiting on the user shows …
    everything across apps in a plain list". Only blocking questions and
-   approvals show, in the chosen direction.
+   approvals show, one at a time (B · Deck).
 5. **Answers as glass buttons** (the shared question card): answers become
    rows inside the card. Glass is kept for Send.
 6. **Status words at 13 points inside 15-point lines**: one size per line.
 7. **Step wells and rails**: removed; steps use the glyph slot.
 8. **Tasks (2026-10-14, 2026-10-24)**: the Tasks sheet with its Tasks |
    Threads switch becomes a pushed Tasks screen with threads nested under
-   their tasks, in the chosen direction. A work item with one live thread
-   shows that thread.
+   their tasks (A · Outline). A work item with one live thread shows that
+   thread.
 
-## Audit: what is wrong today
+## Audit: what was wrong
 
-Captured 2026-10-31 from the running app (`main` at d3a55c1/4c11d89) with
+The state before this overhaul, kept as the reasons for the rules. Captured 2026-10-31 from the running app (`main` at d3a55c1/4c11d89) with
 real data.
 
 ![Chat today](img/audit-chat.jpg)

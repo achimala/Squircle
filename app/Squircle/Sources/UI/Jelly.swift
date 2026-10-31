@@ -4,9 +4,8 @@ import UIKit
 
 /// A jelly always means an agent: one T3 thread, live (user, 2026-10-15,
 /// direction B "little crew"). Colour is its state, shape is who it is.
-/// The app's agent is the plain full-size jelly; a worker is a small chibi
-/// sprout of it (rounder, proportionally bigger eyes), with a stable look
-/// of its own derived from its thread ID.
+/// The app's agent is the plain full-size jelly under a soap film (design
+/// deck, 2026-10-31); a worker is a Sprout, with a stable look of its own.
 struct JellyLook: Hashable {
     enum Role: Hashable { case agent, worker }
     enum Mood: Hashable {
@@ -59,6 +58,8 @@ struct JellyPose {
     var squash: CGFloat = 0
     /// Points up, as a fraction of its size.
     var hop: CGFloat = 0
+    /// The agent's soap film drifting: an angle, once round per loop.
+    var drift: CGFloat = 0
 
     /// How long one loop of `mood` lasts, and its frames per second.
     static func period(_ mood: JellyLook.Mood) -> Double {
@@ -87,6 +88,7 @@ struct JellyPose {
             let lid = u < 0.35 ? 1 - u / 0.35 : (u - 0.35) / 0.65
             return smooth(lid)
         }
+        p.drift = CGFloat(2 * Double.pi * t / P)
         switch look.mood {
         case .working:
             // Reading along a line, a word at a time, then back to the next.
@@ -176,16 +178,17 @@ extension JellyRenderer {
     static func uniforms(_ pose: JellyPose, _ look: JellyLook, canvas: JellyCanvas, scale: CGFloat,
                          traits: UITraitCollection) -> JellyUniforms {
         let color: UIColor = switch look.mood {
+        case .working: Theme.working
         case .needsYou: Theme.warning
         case .done: Theme.success
         case .failed: Theme.failure
-        default: Theme.accent
+        case .idle, .offline: Theme.idle
         }
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         color.resolvedColor(with: traits).getRed(&r, green: &g, blue: &b, alpha: &a)
         // Small jellies read pale on cream: denser below hero size.
         var strength: CGFloat = 0.85 * (canvas.size < 30 ? 1.25 : 1)
-        if look.mood == .idle { strength *= 0.6 }
+        if look.mood == .idle { strength *= 0.85 }
         if look.mood == .offline {
             let grey = 0.3 * r + 0.59 * g + 0.11 * b
             (r, g, b) = (.lerp(r, grey, 0.75), .lerp(g, grey, 0.75), .lerp(b, grey, 0.75))
@@ -204,6 +207,7 @@ extension JellyRenderer {
             bridge: SIMD4(0, 1, 0, 0),
             stubs: SIMD4(0, 0, Float(s / 34), 0),
             look: look.traits.look, sprout: look.traits.sprout,
+            film: look.role == .agent ? SIMD4(1, Float(cos(pose.drift)), Float(sin(pose.drift)), 0) : .zero,
             // No pill: its body is far off the canvas.
             center: SIMD2(-1e4, -1e4), half: SIMD2(1, 1), origin: SIMD2(0, 0),
             scale: Float(scale), radius: 1, pillow: 0, time: 0, churn: 0, opened: 0,

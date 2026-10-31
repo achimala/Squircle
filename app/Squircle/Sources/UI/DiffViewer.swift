@@ -79,11 +79,13 @@ final class DiffViewController: UIViewController, UITableViewDataSource, UITable
     private var collapsed = Set<Int>()
     private let sideways = UIScrollView()
     private let table = UITableView(frame: .zero, style: .plain)
-    private let status = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel)
+    private let status = Theme.label("", Theme.Text.line, color: .secondaryLabel)
     private let spinner = UIActivityIndicatorView(style: .medium)
-    static let font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    static let rowHeight: CGFloat = 19
-    static let gutter: CGFloat = 76
+    /// Mono at the text size the sheet opened with; rows are a fixed height.
+    static let font = Theme.Text.mono
+    static let rowHeight = ceil(font.lineHeight) + Theme.Space.tight
+    /// Both line numbers ("00000 00000"), then the code.
+    static let gutter = ceil(("00000 00000" as NSString).size(withAttributes: [.font: font]).width) + Theme.Space.margin
 
     init(title: String, load: @escaping () async -> String?) {
         self.titleText = title
@@ -101,8 +103,8 @@ final class DiffViewController: UIViewController, UITableViewDataSource, UITable
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
-        let heading = Theme.label(titleText, Theme.font(.headline, 17, .semibold))
+        view.backgroundColor = Theme.paper
+        let heading = Theme.label(titleText, Theme.Text.title)
         heading.accessibilityTraits = .header
         table.dataSource = self
         table.delegate = self
@@ -112,7 +114,7 @@ final class DiffViewController: UIViewController, UITableViewDataSource, UITable
         table.estimatedSectionHeaderHeight = 44
         table.sectionHeaderTopPadding = 0
         table.separatorStyle = .none
-        table.backgroundColor = .systemBackground
+        table.backgroundColor = Theme.paper
         table.register(DiffLineCell.self, forCellReuseIdentifier: "line")
         table.register(DiffFileHeader.self, forHeaderFooterViewReuseIdentifier: "file")
         table.accessibilityIdentifier = "diff.lines"
@@ -124,12 +126,12 @@ final class DiffViewController: UIViewController, UITableViewDataSource, UITable
         spinner.startAnimating()
         [heading, sideways, status, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
         NSLayoutConstraint.activate([
-            heading.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 22),
-            heading.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            heading.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            status.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 2),
+            heading.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: Theme.Space.section),
+            heading.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.margin),
+            heading.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.margin),
+            status.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: Theme.Space.tight),
             status.leadingAnchor.constraint(equalTo: heading.leadingAnchor),
-            sideways.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 12),
+            sideways.topAnchor.constraint(equalTo: status.bottomAnchor, constant: Theme.Space.rowPad),
             sideways.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             sideways.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             sideways.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -155,7 +157,7 @@ final class DiffViewController: UIViewController, UITableViewDataSource, UITable
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let char = ("0" as NSString).size(withAttributes: [.font: Self.font]).width
-        let width = max(sideways.bounds.width, Self.gutter + 24 + CGFloat(diff.widest) * char)
+        let width = max(sideways.bounds.width, Self.gutter + Theme.Space.section + CGFloat(diff.widest) * char)
         if table.frame.size != CGSize(width: width, height: sideways.bounds.height) {
             table.frame = CGRect(x: 0, y: 0, width: width, height: sideways.bounds.height)
             sideways.contentSize = CGSize(width: width, height: sideways.bounds.height)
@@ -201,12 +203,12 @@ final class DiffLineCell: UITableViewCell {
     private let code = UILabel()
     private static let addedFill = Theme.success.withAlphaComponent(0.13)
     private static let removedFill = Theme.failure.withAlphaComponent(0.13)
-    private static let hunkFill = Theme.accent.withAlphaComponent(0.08)
+    private static let hunkFill = Theme.codeFill
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         selectionStyle = .none
-        numbers.font = UIFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+        numbers.font = DiffViewController.font
         numbers.textColor = .tertiaryLabel
         code.font = DiffViewController.font
         code.lineBreakMode = .byClipping
@@ -238,22 +240,24 @@ final class DiffLineCell: UITableViewCell {
             backgroundColor = Self.hunkFill
             numbers.text = nil
             code.text = line.text
-            code.textColor = Theme.accent
+            code.textColor = .secondaryLabel
         }
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         let height = contentView.bounds.height
-        numbers.frame = CGRect(x: 8, y: 0, width: DiffViewController.gutter - 12, height: height)
+        numbers.frame = CGRect(x: Theme.Space.row, y: 0, width: DiffViewController.gutter - Theme.Space.rowPad, height: height)
         code.frame = CGRect(x: DiffViewController.gutter, y: 0, width: contentView.bounds.width - DiffViewController.gutter, height: height)
     }
 }
 
 /// A file's name and its size of change; tap to fold the file.
 final class DiffFileHeader: UITableViewHeaderFooterView {
-    private let glass = Theme.glassSurface(cornerRadius: 16)
-    private let name = Theme.label("", Theme.font(.footnote, 13, .semibold, monospaced: true))
+    /// The header's glass: a capsule `pill` tall.
+    private static let pill: CGFloat = 32
+    private let glass = Theme.glassSurface(cornerRadius: DiffFileHeader.pill / 2)
+    private let name = Theme.label("", Theme.Text.monoStrong)
     private let stats = UILabel()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.down"))
     private var action: (() -> Void)?
@@ -263,10 +267,11 @@ final class DiffFileHeader: UITableViewHeaderFooterView {
     override init(reuseIdentifier: String?) {
         super.init(reuseIdentifier: reuseIdentifier)
         name.lineBreakMode = .byTruncatingHead
-        stats.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        stats.font = Theme.Text.mono
+        stats.adjustsFontForContentSizeCategory = true
         chevron.tintColor = .tertiaryLabel
         chevron.contentMode = .center
-        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        chevron.preferredSymbolConfiguration = Theme.symbol(Theme.Text.mono)
         contentView.addSubview(glass)
         [name, stats, chevron].forEach { glass.contentView.addSubview($0) }
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
@@ -290,11 +295,13 @@ final class DiffFileHeader: UITableViewHeaderFooterView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let width = max(0, min(visibleWidth, bounds.width) - 20)
-        glass.frame = CGRect(x: 10 + contentOffsetX, y: 6, width: width, height: bounds.height - 10)
+        let inset = Theme.Space.rowPad
+        let width = max(0, min(visibleWidth, bounds.width) - 2 * inset)
+        glass.frame = CGRect(x: inset + contentOffsetX, y: Theme.Space.row, width: width, height: Self.pill)
         let statsWidth = stats.intrinsicContentSize.width
-        chevron.frame = CGRect(x: 12, y: 0, width: 14, height: glass.bounds.height)
-        stats.frame = CGRect(x: glass.bounds.width - statsWidth - 12, y: 0, width: statsWidth, height: glass.bounds.height)
-        name.frame = CGRect(x: 32, y: 0, width: max(0, stats.frame.minX - 40), height: glass.bounds.height)
+        // The chevron in a glyph slot, the path right after it.
+        chevron.frame = CGRect(x: inset, y: 0, width: Theme.Space.glyph, height: glass.bounds.height)
+        stats.frame = CGRect(x: glass.bounds.width - statsWidth - inset, y: 0, width: statsWidth, height: glass.bounds.height)
+        name.frame = CGRect(x: chevron.frame.maxX, y: 0, width: max(0, stats.frame.minX - Theme.Space.row - chevron.frame.maxX), height: glass.bounds.height)
     }
 }
