@@ -51,6 +51,15 @@ final class Composer: UIView, UITextViewDelegate {
         return button
     }()
     private var quoteCollapsed: NSLayoutConstraint!
+    #if DEBUG
+    /// Verification only: opens the + menu as a tap would.
+    func showAttachMenu() {
+        let selector = NSSelectorFromString("_presentMenuAtLocation:")
+        guard let interaction = attach.contextMenuInteraction, interaction.responds(to: selector) else { return }
+        typealias Present = @convention(c) (AnyObject, Selector, CGPoint) -> Void
+        unsafeBitCast(interaction.method(for: selector), to: Present.self)(interaction, selector, CGPoint(x: attach.bounds.midX, y: attach.bounds.midY))
+    }
+    #endif
     private let attach: UIButton = {
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: "plus")

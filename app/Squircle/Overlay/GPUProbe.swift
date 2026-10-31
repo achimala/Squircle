@@ -1,4 +1,3 @@
-#if SQUIRCLE_OVERLAY || DEBUG
 import Darwin
 import Metal
 import ObjectiveC
@@ -519,4 +518,3 @@ final class GPUProbe: @unchecked Sendable {
         }
     }
 }
-#endif

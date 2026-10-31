@@ -349,10 +349,26 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private func attachMenu() -> UIMenu {
         let photos = picker.menu
-        guard !appAttachments.isEmpty else { return photos }
+        let more = appAttachments.isEmpty ? ownRecordings : appAttachments
+        guard !more.isEmpty else { return photos }
         return UIMenu(children: [UIMenu(options: .displayInline, children: photos.children),
-                                 UIMenu(options: .displayInline, children: appAttachments)])
+                                 UIMenu(options: .displayInline, children: more)])
     }
+
+    #if SQUIRCLE_OVERLAY
+    private var ownRecordings: [UIMenuElement] { [] }
+    #else
+    /// In Squircle itself, in the Squircle app's own conversations only:
+    /// recordings of Squircle, from its scene's recorder, read as the menu
+    /// opens (unavailable while one runs). Other apps record through their
+    /// own overlay.
+    private var ownRecordings: [UIMenuElement] {
+        guard SelfRecording.records(project) else { return [] }
+        return [UIDeferredMenuElement.uncached { [weak self] done in
+            done((self?.view.window?.windowScene?.delegate as? StudioScene)?.recording?.menu ?? [])
+        }]
+    }
+    #endif
 
     /// The debug overlay's capture is flying into the field: keep its
     /// thumbnail hidden until it lands (nil: show it).
@@ -581,6 +597,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         setNeedsMediaPass()
+        #if DEBUG
+        // Verification only: `SQUIRCLE_ATTACH_MENU=1` opens the + menu of
+        // each conversation that appears.
+        if ProcessInfo.processInfo.environment["SQUIRCLE_ATTACH_MENU"] == "1" {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                self?.composer.showAttachMenu()
+            }
+        }
+        #endif
     }
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
