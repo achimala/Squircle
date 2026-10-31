@@ -49,6 +49,8 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         push.start(model: model)
         if let url = options.urlContexts.first?.url, let target = PushTarget(url: url) { push.open(target) }
         #if DEBUG
+        // Verification only: `SQUIRCLE_PERF_HEADLESS=PATH` records Squircle itself.
+        PerfRecorder.headlessIfAsked()
         // Verification only: the debug overlay over Squircle, scoped to the
         // app with this bundle ID, since it can't run injected in a simulator.
         if let bundleID = ProcessInfo.processInfo.environment["SQUIRCLE_OVERLAY_DEMO"], let configuration = model.configuration {

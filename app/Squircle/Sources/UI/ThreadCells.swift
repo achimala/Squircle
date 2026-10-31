@@ -1175,8 +1175,13 @@ final class LiveCell: TimelineCell {
         accessibilityLabel = status.headline
     }
 
-    /// The jelly draws while it shows and the conversation is in sight.
-    private func renderHero() { hero?.inSight = inSight && hero?.isHidden == false }
+    /// The jelly draws while it shows and the conversation is in sight; a
+    /// cell the table keeps hidden among its spares doesn't.
+    private func renderHero() {
+        hero?.inSight = inSight && !isHidden && hero?.isHidden == false
+        hero?.refresh()
+    }
+    override var isHidden: Bool { didSet { if isHidden != oldValue { renderHero() } } }
 }
 
 /// The live capsule: the app's mark turning while the agent works, the task

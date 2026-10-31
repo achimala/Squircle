@@ -139,7 +139,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private var agent: ThreadViewController? { mountedApp?.controller }
     private var thread: ThreadViewController? { mountedThread?.controller }
     /// A finger on the back edge owns one spring; targets wait for release.
-    private var dragging: SpringDriver?
+    private var dragging: SpringDriver? {
+        // A screen under the finger moves: the jellies hold still meanwhile.
+        didSet { JellyDirector.shared.dragging = dragging != nil }
+    }
     private var dragStart: CGFloat = 0
     /// Inside `sync()`: the scene is drawn once, from the finished state.
     private var syncing = false
@@ -506,22 +509,33 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             // Each pass of the main run loop: one longer than 8.3 ms misses a 120 Hz frame.
             var passes: [Double] = []
             var woke = CACurrentMediaTime()
-            let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue | CFRunLoopActivity.beforeWaiting.rawValue, true, 0) { _, activity in
-                let now = CACurrentMediaTime()
-                if activity == .afterWaiting { woke = now } else { passes.append((now - woke) * 1000) }
+            var wokeAt = Date().timeIntervalSince1970
+            var slow: [String] = []
+            // First to see the wake, last before sleep: the pass includes Core Animation's commit.
+            let wake = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue, true, CFIndex.min) { _, _ in
+                woke = CACurrentMediaTime()
+                wokeAt = Date().timeIntervalSince1970
             }
+            let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.beforeWaiting.rawValue, true, CFIndex.max) { _, _ in
+                let ms = (CACurrentMediaTime() - woke) * 1000
+                passes.append(ms)
+                if ms > 6 { slow.append(String(format: "#%d@%.3f=%.1f", passes.count - 1, wokeAt, ms)) }
+            }
+            CFRunLoopAddObserver(CFRunLoopGetMain(), wake, .commonModes)
             CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
             let end = ContinuousClock.now + .seconds(seconds)
             await action()
             try? await Task.sleep(until: end)
             link.invalidate()
             CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes)
+            CFRunLoopRemoveObserver(CFRunLoopGetMain(), wake, .commonModes)
             let gaps = zip(stamps.dropFirst(), stamps).map { ($0.0 - $1.0, $1.1) }
             let late = gaps.filter { $0.0 > 1.5 * $0.1 }
             let ms = late.reduce(0) { $0 + ($1.0 - $1.1) * 1000 }
             let long = passes.filter { $0 > 8.3 }
             total = (total.frames + stamps.count, total.hitches + late.count, total.ms + ms)
             total120 = (total120.0 + long.count, total120.1 + long.reduce(0) { $0 + $1 - 8.3 })
+            if !slow.isEmpty { NSLog("NAVSLOW %@ %@", label, slow.joined(separator: " ")) }
             NSLog("NAV %@ frames=%d hitches=%d hitch_ms=%.0f worst_ms=%.1f over8=%d main_max=%.1f", label, stamps.count, late.count, ms,
                   (gaps.map(\.0).max() ?? 0) * 1000, long.count, passes.max() ?? 0)
         }

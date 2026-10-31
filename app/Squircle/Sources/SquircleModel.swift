@@ -795,7 +795,9 @@ final class SquircleModel {
         watchBuild = Task { [weak self] in
             while let self, watchDirty, let current = watched, current.id == id, !Task.isCancelled {
                 watchDirty = false
-                let rendered = await Transcript.render(current.state)
+                var steps = watchSteps?.id == id ? watchSteps?.steps ?? StepMemo() : StepMemo()
+                let rendered = await Transcript.render(current.state, steps: &steps)
+                watchSteps = (id, steps)
                 guard !Task.isCancelled, watched?.id == id, id != selectedSessionID else { break }
                 threadCache.set(rendered, for: id)
                 changed()
@@ -860,6 +862,8 @@ final class SquircleModel {
         cacheWrite?.cancel(); cacheWrite = nil
         writeToDisk(id, state)
     }
+    /// Each thread's state sequence last written to disk.
+    private var written: [String: String] = [:]
     /// Keeps the on-disk copy current without writing on every event.
     private func scheduleCacheWrite() {
         guard let id = selectedSessionID, cacheWrite == nil else { return }
@@ -871,7 +875,12 @@ final class SquircleModel {
         }
     }
     private func writeToDisk(_ id: String, _ state: T3ThreadState) {
-        guard configuration != nil else { return }
+        // Leaving a thread saves it; one unchanged since its last write
+        // (going in and out of threads) isn't encoded again.
+        // (T3's sequence, then what the Mac adds beside it: details and media.)
+        let mark = "\(state.sequence) \(state.details.count) \(state.detailsSince ?? "") \(state.media.count)"
+        guard configuration != nil, written[id] != mark else { return }
+        written[id] = mark
         diskGeneration += 1
         Task { [disk, diskGeneration, state = state.restored] in await disk.saveThread(id, state, generation: diskGeneration) }
     }
@@ -886,7 +895,12 @@ final class SquircleModel {
         private init(state: T3ThreadState, rows: [ChatMessage]) { self.state = state; self.rows = rows }
         static let empty = Transcript(state: T3ThreadState(), rows: [])
         nonisolated static func render(_ state: T3ThreadState) async -> Transcript {
-            let rows = await SquircleModel.conversation(state)
+            var steps = StepMemo()
+            return await render(state, steps: &steps)
+        }
+        /// Reusing the steps of the thread's last render (`steps`, updated).
+        nonisolated static func render(_ state: T3ThreadState, steps: inout StepMemo) async -> Transcript {
+            let rows = await SquircleModel.conversation(state, steps: &steps)
             // Here, off the main actor, rather than when the thread first shows.
             ThreadItem.prepare(rows, running: state.isRunning)
             return Transcript(state: state, rows: rows)
@@ -895,6 +909,9 @@ final class SquircleModel {
     /// Renders the open thread off the main actor, one pass at a time;
     /// changes during a pass ask for one more. A render made for a thread no
     /// longer open is dropped.
+    /// The open and the watched thread's described steps, from their last render.
+    private var openSteps: (id: String, steps: StepMemo)?
+    private var watchSteps: (id: String, steps: StepMemo)?
     private func rebuildConversation() {
         conversationDirty = true
         guard conversationBuild == nil else { return }
@@ -902,7 +919,9 @@ final class SquircleModel {
             while let model = self, model.conversationDirty, !Task.isCancelled {
                 model.conversationDirty = false
                 let id = model.selectedSessionID, snapshot = model.state
-                let rendered = await Transcript.render(snapshot)
+                var steps = model.openSteps?.id == id ? model.openSteps?.steps ?? StepMemo() : StepMemo()
+                let rendered = await Transcript.render(snapshot, steps: &steps)
+                if let id { model.openSteps = (id, steps) }
                 guard !Task.isCancelled else { return }
                 if model.selectedSessionID == id {
                     model.transcript = rendered
@@ -1441,8 +1460,8 @@ final class SquircleModel {
     }
     /// T3's conversation with the thread's published recordings in time
     /// order. Runs off the main actor: long histories take a while.
-    private nonisolated static func conversation(_ state: T3ThreadState) async -> [ChatMessage] {
-        let rows = state.messages, media = state.media
+    private nonisolated static func conversation(_ state: T3ThreadState, steps: inout StepMemo) async -> [ChatMessage] {
+        let rows = state.messages(steps: &steps), media = state.media
         guard media.contains(where: { $0["simulator"]["session_id"].string == nil }) else { return rows }
         let clips = media.compactMap { item -> ChatMessage? in
             // Simulator recordings show as the turn's simulator instead.

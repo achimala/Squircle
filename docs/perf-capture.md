@@ -131,6 +131,25 @@ in the same place.
   cost), the render server's own work and its frame drops for
   Core Animation-only content, kernel scheduling: Instruments with the
   phone attached.
+- **2026-10-31 (user: going in and out of threads, Tasks and with the sim
+  PiP is choppy; three phone recordings, Squircle 0.3.0 (75), iPhone18,2,
+  iOS 27.2).** `perf show` took the agent jelly's 120×141 Metal layer for the
+  screen and reported 24–35 fps "app paced"; the screen is Core Animation, so
+  a Metal layer covering under a quarter of it (by share, else under 300 k
+  pixels) no longer stands for the screen, and display refreshes do. Read
+  that way the recordings were 89, 83 and 99 fps, and what they showed was
+  pacing: whenever the hero jelly's display link (24–60 Hz, preferred 30)
+  ran, the display dropped to 80 Hz and the main thread's links ticked at
+  40 Hz, transitions included; the hero also drew while off screen (293 and
+  74 drawables never shown). Now every display link in the app asks for
+  `Motion.displayRange` (80–120, preferred 120) and slower clocks take every
+  few frames themselves; the jellies hold still while any spring animates or
+  a finger drags a screen; the hero draws only when actually visible.
+  Simulator, Squircle agent and three working threads, 18 pushes and back
+  swipes: main run-loop passes over 8.3 ms (now including Core Animation's
+  commit) 6 → 0, worst 22 → 7.8 ms. Simulator numbers are not phone numbers
+  and its display runs at 60 Hz, so the pacing fix is unverified until a
+  phone recording on the new build.
 - Upload: `POST /v1/captures?kind=video|performance` (control token, 300 MB
   route limit) into `<data>/captures/`, started as soon as the recording is
   attached; uploads don't wait for each other. Until the message is sent its

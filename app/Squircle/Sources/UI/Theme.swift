@@ -211,6 +211,13 @@ enum Theme {
 }
 
 enum Motion {
+    /// What every display link in the app asks for: the display's full rate
+    /// (ProMotion to 120 Hz; Info.plist sets
+    /// `CADisableMinimumFrameDurationOnPhone`). Slower clocks (the jellies)
+    /// take every few frames themselves: one link asking for less held the
+    /// phone's display at 80 Hz with every animation ticking at 40.
+    static let displayRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+
     /// The system setting, plus a DEBUG-only launch argument used by UI tests.
     #if DEBUG
     /// Verification only: overrides the setting (the overlay's jelly stress).
