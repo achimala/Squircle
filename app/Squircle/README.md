@@ -106,6 +106,12 @@ and `SimulatorDock`, the PiP/deck of simulators the app's agents are using.
 they show and flicks them back; in a conversation it pages sideways through
 all its pictures and clips, scrolling the conversation behind it so each
 goes home to its own spot.
+PDFs and text files (md, txt, json, csv) an agent links in its reply or
+attaches to a task show as file rows (`FileRowView`: name, size, a PDF's
+pages) and open in Quick Look (`DocumentViewer`: paging, zoom, share and Save
+to Files). A linked file comes from the service's
+`/v1/t3/threads/{thread}/document`, which serves only a document path an
+assistant message of that thread names, as written, with no symlink on the way.
 `ThreadViewController` is also the overlay's conversation; each host states
 what it can do through `ConversationHost` (the overlay shows live simulators
 as previews). `SimulatorFeeds` shares one T3 H.264 stream per simulator while

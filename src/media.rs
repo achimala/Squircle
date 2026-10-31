@@ -1,5 +1,6 @@
 //! Recordings and images an agent publishes into a T3 thread, so the phone
-//! can show them inline. Files live under `<data>/threads/<thread>/media/`.
+//! can show them inline, and documents attached to tasks, which the phone
+//! opens in a viewer. Files live under `<data>/threads/<thread>/media/`.
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -14,8 +15,11 @@ use std::{
 pub struct Media {
     pub id: String,
     pub thread_id: String,
-    /// "video" or "image".
+    /// "video", "image" or "file" (a document: PDF or plain text).
     pub kind: String,
+    /// The attached file's own name, which the phone shows for a document.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     pub caption: String,
     pub content_type: String,
     pub bytes: u64,
@@ -84,7 +88,26 @@ fn kind(path: &Path) -> Result<(&'static str, &'static str)> {
         "m4v" => ("video", "video/x-m4v"),
         "png" => ("image", "image/png"),
         "jpg" | "jpeg" => ("image", "image/jpeg"),
-        _ => bail!("Unsupported media type .{ext}; use mp4, mov, m4v, png or jpg"),
+        _ => match document_type(path) {
+            Some(content_type) => ("file", content_type),
+            None => bail!(
+                "Unsupported media type .{ext}; use mp4, mov, m4v, png, jpg, pdf, md, txt, json or csv"
+            ),
+        },
+    })
+}
+
+/// The content type of a document the phone opens in its viewer (a PDF or
+/// plain text), by extension; nil for anything else.
+pub fn document_type(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "pdf" => "application/pdf",
+        "md" | "markdown" => "text/markdown; charset=utf-8",
+        "txt" | "log" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        "csv" => "text/csv; charset=utf-8",
+        _ => return None,
     })
 }
 
@@ -127,6 +150,10 @@ fn store(
     simulator: Option<SimulatorClip>,
     take: bool,
 ) -> Result<Media> {
+    ensure!(
+        kind(file)?.0 != "file",
+        "A conversation shows pictures and clips; link a document in your reply, or attach it to a task"
+    );
     let media = store_in(
         &private_directory(root, thread)?,
         thread,
@@ -189,6 +216,10 @@ fn store_in(
         id: id.clone(),
         thread_id: thread.into(),
         kind: kind.into(),
+        name: match (kind, file.file_name()) {
+            ("file", Some(name)) => name.to_string_lossy().chars().take(200).collect(),
+            _ => String::new(),
+        },
         caption: caption.unwrap_or("").trim().chars().take(300).collect(),
         content_type: content_type.into(),
         bytes: size,

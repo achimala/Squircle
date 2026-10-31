@@ -452,6 +452,11 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         page.onInstall = { [weak self] in self?.task(id).map { self?.install($0) } }
         page.onMedia = { [weak self] picture, button in self?.openMedia(picture.media, of: picture.task, from: button) }
         page.loadThumbnail = { [weak self] picture in await self?.thumbnail(picture.media, of: picture.task, height: 220) }
+        page.documents = model.documents
+        page.onDocument = { [weak self] row in
+            guard let self else { return }
+            DocumentViewer.open(row, documents: model.documents, from: self)
+        }
         pages[id] = page
         pager.addSubview(page)
         return page
@@ -1105,7 +1110,8 @@ private final class UndoToast: UIView {
 
 /// One work item, a page of the Tasks sheet: where it stands (tap
 /// for any status), your ask, its note, Install when a build is ready, its
-/// sub-tasks as a checklist, its threads and its pictures and clips.
+/// sub-tasks as a checklist, its threads, its pictures and clips, and its
+/// documents.
 final class WorkItemPage: UIView {
     struct Sub: Equatable { let id, ask, note: String; let status: AppTask.Status; let opens: Bool }
     struct Picture: Equatable { let task: String; let media: AppTask.Media }
@@ -1133,6 +1139,8 @@ final class WorkItemPage: UIView {
     var onInstall: (() -> Void)?
     var onMedia: ((Picture, UIButton) -> Void)?
     var loadThumbnail: ((Picture) async -> UIImage?)?
+    var documents: DocumentFiles?
+    var onDocument: ((FileRowView) -> Void)?
     let scroll = UIScrollView()
     private let stack = UIStackView()
     private let status = UIButton(configuration: .plain())
@@ -1147,6 +1155,7 @@ final class WorkItemPage: UIView {
     private let chips = UIStackView()
     private let pictures = UIStackView()
     private let pictureScroll = UIScrollView()
+    private let files = UIStackView()
     private var loads: [Task<Void, Never>] = []
     private var shown: Content?
     private static let pictureHeight: CGFloat = 220
@@ -1216,7 +1225,9 @@ final class WorkItemPage: UIView {
         statusRow.alignment = .firstBaseline
         questions.axis = .vertical
         questions.spacing = 18
-        [statusRow, ask, note, questions, installRow, steps, crew, chipScroll, pictureScroll].forEach(stack.addArrangedSubview)
+        files.axis = .vertical
+        files.spacing = 8
+        [statusRow, ask, note, questions, installRow, steps, crew, chipScroll, pictureScroll, files].forEach(stack.addArrangedSubview)
         stack.setCustomSpacing(6, after: statusRow)
         stack.setCustomSpacing(6, after: ask)
         stack.setCustomSpacing(22, after: note)
@@ -1327,8 +1338,20 @@ final class WorkItemPage: UIView {
             loads.forEach { $0.cancel() }
             loads = []
             pictures.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            content.media.forEach { pictures.addArrangedSubview(picture($0)) }
-            pictureScroll.isHidden = content.media.isEmpty
+            files.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            let shown = content.media.filter { $0.media.kind != "file" }
+            shown.forEach { pictures.addArrangedSubview(picture($0)) }
+            pictureScroll.isHidden = shown.isEmpty
+            for item in content.media where item.media.kind == "file" {
+                guard let documents else { continue }
+                let row = FileRowView()
+                let media = item.media
+                row.show(.attached(task: item.task, media: media.id, name: media.name ?? "Document", bytes: media.bytes.map { Int($0) }),
+                         documents: documents)
+                row.onOpen = { [weak self] row in self?.onDocument?(row) }
+                files.addArrangedSubview(row)
+            }
+            files.isHidden = files.arrangedSubviews.isEmpty
         }
     }
 

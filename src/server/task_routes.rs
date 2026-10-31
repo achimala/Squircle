@@ -101,7 +101,8 @@ pub(super) fn task_view(state: &AppState, task: &tasks::Task) -> Value {
         None => json!({"id": id, "state": "missing"}),
     }).collect();
     let media: Vec<Value> = state.tasks.as_ref().map(|t| t.media(&task.id)).unwrap_or_default().into_iter()
-        .map(|m| json!({"id": m.id, "kind": m.kind, "caption": m.caption, "content_type": m.content_type, "created_at": m.created_at}))
+        .map(|m| json!({"id": m.id, "kind": m.kind, "name": m.name, "caption": m.caption, "content_type": m.content_type,
+                        "bytes": m.bytes, "created_at": m.created_at}))
         .collect();
     let mut value = serde_json::to_value(task).unwrap_or(Value::Null);
     value["subtasks"] = json!(
@@ -442,25 +443,5 @@ pub(super) async fn task_media_file(
 ) -> ApiResult<Response> {
     let dir = tasks_of(&state)?.media_dir(&id).map_err(ApiError::bad)?;
     let media = crate::media::get_in(&dir, &media).map_err(ApiError::missing)?;
-    let file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&media.file)
-        .await
-        .map_err(ApiError::missing)?;
-    let metadata = file.metadata().await.map_err(ApiError::internal)?;
-    if !metadata.is_file() {
-        return Err(ApiError::internal("Invalid media file"));
-    }
-    let mut response = (
-        private_headers(),
-        [(header::CONTENT_TYPE, media.content_type.clone())],
-        Body::from_stream(ReaderStream::new(file)),
-    )
-        .into_response();
-    response.headers_mut().insert(
-        header::CONTENT_LENGTH,
-        metadata.len().to_string().parse().unwrap(),
-    );
-    Ok(response)
+    super::media_routes::serve_file(&media.file, &media.content_type).await
 }

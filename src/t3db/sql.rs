@@ -223,6 +223,13 @@ macro_rules! thread_messages {
     };
 }
 
+/// Whether an assistant message of thread `?1` names a path, as `?2` or `?3`.
+pub(crate) const THREAD_LINKS: &str = concat!(
+    "select 1 linked from ",
+    thread_messages!(),
+    " where role='assistant' and (instr(text,?2)>0 or instr(text,?3)>0) limit 1"
+);
+
 pub(crate) const THREAD_PROJECT: &str = concat!(
     "select p.project_id, p.title, p.workspace_root from ",
     threads!(),
