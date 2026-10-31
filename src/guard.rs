@@ -24,7 +24,7 @@ pub fn check(event: &Value, cli: &str) -> Option<String> {
     if tool == "AskUserQuestion" {
         return Some(format!(
             "Questions to the user go in the tracker, where they wait on the phone with everything else waiting on the user: \
-             `{cli} task ask ITEM --thread <your thread id> --question \"...\" [--option \"...\"]...`, then end your turn; \
+             `{cli} task ask ITEM --thread <your thread id> --question \"...\" [--option \"...\"]... [--file PATH]...` (attach the screenshot or clip it is about), then end your turn; \
              the answer arrives as an [answer] message."
         ));
     }

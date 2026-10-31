@@ -52,7 +52,13 @@ task tracking … Not just plain text. I need to see everything waiting on me."
 - **Questions live on tasks.** `squircle task ask ITEM --thread ID --question
   "..." [--option ...]` adds an open question to a work item or sub-task
   (`questions` on the record: text, up to 6 options, the asking thread,
-  `open | answered {text, at} | withdrawn {at}`). While one is open the task
+  `open | answered {text, at} | withdrawn {at}`). **2026-10-31 (user: "questions
+  need to support attached clips"; LanguageApp's questions said "clip attached"
+  about clips that sat only on the task):** `--file PATH` (repeatable) attaches
+  the screenshots, clips and documents the question is about, with `task
+  attach`'s checks; they are stored in the task's media folder and listed by
+  ID on the question (`media`), shown on the question card and not among the
+  task's own media while it is open (after that they are the task's). While one is open the task
   is held at needs you (linked work can't move it off; an explicit open
   status is refused; closing the task withdraws it). Answering the last open
   one moves it to in progress. `task withdraw QUESTION_ID` takes one back.

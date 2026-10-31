@@ -485,7 +485,7 @@ impl Agents {
              from the tracker, so a correction you don't record never reaches it. When the user corrects or adds to work in progress, mark the asks it \
              replaces (`task update ID --replaced-by NEW`) and send the worker the whole current spec, not just the new piece; after many revisions, \
              prefer a fresh worker briefed from the clean spec. \
-             Ask the user anything (a choice, a review, a go-ahead) only with `task ask ITEM --thread {id} --question \"...\" [--option \"...\"]`, \
+             Ask the user anything (a choice, a review, a go-ahead) only with `task ask ITEM --thread {id} --question \"...\" [--option \"...\"] [--file PATH]` (the screenshot or clip it is about rides on the card; never describe one instead), \
              never as a question in your reply: it waits on their phone with everything else waiting on them (`?` lines above), and the answer \
              arrives as an [answer] message; end your turn after asking unless other work needs no answer. Workers' own questions and approvals \
              reach the user directly in the same place; you are told when one is answered; never relay or repeat them. Never tell the user something works or is done until you or a worker \

@@ -48,6 +48,22 @@ struct ViewerItem {
     let origin: MediaOrigin
 }
 
+extension ViewerItem {
+    /// A picture or clip attached to a task (or a question on it), from its thumbnail.
+    @MainActor
+    static func task(_ media: AppTask.Media, of task: String, poster: UIImage?, origin: MediaOrigin, model: SquircleModel) -> ViewerItem {
+        if media.kind == "video" {
+            return ViewerItem(media: .video(poster: poster, size: nil, player: nil, url: { [weak model] in
+                await model?.taskVideo(task: task, media: media.id)
+            }), origin: origin)
+        }
+        return ViewerItem(media: .image(poster, size: nil, full: { [weak model] pixels in
+            guard let data = await model?.taskMediaData(task: task, media: media.id) else { return nil }
+            return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
+        }), origin: origin)
+    }
+}
+
 /// Every picture, clip and simulator brought large: it flies up from its
 /// inline frame over a darkening backdrop, follows the finger 1:1 when
 /// dragged (shrinking a little, the backdrop fading with distance), and a

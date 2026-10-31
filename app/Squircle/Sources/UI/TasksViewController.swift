@@ -564,7 +564,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             if let page = pages[id] { configure(page, id) }
         }
         page.onMedia = { [weak self] picture, button in self?.openMedia(picture.media, of: picture.task, from: button) }
-        page.loadThumbnail = { [weak self] picture in await self?.thumbnail(picture.media, of: picture.task, height: 220) }
+        page.loadThumbnail = { [weak self] picture in await self?.model.taskThumbnail(task: picture.task, media: picture.media, height: 220) }
         page.documents = model.documents
         page.onDocument = { [weak self] row in
             guard let self else { return }
@@ -673,7 +673,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         if let image = pictures[media.id] { return image }
         guard loadingPictures.insert(media.id).inserted else { return nil }
         Task { [weak self] in
-            guard let image = await self?.thumbnail(media, of: task, height: Theme.Thumb.page.height) else { return }
+            guard let image = await self?.model.taskThumbnail(task: task, media: media, height: Theme.Thumb.page.height) else { return }
             self?.pictures[media.id] = image
             self?.render()
         }
@@ -992,33 +992,11 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         }
     }
 
-    /// A picture or a clip's poster, with enough pixels for `height` points.
-    private func thumbnail(_ media: AppTask.Media, of task: String, height: CGFloat) async -> UIImage? {
-        let data: Data?
-        if media.kind == "video" {
-            guard let url = await model.taskVideo(task: task, media: media.id) else { return nil }
-            data = await ConversationMedia.poster(of: url)
-        } else {
-            data = await model.taskMediaData(task: task, media: media.id)
-        }
-        guard let data else { return nil }
-        return await Downsample.image(data) { height * 3 / max(1, $0.height) }
-    }
-
     /// A task's picture or clip, flown up from its thumbnail.
     private func openMedia(_ media: AppTask.Media, of task: String, from button: UIButton) {
-        guard let window = view.window, let poster = button.image(for: .normal) else { return }
+        guard let window = view.window else { return }
         let origin = MediaOrigin { [weak button] in button.map { MediaSpot($0) } }
-        if media.kind == "video" {
-            MediaViewer.open(.video(poster: poster, size: nil, player: nil, url: { [weak self] in
-                await self?.model.taskVideo(task: task, media: media.id)
-            }), from: origin, in: window)
-        } else {
-            MediaViewer.open(.image(poster, size: nil, full: { [weak self] pixels in
-                guard let data = await self?.model.taskMediaData(task: task, media: media.id) else { return nil }
-                return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
-            }), from: origin, in: window)
-        }
+        MediaViewer.open([.task(media, of: task, poster: button.image(for: .normal), origin: origin, model: model)], at: 0, in: window)
     }
 
     // MARK: Overview
