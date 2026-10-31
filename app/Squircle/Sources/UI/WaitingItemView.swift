@@ -171,6 +171,7 @@ final class WaitingItemView: UIView {
     let head = UIStackView()
     private let context = Theme.label("", Theme.Text.caption, color: .secondaryLabel)
     private let jelly = JellyView(.agent(.needsYou), canvas: .roomy(Theme.Glyph.line))
+    private let jellySlot = UIView()
     private let title = Theme.label("", Theme.Text.body, lines: 0)
     private let detail = Theme.label("", Theme.Text.mono, color: .secondaryLabel, lines: 6)
     private let rows = UIStackView()
@@ -205,12 +206,18 @@ final class WaitingItemView: UIView {
             layer.cornerCurve = .continuous
         }
         context.lineBreakMode = .byTruncatingTail
+        // The jelly's body centred on the words' cap height, not their frame.
+        let slot = jellySlot
+        slot.addSubview(jelly)
         jelly.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
-                                     jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line)])
-        let about = UIStackView(arrangedSubviews: [jelly, context])
+        let about = UIStackView(arrangedSubviews: [slot, context])
         about.spacing = Theme.Space.glyphGap
-        about.alignment = .center
+        about.alignment = .fill
+        NSLayoutConstraint.activate([slot.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
+                                     jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
+                                     jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
+                                     jelly.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+                                     context.centred(on: jelly.centerYAnchor)])
         rows.axis = .vertical
 
         field.font = Theme.Text.body
@@ -294,8 +301,8 @@ final class WaitingItemView: UIView {
         context.text = text
         context.isHidden = text.isEmpty
         if let asker { jelly.look = asker }
-        jelly.isHidden = asker == nil
-        context.superview?.isHidden = context.isHidden && jelly.isHidden
+        jellySlot.isHidden = asker == nil
+        context.superview?.isHidden = context.isHidden && jellySlot.isHidden
         title.text = question
         detail.text = more
         // Home keeps to who asks and the question.

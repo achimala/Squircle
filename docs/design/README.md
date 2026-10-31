@@ -444,6 +444,13 @@ Approved by the user ("Sprouts stuff lgtm for now"), built in stage 1:
 - **The face shows status**, the same on every jelly: working, needs you,
   done, idle, failed (`> <`). Colour is state.
 - At 20 points in lines and rows, canvases leave room above for the sprout.
+- **Laid out by the body** (user, 2026-10-31: "don't allow the antenna
+  things to offset them"): every worker's body bottom sits on one baseline
+  whatever its build (squat, square, tall), the sprout only grows up into
+  the room above, and the body square is centred on the cap-height centre of
+  the text beside it, never on the text's frame (`JellyBody`,
+  `UILabel.centred(on:)`). In the counts capsule the bodies are sized so a
+  full sprout still fits inside it.
 
 ![All 20 sprouts](img/sprouts-all.jpg)
 

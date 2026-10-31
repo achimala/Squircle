@@ -54,7 +54,7 @@ struct JellyLook: Hashable {
 struct JellyPose {
     var lid: CGFloat = 1, happy: CGFloat = 0, squint: CGFloat = 0, worry: CGFloat = 0
     var gaze = CGPoint.zero
-    var yaw: CGFloat = -0.3, pitch: CGFloat = -0.4, roll: CGFloat = 0
+    var yaw = JellyBody.yaw, pitch = JellyBody.pitch, roll: CGFloat = 0
     var squash: CGFloat = 0
     /// Points up, as a fraction of its size.
     var hop: CGFloat = 0
@@ -168,8 +168,55 @@ struct JellyCanvas: Hashable {
         guard look.traits.sprout.x > 0 else { return self }
         var c = self; c.top += JellyTraits.crown; return c
     }
-    /// The body's frame within `bounds`.
+    /// The body's frame within `bounds`. Every jelly's body bottom sits on
+    /// one line near its bottom (`baseline`), whatever its build or sprout,
+    /// and the reference body is centred in it, so owners lay a jelly out by
+    /// this square: its centre on the text's visual centre.
     var body: CGRect { CGRect(x: size * side, y: size * top, width: size, height: size) }
+    /// Where the body's visible bottom sits, the same for every build.
+    func baseline(_ role: JellyLook.Role) -> CGFloat { body.midY + JellyBody.reference(role) * size }
+}
+
+/// The body as the shader draws it at rest (turned by `JellyBody.yaw` and
+/// `.pitch`, a rounded box): how far its visible bottom reaches below its
+/// centre, as a fraction of its size. A tall build reaches further than a
+/// squat one, so each is placed by its bottom, not its centre: the sprout
+/// grows up into the room above and never moves the body.
+enum JellyBody {
+    static let yaw: CGFloat = -0.3, pitch: CGFloat = -0.4
+
+    /// The shader's `cubeD` at rest, seen from the front: half its height
+    /// on screen (the box's inner half-extents turned, plus its rounding).
+    static func reach(_ look: SIMD4<Float>) -> CGFloat {
+        let aspect = CGFloat(look.y).squareRoot(), round = CGFloat(look.w)
+        let half = (y: 0.5 / aspect, z: 0.4)
+        return abs(cos(pitch)) * (half.y - round) + abs(sin(pitch)) * (half.z - round) + round
+    }
+
+    /// Half its width on screen, the same way: so a row of them can stand
+    /// a set gap apart, wide or narrow.
+    static func halfWidth(_ look: SIMD4<Float>) -> CGFloat {
+        let aspect = CGFloat(look.y).squareRoot(), round = CGFloat(look.w)
+        let half = (x: 0.5 * aspect, y: 0.5 / aspect, z: 0.4)
+        return abs(cos(yaw)) * (half.x - round) + abs(sin(yaw) * sin(pitch)) * (half.y - round)
+            + abs(sin(yaw) * cos(pitch)) * (half.z - round) + round
+    }
+
+    /// The reach every body of a role is placed by: the bare agent's own;
+    /// for workers a square build of middling roundness, so their bodies,
+    /// tall or squat, centre on average and share one bottom.
+    static func reference(_ role: JellyLook.Role) -> CGFloat {
+        switch role {
+        case .agent: reach(JellyTraits.plain.look)
+        case .worker:
+            reach(SIMD4(1, 1, JellyTraits.workerEyes, JellyTraits.roundness.reduce(0, +) / Float(JellyTraits.roundness.count)))
+        }
+    }
+
+    /// Where its centre goes so its bottom sits on `baseline`.
+    static func centre(_ look: JellyLook, on baseline: CGFloat, size: CGFloat) -> CGFloat {
+        baseline - reach(look.traits.look) * size
+    }
 }
 
 extension JellyRenderer {
@@ -195,7 +242,9 @@ extension JellyRenderer {
             strength *= 0.5
         }
         let s = canvas.size
-        let center = CGPoint(x: canvas.body.midX, y: canvas.body.midY - pose.hop * s)
+        // Placed by its bottom: every build on the same line, hopping up from it.
+        let rest = JellyBody.centre(look, on: canvas.baseline(look.role), size: s)
+        let center = CGPoint(x: canvas.body.midX, y: rest - pose.hop * s)
         return JellyUniforms(
             tint: SIMD4(Float(r), Float(g), Float(b), Float(strength)),
             fill: SIMD4(1, 1, 1, 0),
