@@ -8,13 +8,13 @@ import UIKit
 final class RequestCard {
     enum Change { case appeared, changed }
 
-    let view = Theme.glassSurface(cornerRadius: 22)
+    let view = Theme.glassSurface(cornerRadius: Theme.Radius.large)
     var onRespond: ((_ request: PendingRequest, _ decision: String?, _ answers: [String: JSONValue]?) -> Void)?
     /// The next question slid in and the card's height changed.
     var onResize: (() -> Void)?
 
-    private let title = Theme.label("", Theme.font(.subheadline, 15, .semibold), lines: 2)
-    private let detail = Theme.label("", Theme.font(.footnote, 12.5, monospaced: true), color: .secondaryLabel, lines: 4)
+    private let title = Theme.label("", Theme.Text.body, lines: 2)
+    private let detail = Theme.label("", Theme.Text.mono, color: .secondaryLabel, lines: 4)
     private let buttons = UIStackView()
     private var renderedID: String?
     private let drafts: QuestionAnswers
@@ -22,22 +22,22 @@ final class RequestCard {
     init(drafts: QuestionAnswers) {
         self.drafts = drafts
         detail.lineBreakMode = .byTruncatingTail
-        buttons.spacing = 8
+        buttons.spacing = Theme.Space.row
         buttons.axis = .vertical
         buttons.distribution = .fill
         let stack = UIStackView(arrangedSubviews: [title, detail, buttons])
         stack.axis = .vertical
-        stack.spacing = 6
-        stack.setCustomSpacing(12, after: detail)
+        stack.spacing = Theme.Space.row
+        stack.setCustomSpacing(Theme.Space.rowPad, after: detail)
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.contentView.addSubview(stack)
         view.accessibilityIdentifier = "thread.request"
         view.isHidden = true
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: view.contentView.topAnchor, constant: 14),
-            stack.bottomAnchor.constraint(equalTo: view.contentView.bottomAnchor, constant: -12),
-            stack.leadingAnchor.constraint(equalTo: view.contentView.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: view.contentView.trailingAnchor, constant: -12)
+            stack.topAnchor.constraint(equalTo: view.contentView.topAnchor, constant: Theme.Space.card.top),
+            stack.bottomAnchor.constraint(equalTo: view.contentView.bottomAnchor, constant: -Theme.Space.card.bottom),
+            stack.leadingAnchor.constraint(equalTo: view.contentView.leadingAnchor, constant: Theme.Space.card.left),
+            stack.trailingAnchor.constraint(equalTo: view.contentView.trailingAnchor, constant: -Theme.Space.card.right)
         ])
     }
 
@@ -76,7 +76,7 @@ final class RequestCard {
         button.configuration?.titleLineBreakMode = .byWordWrapping
         button.configuration?.subtitleLineBreakMode = .byTruncatingTail
         button.configuration?.subtitleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes; attributes.font = Theme.font(.footnote, 13); return attributes
+            var attributes = attributes; attributes.font = Theme.Text.line; return attributes
         }
         if leading {
             button.configuration?.titleAlignment = .leading
@@ -93,10 +93,10 @@ final class RequestCard {
         let text = current.prompt
         if let stack = title.superview as? UIStackView {
             stack.insertArrangedSubview(detail, at: 1)
-            stack.setCustomSpacing(6, after: title)
-            stack.setCustomSpacing(12, after: detail)
+            stack.setCustomSpacing(Theme.Space.row, after: title)
+            stack.setCustomSpacing(Theme.Space.rowPad, after: detail)
         }
-        detail.font = Theme.font(.footnote, 12.5, monospaced: true)
+        detail.font = Theme.Text.mono
         detail.textColor = .secondaryLabel
         detail.text = text
         detail.isHidden = text.isEmpty
@@ -132,11 +132,11 @@ final class RequestCard {
         if questions.count > 1 { caption += "  ·  \(form.index + 1) OF \(questions.count)" }
         if let stack = title.superview as? UIStackView {
             stack.insertArrangedSubview(detail, at: 0)
-            stack.setCustomSpacing(4, after: detail)
-            stack.setCustomSpacing(14, after: title)
+            stack.setCustomSpacing(Theme.Space.tight, after: detail)
+            stack.setCustomSpacing(Theme.Space.rowPad, after: title)
         }
-        detail.font = Theme.font(.caption1, 12, .semibold)
-        detail.textColor = Theme.accent
+        detail.font = Theme.Text.caption
+        detail.textColor = .secondaryLabel
         detail.text = caption
         detail.isHidden = false
         title.text = form.question["question"].string ?? "The agent has a question"
@@ -160,7 +160,7 @@ final class RequestCard {
         let field = UITextField()
         field.placeholder = "Something else…"
         field.text = form.draft.text
-        field.font = Theme.font(.body, 16)
+        field.font = Theme.Text.body
         field.returnKeyType = .send
         field.accessibilityIdentifier = "thread.request.other"
         field.addAction(UIAction { [weak self, weak field] _ in self?.drafts[key].text = field?.text ?? "" }, for: .editingChanged)
@@ -169,15 +169,15 @@ final class RequestCard {
             if !text.isEmpty { field?.resignFirstResponder(); step { $0.reply(text) } }
         }, for: .editingDidEndOnExit)
         let wrap = UIView()
-        wrap.backgroundColor = .tertiarySystemFill
-        wrap.layer.cornerRadius = 20
+        wrap.backgroundColor = Theme.codeFill
+        wrap.layer.cornerRadius = Theme.Space.tap / 2
         wrap.layer.cornerCurve = .continuous
         field.translatesAutoresizingMaskIntoConstraints = false
         wrap.addSubview(field)
         NSLayoutConstraint.activate([
-            wrap.heightAnchor.constraint(equalToConstant: 44),
-            field.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 16),
-            field.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -16),
+            wrap.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
+            field.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: Theme.Space.group),
+            field.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -Theme.Space.group),
             field.centerYAnchor.constraint(equalTo: wrap.centerYAnchor)
         ])
         buttons.addArrangedSubview(wrap)

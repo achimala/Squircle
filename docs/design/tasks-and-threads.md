@@ -1,13 +1,11 @@
-# Tasks and threads (design pass, 2026-10-31, proposal)
+# Tasks and threads (design pass, 2026-10-31)
 
-**Status: proposal for the user's review. Nothing here is built into the
-shipping app.** The renders come from a DEBUG-only prototype
-(`app/Squircle/Sources/UI/TasksDesign.swift`, `SQUIRCLE_TD=A|B|C`) running
-against the Mac's real tasks and threads (LanguageApp, Squircle). Colours
-are neutral system colours on purpose: the palette is being redone in the
-design deck (`docs/design/README.md`, on the `design-language` branch);
-see [against the design deck](#against-the-design-deck). Worker jellies are Sprouts (one face per
-status, the same face on every jelly).
+**Status: the user picked A · Outline (2026-10-31: "task list A seems best,
+others too cluttered"); [the design deck](README.md#tasks-and-threads) is
+the guide, and building it follows the deck's rules. This page keeps the
+pass's audit and model.** The renders came from a DEBUG-only prototype on
+the unmerged `tasks-threads-design` branch, against the Mac's real tasks and
+threads (LanguageApp, Squircle); none of it ships.
 
 User: "We need to see each task clearly up front with live status. When I
 drill into each I want to see the active threads and what they're doing with
@@ -82,21 +80,13 @@ Pictures: `/Users/anshu/.t3/userdata/attachments/tasks-design/audit-*.png`.
   sideways in the overview's order (as today). The prototype only places the
   levels, for stills.
 
-## Directions
+## The direction: A, Outline
 
-See the renders in `tasks-design/` (A-*, B-*, C-*), and the summary in
-the reply that delivered them.
-
-- **A, Outline.** Overview rows carry their live threads nested underneath
-  (sprout, title, what it's doing, a tiny preview). The item page lists
-  threads first, each with a 54×116 preview, then the open sub-tasks with
-  closed ones folded.
-- **B, Tiles.** Overview rows show each working thread as a small portrait
-  tile (its sim or picture) with its sprout standing on it. The item page is
-  a two-column grid of larger tiles with titles and steps, then sub-tasks.
-- **C, Checklist.** Overview is one line of ask plus one line of what the
-  lead thread is doing, said by its sprout. The page is the sub-task
-  checklist with each thread indented under the sub-task it works on.
+Overview rows carry their live threads nested underneath (sprout, title,
+what it's doing, a tiny preview). The item page lists threads first, then
+the open sub-tasks with closed ones folded. Not picked: B, Tiles (a portrait
+tile per thread) and C, Checklist (one line of ask and one of the lead
+thread).
 
 ## What the renders showed (2026-10-31, simulator, iOS 27, live Mac data)
 
@@ -113,17 +103,9 @@ the reply that delivered them.
 - C's one-line overview fits the most items (LanguageApp: all 10 open on one
   screen) but hides how many threads an item has and shows only its lead.
 
-## Recommendation
-
-**A, Outline**, with C's one change on the page: in A the item page lists
-threads first, which is right when there are a few; when a work item has
-many sub-tasks, group each live thread under its sub-task as C does. B only
-works when every thread has a picture, which most don't.
-
 ## Against the design deck
 
-The deck (`docs/design/README.md` on `design-language`, a proposal) landed
-after these renders. Building the chosen direction follows it; the
+The deck ([README.md](README.md)) landed after these renders. Building the chosen direction follows it; the
 prototype departs from it in these places, all to fix when built:
 
 - **Type:** rows use 16 semibold asks, 13 to 14 second lines and 12 section

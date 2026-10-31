@@ -1,44 +1,42 @@
 import QuickLook
 import UIKit
 
-/// A document in a conversation or on a task: its icon, name, and what it
-/// is ("PDF · 6.4 MB · 24 pages"). Tapping it opens the viewer.
+/// A document in a conversation or on a task, as a line: its symbol in the
+/// glyph slot, its name and what it is ("PDF · 6.4 MB · 24 pages"). No card.
+/// Tapping it opens the viewer.
 final class FileRowView: UIControl {
     var onOpen: ((FileRowView) -> Void)?
     private(set) var source: DocumentSource?
     private let icon = UIImageView()
     private let spinner = UIActivityIndicatorView(style: .medium)
-    private let name = Theme.label("", Theme.font(.subheadline, 15, .semibold))
-    private let detail = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel)
+    private let name = Theme.label("", Theme.Text.lineStrong)
+    private let detail = Theme.label("", Theme.Text.line, color: .secondaryLabel)
     private var load: Task<Void, Never>?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        backgroundColor = .tertiarySystemFill
-        layer.cornerRadius = 16
-        layer.cornerCurve = .continuous
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        icon.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         icon.tintColor = Theme.accent
         icon.contentMode = .center
         spinner.hidesWhenStopped = true
         name.lineBreakMode = .byTruncatingMiddle
         let text = UIStackView(arrangedSubviews: [name, detail])
         text.axis = .vertical
-        text.spacing = 2
         let glyph = UIView()
         [icon, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glyph.addSubview($0) }
         let row = UIStackView(arrangedSubviews: [glyph, text])
-        row.spacing = 12
+        row.spacing = Theme.Space.glyphGap
         row.alignment = .center
         row.isUserInteractionEnabled = false
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 58),
-            row.centerYAnchor.constraint(equalTo: centerYAnchor),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            glyph.widthAnchor.constraint(equalToConstant: 32), glyph.heightAnchor.constraint(equalToConstant: 32),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.Space.tap),
+            row.topAnchor.constraint(equalTo: topAnchor),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            glyph.widthAnchor.constraint(equalToConstant: Theme.Space.glyph), glyph.heightAnchor.constraint(equalToConstant: Theme.Space.glyph),
             icon.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), icon.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
             spinner.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: glyph.centerYAnchor)
         ])

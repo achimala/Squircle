@@ -118,7 +118,7 @@ enum ThreadItem: Equatable {
     case answer(ChatMessage)
     case note(ChatMessage)
     case thought(ChatMessage)
-    case step(ChatMessage, first: Bool, last: Bool)
+    case step(ChatMessage)
     case earlier(turn: String, count: Int)
     /// Screenshots side by side, scrolling sideways.
     case gallery(id: String, shots: [Shot])
@@ -147,7 +147,7 @@ enum ThreadItem: Equatable {
         case .action(let line): return line.id
         case .note(let message): return "note:" + message.id
         case .thought(let message): return message.id
-        case .step(let message, _, _): return message.id
+        case .step(let message): return message.id
         case .earlier(let turn, _): return "earlier:" + turn
         case .gallery(let id, _), .figure(let id, _), .table(let id, _, _), .document(let id, _): return id
         case .summary(let summary): return "summary:" + summary.turn
@@ -413,7 +413,7 @@ enum ThreadItem: Equatable {
     private static func liveRows(turn: String, work: [ChatMessage], expanded: Bool) -> [ThreadItem] {
         if expanded { return [.earlier(turn: turn, count: 0)] + allRows(work) }
         // The step running right now is the live line's headline; it joins
-        // the rail when it finishes.
+        // the steps when it finishes.
         var work = work
         if let last = work.last, last.role == "tool", last.isStreaming { work.removeLast() }
         let noteIndex = work.lastIndex { $0.role == "assistant" }
@@ -482,21 +482,21 @@ enum ThreadItem: Equatable {
         return rows
     }
 
-    /// A run of steps shares one rail; screenshots sit beneath their step.
+    /// A run of steps, each with its screenshots beneath it.
     private static func stepRows(_ run: [ChatMessage]) -> [ThreadItem] {
         var rows: [ThreadItem] = []
-        var rail: [ChatMessage] = []
+        var held: [ChatMessage] = []
         func flush() {
-            for (index, step) in rail.enumerated() {
-                rows.append(.step(step, first: index == 0, last: index == rail.count - 1))
+            for step in held {
+                rows.append(.step(step))
                 rows += gallery("gallery:" + step.id, [step])
             }
-            rail = []
+            held = []
         }
         for step in run {
             let actions = actionRows(step)
-            if actions.isEmpty { rail.append(step); continue }
-            if step.step?.alsoRan == true { rail.append(step) }
+            if actions.isEmpty { held.append(step); continue }
+            if step.step?.alsoRan == true { held.append(step) }
             flush()
             rows += actions
         }

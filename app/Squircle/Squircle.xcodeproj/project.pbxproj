@@ -23,6 +23,7 @@
 		258C14855DE02293731178F2 /* TaskLists.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4320E3594CE4CB732C719D2 /* TaskLists.swift */; };
 		261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */ = {isa = PBXBuildFile; fileRef = D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */; };
 		28208C4B33CBBF06CF5B9360 /* AppImportViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */; };
+		293FC58DE7674D2D697B68CF /* JellyTraits.swift in Sources */ = {isa = PBXBuildFile; fileRef = B922953F44D2855A3356D6BE /* JellyTraits.swift */; };
 		2A27507EC33506F4D8562F49 /* AttachmentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD8598F09B147F0F828D9AA7 /* AttachmentPicker.swift */; };
 		2A52C39412728304C6CB766A /* WaitingItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22F53B246FA70BCF76E5C6A1 /* WaitingItemView.swift */; };
 		2AD99D1225F365AB08C7FA39 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 904A58DF20690F298B1F5381 /* JSONValue.swift */; };
@@ -139,6 +140,7 @@
 		D3823161D75D25966F363568 /* BuildDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D133D3B166FEB35D52D6B8E4 /* BuildDetailViewController.swift */; };
 		D6A02AFEF384A1D3B5DBC0D8 /* Link.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD9D79E5C23223D44EB56B4B /* Link.swift */; };
 		D87D81477EA3899FD287DA46 /* OverlayNews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0406EDDB50C29891750CEB54 /* OverlayNews.swift */; };
+		DAB73B4467CB4D21D0059C16 /* JellyTraits.swift in Sources */ = {isa = PBXBuildFile; fileRef = B922953F44D2855A3356D6BE /* JellyTraits.swift */; };
 		DB7268BD931335D7C2469BCE /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		DEAF3BC0C04B32920BDB4C36 /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D09120CE693437EA02625DD /* AppConfiguration.swift */; };
 		DF2A9CF739AF15C1A69A09AD /* MediaLoadsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D09985092A609178762E275 /* MediaLoadsTests.swift */; };
@@ -233,6 +235,7 @@
 		B031C12FA385E38F95AAF587 /* CaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSession.swift; sourceTree = "<group>"; };
 		B0960CDAD4EDF34EF7986A50 /* SquircleWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = SquircleWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B139C93570C1C1D4649B3312 /* GPUProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUProbe.swift; sourceTree = "<group>"; };
+		B922953F44D2855A3356D6BE /* JellyTraits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JellyTraits.swift; sourceTree = "<group>"; };
 		C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimulatorViews.swift; sourceTree = "<group>"; };
 		C37CA1E433E4B0E8834ACEE9 /* TasksViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasksViewController.swift; sourceTree = "<group>"; };
 		C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3Gateway.swift; sourceTree = "<group>"; };
@@ -370,6 +373,7 @@
 				65FE1C66EF2CF568B3B8E3D5 /* DocumentViews.swift */,
 				8FC2D42D3BB1254066A5007E /* Jelly.swift */,
 				0C170C9A359425DE7827D4B3 /* JellyShader.swift */,
+				B922953F44D2855A3356D6BE /* JellyTraits.swift */,
 				5DF796323376B17E9A5610B5 /* Markdown.swift */,
 				D59CC13D19074BC8BE174399 /* MediaAudio.swift */,
 				0C145C181C585068CB76395D /* MediaQueue.swift */,
@@ -673,6 +677,7 @@
 				2AD99D1225F365AB08C7FA39 /* JSONValue.swift in Sources */,
 				825485BA091840E2DDC3668A /* Jelly.swift in Sources */,
 				59B9D8CA84D07C9BAC40B408 /* JellyShader.swift in Sources */,
+				DAB73B4467CB4D21D0059C16 /* JellyTraits.swift in Sources */,
 				4CF0218EF899EB2390B44FCA /* Link.swift in Sources */,
 				80634C6AFE018923DA492393 /* LinkRuntime.swift in Sources */,
 				3B375023CFEB927A141C090E /* Markdown.swift in Sources */,
@@ -775,6 +780,7 @@
 				B254903EDAAA3C21EABA5340 /* JSONValue.swift in Sources */,
 				9DF97E781B2CFBE77266D411 /* Jelly.swift in Sources */,
 				9FA48EFC97AE505AA2608481 /* JellyShader.swift in Sources */,
+				293FC58DE7674D2D697B68CF /* JellyTraits.swift in Sources */,
 				D6A02AFEF384A1D3B5DBC0D8 /* Link.swift in Sources */,
 				CD226037FA13D2D06431D81D /* LinkRuntime.swift in Sources */,
 				01C183AE5505BED2A14E3B72 /* Markdown.swift in Sources */,

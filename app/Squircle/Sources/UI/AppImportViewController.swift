@@ -61,7 +61,7 @@ private class MacImportPage: UITableViewController {
     let model: SquircleModel
     var task: Task<Void, Never>?
     let spinner = UIActivityIndicatorView(style: .large)
-    let message = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
+    let message = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
     let retry = Theme.glassButton(symbol: "arrow.clockwise", title: "Retry", identifier: "import.retry")
     var currentPath: String?
     private let pathButton = UIButton(type: .system)
@@ -81,7 +81,7 @@ private class MacImportPage: UITableViewController {
         let stack = UIStackView(arrangedSubviews: [spinner, message, retry])
         stack.axis = .vertical
         stack.alignment = .center
-        stack.spacing = 18
+        stack.spacing = Theme.Space.group
         stack.translatesAutoresizingMaskIntoConstraints = false
         message.textAlignment = .center
         message.accessibilityIdentifier = "import.error"
@@ -90,26 +90,27 @@ private class MacImportPage: UITableViewController {
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: backdrop.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: backdrop.centerYAnchor, constant: -30),
-            stack.leadingAnchor.constraint(greaterThanOrEqualTo: backdrop.leadingAnchor, constant: 32),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: backdrop.trailingAnchor, constant: -32)
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: backdrop.leadingAnchor, constant: Theme.Space.margin),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: backdrop.trailingAnchor, constant: -Theme.Space.margin)
         ])
         tableView.backgroundView = backdrop
 
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: "folder")
-        config.imagePadding = 6
+        config.imagePadding = Theme.Space.glyphGap
+        config.preferredSymbolConfigurationForImage = Theme.symbol(Theme.Text.line)
         config.baseForegroundColor = .label
         config.titleLineBreakMode = .byTruncatingMiddle
         config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var attributes = attributes
-            attributes.font = Theme.font(.subheadline, 15, .medium)
+            attributes.font = Theme.Text.line
             return attributes
         }
         pathButton.configuration = config
         pathButton.translatesAutoresizingMaskIntoConstraints = false
         pathWidth = pathButton.widthAnchor.constraint(equalToConstant: 280)
         pathWidth?.isActive = true
-        pathButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        pathButton.heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.Space.tap).isActive = true
         pathButton.accessibilityIdentifier = "import.path"
         pathButton.accessibilityLabel = "Go to folder or project on Mac"
         pathButton.addAction(UIAction { [weak self] _ in
@@ -234,22 +235,23 @@ private final class MacProjectBrowserController: MacImportPage {
         let entry = entries(in: indexPath.section)[indexPath.row]
         var content = cell.defaultContentConfiguration()
         content.text = entry.name
-        content.textProperties.font = Theme.font(.body, 17, entry.kind == .directory ? .regular : .semibold)
+        content.textProperties.font = Theme.Text.body
+        content.imageProperties.preferredSymbolConfiguration = Theme.symbol(Theme.Text.body)
         switch entry.kind {
         case .directory:
-            content.image = UIImage(systemName: "folder.fill")
+            content.image = UIImage(systemName: "folder")
             content.imageProperties.tintColor = .secondaryLabel
         case .project:
-            content.image = UIImage(systemName: "hammer.fill")
+            content.image = UIImage(systemName: "hammer")
             content.imageProperties.tintColor = Theme.accent
             content.secondaryText = "Xcode project"
         case .workspace:
-            content.image = UIImage(systemName: "square.stack.3d.up.fill")
+            content.image = UIImage(systemName: "square.stack.3d.up")
             content.imageProperties.tintColor = Theme.accent
             content.secondaryText = "Xcode workspace"
         }
         content.secondaryTextProperties.color = .secondaryLabel
-        content.imageProperties.reservedLayoutSize = CGSize(width: 28, height: 28)
+        content.imageProperties.reservedLayoutSize = CGSize(width: Theme.Space.glyph, height: Theme.Space.glyph)
         cell.contentConfiguration = content
         cell.accessoryType = .disclosureIndicator
         cell.accessibilityIdentifier = "import.entry"
@@ -300,7 +302,7 @@ private final class MacAppImportController: MacImportPage, UITextFieldDelegate {
         navigationItem.largeTitleDisplayMode = .never
         add.accessibilityIdentifier = "import.add"
         navigationItem.rightBarButtonItem = add
-        nameField.font = Theme.font(.body, 17)
+        nameField.font = Theme.Text.body
         nameField.adjustsFontForContentSizeCategory = true
         nameField.textAlignment = .right
         nameField.textColor = .label
@@ -316,8 +318,8 @@ private final class MacAppImportController: MacImportPage, UITextFieldDelegate {
         schemeStyle.baseForegroundColor = .secondaryLabel
         schemeStyle.image = UIImage(systemName: "chevron.up.chevron.down")
         schemeStyle.imagePlacement = .trailing
-        schemeStyle.imagePadding = 6
-        schemeStyle.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .footnote)
+        schemeStyle.imagePadding = Theme.Space.tight
+        schemeStyle.preferredSymbolConfigurationForImage = Theme.symbol(Theme.Text.line)
         schemeStyle.contentInsets = .zero
         schemeButton.configuration = schemeStyle
         schemeButton.contentHorizontalAlignment = .trailing
@@ -390,16 +392,16 @@ private final class MacAppImportController: MacImportPage, UITextFieldDelegate {
             control.translatesAutoresizingMaskIntoConstraints = false
             cell.contentView.addSubview(control)
             NSLayoutConstraint.activate([
-                control.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 6),
-                control.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -6),
+                control.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: Theme.Space.row),
+                control.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -Theme.Space.row),
                 control.trailingAnchor.constraint(equalTo: cell.contentView.layoutMarginsGuide.trailingAnchor),
                 control.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 24 + UIFontMetrics(forTextStyle: .body).scaledValue(for: 88)),
-                control.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
+                control.heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.Space.tap)
             ])
         case .bundle(let value), .team(let value):
             content.text = { if case .bundle = row { return "Bundle ID" }; return "Team" }()
             content.secondaryText = value
-            content.secondaryTextProperties.font = Theme.font(.body, 15, monospaced: true)
+            content.secondaryTextProperties.font = Theme.Text.mono
             cell.contentConfiguration = content
         }
         return cell
@@ -474,7 +476,7 @@ private final class MacSchemeController: UITableViewController {
         let cell = UITableViewCell(style: .default, reuseIdentifier: nil)
         var content = cell.defaultContentConfiguration()
         content.text = schemes[indexPath.row]
-        content.textProperties.font = Theme.font(.body, 17)
+        content.textProperties.font = Theme.Text.body
         cell.contentConfiguration = content
         cell.tintColor = Theme.accent
         let isSelected = schemes[indexPath.row] == selected

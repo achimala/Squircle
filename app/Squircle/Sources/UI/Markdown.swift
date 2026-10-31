@@ -19,7 +19,7 @@ enum Markdown {
     /// except before a list, between a table's rows and after a heading.
     static func render(_ markdown: AttributedString, font: UIFont, color: UIColor) -> NSAttributedString {
         let output = NSMutableAttributedString()
-        let mono = monospaced(for: font)
+        let mono = Theme.Text.mono
         var previous: [PresentationIntent.IntentType] = []
         var marked = Set<Int>()
         for (intent, range) in markdown.runs[\.presentationIntent] {
@@ -57,7 +57,7 @@ enum Markdown {
         if let index = items.first, case .listItem(let ordinal) = blocks[index].kind {
             let ordered = index + 1 < blocks.count && blocks[index + 1].kind == .orderedList
             let width: CGFloat = ordered ? 24 : 16
-            indent = CGFloat(items.count - 1) * 10
+            indent = CGFloat(items.count - 1) * Theme.Space.rowPad
             if marked.insert(blocks[index].identity).inserted {
                 prefix = ordered ? "\(ordinal).\t" : "•\t"
                 hanging = width
@@ -65,12 +65,12 @@ enum Markdown {
                 indent += width
             }
         }
-        if blocks.contains(where: { $0.kind == .blockQuote }) { indent += 12; color = .secondaryLabel }
+        if blocks.contains(where: { $0.kind == .blockQuote }) { indent += Theme.Space.rowPad; color = .secondaryLabel }
         let style = NSMutableParagraphStyle()
         switch blocks.first?.kind {
         case .codeBlock?:
-            style.firstLineHeadIndent = indent + 12
-            style.headIndent = indent + 12
+            style.firstLineHeadIndent = indent + Theme.Space.rowPad
+            style.headIndent = indent + Theme.Space.rowPad
             style.lineBreakMode = .byCharWrapping
             var code = String(text.characters)
             while code.last?.isNewline == true { code.removeLast() }
@@ -82,13 +82,14 @@ enum Markdown {
             break
         }
         var base = font
-        if case .header(let level)? = blocks.first?.kind { base = bold(font.withSize(font.pointSize + (level <= 2 ? 3 : 1))) }
+        // Headings stay in the text's own size (one size per message).
+        if case .header? = blocks.first?.kind { base = bold(font) }
         if blocks.first?.kind == .thematicBreak { color = .tertiaryLabel }
         style.firstLineHeadIndent = indent
         style.headIndent = indent + hanging
         style.lineSpacing = 3
         // List items sit closer together than paragraphs do.
-        style.paragraphSpacing = items.isEmpty ? font.pointSize * 0.35 : 4
+        style.paragraphSpacing = items.isEmpty ? font.pointSize * 0.35 : Theme.Space.tight
         if hanging > 0 { style.tabStops = [NSTextTab(textAlignment: .left, location: indent + hanging)] }
         let result = NSMutableAttributedString(string: prefix, attributes: [.font: base, .foregroundColor: UIColor.secondaryLabel])
         // A new line inside a list item or quote wraps under its text, not
@@ -131,10 +132,6 @@ enum Markdown {
             result.append(NSAttributedString(string: string, attributes: attributes))
         }
         return result
-    }
-
-    static func monospaced(for font: UIFont) -> UIFont {
-        UIFontMetrics(forTextStyle: .footnote).scaledFont(for: .monospacedSystemFont(ofSize: font.pointSize * 0.80, weight: .regular))
     }
 
     static func bold(_ font: UIFont) -> UIFont {
@@ -273,12 +270,12 @@ struct MarkdownTableLayout {
     var overflows: Bool { size.width > available + 0.5 }
     private let available: CGFloat
 
-    static let gap: CGFloat = 18
-    static let padding: CGFloat = 8
+    static let gap = Theme.Space.group
+    static let padding = Theme.Space.row
 
     init(_ table: MarkdownTable, font: UIFont, color: UIColor, width: CGFloat) {
         available = width
-        let mono = Markdown.monospaced(for: font)
+        let mono = Theme.Text.mono
         let header = Markdown.bold(font)
         func render(_ text: AttributedString, row: Int, column: Int) -> NSAttributedString {
             let style = NSMutableParagraphStyle()

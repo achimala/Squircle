@@ -276,7 +276,7 @@ final class SimulatorDock: UIView {
     #endif
 
     private let backdrop = UIView()
-    private let badge = Theme.label("", Theme.font(.caption2, 11, .bold), color: .white)
+    private let badge = Theme.label("", Theme.Text.caption, color: Theme.onAccent)
 
     init(feeds: SimulatorFeeds) {
         self.feeds = feeds
@@ -289,7 +289,7 @@ final class SimulatorDock: UIView {
         addSubview(backdrop)
         badge.backgroundColor = Theme.accent
         badge.textAlignment = .center
-        badge.layer.cornerRadius = 9
+        badge.layer.cornerRadius = 9 // half its 18-point height: a capsule
         badge.layer.cornerCurve = .continuous
         badge.clipsToBounds = true
         badge.isUserInteractionEnabled = false
@@ -421,7 +421,7 @@ final class SimulatorDock: UIView {
 
     private static let deckWidth: CGFloat = 80
     private static let peek: CGFloat = 6
-    private static let gap: CGFloat = 10
+    private static let gap = Theme.Space.row
     private static let captionHeight: CGFloat = 16
 
     /// Only a simulator whose feed has drawn a picture joins the dock: a
@@ -438,7 +438,7 @@ final class SimulatorDock: UIView {
     private var deckSize: CGSize {
         let deck = self.deck
         let height = (Self.deckWidth * aspect(deck.first)).rounded()
-        let caption = deck.count == 1 && showsCaption(deck[0]) ? Self.captionHeight + 4 : 0
+        let caption = deck.count == 1 && showsCaption(deck[0]) ? Self.captionHeight + Theme.Space.tight : 0
         return CGSize(width: Self.deckWidth, height: height + Self.peek * CGFloat(min(max(deck.count - 1, 0), 2)) + caption)
     }
 
@@ -462,12 +462,12 @@ final class SimulatorDock: UIView {
         let left = corner == .topLeft || corner == .bottomLeft
         let top = corner == .topLeft || corner == .topRight
         return CGRect(x: left ? area.minX + step : area.maxX - width - step,
-                      y: top ? area.minY : max(area.minY, area.maxY - height - Self.captionHeight - 4),
+                      y: top ? area.minY : max(area.minY, area.maxY - height - Self.captionHeight - Theme.Space.tight),
                       width: width, height: height)
     }
 
     private var area: CGRect {
-        CGRect(x: 12, y: safeAreaInsets.top + 56, width: bounds.width - 24,
+        CGRect(x: Theme.Space.rowPad, y: safeAreaInsets.top + 56, width: bounds.width - 2 * Theme.Space.rowPad,
                height: max(0, bounds.height - bottomInset - safeAreaInsets.top - 56))
     }
 
@@ -564,8 +564,8 @@ final class SimulatorDock: UIView {
         }
         let top = deckFrame(0, top: deck.first)
         badge.text = "\(deck.count)"
-        let badgeWidth = max(18, badge.intrinsicContentSize.width + 10)
-        badge.frame = CGRect(x: top.maxX - badgeWidth / 2 - 4, y: top.minY - 5,
+        let badgeWidth = max(18, badge.intrinsicContentSize.width + Theme.Space.rowPad)
+        badge.frame = CGRect(x: top.maxX - badgeWidth / 2 - Theme.Space.tight, y: top.minY - 5,
                              width: badgeWidth, height: 18)
         badge.alpha = deck.count > 1 && lent.isEmpty ? 1 - f : 0
         backdrop.alpha = 0.2 * f
@@ -626,13 +626,14 @@ final class SimulatorDock: UIView {
 private final class PiP: UIView {
     let use: SimulatorUse
     let screen = SimulatorScreen()
-    let caption = Theme.label("", Theme.font(.caption2, 11, .semibold), color: .secondaryLabel)
+    let caption = Theme.label("", Theme.Text.caption, color: .secondaryLabel)
     /// Darkens a picture lying behind the deck's top one.
     let shade = UIView()
     private let frameView = UIView()
     private let dot = UIView()
     var onTap: (() -> Void)?
     var onPan: ((UIPanGestureRecognizer) -> Void)?
+    /// A device screen's corner at this size: real geometry, not a token.
     private static let cornerRadius: CGFloat = 12
 
     init(use: SimulatorUse) {
@@ -653,7 +654,7 @@ private final class PiP: UIView {
         shade.layer.cornerCurve = .continuous
         shade.layer.cornerRadius = Self.cornerRadius
         shade.isUserInteractionEnabled = false
-        dot.backgroundColor = .systemRed
+        dot.backgroundColor = Theme.failure
         dot.layer.cornerRadius = 3.5
         dot.isUserInteractionEnabled = false
         caption.textAlignment = .center
@@ -676,8 +677,8 @@ private final class PiP: UIView {
         frameView.layer.shadowPath = UIBezierPath(roundedRect: picture, cornerRadius: Self.cornerRadius).cgPath
         screen.frame = picture
         shade.frame = picture
-        dot.frame = CGRect(x: 8, y: 8, width: 7, height: 7)
-        caption.frame = CGRect(x: 0, y: picture.maxY + 4, width: bounds.width, height: 16)
+        dot.frame = CGRect(x: Theme.Space.row, y: Theme.Space.row, width: 7, height: 7)
+        caption.frame = CGRect(x: 0, y: picture.maxY + Theme.Space.tight, width: bounds.width, height: 16)
     }
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
@@ -691,9 +692,12 @@ private final class PiP: UIView {
         guard labelled?.0 != title || labelled?.1 != jelly else { return }
         labelled = (title, jelly)
         let text = NSMutableAttributedString()
-        if let image = JellySprites.shared.image(jelly, .tight(12), traits: traitCollection) {
+        let canvas = JellyCanvas.tight(12)
+        if let image = JellySprites.shared.image(jelly, canvas, traits: traitCollection) {
             let attachment = NSTextAttachment(image: image)
-            attachment.bounds = CGRect(x: 0, y: (caption.font.capHeight - 12) / 2 - 12 * 0.12, width: image.size.width, height: image.size.height)
+            let body = canvas.fitting(jelly).body
+            attachment.bounds = CGRect(x: 0, y: (caption.font.capHeight - 12) / 2 - (image.size.height - body.maxY),
+                                       width: image.size.width, height: image.size.height)
             text.append(NSAttributedString(attachment: attachment))
             text.append(NSAttributedString(string: " "))
         }
@@ -741,7 +745,7 @@ final class SimulatorCell: TimelineCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        frameView.layer.cornerRadius = 22
+        frameView.layer.cornerRadius = 22 // a device screen's corner at this size
         frameView.layer.cornerCurve = .continuous
         frameView.clipsToBounds = true
         frameView.layer.borderWidth = 2.5
@@ -755,7 +759,7 @@ final class SimulatorCell: TimelineCell {
         posterView.contentMode = .scaleAspectFit
         frameView.addSubview(posterView)
         frameView.addSubview(screen)
-        dot.backgroundColor = .systemRed
+        dot.backgroundColor = Theme.failure
         dot.layer.cornerRadius = 4
         frameView.addSubview(dot)
         button.addSubview(frameView)
@@ -867,11 +871,11 @@ final class SimulatorCell: TimelineCell {
         super.layoutSubviews()
         let height = Self.height
         let width = (height / 2.17).rounded()
-        button.frame = CGRect(x: 20, y: 6, width: width, height: height)
+        button.frame = CGRect(x: Theme.Space.margin, y: 6, width: width, height: height)
         frameView.frame = button.bounds
         screen.frame = frameView.bounds
         posterView.frame = frameView.bounds
-        dot.frame = CGRect(x: 12, y: 12, width: 8, height: 8)
+        dot.frame = CGRect(x: Theme.Space.rowPad, y: Theme.Space.rowPad, width: 8, height: 8)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         playerLayer.frame = frameView.bounds
         CATransaction.commit()

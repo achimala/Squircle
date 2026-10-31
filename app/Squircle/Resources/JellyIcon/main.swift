@@ -13,10 +13,10 @@ import simd
 // OUTPUT_DIR gets every candidate layout as NAME.png, NAME-dark.png and
 // NAME-tinted.png, 1024 px square.
 
-/// Clay (Theme.swift), light and dark.
-enum Clay {
-    static let accent = (light: SIMD3<Float>(0.71, 0.33, 0.20), dark: SIMD3<Float>(0.94, 0.56, 0.41))
-    static let paper = (light: SIMD3<Float>(0.972, 0.957, 0.933), dark: SIMD3<Float>(0.078, 0.070, 0.064))
+/// Pearl (Theme.swift), light and dark: the agent's violet "working" and the paper.
+enum Pearl {
+    static let working = (light: SIMD3<Float>(0x6E, 0x56, 0xF0) / 255, dark: SIMD3<Float>(0x9C, 0x8C, 0xFF) / 255)
+    static let paper = (light: SIMD3<Float>(0xF5, 0xF5, 0xF2) / 255, dark: SIMD3<Float>(0x0E, 0x0F, 0x12) / 255)
 }
 
 enum Appearance { case light, dark, tinted }
@@ -26,8 +26,8 @@ enum Appearance { case light, dark, tinted }
 func agent(center: SIMD2<Float>, size: Float, scale: Float, appearance: Appearance,
            gaze: SIMD2<Float> = .zero, strength: Float = 0.85) -> JellyUniforms {
     let tint: SIMD3<Float> = switch appearance {
-    case .light: Clay.accent.light
-    case .dark: Clay.accent.dark
+    case .light: Pearl.working.light
+    case .dark: Pearl.working.dark
     // The system tints by luminance: a pale grey jelly, dark eyes.
     case .tinted: SIMD3(0.95, 0.95, 0.95)
     }
@@ -41,6 +41,8 @@ func agent(center: SIMD2<Float>, size: Float, scale: Float, appearance: Appearan
         gaze: SIMD4(gaze.x, gaze.y, center.x, center.y),
         bridge: SIMD4(0, 1, 0, 0), stubs: SIMD4(0, 0, size / 34, 0),
         look: JellyUniforms.plainLook,
+        // The app's agent wears its soap film, at the start of its drift.
+        film: appearance == .tinted ? .zero : SIMD4(1, 1, 0, 0),
         center: SIMD2(-1e4, -1e4), half: SIMD2(1, 1), origin: SIMD2(0, 0),
         scale: scale, radius: 1, pillow: 0, time: 0, churn: 0, opened: 0,
         dark: appearance == .dark ? 1 : 0, mode: 0)
@@ -154,19 +156,19 @@ func lone(_ appearance: Appearance, fraction: Float, page: SIMD3<Float>, strengt
 }
 
 let layouts: [Layout] = [
-    // A: terracotta jelly on the app's cream paper, a touch right of its
+    // A: the soap-film agent on the app's pearl paper, a touch right of its
     // mass centre (user, 2026-10-25: it read slightly left).
     Layout(name: "a-cream") { appearance, context in
-        lone(appearance, fraction: 0.6, page: Clay.paper.light, strength: 1.15, in: context, nudge: 0.0125)
+        lone(appearance, fraction: 0.6, page: Pearl.paper.light, strength: 1.15, in: context, nudge: 0.0125)
     },
-    // B: the dark-mode jelly on warm charcoal.
-    Layout(name: "b-charcoal") { appearance, context in
-        lone(appearance, fraction: 0.6, page: SIMD3(0.13, 0.115, 0.105), strength: 1.0, in: context, dark: true)
+    // B: the dark-mode jelly on the dark paper.
+    Layout(name: "b-dark") { appearance, context in
+        lone(appearance, fraction: 0.6, page: Pearl.paper.dark, strength: 1.0, in: context, dark: true)
     },
     // C: as on Home while it works, peeking over a device's top edge.
     Layout(name: "c-peek") { appearance, context in
         let size: Float = 40, width = size / 0.46, scale = Float(pixels) / width
-        background(appearance, page: Clay.paper.light, in: context)
+        background(appearance, page: Pearl.paper.light, in: context)
         let edge = CGFloat(pixels) * 0.5
         let u = agent(center: SIMD2(width / 2, Float(edge) / scale - size * 0.02), size: size, scale: scale,
                       appearance: appearance, gaze: SIMD2(0, 1.0), strength: appearance == .dark ? 1.0 : 1.15)
@@ -176,8 +178,8 @@ let layouts: [Layout] = [
         let radius = device.width * 0.2
         let bezel: CGColor, screen: CGColor
         switch appearance {
-        case .light: (bezel, screen) = (color(SIMD3(0.16, 0.145, 0.135)), color(SIMD3(0.94, 0.91, 0.87)))
-        case .dark: (bezel, screen) = (color(SIMD3(0.36, 0.33, 0.31)), color(SIMD3(0.14, 0.125, 0.115)))
+        case .light: (bezel, screen) = (color(SIMD3(0.11, 0.114, 0.133)), color(SIMD3(0.91, 0.91, 0.90)))
+        case .dark: (bezel, screen) = (color(SIMD3(0.33, 0.33, 0.35)), color(SIMD3(0.12, 0.12, 0.14)))
         case .tinted: (bezel, screen) = (CGColor(gray: 0.55, alpha: 1), CGColor(gray: 0.12, alpha: 1))
         }
         context.setFillColor(bezel)

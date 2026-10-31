@@ -1,45 +1,124 @@
 import UIKit
 
-/// One visual language for every screen: a lit studio backdrop for the real
-/// devices, system text colors for content, and Liquid Glass only on controls.
+/// One visual language for every screen, the design deck's tokens
+/// (docs/design/README.md, approved 2026-10-31): six text roles, a 4-point
+/// grid, a 20-point glyph slot, three radii and the Pearl colours. Nothing
+/// outside these ships.
 enum Theme {
-    /// Terracotta on warm cream (user-chosen "Clay", 2026-10-14).
-    static let accent = dynamic(rgb(0.71, 0.33, 0.20), rgb(0.94, 0.56, 0.41))
+    // MARK: Pearl (user-chosen, 2026-10-31): ink controls, violet work.
+
+    /// What you can tap: near-black ink, near-white in dark.
+    static let accent = hex(0x1C1D22, 0xF2F2F5)
     /// Text and symbols on an accent fill (the send button, Install).
-    static let onAccent = dynamic(.white, rgb(0.20, 0.08, 0.03))
-    /// The page behind conversations and lists that are not on the stage.
-    static let paper = dynamic(rgb(0.972, 0.957, 0.933), rgb(0.078, 0.070, 0.064))
-    /// Tint for your messages' glass bubbles.
-    static let userGlass = dynamic(rgb(0.78, 0.44, 0.28, 0.14), rgb(0.86, 0.50, 0.34, 0.24))
+    static let onAccent = hex(0xFFFFFF, 0x0E0F12)
+    /// Every page's backdrop, sheets included.
+    static let paper = hex(0xF5F5F2, 0x0E0F12)
+    /// An agent at work: its jelly, the "working" word.
+    static let working = hex(0x6E56F0, 0x9C8CFF)
+    /// Something waits on you (needs you).
+    static let warning = hex(0xD08A00, 0xFFC24D)
+    /// Finished, ready to try.
+    static let success = hex(0x2F9461, 0x5FD38E)
+    /// Failed, stopped.
+    static let failure = hex(0xD33A3A, 0xFF6B6B)
+    /// An idle jelly.
+    static let idle = hex(0x8E8E95, 0x7A7A82)
+    /// The agent's bubbles and the question card: a plain fill, not glass.
+    static let receivedFill = hex(0xE9E9E6, 0x1E1F24)
+    /// Tint for your messages' glass bubbles: a breath of violet.
+    static let userGlass = UIColor { working.resolvedColor(with: $0).withAlphaComponent($0.userInterfaceStyle == .dark ? 0.26 : 0.14) }
     static let codeFill = UIColor { trait in
         trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.09) : UIColor(white: 0, alpha: 0.055)
     }
     static let pressedFill = UIColor { trait in
         trait.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.07) : UIColor(white: 0, alpha: 0.045)
     }
-    /// Olive, ochre and crimson, apart from the terracotta accent.
-    static let success = dynamic(rgb(0.36, 0.53, 0.24), rgb(0.60, 0.78, 0.44))
-    static let warning = dynamic(rgb(0.72, 0.55, 0.06), rgb(0.95, 0.78, 0.34))
-    static let failure = dynamic(rgb(0.74, 0.13, 0.24), rgb(1.0, 0.44, 0.52))
 
-    private static func dynamic(_ light: UIColor, _ dark: UIColor) -> UIColor {
-        UIColor { $0.userInterfaceStyle == .dark ? dark : light }
-    }
-    private static func rgb(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> UIColor {
-        UIColor(red: r, green: g, blue: b, alpha: a)
+    private static func hex(_ light: UInt32, _ dark: UInt32) -> UIColor {
+        func color(_ v: UInt32) -> UIColor {
+            UIColor(red: CGFloat((v >> 16) & 0xff) / 255, green: CGFloat((v >> 8) & 0xff) / 255, blue: CGFloat(v & 0xff) / 255, alpha: 1)
+        }
+        let l = color(light), d = color(dark)
+        return UIColor { $0.userInterfaceStyle == .dark ? d : l }
     }
 
-    /// Dynamic Type aware; `rounded` is reserved for app names.
-    static func font(_ style: UIFont.TextStyle, _ size: CGFloat, _ weight: UIFont.Weight = .regular,
-                     monospaced: Bool = false) -> UIFont {
-        let font = monospaced ? UIFont.monospacedSystemFont(ofSize: size, weight: weight)
-            : UIFont.systemFont(ofSize: size, weight: weight)
-        return UIFontMetrics(forTextStyle: style).scaledFont(for: font)
+    // MARK: Type: six roles, all scaling with Dynamic Type. Nothing else.
+
+    enum Text {
+        /// A page's one heading.
+        static var title: UIFont { font(.title2, 22, .bold) }
+        /// What people and agents say; row titles, fields, buttons.
+        static var body: UIFont { font(.body, 17) }
+        /// A button's title.
+        static var bodyStrong: UIFont { font(.body, 17, .semibold) }
+        /// Everything the agent did as one line; a row's second line.
+        static var line: UIFont { font(.subheadline, 15) }
+        /// A line's verb or name; app names on Home.
+        static var lineStrong: UIFont { font(.subheadline, 15, .semibold) }
+        /// Section labels, who asks, counts, tags.
+        static var caption: UIFont { font(.footnote, 13, .semibold) }
+        /// Commands, paths and code.
+        static var mono: UIFont { font(.footnote, 13, monospaced: true) }
+        /// Mono, semibold: a figure in a mono line that leads it.
+        static var monoStrong: UIFont { font(.footnote, 13, .semibold, monospaced: true) }
+
+        private static func font(_ style: UIFont.TextStyle, _ size: CGFloat, _ weight: UIFont.Weight = .regular,
+                                 monospaced: Bool = false) -> UIFont {
+            let font = monospaced ? UIFont.monospacedSystemFont(ofSize: size, weight: weight)
+                : UIFont.systemFont(ofSize: size, weight: weight)
+            return UIFontMetrics(forTextStyle: style).scaledFont(for: font)
+        }
+    }
+
+    /// An SF Symbol drawn in a text role's own size and weight.
+    static func symbol(_ font: UIFont) -> UIImage.SymbolConfiguration { UIImage.SymbolConfiguration(font: font) }
+
+    // MARK: Space: a 4-point grid.
+
+    enum Space {
+        /// Between bubbles from the same sender; between nested lines.
+        static let tight: CGFloat = 4
+        /// Between lines, between rows in a list, between pictures.
+        static let row: CGFloat = 8
+        /// A list row's padding above and below.
+        static let rowPad: CGFloat = 12
+        /// Between a bubble and a line, a card or media.
+        static let group: CGFloat = 16
+        /// From each screen edge.
+        static let margin: CGFloat = 20
+        /// Above a section label; before your message.
+        static let section: CGFloat = 24
+        /// The glyph slot, the gap after it, and where a line's text starts.
+        static let glyph: CGFloat = 20, glyphGap: CGFloat = 8
+        static let text: CGFloat = margin + glyph + glyphGap
+        /// One nesting level: a slot and its gap.
+        static let indent: CGFloat = glyph + glyphGap
+        static let bubble = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+        /// The question card and the build card.
+        static let card = UIEdgeInsets(top: 12, left: 14, bottom: 8, right: 14)
+        /// A bubble's free side: it never comes closer to the far edge.
+        static let bubbleFree: CGFloat = 56
+        /// The smallest thing you can tap, and a one-line bubble's height.
+        static let tap: CGFloat = 44
+    }
+
+    /// Jelly sizes: in lines and rows, the app agent's live line, and Home.
+    enum Glyph {
+        static let line: CGFloat = 20, live: CGFloat = 28, home: CGFloat = 26
+    }
+
+    /// Three radii: small things, bubbles and cards, and capsules
+    /// (`cornerStyle = .capsule`, or half the height).
+    enum Radius {
+        /// Media, code, thumbnails.
+        static let small: CGFloat = 8
+        /// Bubbles, cards, fields, sheets' inner surfaces.
+        static let large: CGFloat = 18
     }
 
     /// App names: plain SF, like the rest of the interface (the user rejected
     /// both SF Rounded and New York here).
-    static func appCaptionFont() -> UIFont { font(.headline, 15, .semibold) }
+    static func appCaptionFont() -> UIFont { Text.lineStrong }
 
     static func label(_ text: String = "", _ font: UIFont, color: UIColor = .label, lines: Int = 1) -> UILabel {
         let label = UILabel()
@@ -63,16 +142,17 @@ enum Theme {
         }
         config.image = symbol.flatMap { UIImage(systemName: $0) }
         config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .body, scale: .medium)
-        config.imagePadding = 7
+        config.imagePadding = Space.row
         if let title {
             config.title = title
             config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
                 var attributes = attributes
-                attributes.font = Theme.font(.body, 17, .semibold)
+                attributes.font = Text.bodyStrong
                 return attributes
             }
-            config.contentInsets = NSDirectionalEdgeInsets(top: 11, leading: 16, bottom: 11, trailing: 18)
+            config.contentInsets = NSDirectionalEdgeInsets(top: 11, leading: Space.group, bottom: 11, trailing: Space.group)
         } else {
+            // 11 around a 22-point line: the 44-point control.
             config.contentInsets = NSDirectionalEdgeInsets(top: 11, leading: 11, bottom: 11, trailing: 11)
         }
         if !prominent { config.baseForegroundColor = .label }
@@ -105,7 +185,7 @@ enum Theme {
     }
 
     /// Lets adjacent glass shapes blend and morph as one native group.
-    static func glassGroup(spacing: CGFloat = 12) -> UIVisualEffectView {
+    static func glassGroup(spacing: CGFloat = Space.rowPad) -> UIVisualEffectView {
         if #available(iOS 26.0, *) {
             let effect = UIGlassContainerEffect()
             effect.spacing = spacing
@@ -157,6 +237,15 @@ extension Theme {
     }()
 }
 
+extension UIFont {
+    /// The same font with figures of one width, for counts and clocks that
+    /// change in place.
+    var tabularDigits: UIFont {
+        let feature: [UIFontDescriptor.FeatureKey: Int] = [.type: kNumberSpacingType, .selector: kMonospacedNumbersSelector]
+        return UIFont(descriptor: fontDescriptor.addingAttributes([.featureSettings: [feature]]), size: 0)
+    }
+}
+
 extension CGFloat {
     func clamped(_ lower: CGFloat = 0, _ upper: CGFloat = 1) -> CGFloat { Swift.min(upper, Swift.max(lower, self)) }
     static func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
@@ -202,7 +291,7 @@ extension CALayer {
     func markSpot(in traits: UITraitCollection) {
         borderColor = Theme.accent.resolvedColor(with: traits).cgColor
         let ring = CAKeyframeAnimation(keyPath: "borderWidth")
-        ring.values = [0, 2.5, 2.5, 0]
+        ring.values = [0, 2, 2, 0]
         ring.keyTimes = [0, 0.12, 0.55, 1]
         ring.duration = 1.8
         add(ring, forKey: "mark")

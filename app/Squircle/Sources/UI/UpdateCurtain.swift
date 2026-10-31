@@ -5,9 +5,9 @@ import UIKit
 /// icon shows the install. iOS can't reopen an app after replacing it.
 @MainActor
 final class UpdateCurtain: UIView {
-    private let glass = Theme.glassSurface(cornerRadius: 30)
-    private let title = Theme.label("", Theme.font(.headline, 17, .semibold), lines: 2)
-    private let detail = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel, lines: 3)
+    private let glass = Theme.glassSurface(cornerRadius: Theme.Radius.large)
+    private let title = Theme.label("", Theme.Text.title, lines: 2)
+    private let detail = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 3)
     private let spinner = UIActivityIndicatorView(style: .medium)
 
     private var onDismiss: (() -> Void)?
@@ -52,16 +52,17 @@ final class UpdateCurtain: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let width = min(bounds.width - 48, 340)
-        let inner = width - 48
+        let pad = Theme.Space.section, spinnerGap = Theme.Space.group, gap = Theme.Space.row
+        let width = min(bounds.width - 2 * pad, 340)
+        let inner = width - 2 * pad
         let titleHeight = title.sizeThatFits(CGSize(width: inner, height: .greatestFiniteMagnitude)).height
         let detailHeight = detail.sizeThatFits(CGSize(width: inner, height: .greatestFiniteMagnitude)).height
-        let height = 28 + 24 + 14 + titleHeight + 8 + detailHeight + 28
+        let height = pad + 24 + spinnerGap + titleHeight + gap + detailHeight + pad
         glass.bounds = CGRect(x: 0, y: 0, width: width, height: height)
         glass.center = CGPoint(x: bounds.midX, y: bounds.midY)
-        spinner.center = CGPoint(x: width / 2, y: 28 + 12)
-        title.frame = CGRect(x: 24, y: 28 + 24 + 14, width: inner, height: titleHeight)
-        detail.frame = CGRect(x: 24, y: title.frame.maxY + 8, width: inner, height: detailHeight)
+        spinner.center = CGPoint(x: width / 2, y: pad + 12)
+        title.frame = CGRect(x: pad, y: pad + 24 + spinnerGap, width: inner, height: titleHeight)
+        detail.frame = CGRect(x: pad, y: title.frame.maxY + gap, width: inner, height: detailHeight)
     }
 
     private func present() {

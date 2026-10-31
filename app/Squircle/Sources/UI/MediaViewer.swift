@@ -138,7 +138,7 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate, UIScrollViewDelega
     private let backdrop = UIView()
     /// Native paging physics for swiping between media; draws nothing.
     private let pager = UIScrollView()
-    private static let gap: CGFloat = 20
+    private static let gap = Theme.Space.margin
     private let close = Theme.glassButton(symbol: "xmark", identifier: "viewer.close", accessibilityLabel: "Close")
     private var sim: SimulatorChrome?
     private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
@@ -359,8 +359,8 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate, UIScrollViewDelega
     private func fit(_ aspect: CGFloat) -> CGRect {
         var area = bounds
         if isSimulator {
-            let top = safeAreaInsets.top + 12
-            area = CGRect(x: 16, y: top, width: bounds.width - 32, height: bounds.height - top - safeAreaInsets.bottom - 96)
+            let top = safeAreaInsets.top + Theme.Space.rowPad
+            area = CGRect(x: Theme.Space.margin, y: top, width: bounds.width - 2 * Theme.Space.margin, height: bounds.height - top - safeAreaInsets.bottom - 96)
         }
         let height = min(area.height, area.width * aspect)
         let width = height / max(0.01, aspect)
@@ -503,7 +503,7 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate, UIScrollViewDelega
         let open = openness(frame)
         let shown = route == .open ? open * open * chrome.value : 0
         let controls = route == .open && chrome.target > 0.5
-        let width = min(bounds.width - 32, 520)
+        let width = min(bounds.width - 2 * Theme.Space.margin, 520)
         let bar = CGRect(x: bounds.midX - width / 2, y: bounds.height - safeAreaInsets.bottom - 64, width: width, height: 52)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1125,9 +1125,9 @@ private final class SimulatorChrome: UIView {
         frame = CGRect(x: 0, y: 0, width: width, height: y + 48)
         grabber.frame = CGRect(x: point.x - 18, y: point.y - 2.5, width: 36, height: 5)
         let buttons = [home] + (showsThread ? [thread] : []) + [shrink]
-        let total = CGFloat(buttons.count) * 48 + CGFloat(buttons.count - 1) * 16
+        let total = CGFloat(buttons.count) * 48 + CGFloat(buttons.count - 1) * Theme.Space.group
         for (slot, button) in buttons.enumerated() {
-            button.frame = CGRect(x: width / 2 - total / 2 + CGFloat(slot) * 64, y: y, width: 48, height: 48)
+            button.frame = CGRect(x: width / 2 - total / 2 + CGFloat(slot) * (48 + Theme.Space.group), y: y, width: 48, height: 48)
         }
     }
 
@@ -1160,6 +1160,7 @@ private final class VideoControls: UIView {
     }
     /// Playing unmuted on the page shown.
     var audible: Bool { playback == .shown && player?.isMuted == false && player?.timeControlStatus != .paused }
+    /// Half the bar's 52-point height: a capsule.
     private let surface = Theme.glassSurface(cornerRadius: 26)
     private let play = UIButton(type: .system)
     private let mute = UIButton(type: .system)
@@ -1184,7 +1185,7 @@ private final class VideoControls: UIView {
         addSubview(surface)
         for button in [play, mute] {
             button.tintColor = .label
-            button.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold), forImageIn: .normal)
+            button.setPreferredSymbolConfiguration(Theme.symbol(Theme.Text.body), forImageIn: .normal)
             surface.contentView.addSubview(button)
         }
         play.accessibilityIdentifier = "viewer.play"
@@ -1205,7 +1206,7 @@ private final class VideoControls: UIView {
         slider.addAction(UIAction { [weak self] _ in self?.endScrub() }, for: [.touchUpInside, .touchUpOutside, .touchCancel])
         slider.accessibilityLabel = "Position"
         surface.contentView.addSubview(slider)
-        time.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+        time.font = Theme.Text.mono
         time.textColor = .secondaryLabel
         time.textAlignment = .right
         surface.contentView.addSubview(time)

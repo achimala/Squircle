@@ -20,7 +20,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     private let header = UIView()
     /// The switch sits on glass like the close button, so rows passing
     /// under it don't show through.
-    private let tabsGlass = Theme.glassSurface(cornerRadius: 20)
+    private let tabsGlass = Theme.glassSurface(cornerRadius: Theme.Space.tap / 2)
 
     /// Where the Tasks tab is: the overview, or one work item's page. Every
     /// frame, visibility and touch below is derived from this and `push`.
@@ -43,7 +43,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     private var pages: [String: WorkItemPage] = [:]
     /// The work items the pages run through: the overview's rows, in order.
     private var order: [String] = []
-    private let notice = Theme.label("", Theme.font(.body, 17), color: .secondaryLabel, lines: 0)
+    private let notice = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
     private lazy var threads = ThreadsViewController(model: model, project: project, embedded: true)
     private var dataSource: UITableViewDiffableDataSource<Group, String>!
     private var list = AppTasks()
@@ -89,12 +89,6 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             case .search: ""
             }
         }
-        var color: UIColor {
-            switch self {
-            case .status(let status): WorkItemPage.color(status)
-            default: .secondaryLabel
-            }
-        }
     }
     private static let searchRow = "search"
     private static let askPrefix = "ask."
@@ -125,7 +119,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         #if DEBUG
         ScrollSweep.start(table)
         #endif
-        if #available(iOS 26.0, *) { view.backgroundColor = nil } else { view.backgroundColor = Theme.paper }
+        view.backgroundColor = Theme.paper
         close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
         back.addAction(UIAction { [weak self] _ in self?.showOverview() }, for: .touchUpInside)
         tabs.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.renderChrome() }, for: .valueChanged)
@@ -150,7 +144,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
                 guard let ask = asks[id] else { return cell }
                 cell.setLast(ask.last)
                 // The cell's text column, so it's measured at its real width.
-                cell.item.fitWidth = table.bounds.width - 72
+                cell.item.fitWidth = table.bounds.width - Theme.Space.text - Theme.Space.margin
                 answers.configure(cell.item, ask.item, about: ask.about) { [weak self] in
                     self?.table.performBatchUpdates(nil)
                 }
@@ -208,24 +202,24 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         threads.scrollView.contentInsetAdjustmentBehavior = .never
         threads.onOpen = { [weak self] id in self?.onOpen?(id) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 14),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            header.heightAnchor.constraint(equalToConstant: 40),
+            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: Theme.Space.rowPad),
+            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.group),
+            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.group),
+            header.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
             close.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             close.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            close.widthAnchor.constraint(equalToConstant: 40), close.heightAnchor.constraint(equalToConstant: 40),
+            close.widthAnchor.constraint(equalToConstant: Theme.Space.tap), close.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
             back.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             back.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            back.widthAnchor.constraint(equalToConstant: 40), back.heightAnchor.constraint(equalToConstant: 40),
+            back.widthAnchor.constraint(equalToConstant: Theme.Space.tap), back.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
             tabsGlass.centerXAnchor.constraint(equalTo: header.centerXAnchor),
             tabsGlass.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             tabsGlass.widthAnchor.constraint(equalToConstant: 196),
-            tabsGlass.heightAnchor.constraint(equalToConstant: 40),
-            tabs.topAnchor.constraint(equalTo: tabsGlass.contentView.topAnchor, constant: 3),
-            tabs.bottomAnchor.constraint(equalTo: tabsGlass.contentView.bottomAnchor, constant: -3),
-            tabs.leadingAnchor.constraint(equalTo: tabsGlass.contentView.leadingAnchor, constant: 3),
-            tabs.trailingAnchor.constraint(equalTo: tabsGlass.contentView.trailingAnchor, constant: -3),
+            tabsGlass.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
+            tabs.topAnchor.constraint(equalTo: tabsGlass.contentView.topAnchor, constant: Theme.Space.tight),
+            tabs.bottomAnchor.constraint(equalTo: tabsGlass.contentView.bottomAnchor, constant: -Theme.Space.tight),
+            tabs.leadingAnchor.constraint(equalTo: tabsGlass.contentView.leadingAnchor, constant: Theme.Space.tight),
+            tabs.trailingAnchor.constraint(equalTo: tabsGlass.contentView.trailingAnchor, constant: -Theme.Space.tight),
             table.topAnchor.constraint(equalTo: view.topAnchor),
             table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -239,15 +233,15 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             threads.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             threads.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             threads.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            notice.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 48),
-            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
-            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32)
+            notice.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2 * Theme.Space.section),
+            notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.margin),
+            notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.margin)
         ])
         undo.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(undo)
         NSLayoutConstraint.activate([
             undo.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            undo.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12)
+            undo.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -Theme.Space.rowPad)
         ])
         push.onChange = { [weak self] _ in self?.applyPush() }
         // No pull to refresh: the lease keeps the list current while it's up,
@@ -283,7 +277,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         applyPush()
         defer { showFocus() }
         // Every list starts just below the controls and scrolls up under them.
-        let top = header.frame.maxY + 4, bottom = view.safeAreaInsets.bottom + 28
+        let top = header.frame.maxY + Theme.Space.tight, bottom = view.safeAreaInsets.bottom + Theme.Space.section
         let scrolls = [table, threads.scrollView] + pages.values.map(\.scroll)
         for scroll in scrolls where scroll.contentInset.top != top || scroll.contentInset.bottom != bottom {
             let atTop = scroll.contentOffset.y <= -scroll.contentInset.top
@@ -435,8 +429,8 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         let page = WorkItemPage()
         page.answers = answers
         page.scroll.contentInsetAdjustmentBehavior = .never
-        let top = header.frame.maxY + 4
-        page.scroll.contentInset = UIEdgeInsets(top: top, left: 0, bottom: view.safeAreaInsets.bottom + 28, right: 0)
+        let top = header.frame.maxY + Theme.Space.tight
+        page.scroll.contentInset = UIEdgeInsets(top: top, left: 0, bottom: view.safeAreaInsets.bottom + Theme.Space.section, right: 0)
         page.scroll.verticalScrollIndicatorInsets.top = top
         page.scroll.contentOffset.y = -top
         if #available(iOS 26.0, *) { page.scroll.topEdgeEffect.style = .soft }
@@ -761,7 +755,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         let folds = group == .history && query.isEmpty
         let count = folds ? list.history.count
             : dataSource.snapshot().itemIdentifiers(inSection: group).filter { !$0.hasPrefix(Self.askPrefix) }.count
-        header.configure(group.title, count: count, color: group.color,
+        header.configure(group.title, count: count,
                          chevron: folds ? (showsHistory ? "chevron.up" : "chevron.down") : nil)
         header.onTap = folds ? { [weak self] in self?.toggleHistory() } : nil
     }
@@ -850,11 +844,11 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     }
 }
 
-/// A status group's name and count: a small coloured label over its rows.
+/// A status group's name and count: a Caption label over its rows.
 private final class TaskGroupHeader: UITableViewHeaderFooterView {
     var onTap: (() -> Void)?
-    private let name = Theme.label("", Theme.font(.footnote, 13, .semibold))
-    private let count = Theme.label("", Theme.font(.footnote, 13), color: .tertiaryLabel)
+    private let name = Theme.label("", Theme.Text.caption, color: .secondaryLabel)
+    private let count = Theme.label("", Theme.Text.caption, color: .tertiaryLabel)
     private let chevron = UIImageView()
 
     override init(reuseIdentifier: String?) {
@@ -862,17 +856,17 @@ private final class TaskGroupHeader: UITableViewHeaderFooterView {
         backgroundConfiguration = .clear()
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
         chevron.tintColor = .tertiaryLabel
-        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .footnote, scale: .small)
+        chevron.preferredSymbolConfiguration = Theme.symbol(Theme.Text.caption)
         let line = UIStackView(arrangedSubviews: [name, count, chevron, UIView()])
-        line.spacing = 5
+        line.spacing = Theme.Space.tight
         line.alignment = .firstBaseline
         line.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(line)
         NSLayoutConstraint.activate([
-            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20),
-            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -2),
-            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22),
-            line.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24)
+            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.section),
+            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            line.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
         ])
     }
 
@@ -881,9 +875,8 @@ private final class TaskGroupHeader: UITableViewHeaderFooterView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ title: String, count value: Int, color: UIColor, chevron symbol: String?) {
+    func configure(_ title: String, count value: Int, chevron symbol: String?) {
         name.text = title
-        name.textColor = color
         count.text = "\(value)"
         chevron.image = symbol.flatMap { UIImage(systemName: $0) }
         chevron.isHidden = symbol == nil
@@ -907,10 +900,10 @@ private final class TaskSearchCell: UITableViewCell {
         field.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(field)
         NSLayoutConstraint.activate([
-            field.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            field.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
-            field.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 22),
-            field.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
+            field.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.row),
+            field.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
+            field.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            field.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
         ])
     }
 
@@ -943,9 +936,9 @@ private struct TaskRow: Equatable {
 private final class TaskCell: UITableViewCell {
     var onInstall: (() -> Void)?
     var onCheck: (() -> Void)?
-    private let ask = Theme.label("", Theme.font(.body, 16), lines: 2)
-    private let note = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel, lines: 1)
-    private let jelly = JellyView(.worker("", .working), canvas: .roomy(22))
+    private let ask = Theme.label("", Theme.Text.body, lines: 2)
+    private let note = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 1)
+    private let jelly = JellyView(.worker("", .working), canvas: .roomy(Theme.Glyph.line))
     private let install = UIButton(configuration: .filled())
     private let rule = UIView()
     /// The round tick at the leading edge; one tap marks the task done.
@@ -965,42 +958,43 @@ private final class TaskCell: UITableViewCell {
         config.cornerStyle = .capsule
         config.baseBackgroundColor = Theme.accent
         config.baseForegroundColor = Theme.onAccent
-        config.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 11, bottom: 5, trailing: 11)
+        config.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.tight, leading: Theme.Space.rowPad,
+                                                       bottom: Theme.Space.tight, trailing: Theme.Space.rowPad)
         config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var attributes = attributes
-            attributes.font = Theme.font(.footnote, 13, .semibold)
+            attributes.font = Theme.Text.caption
             return attributes
         }
         install.configuration = config
         install.setContentHuggingPriority(.required, for: .horizontal)
         install.setContentCompressionResistancePriority(.required, for: .horizontal)
         install.addAction(UIAction { [weak self] _ in self?.onInstall?() }, for: .touchUpInside)
-        mark.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 21, weight: .light)
+        mark.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         mark.isUserInteractionEnabled = false
         mark.translatesAutoresizingMaskIntoConstraints = false
         check.addSubview(mark)
         check.addAction(UIAction { [weak self] _ in self?.onCheck?() }, for: .touchUpInside)
         jelly.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: 22), jelly.heightAnchor.constraint(equalToConstant: 22)])
+        NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line), jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line)])
 
         let text = UIStackView(arrangedSubviews: [ask, note])
         text.axis = .vertical
-        text.spacing = 2
+        text.spacing = Theme.Space.tight
         let line = UIStackView(arrangedSubviews: [text, jelly, install])
         line.alignment = .center
-        line.spacing = 12
+        line.spacing = Theme.Space.rowPad
         rule.backgroundColor = .separator
         [line, rule, check].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         NSLayoutConstraint.activate([
-            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
-            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
-            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 52),
-            line.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
-            // A generous target, its circle centred on the ask's first line.
-            check.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 8),
-            check.widthAnchor.constraint(equalToConstant: 44),
-            check.heightAnchor.constraint(equalToConstant: 44),
-            check.centerYAnchor.constraint(equalTo: ask.topAnchor, constant: 10),
+            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.rowPad),
+            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.rowPad),
+            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.text),
+            line.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
+            // A generous target, its mark centred in the glyph slot on the ask's first line.
+            check.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin + Theme.Space.glyph / 2),
+            check.widthAnchor.constraint(equalToConstant: Theme.Space.tap),
+            check.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
+            check.centerYAnchor.constraint(equalTo: ask.topAnchor, constant: (ask.font.lineHeight / 2).rounded()),
             mark.centerXAnchor.constraint(equalTo: check.centerXAnchor),
             mark.centerYAnchor.constraint(equalTo: check.centerYAnchor),
             rule.leadingAnchor.constraint(equalTo: line.leadingAnchor),
@@ -1021,7 +1015,7 @@ private final class TaskCell: UITableViewCell {
     func configure(_ row: TaskRow) {
         ask.text = row.ask
         ask.textColor = row.faded || row.checked ? .secondaryLabel : .label
-        let symbol = row.status == .dropped ? "xmark.circle.fill" : row.checked ? "checkmark.circle.fill" : "circle"
+        let symbol = row.checked ? "checkmark" : WorkItemPage.symbol(row.status)
         if symbol != shownSymbol, let image = UIImage(systemName: symbol) {
             shownSymbol = symbol
             // Ticking animates; a reused cell just shows its state.
@@ -1031,9 +1025,9 @@ private final class TaskCell: UITableViewCell {
                 mark.image = image
             }
         }
-        // The circle carries the status, so a row reads on its own.
-        mark.tintColor = row.status == .dropped ? .tertiaryLabel : row.checked ? Theme.success
-            : row.status == .queued ? .tertiaryLabel : WorkItemPage.color(row.status)
+        // The mark carries the status, so a row reads on its own; a tick
+        // made here shows in success until it moves to Done.
+        mark.tintColor = row.checked && row.status.open ? Theme.success : WorkItemPage.symbolColor(row.status)
         check.isEnabled = row.status.open
         check.accessibilityLabel = row.checked ? "Done" : "Mark done"
         check.accessibilityTraits = row.checked ? [.button, .selected] : .button
@@ -1066,18 +1060,18 @@ private final class TaskCell: UITableViewCell {
 /// Undo for the last ticks: a small glass capsule at the sheet's foot.
 private final class UndoToast: UIView {
     var onUndo: (() -> Void)?
-    private let surface = Theme.glassSurface(cornerRadius: 20, interactive: true)
-    private let text = Theme.label("", Theme.font(.subheadline, 15, .medium), color: .secondaryLabel)
+    private let surface = Theme.glassSurface(cornerRadius: Theme.Space.tap / 2, interactive: true)
+    private let text = Theme.label("", Theme.Text.line, color: .secondaryLabel)
     private let button = UIButton(type: .system)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         button.setTitle("Undo", for: .normal)
-        button.titleLabel?.font = Theme.font(.subheadline, 15, .semibold)
+        button.titleLabel?.font = Theme.Text.lineStrong
         button.tintColor = Theme.accent
         button.addAction(UIAction { [weak self] _ in self?.onUndo?() }, for: .touchUpInside)
         let line = UIStackView(arrangedSubviews: [text, button])
-        line.spacing = 14
+        line.spacing = Theme.Space.rowPad
         line.alignment = .center
         [surface, line].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         addSubview(surface)
@@ -1087,10 +1081,10 @@ private final class UndoToast: UIView {
             surface.bottomAnchor.constraint(equalTo: bottomAnchor),
             surface.leadingAnchor.constraint(equalTo: leadingAnchor),
             surface.trailingAnchor.constraint(equalTo: trailingAnchor),
-            surface.heightAnchor.constraint(equalToConstant: 40),
+            surface.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
             line.centerYAnchor.constraint(equalTo: surface.contentView.centerYAnchor),
-            line.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: 18),
-            line.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -16)
+            line.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: Theme.Space.group),
+            line.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -Theme.Space.group)
         ])
     }
 
@@ -1144,11 +1138,11 @@ final class WorkItemPage: UIView {
     let scroll = UIScrollView()
     private let stack = UIStackView()
     private let status = UIButton(configuration: .plain())
-    private let ask = Theme.label("", Theme.font(.title2, 24, .semibold), lines: 0)
-    private let note = Theme.label("", Theme.font(.subheadline, 15), color: .secondaryLabel, lines: 0)
+    private let ask = Theme.label("", Theme.Text.title, lines: 0)
+    private let note = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 0)
     private let install = UIButton(configuration: .filled())
-    private let shipped = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel)
-    private let position = Theme.label("", Theme.font(.footnote, 13), color: .tertiaryLabel)
+    private let shipped = Theme.label("", Theme.Text.line, color: .secondaryLabel)
+    private let position = Theme.label("", Theme.Text.caption, color: .tertiaryLabel)
     private let steps = UIStackView()
     private let questions = UIStackView()
     private let crew = UIStackView()
@@ -1165,13 +1159,13 @@ final class WorkItemPage: UIView {
         scroll.alwaysBounceVertical = true
         scroll.showsHorizontalScrollIndicator = false
         stack.axis = .vertical
-        stack.spacing = 14
+        stack.spacing = Theme.Space.group
         stack.alignment = .fill
         var config = UIButton.Configuration.plain()
         config.contentInsets = .zero
         config.imagePlacement = .trailing
-        config.imagePadding = 4
-        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+        config.imagePadding = Theme.Space.tight
+        config.preferredSymbolConfigurationForImage = Theme.symbol(Theme.Text.line)
         config.image = UIImage(systemName: "chevron.down")
         status.configuration = config
         status.showsMenuAsPrimaryAction = true
@@ -1182,29 +1176,30 @@ final class WorkItemPage: UIView {
         fill.cornerStyle = .capsule
         fill.baseBackgroundColor = Theme.accent
         fill.baseForegroundColor = Theme.onAccent
-        fill.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 18, bottom: 8, trailing: 18)
+        fill.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.row, leading: Theme.Space.group,
+                                                     bottom: Theme.Space.row, trailing: Theme.Space.group)
         fill.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var attributes = attributes
-            attributes.font = Theme.font(.subheadline, 15, .semibold)
+            attributes.font = Theme.Text.lineStrong
             return attributes
         }
         install.configuration = fill
         install.addAction(UIAction { [weak self] _ in self?.onInstall?() }, for: .touchUpInside)
         let installRow = UIStackView(arrangedSubviews: [install, shipped, UIView()])
-        installRow.spacing = 12
+        installRow.spacing = Theme.Space.rowPad
         installRow.alignment = .center
 
         steps.axis = .vertical
         steps.spacing = 0
         crew.axis = .vertical
-        crew.spacing = 10
+        crew.spacing = Theme.Space.row
         crew.alignment = .leading
-        chips.spacing = 8
+        chips.spacing = Theme.Space.row
         chips.alignment = .leading
         let chipScroll = UIScrollView()
         chipScroll.showsHorizontalScrollIndicator = false
         chipScroll.clipsToBounds = false
-        pictures.spacing = 10
+        pictures.spacing = Theme.Space.row
         pictures.alignment = .center
         pictureScroll.showsHorizontalScrollIndicator = false
         pictureScroll.clipsToBounds = false
@@ -1224,16 +1219,16 @@ final class WorkItemPage: UIView {
         let statusRow = UIStackView(arrangedSubviews: [status, UIView(), position])
         statusRow.alignment = .firstBaseline
         questions.axis = .vertical
-        questions.spacing = 18
+        questions.spacing = Theme.Space.group
         files.axis = .vertical
-        files.spacing = 8
+        files.spacing = Theme.Space.row
         [statusRow, ask, note, questions, installRow, steps, crew, chipScroll, pictureScroll, files].forEach(stack.addArrangedSubview)
-        stack.setCustomSpacing(6, after: statusRow)
-        stack.setCustomSpacing(6, after: ask)
-        stack.setCustomSpacing(22, after: note)
-        stack.setCustomSpacing(22, after: questions)
-        stack.setCustomSpacing(20, after: installRow)
-        stack.setCustomSpacing(20, after: steps)
+        stack.setCustomSpacing(Theme.Space.row, after: statusRow)
+        stack.setCustomSpacing(Theme.Space.row, after: ask)
+        stack.setCustomSpacing(Theme.Space.section, after: note)
+        stack.setCustomSpacing(Theme.Space.section, after: questions)
+        stack.setCustomSpacing(Theme.Space.section, after: installRow)
+        stack.setCustomSpacing(Theme.Space.section, after: steps)
         scroll.translatesAutoresizingMaskIntoConstraints = false
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(scroll)
@@ -1243,10 +1238,10 @@ final class WorkItemPage: UIView {
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 18),
-            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -12),
-            stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -24)
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: Theme.Space.group),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -Theme.Space.rowPad),
+            stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: Theme.Space.margin),
+            stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -Theme.Space.margin)
         ])
     }
 
@@ -1277,10 +1272,30 @@ final class WorkItemPage: UIView {
 
     static func color(_ status: AppTask.Status) -> UIColor {
         switch status {
-        case .needsYou: Theme.accent
-        case .inProgress: Theme.warning
+        case .needsYou: Theme.warning
+        case .inProgress: Theme.working
         case .readyToTry: Theme.success
         default: .secondaryLabel
+        }
+    }
+
+    /// A status as a flat outline in the glyph slot (never a filled disc).
+    static func symbol(_ status: AppTask.Status) -> String {
+        switch status {
+        case .queued: "circle"
+        case .inProgress: "circle.dashed"
+        case .needsYou: "exclamationmark.circle"
+        case .readyToTry: "checkmark.circle"
+        case .done: "checkmark"
+        case .dropped: "xmark"
+        }
+    }
+
+    /// The status mark's colour: its state's, or tertiary when there's nothing to do.
+    static func symbolColor(_ status: AppTask.Status) -> UIColor {
+        switch status {
+        case .queued, .done, .dropped: .tertiaryLabel
+        default: color(status)
         }
     }
 
@@ -1289,7 +1304,7 @@ final class WorkItemPage: UIView {
         let was = shown
         shown = content
         status.configuration?.attributedTitle = AttributedString(Self.name(content.status), attributes: AttributeContainer([
-            .font: Theme.font(.footnote, 13, .semibold), .foregroundColor: Self.color(content.status)]))
+            .font: Theme.Text.line, .foregroundColor: Self.color(content.status)]))
         status.tintColor = Self.color(content.status)
         status.menu = UIMenu(children: [
             UIAction(title: "Move to Front", image: UIImage(systemName: "arrow.left.to.line")) { [weak self] _ in self?.onTop?() },
@@ -1309,7 +1324,7 @@ final class WorkItemPage: UIView {
             questions.arrangedSubviews.forEach { $0.removeFromSuperview() }
             for ask in content.asks {
                 let view = WaitingItemView()
-                view.fitWidth = max(0, bounds.width - 48)
+                view.fitWidth = max(0, bounds.width - 2 * Theme.Space.margin)
                 answers?.configure(view, ask.item, about: ask.about)
                 questions.addArrangedSubview(view)
             }
@@ -1359,7 +1374,7 @@ final class WorkItemPage: UIView {
     private func picture(_ picture: Picture) -> UIView {
         let button = UIButton(type: .custom)
         button.backgroundColor = Theme.codeFill
-        button.layer.cornerRadius = 14
+        button.layer.cornerRadius = Theme.Radius.small
         button.layer.cornerCurve = .continuous
         button.clipsToBounds = true
         button.imageView?.contentMode = .scaleAspectFill
@@ -1371,7 +1386,7 @@ final class WorkItemPage: UIView {
         if picture.media.kind == "video" {
             let play = UIImageView(image: UIImage(systemName: "play.fill"))
             play.tintColor = .white
-            play.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 26)
+            play.preferredSymbolConfiguration = Theme.symbol(Theme.Text.body)
             play.layer.shadowOpacity = 0.4
             play.layer.shadowRadius = 6
             play.layer.shadowOffset = .zero
@@ -1404,19 +1419,19 @@ private final class SubtaskRow: UIControl {
         opens = sub.opens
         super.init(frame: .zero)
         let closed = !sub.status.open
-        let mark = UIImageView(image: UIImage(systemName: sub.status == .dropped ? "xmark.circle.fill" : closed ? "checkmark.circle.fill" : "circle"))
-        mark.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 21, weight: .light)
-        mark.tintColor = sub.status == .done ? Theme.success : .tertiaryLabel
+        let mark = UIImageView(image: UIImage(systemName: WorkItemPage.symbol(sub.status)))
+        mark.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
+        mark.tintColor = WorkItemPage.symbolColor(sub.status)
         mark.isUserInteractionEnabled = false
-        let ask = Theme.label(sub.ask, Theme.font(.body, 17), color: closed ? .secondaryLabel : .label, lines: 0)
+        let ask = Theme.label(sub.ask, Theme.Text.body, color: closed ? .secondaryLabel : .label, lines: 0)
         let words = [[.needsYou, .inProgress, .readyToTry].contains(sub.status) ? WorkItemPage.name(sub.status) : nil,
                      sub.note.isEmpty ? nil : sub.note].compactMap { $0 }
-        let detail = Theme.label(words.joined(separator: " · "), Theme.font(.footnote, 13),
+        let detail = Theme.label(words.joined(separator: " · "), Theme.Text.line,
                                  color: words.first == sub.note ? .secondaryLabel : WorkItemPage.color(sub.status), lines: 2)
         detail.isHidden = words.isEmpty
         let text = UIStackView(arrangedSubviews: [ask, detail])
         text.axis = .vertical
-        text.spacing = 2
+        text.spacing = Theme.Space.tight
         text.isUserInteractionEnabled = false
         check.addAction(UIAction { [weak self] _ in self?.onTick?() }, for: .touchUpInside)
         check.isEnabled = sub.status != .dropped
@@ -1424,16 +1439,17 @@ private final class SubtaskRow: UIControl {
         check.accessibilityTraits = closed ? [.button, .selected] : .button
         [check, mark, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
         NSLayoutConstraint.activate([
-            check.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -11),
-            check.widthAnchor.constraint(equalToConstant: 44),
-            check.heightAnchor.constraint(equalToConstant: 44),
-            check.centerYAnchor.constraint(equalTo: ask.topAnchor, constant: 11),
+            // The mark in the glyph slot, its target a generous 44.
+            check.centerXAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.glyph / 2),
+            check.widthAnchor.constraint(equalToConstant: Theme.Space.tap),
+            check.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
+            check.centerYAnchor.constraint(equalTo: ask.topAnchor, constant: (ask.font.lineHeight / 2).rounded()),
             mark.centerXAnchor.constraint(equalTo: check.centerXAnchor),
             mark.centerYAnchor.constraint(equalTo: check.centerYAnchor),
-            text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 34),
+            text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.indent),
             text.trailingAnchor.constraint(equalTo: trailingAnchor),
-            text.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9)
+            text.topAnchor.constraint(equalTo: topAnchor, constant: Theme.Space.row),
+            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.row)
         ])
         isAccessibilityElement = false
         accessibilityElements = [check, text]
@@ -1468,28 +1484,28 @@ enum TaskParts {
     static func member(_ thread: AppTask.Thread, open: @escaping () -> Void) -> UIView {
         let mood = mood(thread) ?? .working
         let button = UIControl()
-        let jelly = JellyView(.worker(thread.id, mood), canvas: .roomy(22))
-        let title = Theme.label(thread.title ?? "Worker", Theme.font(.subheadline, 15, .semibold), lines: 1)
+        let jelly = JellyView(.worker(thread.id, mood), canvas: .roomy(Theme.Glyph.line))
+        let title = Theme.label(thread.title ?? "Worker", Theme.Text.lineStrong, lines: 1)
         let (word, color): (String, UIColor) = switch mood {
         case .needsYou: ("Needs you", Theme.warning)
         case .failed: ("Stopped with an error", Theme.failure)
-        default: ("Working", .secondaryLabel)
+        default: ("Working", Theme.working)
         }
-        let state = Theme.label(word, Theme.font(.footnote, 13), color: color, lines: 1)
+        let state = Theme.label(word, Theme.Text.line, color: color, lines: 1)
         let text = UIStackView(arrangedSubviews: [title, state])
         text.axis = .vertical
         text.spacing = 0
         text.isUserInteractionEnabled = false
         [jelly, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; button.addSubview($0) }
         NSLayoutConstraint.activate([
-            jelly.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 1),
-            jelly.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: 1),
-            jelly.widthAnchor.constraint(equalToConstant: 22),
-            jelly.heightAnchor.constraint(equalToConstant: 22),
-            text.leadingAnchor.constraint(equalTo: jelly.trailingAnchor, constant: 11),
+            jelly.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+            jelly.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+            jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
+            jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
+            text.leadingAnchor.constraint(equalTo: jelly.trailingAnchor, constant: Theme.Space.glyphGap),
             text.trailingAnchor.constraint(lessThanOrEqualTo: button.trailingAnchor),
-            text.topAnchor.constraint(equalTo: button.topAnchor, constant: 2),
-            text.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -2)
+            text.topAnchor.constraint(equalTo: button.topAnchor),
+            text.bottomAnchor.constraint(equalTo: button.bottomAnchor)
         ])
         button.addAction(UIAction { _ in Theme.selectionHaptic(); open() }, for: .touchUpInside)
         button.isAccessibilityElement = true
@@ -1505,20 +1521,23 @@ enum TaskParts {
         config.baseForegroundColor = .label
         config.background.backgroundColor = Theme.codeFill
         config.cornerStyle = .capsule
-        config.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 11)
-        config.imagePadding = 6
-        config.image = UIImage(systemName: "circle.fill")?.withConfiguration(UIImage.SymbolConfiguration(pointSize: 7))
+        config.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.tight, leading: Theme.Space.rowPad,
+                                                       bottom: Theme.Space.tight, trailing: Theme.Space.rowPad)
+        config.imagePadding = Theme.Space.tight
+        // A small dot in the chip's own font.
+        config.image = UIImage(systemName: "circle.fill")?
+            .withConfiguration(Theme.symbol(Theme.Text.caption).applying(UIImage.SymbolConfiguration(scale: .small)))
         config.imageColorTransformer = UIConfigurationColorTransformer { _ in
             switch thread.state {
-            case "needs-you": Theme.accent
-            case "working": Theme.warning
+            case "needs-you": Theme.warning
+            case "working": Theme.working
             case "error": Theme.failure
             default: .tertiaryLabel
             }
         }
         config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
             var attributes = attributes
-            attributes.font = Theme.font(.footnote, 13, .medium)
+            attributes.font = Theme.Text.caption
             return attributes
         }
         config.titleLineBreakMode = .byTruncatingTail
@@ -1544,7 +1563,7 @@ final class TaskStrip: UIControl {
         accessibilityTraits = .button
         // Never clip: the glass draws its rim and shadow past its bounds.
         if #available(iOS 26.0, *) { surface.cornerConfiguration = .capsule() }
-        parts.spacing = 10
+        parts.spacing = Theme.Space.rowPad
         parts.alignment = .center
         [surface, parts].forEach { $0.isUserInteractionEnabled = false; $0.translatesAutoresizingMaskIntoConstraints = false }
         addSubview(surface)
@@ -1558,8 +1577,8 @@ final class TaskStrip: UIControl {
             surface.trailingAnchor.constraint(equalTo: trailingAnchor),
             height,
             parts.centerYAnchor.constraint(equalTo: surface.contentView.centerYAnchor),
-            parts.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: 12),
-            parts.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -12)
+            parts.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: Theme.Space.rowPad),
+            parts.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -Theme.Space.rowPad)
         ])
     }
 
@@ -1568,7 +1587,7 @@ final class TaskStrip: UIControl {
 
     // A larger touch than it looks.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        bounds.insetBy(dx: -8, dy: -8).contains(point)
+        bounds.insetBy(dx: -Theme.Space.row, dy: -Theme.Space.row).contains(point)
     }
 
     override var isHighlighted: Bool {
@@ -1588,8 +1607,8 @@ final class TaskStrip: UIControl {
             return threads.isEmpty ? [.agent(mood)] : threads.prefix(3).map { .worker($0.id, mood) }
         }
         var items: [(Int, String, UIColor, Bool, [JellyLook])] = [
-            (count(.needsYou), "needs you", Theme.accent, true, crew("needs-you", .needsYou).prefix(1).map { $0 }),
-            (count(.inProgress), "working", Theme.warning, false, crew("working", .working)),
+            (count(.needsYou), "needs you", Theme.warning, true, crew("needs-you", .needsYou).prefix(1).map { $0 }),
+            (count(.inProgress), "working", Theme.working, false, crew("working", .working)),
             (count(.readyToTry), "to try", Theme.success, false, [])
         ].filter { $0.0 > 0 }
         if items.isEmpty { items = [(count(.queued), "queued", .tertiaryLabel, false, [])] }
@@ -1604,24 +1623,26 @@ final class TaskStrip: UIControl {
             if item.4.isEmpty {
                 let dot = UIView()
                 dot.backgroundColor = item.2
+                // A capsule: half its size.
                 dot.layer.cornerRadius = 3
                 dot.translatesAutoresizingMaskIntoConstraints = false
                 NSLayoutConstraint.activate([dot.widthAnchor.constraint(equalToConstant: 6), dot.heightAnchor.constraint(equalToConstant: 6)])
                 lead = dot
             } else {
                 let group = UIStackView(arrangedSubviews: item.4.map { look in
-                    let jelly = JellyView(look, canvas: JellyCanvas(size: 16, side: 0.16, top: 0.42, bottom: 0.14))
+                    let jelly = JellyView(look, canvas: JellyCanvas(size: Theme.Glyph.line, side: 0.16, top: 0.42, bottom: 0.14))
                     jelly.translatesAutoresizingMaskIntoConstraints = false
-                    NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: 16), jelly.heightAnchor.constraint(equalToConstant: 16)])
+                    NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
+                                                 jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line)])
                     return jelly
                 })
                 // A little crew, shoulder to shoulder.
                 group.spacing = -3
                 lead = group
             }
-            let label = Theme.label(texts[index], Theme.font(.footnote, 13, .medium), color: item.3 ? .label : .secondaryLabel)
+            let label = Theme.label(texts[index], Theme.Text.caption, color: item.3 ? .label : .secondaryLabel)
             let part = UIStackView(arrangedSubviews: [lead, label])
-            part.spacing = 5
+            part.spacing = Theme.Space.tight
             part.alignment = .center
             parts.addArrangedSubview(part)
         }

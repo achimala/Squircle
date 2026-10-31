@@ -1731,6 +1731,8 @@ on the Mac) and a T3 that stays down. Not yet on the phone.
 
 ## 2026-10-14 Clay palette
 
+**Superseded 2026-10-31** by Pearl in [the design deck](design/README.md#pearl-and-the-soap-film-agent).
+
 User: "The purple theme in the app is a bit sloppy btw can we come up with a
 nicer design." Three alternatives (Graphite: ink on neutral paper; Harbor:
 deep teal; Clay: terracotta on warm cream) were captured in the simulator in

@@ -116,7 +116,7 @@ class TimelineCell: UITableViewCell {
 
 /// The thread's title at the top of its conversation.
 final class HeaderCell: TimelineCell {
-    private let title = Theme.label("", Theme.font(.title2, 24, .bold), lines: 3)
+    private let title = Theme.label("", Theme.Text.title, lines: 3)
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -124,10 +124,10 @@ final class HeaderCell: TimelineCell {
         title.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(title)
         NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            title.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
-            title.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            title.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20)
+            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.tight),
+            title.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
+            title.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            title.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
         ])
         accessibilityIdentifier = "thread.title"
     }
@@ -142,7 +142,7 @@ final class MessageCell: TimelineCell {
     /// Your words sit in lightly tinted glass. Made only for your rows:
     /// glass is costly to create and most rows never show it.
     private(set) lazy var bubble: UIVisualEffectView = {
-        let bubble = Theme.glassSurface(cornerRadius: 21, tint: Theme.userGlass)
+        let bubble = Theme.glassSurface(cornerRadius: Theme.Radius.large, tint: Theme.userGlass)
         contentView.insertSubview(bubble, at: 0)
         hasBubble = true
         setNeedsLayout()
@@ -153,10 +153,13 @@ final class MessageCell: TimelineCell {
     private let rule = UIView()
     let text = UITextView()
     private var style = Style.answer
-    /// The text's distance from the row's top; 8 points of row follow it.
-    private var top: CGFloat = 6
-    /// The text's frame for the last width it was laid out at.
-    private var measured: (width: CGFloat, frame: CGRect)?
+    /// The text's distance from the row's top and the row left under it:
+    /// half the gap to each neighbour (lines 4, bubbles and answers 8; your
+    /// message keeps 16 above it, for 24 after anything).
+    private var top = Theme.Space.tight, bottom = Theme.Space.tight
+    /// The text's frame for the last width it was laid out at, and how far
+    /// your bubble reaches past it to be at least `Space.tap` tall.
+    private var measured: (width: CGFloat, frame: CGRect, pad: CGFloat)?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -168,44 +171,52 @@ final class MessageCell: TimelineCell {
         text.textContainerInset = .zero
         text.adjustsFontForContentSizeCategory = true
         text.linkTextAttributes = [.foregroundColor: Theme.accent]
-        rule.backgroundColor = Theme.accent.withAlphaComponent(0.45)
-        rule.layer.cornerRadius = 1
+        rule.backgroundColor = .separator
+        rule.layer.cornerRadius = 1 // a capsule: the rule is 2 wide
         [rule, text].forEach(contentView.addSubview)
     }
 
     /// Laid out by hand: the most common row, measured and placed without
     /// solving constraints (sizing it through Auto Layout laid its text out
     /// twice more).
-    private func textFrame(width: CGFloat) -> CGRect {
-        if let measured, measured.width == width { return measured.frame }
+    private func textFrame(width: CGFloat) -> (frame: CGRect, pad: CGFloat) {
+        if let measured, measured.width == width { return (measured.frame, measured.pad) }
         let frame: CGRect
+        var pad: CGFloat = 0
+        let margin = Theme.Space.margin
         if style == .user {
-            // Your words hug their text at the trailing edge, wrapping 76 points from the leading one.
-            let available = max(0, width - 76 - 35)
+            // Your words hug their text at the trailing edge, the bubble
+            // keeping `bubbleFree` clear of the leading one.
+            let inset = Theme.Space.bubble.left + Theme.Space.bubble.right
+            let available = max(0, width - Theme.Space.bubbleFree - margin - inset)
             let size = text.sizeThatFits(CGSize(width: available, height: .greatestFiniteMagnitude))
             let used = min(available, size.width)
-            frame = CGRect(x: width - 35 - used, y: top, width: used, height: size.height)
+            pad = max(0, Theme.Space.tap - size.height) / 2
+            frame = CGRect(x: width - margin - Theme.Space.bubble.right - used, y: top + pad, width: used, height: size.height)
         } else {
-            let x: CGFloat = style == .agent ? 34 : 20
-            let used = max(0, width - x - 20)
+            // What an agent sent hangs off its rule in the glyph slot, its text where lines' text starts.
+            let x = style == .agent ? Theme.Space.text : margin
+            let used = max(0, width - x - margin)
             frame = CGRect(x: x, y: top, width: used, height: text.sizeThatFits(CGSize(width: used, height: .greatestFiniteMagnitude)).height)
         }
-        measured = (width, frame)
-        return frame
+        measured = (width, frame, pad)
+        return (frame, pad)
     }
 
     override func systemLayoutSizeFitting(_ targetSize: CGSize, withHorizontalFittingPriority horizontalFittingPriority: UILayoutPriority,
                                           verticalFittingPriority: UILayoutPriority) -> CGSize {
-        CGSize(width: targetSize.width, height: textFrame(width: targetSize.width).maxY + 8)
+        let (frame, pad) = textFrame(width: targetSize.width)
+        return CGSize(width: targetSize.width, height: frame.maxY + pad + bottom)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        var frame = textFrame(width: contentView.bounds.width)
-        frame.size.height = max(0, contentView.bounds.height - top - 8)
+        let (fitted, pad) = textFrame(width: contentView.bounds.width)
+        var frame = fitted
+        frame.size.height = max(0, contentView.bounds.height - frame.minY - pad - bottom)
         text.frame = frame
-        if hasBubble { bubble.frame = frame.insetBy(dx: -15, dy: 0) }
-        rule.frame = CGRect(x: 20, y: frame.minY + 2, width: 2, height: max(0, frame.height - 4))
+        if hasBubble { bubble.frame = frame.insetBy(dx: -Theme.Space.bubble.left, dy: -pad) }
+        rule.frame = CGRect(x: Theme.Space.margin, y: frame.minY + 2, width: 2, height: max(0, frame.height - 4))
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -235,7 +246,8 @@ final class MessageCell: TimelineCell {
         self.style = style
         measured = nil
         // The text last, so it is laid out once, in its final container.
-        text.update(\.textContainerInset, to: user ? UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0) : .zero)
+        let padding = Theme.Space.bubble
+        text.update(\.textContainerInset, to: user ? UIEdgeInsets(top: padding.top, left: 0, bottom: padding.bottom, right: 0) : .zero)
         // Reasoning reads in full; long notes and agents' messages fold until tapped.
         let folded = [.note, .action, .agent].contains(style) && !expanded
         text.textContainer.update(\.maximumNumberOfLines, to: folded ? [.action: 2, .agent: 9][style] ?? 4 : 0)
@@ -245,54 +257,48 @@ final class MessageCell: TimelineCell {
         text.isUserInteractionEnabled = style == .answer || style == .user
         if user || hasBubble { bubble.isHidden = !user }
         rule.isHidden = style != .agent
-        top = user || style == .update || style == .agent ? 14 : style == .answer ? 10 : 6
+        let line = [.note, .thought, .update, .action].contains(style)
+        top = user ? Theme.Space.group : line ? Theme.Space.tight : Theme.Space.row
+        bottom = line ? Theme.Space.tight : Theme.Space.row
         setNeedsLayout()
         accessibilityIdentifier = "thread.message.\(message.role)"
     }
 }
 
-/// One thing the agent did, on a rail joining the steps around it.
+/// One thing the agent did: its symbol in the glyph slot, the step as a line.
 final class StepCell: TimelineCell {
+    /// The glyph slot; a ring pulses out of it while the step runs.
     private let well = UIView()
     private let icon = UIImageView()
-    private let railUp = UIView()
-    private let railDown = UIView()
     let title = ShimmerLabel()
     private let stats = UILabel()
     private let pulse = CAShapeLayer()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        well.layer.cornerRadius = 12
-        well.layer.cornerCurve = .continuous
-        well.backgroundColor = .tertiarySystemFill
         icon.contentMode = .center
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-        [railUp, railDown].forEach { $0.backgroundColor = .quaternaryLabel }
-        stats.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        icon.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
+        stats.font = Theme.Text.line.tabularDigits
+        stats.adjustsFontForContentSizeCategory = true
         stats.setContentCompressionResistancePriority(.required, for: .horizontal)
         stats.setContentHuggingPriority(.required, for: .horizontal)
         title.label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         pulse.fillColor = nil
         pulse.lineWidth = 1.5
         well.layer.addSublayer(pulse)
-        [railUp, railDown, well, title, stats].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
+        [well, title, stats].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         icon.translatesAutoresizingMaskIntoConstraints = false
         well.addSubview(icon)
         NSLayoutConstraint.activate([
-            well.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            well.widthAnchor.constraint(equalToConstant: 24), well.heightAnchor.constraint(equalToConstant: 24),
+            well.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            well.widthAnchor.constraint(equalToConstant: Theme.Space.glyph), well.heightAnchor.constraint(equalToConstant: Theme.Space.glyph),
             well.centerYAnchor.constraint(equalTo: title.label.firstBaselineAnchor, constant: -5),
             icon.centerXAnchor.constraint(equalTo: well.centerXAnchor), icon.centerYAnchor.constraint(equalTo: well.centerYAnchor),
-            railUp.centerXAnchor.constraint(equalTo: well.centerXAnchor), railUp.widthAnchor.constraint(equalToConstant: 1.5),
-            railUp.topAnchor.constraint(equalTo: contentView.topAnchor), railUp.bottomAnchor.constraint(equalTo: well.topAnchor, constant: -3),
-            railDown.centerXAnchor.constraint(equalTo: well.centerXAnchor), railDown.widthAnchor.constraint(equalToConstant: 1.5),
-            railDown.topAnchor.constraint(equalTo: well.bottomAnchor, constant: 3), railDown.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
-            title.leadingAnchor.constraint(equalTo: well.trailingAnchor, constant: 12),
-            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            title.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            stats.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 8),
-            stats.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            title.leadingAnchor.constraint(equalTo: well.trailingAnchor, constant: Theme.Space.glyphGap),
+            title.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.tight),
+            title.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.tight),
+            stats.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: Theme.Space.row),
+            stats.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
             stats.firstBaselineAnchor.constraint(equalTo: title.label.firstBaselineAnchor)
         ])
         isAccessibilityElement = true
@@ -300,18 +306,15 @@ final class StepCell: TimelineCell {
         accessibilityIdentifier = "thread.step"
     }
 
-    func configure(_ step: ChatMessage, first: Bool, last: Bool) {
+    func configure(_ step: ChatMessage) {
         let literal = step.step?.literal == true
         title.text = step.content
-        title.font = literal ? Theme.font(.footnote, 13, .regular, monospaced: true) : Theme.font(.subheadline, 15)
+        title.font = literal ? Theme.Text.mono : Theme.Text.line
         title.numberOfLines = literal ? 1 : 2
         title.textColor = .secondaryLabel
         title.isShimmering = step.isStreaming
         icon.image = UIImage(systemName: step.failed ? "exclamationmark" : step.symbol.isEmpty ? "wrench.and.screwdriver" : step.symbol)
-        icon.tintColor = step.failed ? Theme.failure : step.isStreaming ? Theme.accent : .secondaryLabel
-        well.backgroundColor = step.isStreaming ? Theme.accent.withAlphaComponent(0.14) : .tertiarySystemFill
-        railUp.isHidden = first
-        railDown.isHidden = last
+        icon.tintColor = step.failed ? Theme.failure : step.isStreaming ? Theme.working : .secondaryLabel
         let added = step.step?.added ?? 0, removed = step.step?.removed ?? 0
         let text = Theme.lineCounts(added: added, removed: removed, omittingZeros: true)
         stats.attributedText = text
@@ -323,15 +326,12 @@ final class StepCell: TimelineCell {
 
     func configureEarlier(count: Int, expanded: Bool) {
         title.text = expanded ? "Show fewer steps" : "\(count) earlier step\(count == 1 ? "" : "s")"
-        title.font = Theme.font(.subheadline, 15, .medium)
+        title.font = Theme.Text.line
         title.numberOfLines = 1
         title.textColor = .secondaryLabel
         title.isShimmering = false
         icon.image = UIImage(systemName: expanded ? "chevron.up" : "ellipsis")
         icon.tintColor = .secondaryLabel
-        well.backgroundColor = .tertiarySystemFill
-        railUp.isHidden = true
-        railDown.isHidden = true
         stats.isHidden = true
         setPulsing(false)
         accessibilityLabel = title.text
@@ -347,7 +347,7 @@ final class StepCell: TimelineCell {
     override func layoutSubviews() {
         super.layoutSubviews()
         pulse.frame = well.bounds
-        pulse.path = UIBezierPath(roundedRect: well.bounds, cornerRadius: 12).cgPath
+        pulse.path = UIBezierPath(ovalIn: well.bounds).cgPath
     }
 
     override func didMoveToWindow() {
@@ -357,7 +357,7 @@ final class StepCell: TimelineCell {
 
     private func setPulsing(_ on: Bool) {
         pulse.removeAllAnimations()
-        pulse.strokeColor = on ? Theme.accent.cgColor : nil
+        pulse.strokeColor = on ? Theme.working.cgColor : nil
         guard on, window != nil, !Motion.reduced else { return }
         let grow = CABasicAnimation(keyPath: "transform.scale")
         grow.fromValue = 1; grow.toValue = 1.7
@@ -383,7 +383,7 @@ final class GalleryCell: TimelineCell {
     private var galleryID: String?
     /// Your own pictures sit at the right, under your message.
     private var trailing = false
-    private var indent: CGFloat = 20
+    private var indent = Theme.Space.margin
     private static let cache = NSCache<NSString, UIImage>()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -391,14 +391,14 @@ final class GalleryCell: TimelineCell {
         scroll.showsHorizontalScrollIndicator = false
         scroll.alwaysBounceHorizontal = true
         scroll.clipsToBounds = false
-        row.spacing = 12
+        row.spacing = Theme.Space.row
         row.alignment = .center
         [scroll].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         row.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(row)
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
-            scroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -14),
+            scroll.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.row),
+            scroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
             scroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             scroll.heightAnchor.constraint(equalToConstant: Self.height),
@@ -443,7 +443,7 @@ final class GalleryCell: TimelineCell {
     func configure(_ shots: [Shot], indent: CGFloat, id: String, trailing: Bool = false) {
         self.indent = indent
         self.trailing = trailing
-        scroll.contentInset = UIEdgeInsets(top: 0, left: indent, bottom: 0, right: 20)
+        scroll.contentInset = UIEdgeInsets(top: 0, left: indent, bottom: 0, right: Theme.Space.margin)
         let same = id == galleryID
         galleryID = id
         if shots != self.shots {
@@ -465,7 +465,7 @@ final class GalleryCell: TimelineCell {
             }
             row.layoutIfNeeded()
             scroll.layoutIfNeeded()
-            let end = max(-indent, scroll.contentSize.width + 20 - scroll.bounds.width)
+            let end = max(-indent, scroll.contentSize.width + Theme.Space.margin - scroll.bounds.width)
             scroll.setContentOffset(CGPoint(x: end, y: 0), animated: animate)
         }
         for case let view as ShotView in row.arrangedSubviews { view.update() }
@@ -482,7 +482,7 @@ final class GalleryCell: TimelineCell {
         guard trailing, scroll.bounds.width > 0 else { return }
         row.layoutIfNeeded()
         let width = row.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width
-        let left = max(indent, scroll.bounds.width - 20 - width)
+        let left = max(indent, scroll.bounds.width - Theme.Space.margin - width)
         guard scroll.contentInset.left != left else { return }
         scroll.contentInset.left = left
         scroll.contentOffset.x = -left
@@ -515,9 +515,9 @@ final class ShotView: UIControl {
         image.contentMode = .scaleAspectFill
         image.clipsToBounds = true
         image.layer.cornerCurve = .continuous
-        image.layer.cornerRadius = 18
+        image.layer.cornerRadius = Theme.Radius.small
         image.layer.borderWidth = 2.5
-        image.backgroundColor = .secondarySystemFill
+        image.backgroundColor = Theme.codeFill
         image.isUserInteractionEnabled = false
         shadow.isUserInteractionEnabled = false
         shadow.layer.shadowColor = UIColor.black.cgColor
@@ -525,10 +525,10 @@ final class ShotView: UIControl {
         shadow.layer.shadowRadius = 12
         shadow.layer.shadowOffset = CGSize(width: 0, height: 7)
         badge.tintColor = .white
-        badge.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        badge.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         badge.contentMode = .center
         badge.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-        badge.layer.cornerRadius = 12
+        badge.layer.cornerRadius = 12 // a capsule: the badge is 24 across
         badge.isHidden = !shot.video
         badge.isUserInteractionEnabled = false
         [shadow, image, badge].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
@@ -540,8 +540,8 @@ final class ShotView: UIControl {
             shadow.topAnchor.constraint(equalTo: topAnchor), shadow.bottomAnchor.constraint(equalTo: bottomAnchor),
             shadow.leadingAnchor.constraint(equalTo: leadingAnchor), shadow.trailingAnchor.constraint(equalTo: trailingAnchor),
             badge.widthAnchor.constraint(equalToConstant: 24), badge.heightAnchor.constraint(equalToConstant: 24),
-            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            badge.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8)
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.row),
+            badge.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.row)
         ])
         addAction(UIAction { [weak self] _ in guard let self else { return }; Theme.selectionHaptic(); self.action(self.shot) }, for: .touchUpInside)
         isAccessibilityElement = true
@@ -571,7 +571,6 @@ final class ShotView: UIControl {
         guard image.image !== picture else { return }
         let ratio = picture.size.width / max(1, picture.size.height)
         width.constant = min(320, max(64, GalleryCell.height * ratio))
-        image.layer.cornerRadius = ratio < 0.7 ? 18 : 10
         if waited, image.image == nil, window != nil {
             UIView.transition(with: image, duration: 0.35, options: [.transitionCrossDissolve, .allowUserInteraction]) { self.image.image = picture }
         } else {
@@ -623,7 +622,7 @@ final class ShotView: UIControl {
 final class FigureCell: TimelineCell {
     static let maxHeight: CGFloat = 440
     static let minRowHeight: CGFloat = 190
-    static let gap: CGFloat = 8
+    static let gap = Theme.Space.row
     var onTap: ((Shot) -> Void)?
     private let canvas = UIView()
     private var tiles: [FigureTile] = []
@@ -638,10 +637,10 @@ final class FigureCell: TimelineCell {
         height = canvas.heightAnchor.constraint(equalToConstant: 200)
         height.priority = .required - 1
         NSLayoutConstraint.activate([
-            canvas.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
-            canvas.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
-            canvas.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            canvas.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+            canvas.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.row),
+            canvas.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
+            canvas.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            canvas.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
             height
         ])
         accessibilityIdentifier = "thread.figures"
@@ -681,7 +680,7 @@ final class FigureCell: TimelineCell {
     }
 
     static func height(_ shots: [Shot], width: CGFloat) -> CGFloat {
-        (layout(shots, width: width - 40).map(\.maxY).max() ?? 0) + 16
+        (layout(shots, width: width - 2 * Theme.Space.margin).map(\.maxY).max() ?? 0) + 2 * Theme.Space.row
     }
 
     /// The decoded picture, once `prepare` has made it.
@@ -711,7 +710,7 @@ final class FigureCell: TimelineCell {
                 return tile
             }
         }
-        available = width - 40
+        available = width - 2 * Theme.Space.margin
         height.constant = Self.layout(shots, width: available).map(\.maxY).max() ?? 0
         tiles.forEach { $0.update(failed: failed.contains($0.shot.step)) }
         setNeedsLayout()
@@ -749,18 +748,19 @@ final class FigureTile: UIControl {
         super.init(frame: .zero)
         clipsToBounds = true
         layer.cornerCurve = .continuous
-        backgroundColor = .secondarySystemFill
+        layer.cornerRadius = Theme.Radius.small
+        backgroundColor = Theme.codeFill
         image.contentMode = .scaleAspectFill
         image.isUserInteractionEnabled = false
         badge.tintColor = .white
-        badge.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        badge.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         badge.contentMode = .center
         badge.backgroundColor = UIColor.black.withAlphaComponent(0.45)
-        badge.layer.cornerRadius = 12
+        badge.layer.cornerRadius = 12 // a capsule: the badge is 24 across
         badge.isUserInteractionEnabled = false
         badge.isHidden = !shot.video
         broken.tintColor = .tertiaryLabel
-        broken.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
+        broken.preferredSymbolConfiguration = Theme.symbol(Theme.Text.body)
         broken.contentMode = .center
         broken.isHidden = true
         addSubview(image)
@@ -803,8 +803,6 @@ final class FigureTile: UIControl {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // Phone screenshots read as phones; everything else as a picture.
-        layer.cornerRadius = bounds.width / max(1, bounds.height) < 0.7 ? min(22, bounds.width * 0.1) : 12
         image.frame = bounds
         broken.frame = bounds
         badge.frame = CGRect(x: bounds.maxX - 32, y: bounds.maxY - 32, width: 24, height: 24)
@@ -848,30 +846,32 @@ final class FigureTile: UIControl {
 /// What a turn changed, as a quiet line with its size; opens the diff.
 final class ChangesCell: TimelineCell {
     private let icon = UIImageView(image: UIImage(systemName: "chevron.left.forwardslash.chevron.right"))
-    private let label = Theme.label("", Theme.font(.footnote, 13, .medium), color: .secondaryLabel)
+    private let label = Theme.label("", Theme.Text.line, color: .secondaryLabel)
     private let stats = UILabel()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        icon.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         icon.tintColor = .secondaryLabel
-        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        icon.contentMode = .center
+        chevron.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         chevron.tintColor = .tertiaryLabel
-        stats.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        stats.font = Theme.Text.line.tabularDigits
+        stats.adjustsFontForContentSizeCategory = true
         let row = UIStackView(arrangedSubviews: [icon, label, stats, chevron])
-        row.spacing = 7
+        row.spacing = Theme.Space.glyphGap
         row.alignment = .center
-        row.setCustomSpacing(10, after: stats)
         row.isUserInteractionEnabled = false
         row.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(row)
         NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            row.heightAnchor.constraint(equalToConstant: 34),
-            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
-            row.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -20)
+            row.topAnchor.constraint(equalTo: contentView.topAnchor),
+            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            row.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
+            icon.widthAnchor.constraint(equalToConstant: Theme.Space.glyph),
+            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            row.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
@@ -894,10 +894,10 @@ final class DocumentCell: TimelineCell {
         row.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(row)
         NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14)
+            row.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.tight),
+            row.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.tight),
+            row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            row.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
         ])
     }
 }
@@ -910,8 +910,8 @@ final class BuildCell: TimelineCell {
     private let card = UIView()
     private let icon = UIImageView()
     private let spinner = UIActivityIndicatorView(style: .medium)
-    private let titleLabel = Theme.label("", Theme.font(.subheadline, 15, .semibold))
-    private let detailLabel = Theme.label("", Theme.font(.footnote, 13), color: .secondaryLabel)
+    private let titleLabel = Theme.label("", Theme.Text.body)
+    private let detailLabel = Theme.label("", Theme.Text.line, color: .secondaryLabel)
     private let install: UIButton = {
         var config = UIButton.Configuration.filled()
         config.title = "Install"
@@ -925,12 +925,13 @@ final class BuildCell: TimelineCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        icon.preferredSymbolConfiguration = Theme.symbol(Theme.Text.body)
         icon.contentMode = .center
         spinner.hidesWhenStopped = true
-        install.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 14)
+        let padding = Theme.Space.bubble
+        install.configuration?.contentInsets = NSDirectionalEdgeInsets(top: padding.top, leading: padding.left, bottom: padding.bottom, trailing: padding.right)
         install.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes; attributes.font = Theme.font(.subheadline, 15, .semibold); return attributes
+            var attributes = attributes; attributes.font = Theme.Text.bodyStrong; return attributes
         }
         install.setContentCompressionResistancePriority(.required, for: .horizontal)
         install.setContentHuggingPriority(.required, for: .horizontal)
@@ -941,30 +942,29 @@ final class BuildCell: TimelineCell {
         }, for: .touchUpInside)
         let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
         text.axis = .vertical
-        text.spacing = 2
         text.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let glyph = UIView()
         [icon, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glyph.addSubview($0) }
         let row = UIStackView(arrangedSubviews: [glyph, text, install])
-        row.spacing = 12
+        row.spacing = Theme.Space.glyphGap
         row.alignment = .center
         card.translatesAutoresizingMaskIntoConstraints = false
         row.translatesAutoresizingMaskIntoConstraints = false
-        card.backgroundColor = .tertiarySystemFill
-        card.layer.cornerRadius = 18
+        card.backgroundColor = Theme.receivedFill
+        card.layer.cornerRadius = Theme.Radius.large
         card.layer.cornerCurve = .continuous
         contentView.addSubview(card)
         card.addSubview(row)
         NSLayoutConstraint.activate([
-            card.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
-            card.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
-            card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            row.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
-            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10),
-            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
-            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10),
-            glyph.widthAnchor.constraint(equalToConstant: 30), glyph.heightAnchor.constraint(equalToConstant: 30),
+            card.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.row),
+            card.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
+            card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
+            row.topAnchor.constraint(equalTo: card.topAnchor, constant: Theme.Space.card.top),
+            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Theme.Space.card.bottom),
+            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Theme.Space.card.left),
+            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Theme.Space.card.right),
+            glyph.widthAnchor.constraint(equalToConstant: Theme.Space.glyph), glyph.heightAnchor.constraint(equalToConstant: Theme.Space.glyph),
             icon.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), icon.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
             spinner.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: glyph.centerYAnchor)
         ])
@@ -978,7 +978,7 @@ final class BuildCell: TimelineCell {
         switch build.status {
         case "queued": detail = "Queued"; icon.image = UIImage(systemName: "clock"); icon.tintColor = .secondaryLabel
         case "running": detail = "Building"; icon.image = nil
-        case "succeeded": detail = "Ready to install"; icon.image = UIImage(systemName: "app.badge.checkmark"); icon.tintColor = Theme.accent
+        case "succeeded": detail = "Ready to install"; icon.image = UIImage(systemName: "app.badge.checkmark"); icon.tintColor = Theme.success
         case "failed":
             detail = build.error?.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Build failed"
             icon.image = UIImage(systemName: "xmark.octagon"); icon.tintColor = Theme.failure
@@ -1001,23 +1001,28 @@ final class QuestionCell: TimelineCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        card.backgroundColor = .tertiarySystemFill
-        card.layer.cornerRadius = 18
+        card.backgroundColor = Theme.receivedFill
+        card.layer.cornerRadius = Theme.Radius.large
         card.layer.cornerCurve = .continuous
         [card, item].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         contentView.addSubview(card)
         card.addSubview(item)
         NSLayoutConstraint.activate([
-            card.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 6),
-            card.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
-            card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            item.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
-            item.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14),
-            item.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            item.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16)
+            card.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.row),
+            card.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
+            card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.bubbleFree),
+            item.topAnchor.constraint(equalTo: card.topAnchor, constant: Theme.Space.card.top),
+            item.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Theme.Space.card.bottom),
+            item.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Theme.Space.card.left),
+            item.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Theme.Space.card.right)
         ])
         accessibilityIdentifier = "thread.question"
+    }
+
+    /// The question's width inside its card, for a row `width` wide.
+    static func itemWidth(_ width: CGFloat) -> CGFloat {
+        max(0, width - Theme.Space.margin - Theme.Space.bubbleFree - Theme.Space.card.left - Theme.Space.card.right)
     }
 
     /// Where Waiting on you took you.
@@ -1029,35 +1034,38 @@ final class SummaryCell: TimelineCell {
     /// The line; it pulses when the turn finishes.
     private let line = UIView()
     private let icon = UIImageView()
-    private let titleLabel = Theme.label("", Theme.font(.footnote, 13, .medium), color: .secondaryLabel)
-    private let detailLabel = Theme.label("", Theme.font(.footnote, 13), color: .tertiaryLabel)
+    private let titleLabel = Theme.label("", Theme.Text.line, color: .secondaryLabel)
+    private let detailLabel = Theme.label("", Theme.Text.line, color: .tertiaryLabel)
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.down"))
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-        chevron.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 10, weight: .bold)
+        icon.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
+        icon.contentMode = .center
+        chevron.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         chevron.tintColor = .tertiaryLabel
         detailLabel.lineBreakMode = .byTruncatingTail
         detailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let row = UIStackView(arrangedSubviews: [icon, titleLabel, detailLabel, chevron])
-        row.spacing = 7
+        row.spacing = Theme.Space.glyphGap
         row.alignment = .center
-        row.setCustomSpacing(10, after: detailLabel)
         row.isUserInteractionEnabled = false
         line.isUserInteractionEnabled = false
         [line, row].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         contentView.addSubview(line)
         line.addSubview(row)
         NSLayoutConstraint.activate([
-            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 14),
-            line.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -14),
-            row.topAnchor.constraint(equalTo: line.topAnchor, constant: 2),
-            row.bottomAnchor.constraint(equalTo: line.bottomAnchor, constant: -2),
-            row.leadingAnchor.constraint(equalTo: line.leadingAnchor, constant: 6),
-            row.trailingAnchor.constraint(equalTo: line.trailingAnchor, constant: -6)
+            // The line reaches a little past its text, for the pulse to bloom
+            // around; the check still sits in the glyph slot.
+            line.topAnchor.constraint(equalTo: contentView.topAnchor),
+            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin - Theme.Space.row),
+            line.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -(Theme.Space.margin - Theme.Space.row)),
+            row.topAnchor.constraint(equalTo: line.topAnchor, constant: Theme.Space.tight),
+            row.bottomAnchor.constraint(equalTo: line.bottomAnchor, constant: -Theme.Space.tight),
+            row.leadingAnchor.constraint(equalTo: line.leadingAnchor, constant: Theme.Space.row),
+            row.trailingAnchor.constraint(equalTo: line.trailingAnchor, constant: -Theme.Space.row),
+            icon.widthAnchor.constraint(equalToConstant: Theme.Space.glyph)
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
@@ -1071,8 +1079,8 @@ final class SummaryCell: TimelineCell {
         bloom.frame = line.frame
         bloom.cornerRadius = line.bounds.height / 2
         bloom.cornerCurve = .continuous
-        bloom.backgroundColor = Theme.accent.withAlphaComponent(0.18).cgColor
-        bloom.shadowColor = Theme.accent.cgColor
+        bloom.backgroundColor = Theme.success.withAlphaComponent(0.18).cgColor
+        bloom.shadowColor = Theme.success.cgColor
         bloom.shadowRadius = 16
         bloom.shadowOffset = .zero
         bloom.shadowOpacity = 0
@@ -1130,20 +1138,24 @@ final class LiveCell: TimelineCell {
     private let capsule = LiveCapsule()
     private var hero: JellyHero?
     private var heroLead: NSLayoutConstraint!
-    private static let heroSize: CGFloat = 34
+    private static let heroSize = Theme.Glyph.live
+    /// Where the capsule starts: its mark in the glyph slot (the capsule
+    /// leads it by 12) or, with the jelly there instead, its text at
+    /// `Space.text` (an empty mark slot puts the text 18 in).
+    private static let markLead = Theme.Space.margin - 12, jellyLead = Theme.Space.text - 18
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         capsule.isUserInteractionEnabled = false
         capsule.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(capsule)
-        heroLead = capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 6)
+        heroLead = capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Self.markLead)
         NSLayoutConstraint.activate([
-            capsule.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            capsule.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -6),
+            capsule.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.tight),
+            capsule.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.tight),
             heroLead,
-            capsule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -14),
-            capsule.heightAnchor.constraint(equalToConstant: 34)
+            capsule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
+            capsule.heightAnchor.constraint(equalToConstant: Self.heroSize)
         ])
         accessibilityIdentifier = "thread.working"
         isAccessibilityElement = true
@@ -1160,7 +1172,8 @@ final class LiveCell: TimelineCell {
                 hero.translatesAutoresizingMaskIntoConstraints = false
                 contentView.addSubview(hero)
                 NSLayoutConstraint.activate([
-                    hero.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 20),
+                    // Centred on the glyph slot, rounding over it on each side.
+                    hero.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin + Theme.Space.glyph / 2),
                     hero.centerYAnchor.constraint(equalTo: capsule.centerYAnchor),
                     hero.widthAnchor.constraint(equalToConstant: Self.heroSize),
                     hero.heightAnchor.constraint(equalToConstant: Self.heroSize)
@@ -1170,7 +1183,7 @@ final class LiveCell: TimelineCell {
         }
         hero?.isHidden = jelly == nil
         capsule.markSlot = jelly == nil ? nil : 0
-        heroLead.constant = jelly == nil ? 6 : 20 + Self.heroSize + 4
+        heroLead.constant = jelly == nil ? Self.markLead : Self.jellyLead
         capsule.configure(headline: status.headline, started: status.started)
         accessibilityLabel = status.headline
     }
@@ -1188,7 +1201,7 @@ final class LiveCell: TimelineCell {
 /// before the next replaces it; changes in between collapse into the latest.
 final class LiveCapsule: UIView {
     /// `recording`: a screen or performance recording runs; the mark is a
-    /// pulsing crimson dot and the time shows.
+    /// pulsing dot in the failure colour and the time shows.
     enum Tone: Equatable { case idle, working, needsYou, done, recording }
     /// Clips the sliding lines to the capsule.
     private let track = LayoutView()
@@ -1202,7 +1215,7 @@ final class LiveCapsule: UIView {
     private var started: Date?
     private var timer: Timer?
     var showsTime = true { didSet { setNeedsLayout() } }
-    var font = Theme.font(.subheadline, 15, .semibold) { didSet { line.font = font; setNeedsLayout() } }
+    var font = Theme.Text.line { didSet { line.font = font; setNeedsLayout() } }
     /// The widest the owner lets the capsule get (`preferredWidth`'s limit),
     /// when it animates the capsule's width itself.
     var widthLimit: CGFloat?
@@ -1215,10 +1228,11 @@ final class LiveCapsule: UIView {
 
     init() {
         super.init(frame: .zero)
-        mark.backgroundColor = Theme.accent
+        mark.backgroundColor = Theme.working
         mark.layer.cornerCurve = .continuous
         mark.layer.cornerRadius = 4.5
-        elapsed.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+        elapsed.font = Theme.Text.line.tabularDigits
+        elapsed.adjustsFontForContentSizeCategory = true
         elapsed.textColor = .tertiaryLabel
         track.onLayout = { [weak self] in self?.placeLines() }
         track.clipsToBounds = true
@@ -1320,7 +1334,7 @@ final class LiveCapsule: UIView {
             case .needsYou: Theme.warning
             case .done: Theme.success
             case .recording: Theme.failure
-            default: Theme.accent
+            default: Theme.working
             }
             mark.layer.cornerRadius = tone == .recording ? markSide / 2 : 4.5
             line.isShimmering = tone == .working
@@ -1469,15 +1483,15 @@ final class MarkdownTableCell: TimelineCell {
         scroll.showsVerticalScrollIndicator = false
         scroll.alwaysBounceVertical = false
         scroll.contentInsetAdjustmentBehavior = .never
-        scroll.contentInset = UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)
+        scroll.contentInset = UIEdgeInsets(top: 0, left: Theme.Space.margin, bottom: 0, right: Theme.Space.margin)
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(grid)
         contentView.addSubview(scroll)
         height = scroll.heightAnchor.constraint(equalToConstant: 0)
         height.priority = .defaultHigh + 1
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            scroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+            scroll.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.tight),
+            scroll.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
             scroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             height
@@ -1486,7 +1500,7 @@ final class MarkdownTableCell: TimelineCell {
         accessibilityIdentifier = "thread.table"
     }
 
-    static func height(_ layout: MarkdownTableLayout) -> CGFloat { layout.size.height + 12 }
+    static func height(_ layout: MarkdownTableLayout) -> CGFloat { layout.size.height + Theme.Space.tight + Theme.Space.row }
 
     func configure(_ layout: MarkdownTableLayout, id: String) {
         grid.layout = layout

@@ -30,14 +30,14 @@ final class Composer: UIView, UITextViewDelegate {
             attach.menu = attachMenu
             attach.showsMenuAsPrimaryAction = true
             attach.isHidden = attachMenu == nil
-            inputLeading.constant = attachMenu == nil ? Self.edge : Self.edge + Self.button - 4
+            inputLeading.constant = attachMenu == nil ? Self.edge : Self.edge + Self.button - Theme.Space.tight
         }
     }
     var onRemoveAttachment: ((String) -> Void)?
     private let attach: UIButton = {
         var config = UIButton.Configuration.plain()
         config.image = UIImage(systemName: "plus")
-        config.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 17, weight: .medium)
+        config.preferredSymbolConfigurationForImage = Theme.symbol(Theme.Text.body)
         config.baseForegroundColor = .secondaryLabel
         config.contentInsets = .zero
         let button = UIButton(configuration: config)
@@ -48,24 +48,26 @@ final class Composer: UIView, UITextViewDelegate {
     /// The + and send buttons' side, each centred on a one-line field as far
     /// from its edge as from the field's top and bottom.
     private static let button: CGFloat = 30
-    private static let edge: CGFloat = (48 - button) / 2
+    private static let edge: CGFloat = (field - button) / 2
+    /// A one-line field's height; it is a capsule then.
+    private static let field: CGFloat = 48
     /// Pictures waiting to be sent, above the text.
     private let tray = UIScrollView()
     private let thumbs = UIStackView()
     private var shown: [String] = []
     private var trayHeight: NSLayoutConstraint!
     private var inputLeading: NSLayoutConstraint!
-    /// The send arrow's point size.
-    let sendSymbolSize: CGFloat = 13
+    /// The send arrow, in the field's line size.
+    let sendSymbol = Theme.symbol(Theme.Text.line)
     var placeholderText: String {
         get { placeholder.text ?? "" }
         set { if placeholder.text != newValue { placeholder.text = newValue } }
     }
-    private let glass = Theme.glassSurface(cornerRadius: 24, interactive: true)
+    private let glass = Theme.glassSurface(cornerRadius: Composer.field / 2, interactive: true)
     /// The field's glass shares a Liquid Glass group with anything sent from
     /// it, so a new message's bubble can pinch off the field as liquid.
     let group = Theme.glassGroup(spacing: 22)
-    private let placeholder = Theme.label("", Theme.font(.body, 17), color: .placeholderText)
+    private let placeholder = Theme.label("", Theme.Text.body, color: .placeholderText)
     private var height: NSLayoutConstraint!
 
     var text: String {
@@ -76,7 +78,7 @@ final class Composer: UIView, UITextViewDelegate {
     init(placeholder text: String) {
         super.init(frame: .zero)
         placeholder.text = text
-        input.font = Theme.font(.body, 17)
+        input.font = Theme.Text.body
         input.adjustsFontForContentSizeCategory = true
         input.backgroundColor = .clear
         input.textContainerInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 4)
@@ -87,8 +89,8 @@ final class Composer: UIView, UITextViewDelegate {
         attach.isHidden = true
         tray.showsHorizontalScrollIndicator = false
         tray.alwaysBounceHorizontal = true
-        tray.contentInset = UIEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
-        thumbs.spacing = 8
+        tray.contentInset = UIEdgeInsets(top: 0, left: Theme.Space.row, bottom: 0, right: Theme.Space.row)
+        thumbs.spacing = Theme.Space.row
         thumbs.alignment = .bottom
         thumbs.translatesAutoresizingMaskIntoConstraints = false
         tray.addSubview(thumbs)
@@ -99,7 +101,7 @@ final class Composer: UIView, UITextViewDelegate {
         addSubview(group)
         group.contentView.addSubview(glass)
         [tray, input, placeholder, attach, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
-        height = input.heightAnchor.constraint(equalToConstant: 48)
+        height = input.heightAnchor.constraint(equalToConstant: Self.field)
         trayHeight = tray.heightAnchor.constraint(equalToConstant: 0)
         let side = Self.button, edge = Self.edge
         inputLeading = input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: edge)
@@ -126,11 +128,11 @@ final class Composer: UIView, UITextViewDelegate {
             input.topAnchor.constraint(equalTo: tray.bottomAnchor),
             input.bottomAnchor.constraint(equalTo: glass.contentView.bottomAnchor),
             inputLeading,
-            input.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -4),
+            input.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -Theme.Space.tight),
             height,
             placeholder.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 17),
             placeholder.topAnchor.constraint(equalTo: input.topAnchor, constant: 12),
-            placeholder.trailingAnchor.constraint(lessThanOrEqualTo: send.leadingAnchor, constant: -4),
+            placeholder.trailingAnchor.constraint(lessThanOrEqualTo: send.leadingAnchor, constant: -Theme.Space.tight),
         ])
     }
 
@@ -178,7 +180,7 @@ final class Composer: UIView, UITextViewDelegate {
         if let thumb = thumbs.arrangedSubviews.first(where: { ($0 as? AttachmentThumb)?.id == id }) {
             return thumb.convert(thumb.bounds, to: view)
         }
-        return convert(CGRect(x: 10, y: -72, width: 48, height: 72), to: view)
+        return convert(CGRect(x: Theme.Space.row, y: -72, width: 48, height: 72), to: view)
     }
 
     /// Where the first line of typed text begins, in `view`'s coordinates.
@@ -205,7 +207,7 @@ final class Composer: UIView, UITextViewDelegate {
     func textViewDidChange(_ textView: UITextView) {
         placeholder.isHidden = !textView.text.isEmpty
         let fitted = textView.sizeThatFits(CGSize(width: textView.bounds.width, height: .greatestFiniteMagnitude)).height
-        let next = min(140, max(48, ceil(fitted)))
+        let next = min(140, max(Self.field, ceil(fitted)))
         textView.isScrollEnabled = fitted > 140
         if height.constant != next { height.constant = next }
         onChange?()
@@ -286,14 +288,14 @@ final class AttachmentThumb: UIView {
         image.contentMode = .scaleAspectFill
         image.clipsToBounds = true
         image.layer.cornerCurve = .continuous
-        image.layer.cornerRadius = 12
+        image.layer.cornerRadius = Theme.Radius.small
         image.layer.borderWidth = 1
         image.layer.borderColor = UIColor.separator.cgColor
         image.isAccessibilityElement = true
         image.accessibilityLabel = "Attached image"
         var config = UIButton.Configuration.plain()
         // A white cross on a dark disc reads over light and dark pictures alike.
-        config.image = UIImage(systemName: "xmark.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+        config.image = UIImage(systemName: "xmark.circle.fill", withConfiguration: Theme.symbol(Theme.Text.body)
             .applying(UIImage.SymbolConfiguration(paletteColors: [.white, UIColor.black.withAlphaComponent(0.6)])))
         config.contentInsets = .zero
         let close = UIButton(configuration: config)
@@ -338,9 +340,9 @@ final class ThreadRow: UIControl {
     /// `compact` rows fit the debug overlay's card.
     init(sessionID: String, compact: Bool = false) {
         self.sessionID = sessionID
-        titleLabel = Theme.label("", compact ? Theme.font(.subheadline, 15, .semibold) : Theme.font(.headline, 17, .semibold))
-        detailLabel = Theme.label("", compact ? Theme.font(.footnote, 13) : Theme.font(.subheadline, 15), color: .secondaryLabel)
-        let inset: CGFloat = compact ? 9 : 13
+        titleLabel = Theme.label("", compact ? Theme.Text.lineStrong : Theme.Text.body)
+        detailLabel = Theme.label("", Theme.Text.line, color: .secondaryLabel)
+        let inset = compact ? Theme.Space.row : Theme.Space.rowPad
         super.init(frame: .zero)
         accessibilityIdentifier = "thread.row"
         accessibilityValue = sessionID
@@ -348,19 +350,19 @@ final class ThreadRow: UIControl {
         accessibilityTraits = .button
 
         highlight.backgroundColor = Theme.pressedFill
-        highlight.layer.cornerRadius = 18
+        highlight.layer.cornerRadius = Theme.Radius.large
         highlight.layer.cornerCurve = .continuous
         highlight.alpha = 0
-        dot.layer.cornerRadius = 4
+        dot.layer.cornerRadius = 4 // a capsule: the dot is 8 across
         dot.isHidden = true
         titleLabel.lineBreakMode = .byTruncatingTail
         let detail = UIStackView(arrangedSubviews: [dot, detailLabel])
         detail.alignment = .center
-        detail.spacing = 7
+        detail.spacing = Theme.Space.row
         let content = UIStackView(arrangedSubviews: [titleLabel, detail])
         content.axis = .vertical
         content.alignment = .leading
-        content.spacing = compact ? 1 : 3
+        content.spacing = compact ? 0 : Theme.Space.tight
         separator.backgroundColor = .separator
         [highlight, content, separator].forEach {
             $0.isUserInteractionEnabled = false
@@ -375,10 +377,10 @@ final class ThreadRow: UIControl {
             dot.widthAnchor.constraint(equalToConstant: 8), dot.heightAnchor.constraint(equalToConstant: 8),
             content.topAnchor.constraint(equalTo: topAnchor, constant: inset),
             content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset),
-            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            separator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.group),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.group),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.group),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.group),
             separator.bottomAnchor.constraint(equalTo: bottomAnchor),
             separator.heightAnchor.constraint(equalToConstant: 1 / max(1, traitCollection.displayScale)),
             heightAnchor.constraint(greaterThanOrEqualToConstant: compact ? 50 : 64)
@@ -395,7 +397,7 @@ final class ThreadRow: UIControl {
         if phase != self.phase || dot.isHidden != (phase == .idle) {
             self.phase = phase
             dot.isHidden = phase == .idle
-            dot.backgroundColor = phase == .needsYou ? Theme.warning : Theme.accent
+            dot.backgroundColor = phase == .needsYou ? Theme.warning : Theme.working
             dot.layer.removeAllAnimations()
             if phase == .working {
                 let pulse = CABasicAnimation(keyPath: "opacity")
@@ -417,7 +419,7 @@ final class ThreadRow: UIControl {
         case .idle: text = [agent, time].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         }
         if detailLabel.text != text { detailLabel.text = text }
-        detailLabel.textColor = phase == .needsYou ? Theme.warning : phase == .working ? Theme.accent : .secondaryLabel
+        detailLabel.textColor = phase == .needsYou ? Theme.warning : phase == .working ? Theme.working : .secondaryLabel
         accessibilityLabel = [titleLabel.text, text].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
     }
 

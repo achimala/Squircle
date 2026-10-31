@@ -31,11 +31,11 @@ final class GlassJelly: UIView {
         case idle
         /// The agent's turn runs: eyes read along, it kneads.
         case working
-        /// A question or approval waits: ochre, worried, hops now and then.
+        /// A question or approval waits: warning amber, worried, hops now and then.
         case needsYou
-        /// A turn finished that you haven't looked at yet: olive, happy.
+        /// A turn finished that you haven't looked at yet: green, happy.
         case done
-        /// A turn failed that you haven't looked at yet: crimson, slumped `> <`.
+        /// A turn failed that you haven't looked at yet: red, slumped `> <`.
         case failed
         /// A screen or performance recording runs.
         case recording
@@ -64,7 +64,7 @@ final class GlassJelly: UIView {
     let content = UIView()
     /// The blob's rest shape, in bounds coordinates.
     var bodyRect = CGRect(x: 0, y: 0, width: 44, height: 44)
-    var cornerRadius: CGFloat = 18
+    var cornerRadius = Theme.Radius.large
     /// Where the creature belongs, in bounds coordinates (its centre).
     var creatureAnchor = CGPoint(x: 22, y: 22)
     /// Where the neck leaves the body (bounds coordinates), and its rest length.
@@ -769,11 +769,12 @@ final class GlassJelly: UIView {
         case .needsYou: Theme.warning
         case .done: Theme.success
         case .failed, .recording: Theme.failure
-        case .idle, .working: Theme.accent
+        case .working: Theme.working
+        case .idle: Theme.idle
         }
         color.resolvedColor(with: traitCollection).getRed(&r, green: &g, blue: &b, alpha: &a)
-        // Idle is terracotta at half strength (a little more while workers
-        // run); working is the fullest.
+        // Idle is its grey at half strength (a little more while workers
+        // run); working violet is the fullest.
         var strength: CGFloat = switch mood {
         case .idle: crew > 0 ? 0.6 : 0.45
         case .working: 0.92

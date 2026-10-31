@@ -228,7 +228,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         // The jelly's eyes sit where the mark was; its colour is the tone.
         bubble.markSlot = 0
         bubble.tintsText = false
-        bubble.textColor = .label.withAlphaComponent(0.75)
+        bubble.textColor = .secondaryLabel
         bubble.onLineChange = { [weak self] in self?.glass.gulp() }
         bubble.onHeadlineChange = { [weak self] in self?.retarget() }
         bubble.isAccessibilityElement = true
@@ -249,7 +249,7 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
             // A small quiet grip on the edge it resizes.
             let grip = UIView()
             grip.backgroundColor = Theme.accent.withAlphaComponent(0.3)
-            grip.layer.cornerRadius = 2
+            grip.layer.cornerRadius = 2 // half its height: a capsule
             grip.isUserInteractionEnabled = false
             handle.addSubview(grip)
             handle.isAccessibilityElement = true
@@ -909,8 +909,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
         let target = route.isOpen ? flying.conversation?.attachmentFrame(flying.attachmentID, in: view) ?? bubbleFrame : frame.value
         lift.frame = .lerp(start, target, t)
         picture.frame = lift.bounds
-        // Full screen it hides under the display's own corners.
-        let radius = CGFloat.lerp(start == view.bounds ? 44 : min(22, start.height / 2), 12, t.clamped())
+        // Full screen it hides under the display's own corners; it lands
+        // with the field's thumbnail corners.
+        let radius = CGFloat.lerp(start == view.bounds ? 44 : min(22, start.height / 2), Theme.Radius.small, t.clamped())
         picture.layer.cornerRadius = radius
         picture.layer.borderWidth = 1
         lift.layer.shadowPath = UIBezierPath(roundedRect: lift.bounds, cornerRadius: radius).cgPath

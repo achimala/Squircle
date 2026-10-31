@@ -638,8 +638,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
         // Controls rise in with transforms; `place` keeps their resting spot exact.
         let safe = view.safeAreaInsets
-        connection.place(in: CGRect(x: 16, y: safe.top + 4, width: 44, height: 44))
-        add.place(in: CGRect(x: bounds.width - 60, y: safe.top + 4, width: 44, height: 44))
+        let button = Theme.Space.tap, inset = Theme.Space.group
+        connection.place(in: CGRect(x: inset, y: safe.top + Theme.Space.tight, width: button, height: button))
+        add.place(in: CGRect(x: bounds.width - inset - button, y: safe.top + Theme.Space.tight, width: button, height: button))
         applyScene()
     }
 
@@ -653,7 +654,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let width = view.bounds.width - 2 * StageLayout.gridMargin
         if !waitingList.isEmpty, width > 0 {
             layout.waiting = waitingList.systemLayoutSizeFitting(CGSize(width: width, height: 0), withHorizontalFittingPriority: .required,
-                                                                 verticalFittingPriority: .fittingSizeLevel).height.rounded(.up) + 22
+                                                                 verticalFittingPriority: .fittingSizeLevel).height.rounded(.up) + Theme.Space.section
         }
         return layout
     }
@@ -746,7 +747,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let layout = self.layout, shown = self.shown, held = lift
         grid.contentSize = CGSize(width: view.bounds.width, height: layout.gridContentHeight(count: shown.count))
         waitingList.frame = CGRect(x: StageLayout.gridMargin, y: layout.homeTop, width: layout.size.width - 2 * StageLayout.gridMargin,
-                                   height: max(0, layout.waiting - 22))
+                                   height: max(0, layout.waiting - Theme.Space.section))
         let place = { [cells] in
             for (index, project) in shown.enumerated() {
                 guard let cell = cells[project.id] else { continue }
@@ -1667,7 +1668,7 @@ final class GridCell: UIControl {
     private let name = Theme.label("", Theme.appCaptionFont())
     /// The app's agent, behind the portrait's top edge.
     private let peek = JellyView(.agent(.working), canvas: .roomy(GridCell.peekSize))
-    private static let peekSize: CGFloat = 26
+    private static let peekSize = Theme.Glyph.home
     private var peeking = false
 
     init(id: String) {
@@ -1703,7 +1704,7 @@ final class GridCell: UIControl {
         let size = DeviceStage.portraitSize(height: phoneHeight)
         portrait.bounds = CGRect(origin: .zero, size: size)
         portrait.center = CGPoint(x: bounds.midX, y: phoneHeight / 2)
-        let top = phoneHeight + 12
+        let top = phoneHeight + Theme.Space.rowPad
         let width = min(bounds.width, ceil(name.sizeThatFits(CGSize(width: CGFloat.greatestFiniteMagnitude, height: 21)).width))
         name.frame = CGRect(x: (bounds.width - width) / 2, y: top, width: width, height: 21)
         // Its body rests a little over half above the device's top edge (the
