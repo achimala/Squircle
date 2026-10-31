@@ -275,7 +275,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// (open the app with this name), `SQUIRCLE_APP_SCRUB` (0…1 of opening it)
     /// and `SQUIRCLE_SCRUB` (0…1 of a thread over its agent); `SQUIRCLE_SIM_EXPAND=1` (or a simulator's name) brings
     /// the first (or that) simulator large; `SQUIRCLE_BUILDS=1` shows the app's builds and
-    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads|TASK_ID` opens Tasks on either tab (a task ID shows its row, `SQUIRCLE_TASK_PAGE=1` its page) (`SQUIRCLE_DEMO_TASKS=1` shows made-up tasks, `=PATH` a copy of a real list; `SQUIRCLE_DEMO_SENT=1` with no Mac connection shows a made-up app "Demo" whose agent sent to and heard from workers). `SQUIRCLE_OPEN_TARGET` opens a notification payload; `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_DEMO_VIDEO=PATH` opens a movie full screen; `SQUIRCLE_STRESS=1`
+    /// `SQUIRCLE_NO_DOCK=1` hides simulators for stills; `SQUIRCLE_TASKS=1|threads|TASK_ID` opens Tasks on either tab (a task ID shows its row, `SQUIRCLE_TASK_PAGE=1` its page) (`SQUIRCLE_DEMO_TASKS=1` shows made-up tasks, `=PATH` a copy of a real list; `SQUIRCLE_DEMO_REPLY=1` has the app's agent answer in three paragraphs, to watch its bubbles land; `SQUIRCLE_DEMO_SENT=1` with no Mac connection shows a made-up app "Demo" whose agent sent to and heard from workers). `SQUIRCLE_OPEN_TARGET` opens a notification payload; `SQUIRCLE_DEMO=1` loops through them; `SQUIRCLE_DEMO_VIDEO=PATH` opens a movie full screen; `SQUIRCLE_STRESS=1`
     /// navigates as fast as a hurried person and checks every frame.
     private func startVerificationHooks() {
         let environment = ProcessInfo.processInfo.environment
@@ -323,6 +323,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 }
                 if let text = environment["SQUIRCLE_SEND"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.agent?.debugSend(text) }
+                }
+                if environment["SQUIRCLE_DEMO_REPLY"] == "1" {
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(4)); self?.agent?.debugReplyArrives() }
                 }
                 if let tab = environment["SQUIRCLE_TASKS"] {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentTasks(threads: tab == "threads", focus: tab.count > 8 ? tab : nil) }

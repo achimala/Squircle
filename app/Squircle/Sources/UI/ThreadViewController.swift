@@ -1204,6 +1204,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// it: the same ID, so the row stays put when T3's copy replaces it.
     private func displayedMessages(_ messages: [ChatMessage]) -> [ChatMessage] {
         var messages = messages
+        #if DEBUG
+        if let debugReply { messages += debugReply }
+        #endif
         guard let pending = pendingSend, !messages.contains(where: { $0.id == pending.messageID }) else { return messages }
         var message = ChatMessage(id: pending.messageID, role: "user", content: pending.text,
                                   createdAt: ISODate.format(.now))
@@ -2059,6 +2062,27 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     #if DEBUG
     /// Verification only: a sample agent question, never sent to T3.
+    #if DEBUG
+    /// Verification only: `SQUIRCLE_DEMO_REPLY=1` (with `SQUIRCLE_APP`) has the
+    /// app's agent answer a made-up message in three paragraphs, to watch
+    /// its bubbles land.
+    private var debugReply: [ChatMessage]?
+    func debugReplyArrives() {
+        let now = ISODate.format(.now)
+        debugReply = [ChatMessage(id: "debug-ask", role: "user", content: "How did the chat stage go?", createdAt: now),
+                      ChatMessage(id: "debug-reply", role: "assistant", content: """
+            The chat stage is in: the agent's replies are bubbles now, one per paragraph.
+
+            Still to check:
+
+            - the landing haptic on a real reply
+            - dark mode
+
+            I'll send you a build once Tasks is merged too.
+            """, createdAt: now)]
+        render()
+    }
+    #endif
     func debugShowQuestion() {
         debugRequest = PendingRequest(id: "debug", item: ["id": "debug-question", "type": "user_input_request", "requestId": "debug", "questions": [
             ["id": "media", "header": "Media", "question": "What should appear inline?", "multiSelect": true, "options": [

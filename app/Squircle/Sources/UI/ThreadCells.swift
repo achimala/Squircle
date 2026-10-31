@@ -198,6 +198,8 @@ final class MessageCell: TimelineCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         text.isEditable = false
         text.isScrollEnabled = false
+        // A line's jelly may round over its slot, past the text's top.
+        text.clipsToBounds = false
         text.backgroundColor = .clear
         text.textContainer.lineFragmentPadding = 0
         // Most rows have none; set once here, not again for every row it shows.

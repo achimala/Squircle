@@ -29,7 +29,7 @@ final class ConversationText {
                 line.append(NSAttributedString(string: "\t"))
             }
             line.append(NSAttributedString(string: message.content))
-            line.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: Self.slotted],
+            line.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: Self.slotted(font)],
                                range: NSRange(location: 0, length: line.length))
             text = line
         }
@@ -115,13 +115,16 @@ final class ConversationText {
 
     /// A line's glyph in the slot, its text at the slot's end, and wrapped
     /// lines hanging under the text, not the glyph.
-    private static let slotted: NSParagraphStyle = {
+    private static func slotted(_ font: UIFont) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.tabStops = [NSTextTab(textAlignment: .natural, location: Theme.Space.indent)]
         style.headIndent = Theme.Space.indent
         style.paragraphSpacing = Theme.Space.tight
+        // Every line keeps the font's height: a jelly rounds over its slot, never pushing the lines apart.
+        style.minimumLineHeight = ceil(font.lineHeight)
+        style.maximumLineHeight = ceil(font.lineHeight)
         return style
-    }()
+    }
 
     /// The state a worker line shows its jelly in: what the news said, or
     /// the worker's live state.
@@ -216,7 +219,7 @@ final class ConversationText {
             text.insert(NSAttributedString(string: "\t", attributes: [.font: font]), at: 0)
             text.insert(NSAttributedString(attachment: NSTextAttachment(image: symbol)), at: 0)
         }
-        text.addAttribute(.paragraphStyle, value: Self.slotted, range: NSRange(location: 0, length: text.length))
+        text.addAttribute(.paragraphStyle, value: Self.slotted(font), range: NSRange(location: 0, length: text.length))
         if expanded, let message = line.text?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
             add("\n", font)
             text.append(Markdown.render(message, font: Theme.Text.line, color: .secondaryLabel))
