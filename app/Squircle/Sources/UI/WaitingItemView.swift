@@ -27,6 +27,7 @@ final class WaitingAnswers {
             let context = ((about ? [app] : []) + [asker] + (about ? [question.ask] : [])).compactMap { $0 }.joined(separator: " · ")
             let jelly = question.from == nil ? JellyLook.agent(.needsYou) : .worker(question.threadID ?? "", .needsYou)
             view.show(context: context, asker: jelly, question: question.text, detail: nil)
+            attach(question, to: view)
             view.answers(question.options.map { WaitingItemView.Answer(title: $0) }, busy: busy) { [weak self] index in
                 self?.send(question, question.options[index])
             }
@@ -36,6 +37,7 @@ final class WaitingAnswers {
             let context = (about ? [app, request.title, request.ask] : [request.worker ? request.title : "Your agent asks"])
                 .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
             let jelly = request.worker ? JellyLook.worker(request.threadID, .needsYou) : .agent(.needsYou)
+            view.media([], task: "", documents: model.documents) { _, _ in nil }
             if request.pending.isQuestion {
                 question(view, request, context: context, jelly: jelly, id: id, busy: busy, changed: changed)
             } else {
@@ -76,6 +78,29 @@ final class WaitingAnswers {
                    edit: { [weak self] text in self?.drafts[id].text = text }) { text in step { $0.reply(text) } }
     }
 
+    /// The question's pictures and clips, opened large from their thumbnails
+    /// and paged sideways; its documents in Quick Look.
+    private func attach(_ question: WaitingList.Question, to view: WaitingItemView) {
+        let task = question.taskID, documents = model.documents
+        view.media(question.media, task: task, documents: documents) { [weak model] media, height in
+            await model?.taskThumbnail(task: task, media: media, height: height)
+        }
+        view.onOpen = { [weak self, weak view] index in
+            guard let self, let view, let window = view.window else { return }
+            let items = view.pictures.map { tile, media in
+                ViewerItem.task(media, of: task, poster: tile.image(for: .normal), origin: MediaOrigin { [weak tile] in tile.map { MediaSpot($0) } },
+                                model: self.model)
+            }
+            MediaViewer.open(items, at: index, in: window)
+        }
+        view.onDocument = { row in
+            var responder = row.next
+            while let next = responder, !(next is UIViewController) { responder = next.next }
+            guard let presenter = responder as? UIViewController else { return }
+            DocumentViewer.open(row, documents: documents, from: presenter)
+        }
+    }
+
     private func send(_ question: WaitingList.Question, _ text: String) {
         Theme.selectionHaptic()
         Task { await model.answer(question, text: text) }
@@ -94,8 +119,11 @@ final class WaitingAnswers {
 /// a list of rows: a mark in the slot (a circle to pick one, a square to
 /// pick several, filled when picked), the label wrapping as long as it
 /// needs, its description under it, and a last row to write something
-/// else. Several picks go with Send. `compact` (Home): the question in
-/// three lines and no write-in row.
+/// else. Several picks go with Send. What the question is about (pictures
+/// and clips, documents) sits between the question and the answers: a row
+/// of thumbnails, then a line per document. `compact` (Home): the question
+/// in three lines, a short strip of thumbnails, no documents and no
+/// write-in row.
 final class WaitingItemView: UIView {
     struct Answer {
         var title: String
@@ -120,6 +148,17 @@ final class WaitingItemView: UIView {
     private var onSend: ((String) -> Void)?
     private var onEdit: ((String) -> Void)?
     private var sendIndex = 0
+    /// Tapped the picture or clip at this index of `pictures`.
+    var onOpen: ((Int) -> Void)?
+    var onDocument: ((FileRowView) -> Void)?
+    /// Each picture's or clip's thumbnail, and what it shows.
+    private(set) var pictures: [(tile: UIButton, media: AppTask.Media)] = []
+    private let strip = UIScrollView()
+    private let tiles = UIStackView()
+    private let files = UIStackView()
+    private var shownMedia: (task: String, media: [AppTask.Media])?
+    private var loads: [Task<Void, Never>] = []
+    private var tileHeight: CGFloat { compact ? Theme.Thumb.row.height : Theme.Thumb.page.height }
 
     /// `filled` false: no bubble of its own (the request card's glass is its surface).
     init(compact: Bool = false, filled: Bool = true) {
@@ -176,7 +215,25 @@ final class WaitingItemView: UIView {
         sendRow.directionalLayoutMargins = NSDirectionalEdgeInsets(top: Theme.Space.row, leading: 0, bottom: Theme.Space.tight, trailing: 0)
         sendRow.isHidden = true
 
-        let stack = UIStackView(arrangedSubviews: [about, title, detail, rows, fieldRow, sendRow])
+        tiles.spacing = Theme.Space.row
+        tiles.translatesAutoresizingMaskIntoConstraints = false
+        strip.addSubview(tiles)
+        strip.showsHorizontalScrollIndicator = false
+        // On Home a sideways swipe is the deck's: the strip only clips.
+        strip.isScrollEnabled = !compact
+        strip.isHidden = true
+        NSLayoutConstraint.activate([
+            tiles.topAnchor.constraint(equalTo: strip.contentLayoutGuide.topAnchor),
+            tiles.bottomAnchor.constraint(equalTo: strip.contentLayoutGuide.bottomAnchor),
+            tiles.leadingAnchor.constraint(equalTo: strip.contentLayoutGuide.leadingAnchor),
+            tiles.trailingAnchor.constraint(equalTo: strip.contentLayoutGuide.trailingAnchor),
+            tiles.heightAnchor.constraint(equalTo: strip.frameLayoutGuide.heightAnchor),
+            strip.heightAnchor.constraint(equalToConstant: tileHeight)
+        ])
+        files.axis = .vertical
+        files.isHidden = true
+
+        let stack = UIStackView(arrangedSubviews: [about, title, strip, files, detail, rows, fieldRow, sendRow])
         stack.axis = .vertical
         stack.spacing = Theme.Space.row
         stack.setCustomSpacing(Theme.Space.tight, after: about)
@@ -208,6 +265,70 @@ final class WaitingItemView: UIView {
         detail.text = more
         // Home keeps to who asks and the question.
         detail.isHidden = compact || (more ?? "").isEmpty
+    }
+
+    /// What the question is about, attached to `task`: pictures and clips as
+    /// thumbnails (`thumbnail` loads one at a height), documents as lines.
+    /// Drawn again only when they change.
+    func media(_ media: [AppTask.Media], task: String, documents: DocumentFiles,
+               thumbnail: @escaping (AppTask.Media, CGFloat) async -> UIImage?) {
+        if let shownMedia, shownMedia.task == task, shownMedia.media == media { return }
+        shownMedia = (task, media)
+        loads.forEach { $0.cancel() }
+        loads = []
+        tiles.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        files.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        pictures = media.filter { $0.kind == "image" || $0.kind == "video" }.enumerated().map { index, item in
+            (tile(item, index: index, thumbnail: thumbnail), item)
+        }
+        pictures.forEach { tiles.addArrangedSubview($0.tile) }
+        strip.isHidden = pictures.isEmpty
+        strip.contentOffset = .zero
+        for item in media where item.kind == "file" && !compact {
+            let row = FileRowView()
+            row.show(.attached(task: task, media: item.id, name: item.name ?? "Document", bytes: item.bytes.map { Int($0) }), documents: documents)
+            row.onOpen = { [weak self] row in self?.onDocument?(row) }
+            files.addArrangedSubview(row)
+        }
+        files.isHidden = files.arrangedSubviews.isEmpty
+    }
+
+    /// A picture or clip at the strip's height, a phone screen's shape until
+    /// its thumbnail gives it its own; a clip carries a play mark.
+    private func tile(_ media: AppTask.Media, index: Int, thumbnail: @escaping (AppTask.Media, CGFloat) async -> UIImage?) -> UIButton {
+        let height = tileHeight
+        let tile = UIButton(type: .custom)
+        tile.backgroundColor = Theme.codeFill
+        tile.layer.cornerRadius = compact ? Theme.Thumb.rowRadius : Theme.Radius.small
+        tile.layer.cornerCurve = .continuous
+        tile.clipsToBounds = true
+        tile.imageView?.contentMode = .scaleAspectFill
+        tile.contentHorizontalAlignment = .fill
+        tile.contentVerticalAlignment = .fill
+        let width = tile.widthAnchor.constraint(equalToConstant: (height * 0.46).rounded())
+        width.isActive = true
+        if media.kind == "video" {
+            let play = UIImageView(image: UIImage(systemName: "play.fill"))
+            play.tintColor = .white
+            play.preferredSymbolConfiguration = Theme.symbol(compact ? Theme.Text.caption : Theme.Text.body)
+            play.layer.shadowOpacity = 0.4
+            play.layer.shadowRadius = 6
+            play.layer.shadowOffset = .zero
+            play.isUserInteractionEnabled = false
+            play.translatesAutoresizingMaskIntoConstraints = false
+            tile.addSubview(play)
+            NSLayoutConstraint.activate([play.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
+                                         play.centerYAnchor.constraint(equalTo: tile.centerYAnchor)])
+        }
+        tile.accessibilityLabel = media.caption.isEmpty ? (media.kind == "video" ? "Clip" : "Picture") : media.caption
+        tile.accessibilityIdentifier = "waiting.media"
+        tile.addAction(UIAction { [weak self] _ in self?.onOpen?(index) }, for: .touchUpInside)
+        loads.append(Task { [weak tile] in
+            guard let image = await thumbnail(media, height), !Task.isCancelled, let tile, image.size.height > 0 else { return }
+            width.constant = (height * min(max(image.size.width / image.size.height, 0.4), 1.8)).rounded()
+            tile.setImage(image, for: .normal)
+        })
+        return tile
     }
 
     /// The answers as rows; `send`: Send's title and whether it can be

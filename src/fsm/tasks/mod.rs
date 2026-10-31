@@ -84,6 +84,11 @@ pub struct Question {
     /// Choices the phone offers as buttons; the user may still type anything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
+    /// Screenshots, clips and documents it is about: IDs of media in its
+    /// task's folder, in the order given. The task lists them as its own
+    /// once the question is closed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub media: Vec<String>,
     /// The thread that asked, which the answer goes to.
     pub thread_id: String,
     pub asked_at: u64,
@@ -948,6 +953,7 @@ pub enum Event {
         question: String,
         text: String,
         options: Vec<String>,
+        media: Vec<String>,
         thread: String,
         observed: Option<Signals>,
         now: u64,
@@ -1313,6 +1319,7 @@ impl Machine for M17 {
                 question,
                 text,
                 options,
+                media,
                 thread,
                 observed,
                 now,
@@ -1337,6 +1344,7 @@ impl Machine for M17 {
                         .filter(|o| !o.is_empty())
                         .take(6)
                         .collect(),
+                    media,
                     thread_id: thread,
                     asked_at: now,
                     state: QuestionState::Open,
@@ -1662,6 +1670,7 @@ mod tests {
                     question: question.into(),
                     text: "Top or bottom?".into(),
                     options: vec!["Top".into(), "Bottom".into()],
+                    media: Vec::new(),
                     thread: "agent".into(),
                     observed: None,
                     now,

@@ -10,6 +10,9 @@ pub(super) struct AskTask {
     pub(super) question: String,
     #[serde(default)]
     pub(super) options: Vec<String>,
+    /// Screenshots, clips and documents the question is about.
+    #[serde(default)]
+    pub(super) files: Vec<PathBuf>,
 }
 
 /// `squircle task ask`: a question to the user on a task, in the tracker
@@ -33,7 +36,14 @@ pub(super) async fn ask_task(
     }
     let observed = task_signals(&state, &current);
     let (task, question) = tasks
-        .ask(&id, &r.question, r.options, &r.thread, Some(observed))
+        .ask(
+            &id,
+            &r.question,
+            r.options,
+            &r.files,
+            &r.thread,
+            Some(observed),
+        )
         .await
         .map_err(task_error)?;
     if let Some(push) = &state.push {
@@ -173,6 +183,11 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
     // Open questions wherever their task sits: aging into History does not
     // take back what the agent is still waiting on.
     for (task, question) in tasks.asking() {
+        let task_media = if question.media.is_empty() {
+            Vec::new()
+        } else {
+            tasks.media(&task.id)
+        };
         let from = agents
             .coordinator_of(&question.thread_id)
             .and(agents.worker_title(&question.thread_id));
@@ -181,11 +196,17 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
             .as_ref()
             .and_then(|p| all.iter().find(|t| &t.id == p))
             .map(|item| item.ask.clone());
+        let media: Vec<Value> = question
+            .media
+            .iter()
+            .filter_map(|id| task_media.iter().find(|m| &m.id == id))
+            .map(super::task_routes::media_view)
+            .collect();
         apps.entry(task.project_id.clone()).or_default().push((
             question.asked_at,
             json!({
                 "kind": "question", "id": question.id, "task_id": task.id, "ask": task.ask,
-                "item_ask": item_ask, "text": question.text, "options": question.options,
+                "item_ask": item_ask, "text": question.text, "options": question.options, "media": media,
                 "from": from, "thread_id": question.thread_id, "asked_at": question.asked_at,
             }),
         ));

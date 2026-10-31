@@ -325,6 +325,13 @@ sheet (under its task) and on Home (`WaitingItemView`, shared):
   prominent glass button) sends them.
 - **Something else…** is the last row: the pencil in the slot and a field in
   Body. No grey pill, and no separate Reply field.
+- **What it is about** (`task ask --file`, 2026-10-31): the pictures and
+  clips sit in a compact row of thumbnails under the question (120 tall in
+  the chat and Tasks, scrolling sideways; on Home a 52-point strip that only
+  clips, so the deck keeps its swipe), a clip with a play mark; documents are
+  file lines under them (not on Home). Tapping one opens the full-screen
+  viewer with the question's others a swipe away, flick to dismiss, clips
+  muted.
 - **Approvals** are the same card: the command in Mono under the question,
   then rows (Allow, Allow for this session, Decline).
 - The thread's own request card over the field (`RequestCard`) uses the same
