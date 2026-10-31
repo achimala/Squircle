@@ -35,29 +35,19 @@ struct JellyLook: Hashable {
 
     var role: Role
     var mood: Mood
-    /// 0..<9: three cube aspects × three eye spacings. The agent is 4 (plain).
-    var identity: Int
+    /// Who it is, from its thread ID; the agent is plain.
+    var traits: JellyTraits
     /// The first byte of its ID's hash, for its temperament (blink and glance timing).
     var temper: Int
 
-    static func agent(_ mood: Mood) -> JellyLook { JellyLook(role: .agent, mood: mood, identity: 4, temper: 0) }
+    static func agent(_ mood: Mood) -> JellyLook { JellyLook(role: .agent, mood: mood, traits: .plain, temper: 0) }
 
     static func worker(_ id: String, _ mood: Mood) -> JellyLook {
         // FNV-1a: stable across launches (Swift's hashes are not).
         var hash: UInt64 = 0xcbf29ce484222325
         for byte in id.lowercased().utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
-        return JellyLook(role: .worker, mood: mood, identity: Int(hash % 9), temper: Int((hash >> 16) & 0xff))
+        return JellyLook(role: .worker, mood: mood, traits: .worker(hash: hash, JellyTraits.direction), temper: Int((hash >> 16) & 0xff))
     }
-
-    /// The shader's identity knobs.
-    var knobs: SIMD4<Float> {
-        guard role == .worker else { return JellyUniforms.plainLook }
-        let aspects: [Float] = [1, 1.14, 0.88], spacings: [Float] = [0.84, 0.96, 1.08]
-        return SIMD4(spacings[identity % 3], aspects[identity / 3], JellyLook.workerEyes, 0.36)
-    }
-
-    /// Workers' eyes relative to the agent's, at the same body size.
-    static let workerEyes: Float = 1.5
 }
 
 /// One frame of a jelly's face and body.
@@ -207,7 +197,7 @@ extension JellyRenderer {
             gaze: SIMD4(Float(pose.gaze.x), Float(pose.gaze.y), Float(center.x), Float(center.y)),
             bridge: SIMD4(0, 1, 0, 0),
             stubs: SIMD4(0, 0, Float(s / 34), 0),
-            look: look.knobs,
+            look: look.traits.look, traits: look.traits.traits, marks: look.traits.marks,
             // No pill: its body is far off the canvas.
             center: SIMD2(-1e4, -1e4), half: SIMD2(1, 1), origin: SIMD2(0, 0),
             scale: Float(scale), radius: 1, pillow: 0, time: 0, churn: 0, opened: 0,
