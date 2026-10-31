@@ -1,4 +1,3 @@
-#if SQUIRCLE_OVERLAY || DEBUG
 import UIKit
 
 /// What a recorder hands over when it stops.
@@ -160,4 +159,3 @@ final class CaptureSession {
         }
     }
 }
-#endif

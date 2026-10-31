@@ -1001,8 +1001,9 @@ final class SquircleModel {
 
     /// Adds a picture to the open conversation's field; one with the same
     /// `id` is replaced.
-    func attach(_ attachment: ImageAttachment) {
-        guard let open else { return }
+    /// Into the field of `conversation`, or of the conversation on screen.
+    func attach(_ attachment: ImageAttachment, to conversation: ConversationID? = nil) {
+        guard let open = conversation ?? open else { return }
         var field = drafts[open] ?? []
         if let index = field.firstIndex(where: { $0.id == attachment.id }) { field[index] = attachment }
         else { field.append(attachment) }

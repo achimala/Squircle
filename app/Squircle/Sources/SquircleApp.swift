@@ -32,6 +32,8 @@ final class SquircleApp: UIResponder, UIApplicationDelegate {
 final class StudioScene: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
     private let model = SquircleModel()
+    /// Recordings of Squircle itself, from the message field's + menu.
+    private(set) var recording: SelfRecording?
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
@@ -42,6 +44,7 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = studio
         window.makeKeyAndVisible()
         self.window = window
+        recording = SelfRecording(scene: scene, model: model)
         Task { await model.refresh() }
         let push = PushCenter.shared
         studio.onViewing = { push.viewing($0) }
@@ -100,6 +103,9 @@ final class StudioScene: UIResponder, UIWindowSceneDelegate {
     }
     func sceneDidEnterBackground(_ scene: UIScene) { model.enteredBackground() }
     /// The scene is gone for good: so is everything its model started.
-    func sceneDidDisconnect(_ scene: UIScene) { model.close() }
+    func sceneDidDisconnect(_ scene: UIScene) {
+        recording?.end()
+        model.close()
+    }
     func sceneWillEnterForeground(_ scene: UIScene) { model.enteringForeground() }
 }

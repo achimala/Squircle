@@ -1,4 +1,3 @@
-#if SQUIRCLE_OVERLAY || DEBUG
 import Darwin
 import MachO
 import Synchronization
@@ -693,4 +692,3 @@ struct ThreadSamples: @unchecked Sendable {
         return out
     }
 }
-#endif

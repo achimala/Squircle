@@ -68,6 +68,23 @@ in the same place.
   first, at most 8) before the dots and 420v conversion. The keyboard and
   status bar are not in the recording again. Simulator: 2 s → 58 frames,
   upright, content as shown.
+- **2026-10-31 (user: "+ menu has no perf recording in squircle app?"; then
+  "doesn't make sense … unless working on the squircle app"): Squircle records
+  itself.** In Squircle's own conversations (its agent, workers and tasks: the
+  project whose bundle ID is the running app's; never other apps', which
+  record through their overlay) the field's + menu adds Record Performance and
+  Record Screen. The same `CaptureSession`, `PerfRecorder` and
+  `ScreenRecorder` (no longer Debug-only, since Squircle's phone build is
+  Release) run from `SelfRecording`, which the scene owns, so a recording
+  carries on across pushes and pops. Its state is a glass capsule (the
+  `.recording` `LiveCapsule`: dot, "Recording performance", elapsed time) in
+  its own window above the app's, left out of the recording as the overlay
+  is; tapping it stops, and the file goes into the field of the conversation
+  on screen (or the one it started in), uploading at once. Simulator check
+  (`SQUIRCLE_SELF_RECORD=performance` with `SQUIRCLE_NAV_LOOP=Squircle`, two
+  rounds of push into three threads and back): 16 s capture, 240 presented
+  frames, symbolicated main-thread stacks; a 6 s screen recording, 588×1280,
+  173 frames, no capsule in it.
 - Videos from the library, the pasteboard or a drop (2026-10-24): the field's
   picker offers images and videos; picked, pasted, dropped and recorded videos
   all become `ImageAttachment(video:)`, upload through `/v1/captures?kind=video`

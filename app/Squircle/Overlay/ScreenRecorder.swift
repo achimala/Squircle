@@ -1,4 +1,3 @@
-#if SQUIRCLE_OVERLAY || DEBUG
 import AVFoundation
 import Metal
 import UIKit
@@ -434,4 +433,3 @@ private struct RenderServer: @unchecked Sendable {
         (screen.perform(displaySelector)?.takeUnretainedValue() as? NSObject)?.value(forKey: "name") as? NSString
     }
 }
-#endif
