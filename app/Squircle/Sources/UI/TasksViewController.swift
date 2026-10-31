@@ -1543,7 +1543,7 @@ final class ThreadLine: UIControl {
             jelly.leadingAnchor.constraint(equalTo: leadingAnchor),
             jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
             jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
-            jelly.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            title.centred(on: jelly.centerYAnchor),
             text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.indent),
             text.topAnchor.constraint(equalTo: topAnchor),
             text.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
@@ -2199,15 +2199,15 @@ final class TaskStrip: UIControl {
     private var shown: (texts: [String], crews: [[JellyLook]])?
 
     private static let height: CGFloat = 30
-    /// A Sprout's body here: its slot (body and sprout) fits the capsule
-    /// with `inset` above and below.
-    private static let inset: CGFloat = 3
-    private static let body = (height - 2 * inset) / (1 + JellyTraits.crown)
+    /// A Sprout's body here: centred on the capsule's middle line (the
+    /// text's cap-height centre), its sprout fits above with `inset` to spare.
+    private static let inset: CGFloat = 2
+    private static let body = ((height - 2 * inset) / (1 + 2 * JellyTraits.crown)).rounded(.down)
     private static let crewGap: CGFloat = 3
 
-    /// One Sprout in a slot as wide as its body is drawn and as tall as its
-    /// sprout reaches, so the stack spaces bodies evenly and nothing leaves
-    /// the capsule.
+    /// One Sprout in a slot as wide as its body is drawn (turned) and as
+    /// tall as its body: the picture's sprout grows up out of it, and the shader puts
+    /// every build's bottom on the same line, so the crew stands in a row.
     private static func slot(_ look: JellyLook) -> UIView {
         let slot = UIView()
         let jelly = JellyView(look, canvas: JellyCanvas(size: body, side: 0.2, top: 0.42, bottom: 0.14))
@@ -2215,14 +2215,32 @@ final class TaskStrip: UIControl {
         [slot, jelly].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         slot.addSubview(jelly)
         NSLayoutConstraint.activate([
-            slot.widthAnchor.constraint(equalToConstant: (body * CGFloat(look.traits.look.y)).rounded(.up)),
-            slot.heightAnchor.constraint(equalToConstant: body * (1 + JellyTraits.crown)),
+            slot.widthAnchor.constraint(equalToConstant: (2 * JellyBody.halfWidth(look.traits.look) * body).rounded(.up)),
+            slot.heightAnchor.constraint(equalToConstant: body),
             jelly.widthAnchor.constraint(equalToConstant: body),
             jelly.heightAnchor.constraint(equalToConstant: body),
             jelly.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
-            jelly.bottomAnchor.constraint(equalTo: slot.bottomAnchor)
+            jelly.centerYAnchor.constraint(equalTo: slot.centerYAnchor)
         ])
         return slot
+    }
+
+    /// A count: its lead (Sprouts or a dot) centred on the middle line, and
+    /// its words with their cap height centred on it too, not their frame.
+    private static func part(_ lead: UIView, _ label: UILabel) -> UIView {
+        let part = UIView()
+        part.isUserInteractionEnabled = false
+        [part, lead, label].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        [lead, label].forEach(part.addSubview)
+        NSLayoutConstraint.activate([
+            part.heightAnchor.constraint(equalToConstant: height),
+            lead.leadingAnchor.constraint(equalTo: part.leadingAnchor),
+            lead.centerYAnchor.constraint(equalTo: part.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: lead.trailingAnchor, constant: Theme.Space.tight),
+            label.trailingAnchor.constraint(equalTo: part.trailingAnchor),
+            label.centred(on: part.centerYAnchor)
+        ])
+        return part
     }
 
     /// Counts of open tasks; working and needing you are shown by the
@@ -2263,14 +2281,11 @@ final class TaskStrip: UIControl {
                 let group = UIStackView(arrangedSubviews: item.4.map(Self.slot))
                 // A little crew, shoulder to shoulder: the bodies never overlap.
                 group.spacing = Self.crewGap
-                group.alignment = .bottom
+                group.alignment = .center
                 lead = group
             }
             let label = Theme.label(texts[index], Theme.Text.caption, color: item.3 ? .label : .secondaryLabel)
-            let part = UIStackView(arrangedSubviews: [lead, label])
-            part.spacing = Theme.Space.tight
-            part.alignment = .center
-            parts.addArrangedSubview(part)
+            parts.addArrangedSubview(Self.part(lead, label))
         }
         accessibilityLabel = "Tasks: " + texts.joined(separator: ", ")
     }

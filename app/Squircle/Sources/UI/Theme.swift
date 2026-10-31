@@ -319,3 +319,12 @@ extension CALayer {
         add(nod, forKey: "nod")
     }
 }
+
+extension UILabel {
+    /// Its first line's visual centre (half its cap height above the
+    /// baseline, not its frame's middle) on `line`: how a glyph or jelly
+    /// beside text lines up with it.
+    func centred(on line: NSLayoutYAxisAnchor) -> NSLayoutConstraint {
+        firstBaselineAnchor.constraint(equalTo: line, constant: font.capHeight / 2)
+    }
+}
