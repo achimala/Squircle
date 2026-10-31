@@ -61,56 +61,20 @@ pub(super) struct AnswerQuestion {
     pub(super) text: String,
 }
 
-/// The user's answer from the phone: closes the question and sends it to
-/// the thread that asked (and, for a worker, tells its app agent).
+/// The user's answer from the phone: saves it as answered and owed to the
+/// thread that asked (and, for a worker, its app agent), which the task loop
+/// then relays (`Agents::relay_answers`). The same answer again is accepted
+/// and resumes a delivery not yet made.
 pub(super) async fn answer_question(
     State(state): State<AppState>,
     Path(id): Path<String>,
     payload: std::result::Result<Json<AnswerQuestion>, JsonRejection>,
 ) -> ApiResult<Json<Value>> {
     let text = body(payload)?.text;
-    let tasks = tasks_of(&state)?;
-    let agents = agents(&state)?;
-    let (task, question) = tasks
+    let (task, _) = tasks_of(&state)?
         .close_question(&id, Some(&text))
         .await
         .map_err(task_error)?;
-    let ask = task.ask.replace('\n', " ");
-    let message = format!(
-        "[answer] The user answered your question on “{ask}” in the tracker:\nQ: {}\nA: {}\n\
-         Go on with it; record any new demand in the answer as a sub-task first.",
-        question.text,
-        text.trim()
-    );
-    let payload = json!({"task": task.id, "question": question.id});
-    agents
-        .notify(
-            &question.thread_id,
-            &id,
-            message,
-            Note::Answer,
-            payload.clone(),
-        )
-        .await
-        .map_err(agent_error)?;
-    if let Some(coordinator) = agents.coordinator_of(&question.thread_id) {
-        let title = agents.worker_title(&question.thread_id).unwrap_or_default();
-        let told = format!(
-            "[answer] The user answered “{title}”'s question on “{ask}” directly; it has the answer, nothing to relay:\n“{}” → “{}”",
-            question.text,
-            text.trim()
-        );
-        agents
-            .notify(
-                &coordinator,
-                &format!("{id}.told"),
-                told,
-                Note::Answer,
-                payload,
-            )
-            .await
-            .map_err(agent_error)?;
-    }
     Ok(Json(success(json!({"answered": id, "task_id": task.id}))))
 }
 
@@ -219,11 +183,10 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
         .map(|t| t.project_id.clone())
         .collect::<std::collections::BTreeSet<_>>()
     {
-        for item in tasks
-            .list(&project)
-            .into_iter()
-            .filter(|t| t.archived_at.is_none())
-        {
+        // Open questions wherever their task sits: aging into History does
+        // not take back what the agent is still waiting on.
+        for item in tasks.list(&project) {
+            let active = item.archived_at.is_none();
             for task in std::iter::once(&item).chain(item.subtasks.iter()) {
                 for question in task.questions.iter().filter(|q| q.open()) {
                     let from = agents
@@ -246,7 +209,7 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
                         .subtasks
                         .iter()
                         .any(|s| s.status == tasks::Status::NeedsYou);
-                if task.status == tasks::Status::NeedsYou && !covered {
+                if active && task.status == tasks::Status::NeedsYou && !covered {
                     apps.entry(project.clone()).or_default().push((
                         task.updated_at,
                         json!({

@@ -103,6 +103,9 @@ pub struct AppState {
     diagnosed: Arc<tokio::sync::watch::Sender<u64>>,
     public_url: Option<String>,
     draining: Arc<AtomicBool>,
+    /// Cancelled as shutdown begins: requests waiting for a change answer
+    /// with what they have.
+    closing: tokio_util::sync::CancellationToken,
     agents: Option<Arc<Agents>>,
     sims: Option<Arc<Sims>>,
     pool: Option<Arc<Pool>>,
@@ -123,11 +126,14 @@ impl Drop for Inspection {
 impl AppState {
     /// One item each time something a build's status shows may have
     /// changed: its job, its launch diagnostics, the agent that owns it.
+    /// Ends as shutdown begins.
     pub(super) fn build_changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
         use futures_util::StreamExt;
         let mut sources = vec![self.jobs.changes(), counted(&self.diagnosed)];
         sources.extend(self.agents.as_ref().map(|a| a.changes()));
-        futures_util::stream::select_all(sources).boxed()
+        futures_util::stream::select_all(sources)
+            .take_until(self.closing.clone().cancelled_owned())
+            .boxed()
     }
 
     /// A place for one Xcode inspection, if one is free now.
@@ -156,6 +162,7 @@ impl AppState {
             diagnosed: Arc::new(tokio::sync::watch::channel(0).0),
             public_url,
             draining: Arc::new(AtomicBool::new(false)),
+            closing: tokio_util::sync::CancellationToken::new(),
             agents: None,
             sims: None,
             pool: None,
@@ -167,13 +174,17 @@ impl AppState {
 
 /// Runs blocking file work in `lane`, off the async workers, to its end even
 /// if the request that asked for it goes away (so the lane is held for as
-/// long as the work runs).
+/// long as the work runs). The work starts only once the lane admits it.
 async fn in_lane<T: Send + 'static>(
     lane: &Arc<Lane>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> std::result::Result<T, tokio::task::JoinError> {
     let lane = lane.clone();
-    tokio::spawn(async move { lane.run(tokio::task::spawn_blocking(work)).await }).await?
+    tokio::spawn(async move {
+        lane.run(async move { tokio::task::spawn_blocking(work).await })
+            .await
+    })
+    .await?
 }
 
 /// Where catalog writes run: its lane, and the count they bump.

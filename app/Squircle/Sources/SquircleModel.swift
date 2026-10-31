@@ -163,7 +163,6 @@ final class SquircleModel {
     /// M03: messages on their way, and where the unfinished ones are kept.
     private var delivery = Delivery.State() { didSet { changed() } }
     private let journal: PendingJournal?
-    private var journalSequence: UInt64 = 0
     /// The journal's writes, in the order they were asked for.
     private var journalWork: Task<Void, Never>?
     /// The fields messages were sent with, to put back if T3 refuses one.
@@ -212,12 +211,13 @@ final class SquircleModel {
     private var debugDrops: Task<Void, Never>?
     private var installWatch: Task<Void, Never>?
     private var media: [JSONValue] { state.media }
-    /// Pictures, recordings and files the open conversation shows.
+    /// Pictures, recordings and files conversations show, each loaded for its own thread.
     private(set) lazy var conversationMedia = ConversationMedia(
         client: client, gateway: gateway, base: configuration?.t3URL,
-        thread: { [weak self] in self?.selectedSessionID },
-        message: { [weak self] id in self?.messages.first { $0.id == id } },
-        published: { [weak self] in self?.media ?? [] })
+        published: { [weak self] thread in self?.publishedMedia(of: thread) ?? [] })
+    private func publishedMedia(of thread: String) -> [JSONValue] {
+        thread == selectedSessionID ? media : threadCache.peek(thread)?.state.media ?? []
+    }
     private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
     private let upload: ((URL, String) async throws -> String)?
     private let preferences: UserDefaults
@@ -548,6 +548,8 @@ final class SquircleModel {
             // Replayed and live events overlap; each applies once, and the
             // shell remembers how far it got for the next resume.
             let sequence = item["sequence"].int
+            // A sequence that isn't a whole number is a broken event: never applied.
+            if sequence == nil, item["sequence"] != .null { return }
             if let sequence, let held = shell["snapshotSequence"].int, sequence <= held { return }
             var s = shell.object
             if let sequence { s["snapshotSequence"] = .number(Double(sequence)) }
@@ -1188,39 +1190,26 @@ final class SquircleModel {
         if case .protocolFault(let fault) = reduction.disposition { NSLog("SQUIRCLE-FSM M03 fault %@", fault) }
         #endif
         delivery = reduction.state
-        run(reduction.effects[...])
-    }
-    /// Runs `effects` in order; what follows a save waits until it is on disk.
-    private func run(_ effects: ArraySlice<Delivery.Effect>) {
-        var rest = effects
-        while let effect = rest.popFirst() {
-            guard case .save(let entry) = effect else { perform(effect); continue }
-            guard let journal else { continue }
-            journalSequence += 1
-            let sequence = journalSequence, after = rest
-            journalWork = Task { [weak self, previous = journalWork] in
-                await previous?.value
-                do {
-                    try await journal.save(.init(intent: entry.intent, stage: entry.stage), sequence: sequence)
-                    self?.run(after)
-                } catch {
-                    self?.deliver(.saveFailed(messageID: entry.intent.messageID, reason: error.localizedDescription))
-                }
-            }
-            return
-        }
+        for effect in reduction.effects { perform(effect) }
     }
     private func perform(_ effect: Delivery.Effect) {
         switch effect {
-        case .save: break
-        case .forget(let id):
-            journalSequence += 1
-            let sequence = journalSequence
-            if let journal {
-                journalWork = Task { [previous = journalWork] in
-                    await previous?.value
-                    await journal.forget(id, sequence: sequence)
+        case .save(let entry, let sequence):
+            // Writes go in the order asked; the reducer sends nothing until this one is acknowledged.
+            let id = entry.intent.messageID
+            journalWork = Task { [weak self, journal, previous = journalWork] in
+                await previous?.value
+                do {
+                    try await journal?.save(.init(intent: entry.intent, stage: entry.stage), sequence: sequence)
+                    self?.deliver(.saved(messageID: id, sequence: sequence))
+                } catch {
+                    self?.deliver(.saveFailed(messageID: id, sequence: sequence, reason: error.localizedDescription))
                 }
+            }
+        case .forget(let id, let sequence):
+            journalWork = Task { [journal, previous = journalWork] in
+                await previous?.value
+                await journal?.forget(id, sequence: sequence)
             }
         case .prepare(let intent):
             let field = sentFields[intent.messageID] ?? intent.recordings.map(Self.attachment)

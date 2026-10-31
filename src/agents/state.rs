@@ -93,60 +93,79 @@ impl State {
     /// shell holds every thread that is neither archived nor deleted: an
     /// archived thread leaves it (`thread.removed`), so to this service it is
     /// gone. A snapshot that names `resolvedRepositoryIdentityRoots` is only
-    /// a refresh of those projects' metadata, with no threads.
-    pub(super) fn consume_shell(&mut self, item: &Value) {
+    /// a refresh of those projects' metadata, with no threads. An item that
+    /// isn't what protocol 2 says is refused unapplied: the connection ends
+    /// and the shell stays unknown until a new one sends its snapshot.
+    pub(super) fn consume_shell(&mut self, item: &Value) -> Result<()> {
+        let malformed = || format!("T3 sent a malformed shell item: {}", item["kind"]);
         let shell = self.shell_mut();
-        let keyed = |list: &Value| -> HashMap<String, Arc<Value>> {
-            list.as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|v| Some((v["id"].as_str()?.to_string(), Arc::new(v.clone()))))
-                .collect()
-        };
         match item["kind"].as_str() {
             Some("snapshot") if item.get("resolvedRepositoryIdentityRoots").is_some() => {
-                shell.projects.extend(keyed(&item["snapshot"]["projects"]));
+                let projects = keyed(&item["snapshot"]["projects"]).with_context(malformed)?;
+                shell.projects.extend(projects);
             }
             Some("snapshot") => {
                 let snapshot = &item["snapshot"];
-                shell.threads = keyed(&snapshot["threads"]);
-                shell.projects = keyed(&snapshot["projects"]);
+                let (Some(threads), Some(projects), Some(sequence)) = (
+                    keyed(&snapshot["threads"]).filter(|t| t.values().all(|t| shell_row(t))),
+                    keyed(&snapshot["projects"]),
+                    snapshot["snapshotSequence"].as_u64(),
+                ) else {
+                    bail!(malformed());
+                };
+                shell.threads = threads;
+                shell.projects = projects;
+                shell.sequence = sequence;
                 shell.link = Link::Current {
                     epoch: shell.link.epoch(),
                 };
             }
-            Some("thread.updated") if item["location"] == "archive" => {
-                if let Some(id) = item["thread"]["id"].as_str() {
-                    shell.threads.remove(id);
+            Some(
+                kind
+                @ ("thread.updated" | "thread.removed" | "project.updated" | "project.removed"),
+            ) => {
+                let sequence = item["sequence"].as_u64().with_context(malformed)?;
+                match kind {
+                    "thread.updated" => {
+                        let thread = &item["thread"];
+                        let id = thread["id"]
+                            .as_str()
+                            .filter(|_| shell_row(thread))
+                            .with_context(malformed)?;
+                        if item["location"] == "archive" {
+                            shell.threads.remove(id);
+                        } else {
+                            shell
+                                .threads
+                                .insert(id.to_string(), Arc::new(thread.clone()));
+                        }
+                    }
+                    "thread.removed" => {
+                        let id = item["threadId"].as_str().with_context(malformed)?;
+                        if item["location"] != "archive" {
+                            shell.threads.remove(id);
+                        }
+                    }
+                    "project.updated" => {
+                        let project = &item["project"];
+                        let id = project["id"].as_str().with_context(malformed)?;
+                        shell
+                            .projects
+                            .insert(id.to_string(), Arc::new(project.clone()));
+                    }
+                    _ => {
+                        let id = item["projectId"].as_str().with_context(malformed)?;
+                        shell.projects.remove(id);
+                    }
                 }
-            }
-            Some("thread.updated") => {
-                if let Some(id) = item["thread"]["id"].as_str() {
-                    shell
-                        .threads
-                        .insert(id.to_string(), Arc::new(item["thread"].clone()));
-                }
-            }
-            Some("project.updated") => {
-                if let Some(id) = item["project"]["id"].as_str() {
-                    shell
-                        .projects
-                        .insert(id.to_string(), Arc::new(item["project"].clone()));
-                }
-            }
-            Some("thread.removed") if item["location"] != "archive" => {
-                if let Some(id) = item["threadId"].as_str() {
-                    shell.threads.remove(id);
-                }
-            }
-            Some("project.removed") => {
-                if let Some(id) = item["projectId"].as_str() {
-                    shell.projects.remove(id);
-                }
+                shell.sequence = shell.sequence.max(sequence);
             }
             _ => {}
         }
+        let sequence = shell.sequence;
+        shell.created.retain(|_, at| *at > sequence);
         self.publish();
+        Ok(())
     }
 
     /// Follows workers in T3's shell: a reserved worker whose thread has
@@ -432,30 +451,86 @@ impl State {
 
     /// The command for `purpose` a caller waits for: the one saved for it
     /// while T3 left it unanswered, or a new one, saved before it is sent.
+    /// One found again may already have reached T3, so it is marked
+    /// uncertain. A new one is refused while `INTENTS_KEPT` wait for an
+    /// answer: those are never dropped to make room.
     pub(super) fn intent(
         &mut self,
         purpose: String,
         build: impl FnOnce(&Identity) -> Command,
     ) -> Result<Command> {
         self.resolve()?;
-        if let Some(pending) = self
-            .registry()
-            .intents
-            .iter()
-            .find(|p| p.purpose == purpose)
-        {
-            return Ok(pending.command.clone());
+        let intents = &self.registry().intents;
+        if let Some(index) = intents.iter().position(|p| p.purpose == purpose) {
+            let pending = &intents[index];
+            let command = pending.command.clone();
+            if !pending.uncertain {
+                let mut next = self.registry().clone();
+                next.intents[index].uncertain = true;
+                self.commit(next)?;
+            }
+            return Ok(command);
         }
+        ensure!(
+            intents.len() < INTENTS_KEPT,
+            "T3 has not confirmed {} earlier commands. Ask those again with the same text first (each is sent again as itself, never twice):\n{}",
+            intents.len(),
+            intents
+                .iter()
+                .map(|p| p.purpose.lines().next().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
         let command = build(&identity());
         let mut next = self.registry().clone();
         next.intents.push(Pending {
             purpose,
             command: command.clone(),
             at: crate::model::now(),
+            uncertain: false,
         });
-        let excess = next.intents.len().saturating_sub(INTENTS_KEPT);
-        next.intents.drain(..excess);
         self.commit(next)?;
         Ok(command)
     }
+
+    /// Records what an attempt at a saved command got. T3's answer settles
+    /// it; a lost answer leaves it uncertain; one that never left the
+    /// service drops it only if no attempt may have reached T3.
+    pub(super) fn attempted(&mut self, id: &str, outcome: &Dispatched) -> Result<()> {
+        self.change_if(|registry, _| {
+            let index = registry
+                .intents
+                .iter()
+                .position(|p| p.command.id() == Some(id))?;
+            let uncertain = registry.intents[index].uncertain;
+            match outcome {
+                Dispatched::Accepted(_) | Dispatched::Refused(_) => {
+                    registry.intents.remove(index);
+                }
+                Dispatched::NotSent(_) if !uncertain => {
+                    registry.intents.remove(index);
+                }
+                Dispatched::NotSent(_) | Dispatched::Unknown(_) if uncertain => return None,
+                Dispatched::NotSent(_) | Dispatched::Unknown(_) => {
+                    registry.intents[index].uncertain = true;
+                }
+            }
+            Some(())
+        })?;
+        Ok(())
+    }
+}
+
+/// A list of shell rows by ID; `None` unless every one has a string ID.
+fn keyed(list: &Value) -> Option<HashMap<String, Arc<Value>>> {
+    list.as_array()?
+        .iter()
+        .map(|v| Some((v["id"].as_str()?.to_string(), Arc::new(v.clone()))))
+        .collect()
+}
+
+/// Whether a thread row says what its run is doing: a row without its
+/// status would read as stopped.
+fn shell_row(row: &Value) -> bool {
+    row["id"].is_string() && row["status"].is_string()
 }

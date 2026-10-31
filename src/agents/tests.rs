@@ -5,6 +5,13 @@
 use super::*;
 use std::sync::Mutex;
 
+/// T3's event sequence, shared by every fake: what it answers an accepted
+/// command with, and what numbers shell items the tests don't number.
+pub(super) fn next_sequence() -> u64 {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// A protocol 2 shell row: `status` is `idle` or the latest run's.
 fn thread(run: Option<&str>, status: &str, needs: bool) -> Value {
     json!({
@@ -53,6 +60,44 @@ async fn a_metadata_snapshot_keeps_the_threads_and_archiving_removes_one() {
             value: None
         }
     );
+}
+
+/// A shell item that isn't protocol 2 is refused unapplied (its
+/// connection then ends, leaving the shell unknown); a thread T3 accepted but hasn't shown yet is waited for, and
+/// is gone once the shell has moved past its creation without it.
+#[tokio::test]
+async fn only_a_caught_up_current_shell_says_a_thread_is_gone() {
+    let temp = tempfile::tempdir().unwrap();
+    let (agents, _) = fake_agents(temp.path(), temp.path(), vec![]).await;
+    let refused = agents
+        .owner
+        .ask(|s| {
+            s.consume_shell(
+                &json!({"kind": "snapshot", "snapshot": {"snapshotSequence": 9,
+                "projects": [], "threads": [{"id": "a", "projectId": "p"}]}}),
+            )
+        })
+        .await;
+    assert!(refused.is_err());
+    assert_eq!(agents.shell().thread("a"), None);
+
+    let created = next_sequence() + 100;
+    agents
+        .owner
+        .ask(move |s| {
+            s.shell_mut().created.insert("new".into(), created);
+            s.publish();
+        })
+        .await;
+    assert_eq!(agents.observe("new"), Observed::Unavailable);
+    let mut waiting = Box::pin(agents.wait_thread("new"));
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    // An event past its creation, and the thread isn't there.
+    agents
+        .consume_shell(&json!({"kind": "project.removed", "sequence": created, "projectId": "x"}))
+        .await;
+    assert_eq!(waiting.await.unwrap(), None);
+    assert!(agents.shell().created.is_empty());
 }
 
 fn event(key: &str) -> WorkerEvent {
@@ -109,6 +154,8 @@ struct Fake {
     detached: Mutex<std::collections::HashSet<String>>,
     /// The next dispatch of this type fails; `true` if T3 applied it anyway (a lost acknowledgement).
     fail: Mutex<Vec<(&'static str, bool)>>,
+    /// The next dispatch of this type never leaves the service.
+    unsent: Mutex<Vec<&'static str>>,
     /// Created thread rows not shown yet; None shows them at once.
     held: Mutex<Option<Vec<Value>>>,
     /// Told when a thread is created.
@@ -206,6 +253,13 @@ impl Peer for Fake {
                 .expect("every command has its identity")
                 .to_string();
             assert!(command["createdAt"].is_string());
+            {
+                let mut unsent = self.unsent.lock().unwrap();
+                if let Some(i) = unsent.iter().position(|kind| command["type"] == *kind) {
+                    unsent.remove(i);
+                    return Dispatched::NotSent("No connection".into());
+                }
+            }
             match self.receipts.lock().unwrap().get(&id) {
                 Some(true) => return Dispatched::Accepted(json!({"sequence": 1})),
                 Some(false) => return Dispatched::Refused("Previously rejected".into()),
@@ -268,7 +322,7 @@ impl Peer for Fake {
             if failure == Some(true) {
                 return Dispatched::Unknown("T3 did not answer".into());
             }
-            Dispatched::Accepted(json!({"sequence": 1}))
+            Dispatched::Accepted(json!({"sequence": next_sequence()}))
         })
     }
     fn snapshot<'a>(&'a self, tag: &'a str, _: Value) -> crate::push::BoxFuture<'a, Result<Value>> {
@@ -716,6 +770,106 @@ async fn a_send_asked_again_after_a_lost_answer_is_the_same_command() {
     // A new request is a new command.
     agents.message("w1", "go on").await.unwrap();
     assert_eq!(fake.messages.lock().unwrap()["w1"].len(), 2);
+}
+
+/// A lost answer, then an attempt that never left the service: the
+/// command may still have reached T3, so the next ask sends it again as
+/// itself and T3 shows the message once.
+#[tokio::test]
+async fn an_unsent_retry_keeps_an_uncertain_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let (agents, fake) = fake_agents(
+        temp.path(),
+        temp.path(),
+        vec![row("w1", "p", "auto", "t", "completed", false)],
+    )
+    .await;
+    fake.fail.lock().unwrap().push(("message.dispatch", true));
+    assert!(agents.message("w1", "go on").await.is_err());
+    fake.unsent.lock().unwrap().push("message.dispatch");
+    assert!(agents.message("w1", "go on").await.is_err());
+    assert_eq!(agents.registry().intents.len(), 1);
+    agents.message("w1", "go on").await.unwrap();
+    assert_eq!(fake.messages.lock().unwrap()["w1"].len(), 1);
+    let sent = fake.sent("message.dispatch");
+    assert!(sent.iter().all(|c| c["commandId"] == sent[0]["commandId"]));
+    assert!(agents.registry().intents.is_empty());
+}
+
+/// An answer saved when the service stopped before relaying it reaches its
+/// asker and the asker's app agent after a restart, once; the phone sending
+/// the same answer again is accepted, a different one is not.
+#[tokio::test]
+async fn an_answer_saved_before_a_restart_is_delivered_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let threads = vec![
+        row("agent", "p", "full-access", "a", "completed", false),
+        row("w1", "p", "full-access", "t", "completed", false),
+    ];
+    let (agents, fake) = fake_agents(temp.path(), temp.path(), threads.clone()).await;
+    registered(&agents, |r| {
+        r.agents.insert("p".into(), agent("agent"));
+        r.workers.insert("w1".into(), worker("agent"));
+    })
+    .await;
+    let task = agents
+        .tasks
+        .add(
+            "p",
+            "Pick a colour",
+            None,
+            None,
+            crate::tasks::By::Agent,
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    let (_, question) = agents
+        .tasks
+        .ask(&task.id, "Red or blue?", vec![], "w1", None)
+        .await
+        .unwrap();
+    agents
+        .tasks
+        .close_question(&question.id, Some("Blue"))
+        .await
+        .unwrap();
+    drop(agents);
+    let agents = reopened(temp.path(), &fake, threads, temp.path()).await;
+    agents
+        .tasks
+        .close_question(&question.id, Some("Blue"))
+        .await
+        .unwrap();
+    agents.relay_answers().await.unwrap();
+    agents.relay_answers().await.unwrap();
+    agents.flush().await.unwrap();
+    let told = format!("{}.told", question.id);
+    let count = |thread: &str, id: &str| {
+        fake.messages.lock().unwrap()[thread]
+            .iter()
+            .filter(|m| *m == id)
+            .count()
+    };
+    assert_eq!((count("w1", &question.id), count("agent", &told)), (1, 1));
+    assert!(agents.tasks.owed().is_empty());
+    assert!(
+        agents
+            .tasks
+            .close_question(&question.id, Some("Red"))
+            .await
+            .is_err()
+    );
+    agents
+        .tasks
+        .close_question(&question.id, Some("Blue"))
+        .await
+        .unwrap();
+    agents.relay_answers().await.unwrap();
+    agents.flush().await.unwrap();
+    assert_eq!((count("w1", &question.id), count("agent", &told)), (1, 1));
 }
 
 async fn run(dir: &Path, args: &[&str]) {

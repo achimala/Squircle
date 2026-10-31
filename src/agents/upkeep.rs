@@ -80,17 +80,24 @@ impl Agents {
         config: &crate::upkeep::Upkeep,
         agent: &Agent,
     ) -> Result<Option<f64>> {
-        use crate::upkeep::tokens;
         let thread = &agent.thread_id;
         if !crate::t3steps::valid(thread, &[]) || self.upkeep_blocker(agent).is_some() {
             return Ok(None);
         }
-        let rows = crate::t3db::query(
-            crate::t3db::sql::CONTEXT_READING,
-            crate::t3db::params![thread],
-        )
-        .await?;
-        let row = rows.first().context("no reading")?;
+        // After any compaction already in flight: it settles before the read.
+        self.compacting
+            .run(agent.project_id.clone(), self.upkeep_in_lane(config, agent))
+            .await
+    }
+
+    async fn upkeep_in_lane(
+        self: &Arc<Self>,
+        config: &crate::upkeep::Upkeep,
+        agent: &Agent,
+    ) -> Result<Option<f64>> {
+        use crate::upkeep::tokens;
+        let thread = &agent.thread_id;
+        let row = context(thread).await?;
         let (Some(reading), Some(used), Some(last)) = (
             row["reading_at"].as_str(),
             row["used"].as_u64(),
@@ -148,7 +155,7 @@ impl Agents {
 
     /// Feeds one event to the app's upkeep (M26) and carries out what it
     /// decides, each decision saved before its effect runs. Returns what the
-    /// last compaction sent got.
+    /// last compaction sent got. Runs in the app's `compacting` lane.
     pub(super) async fn run_upkeep(
         self: &Arc<Self>,
         project: &str,
@@ -168,7 +175,10 @@ impl Agents {
                     m26::Effect::Send(command) => {
                         let sent = self.client().await?.dispatch(&command).await;
                         outcome = Some(sent.clone());
-                        event = Some(m26::Event::Sent(sent));
+                        event = Some(m26::Event::Sent {
+                            command: command.id().context("compaction has no ID")?.into(),
+                            outcome: sent,
+                        });
                     }
                 }
             }
@@ -185,26 +195,40 @@ impl Agents {
         thread_id: Option<&str>,
     ) -> Result<Value> {
         self.ready().await?;
-        let agent = self.find_agent(project_id, thread_id)?;
-        ensure!(
-            matches!(agent.lifecycle, Lifecycle::Ready { .. }),
-            "The app's agent is being created or restarted"
-        );
-        ensure!(
-            !self.observe_now(&agent.thread_id)?.busy(),
-            "The agent is working; compact it once its turn ends"
-        );
-        let compact = self.compact_command(&agent.thread_id, "Compacted", 0)?;
-        match self
-            .run_upkeep(
-                &agent.project_id,
-                m26::Event::Manual {
+        let project = self.find_agent(project_id, thread_id)?.project_id;
+        let (agent, sent) = self
+            .compacting
+            .run(project.clone(), async {
+                // Found again: it may have changed while an automatic one ran.
+                let agent = self.find_agent(Some(&project), None)?;
+                ensure!(
+                    matches!(agent.lifecycle, Lifecycle::Ready { .. }),
+                    "The app's agent is being created or restarted"
+                );
+                ensure!(
+                    !self.observe_now(&agent.thread_id)?.busy(),
+                    "The agent is working; compact it once its turn ends"
+                );
+                // The reading it compacts, so a check on that same one later
+                // doesn't compact again before this one shows.
+                let row = context(&agent.thread_id).await?;
+                let reading = Reading {
+                    origin: Origin::Manual,
+                    at: row["reading_at"].as_str().map(Into::into),
+                    tokens: row["used"].as_u64().unwrap_or(0),
+                };
+                let compact =
+                    self.compact_command(&agent.thread_id, "Compacted", reading.tokens)?;
+                let event = m26::Event::Manual {
                     thread: agent.thread_id.clone(),
+                    reading,
                     compact,
-                },
-            )
-            .await?
-        {
+                };
+                let sent = self.run_upkeep(&agent.project_id, event).await?;
+                Ok((agent, sent))
+            })
+            .await?;
+        match sent {
             Some(Dispatched::Accepted(_)) => {}
             Some(Dispatched::Unknown(detail) | Dispatched::NotSent(detail)) => bail!(
                 "T3 has not confirmed the compaction ({detail}); the same one is sent again when the agent is next idle"
@@ -235,4 +259,15 @@ impl Agents {
             ),
         ))
     }
+}
+
+/// The thread's latest context reading, its newest user message and when
+/// it last changed, from T3's database.
+async fn context(thread: &str) -> Result<Value> {
+    let rows = crate::t3db::query(
+        crate::t3db::sql::CONTEXT_READING,
+        crate::t3db::params![thread],
+    )
+    .await?;
+    rows.into_iter().next().context("no reading")
 }

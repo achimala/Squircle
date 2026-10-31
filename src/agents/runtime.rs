@@ -35,6 +35,7 @@ impl Agents {
             ops: Lanes::new("agent operations", Rank::AgentOp),
             spawning: Lanes::new("worker spawns", Rank::AgentSpawn),
             flushing: Lane::new(Rank::AgentFlush),
+            compacting: Lanes::new("compactions", Rank::Compaction),
             push: std::sync::OnceLock::new(),
             tasks,
         }))
@@ -140,7 +141,7 @@ impl Agents {
             tokio::select! {
                 item = shell.recv() => {
                     let Some(item) = item else { break };
-                    self.owner.ask(move |s| { s.consume_shell(&item); s.observe_workers(); }).await;
+                    self.owner.ask(move |s| { s.consume_shell(&item)?; s.observe_workers(); anyhow::Ok(()) }).await?;
                     if let Some(push) = self.push.get() { push.apps_changed(self.app_views()).await; }
                     self.schedule_flush();
                     self.run_due_resets().await;
@@ -151,11 +152,24 @@ impl Agents {
         bail!("T3 connection closed")
     }
 
-    /// Applies one item of T3's shell subscription.
+    /// Applies one item of T3's shell subscription, numbered (unless the
+    /// test numbers it) after everything T3 has done so far.
     #[cfg(test)]
     pub(super) async fn consume_shell(&self, item: &Value) {
-        let item = item.clone();
-        self.owner.ask(move |s| s.consume_shell(&item)).await
+        let mut item = item.clone();
+        let sequence = super::tests::next_sequence();
+        match item["kind"].as_str() {
+            Some("snapshot") if item["snapshot"]["snapshotSequence"].is_null() => {
+                item["snapshot"]["snapshotSequence"] = json!(sequence)
+            }
+            Some("snapshot") => {}
+            _ if item["sequence"].is_null() => item["sequence"] = json!(sequence),
+            _ => {}
+        }
+        self.owner
+            .ask(move |s| s.consume_shell(&item))
+            .await
+            .expect("a well-formed shell item")
     }
 
     pub(super) fn thread(&self, id: &str) -> Option<Value> {

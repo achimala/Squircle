@@ -171,10 +171,9 @@ impl Agents {
                 match effect {
                     BootEffect::Commit => {}
                     BootEffect::Send => {
+                        let command = Command::new(&identity(), command.clone());
                         next = Some(BootEvent::Sent(
-                            client
-                                .dispatch(&Command::new(&identity(), command.clone()))
-                                .await,
+                            self.dispatch_creation(client, id, &command).await,
                         ))
                     }
                     BootEffect::Confirm(detail) => {
@@ -205,12 +204,43 @@ impl Agents {
         self.owner.ask(move |s| s.reduce_boot(&id, event)).await
     }
 
-    /// A thread from the live shell; one just created arrives with T3's
-    /// next shell event.
-    pub(super) async fn wait_thread(&self, id: &str) -> Result<Value> {
-        let view = self.view_when(|v| v.shell.threads.contains_key(id)).await;
-        view.and_then(|v| v.shell.thread(id))
-            .with_context(|| format!("T3 has no thread {id}"))
+    /// A thread from the live shell, or `None` if T3 has no such thread.
+    /// One whose creation T3 accepted is waited for until the shell shows
+    /// it or has moved past its creation; the connection going down first
+    /// is an error.
+    pub(super) async fn wait_thread(&self, id: &str) -> Result<Option<Value>> {
+        let view = self
+            .view_when(|v| v.shell.has(id).is_some())
+            .await
+            .context("T3's thread list is not current; try again")?;
+        Ok(view.shell.thread(id))
+    }
+
+    /// Dispatches a command that creates thread `id`, remembering the
+    /// sequence T3 accepted it at, so its absence before the shell gets
+    /// there is not taken for its deletion.
+    pub(super) async fn dispatch_creation(
+        &self,
+        client: &dyn Peer,
+        id: &str,
+        command: &Command,
+    ) -> Dispatched {
+        let outcome = client.dispatch(command).await;
+        if let Dispatched::Accepted(result) = &outcome
+            && let Some(at) = result["sequence"].as_u64()
+        {
+            let id = id.to_string();
+            self.owner
+                .ask(move |s| {
+                    let shell = s.shell_mut();
+                    if at > shell.sequence {
+                        shell.created.insert(id, at);
+                    }
+                    s.publish();
+                })
+                .await;
+        }
+        outcome
     }
 
     /// Archives a worker (M15): stops its session (one whose turn may still
@@ -252,12 +282,16 @@ impl Agents {
         let mut stage = worker.as_ref().map_or(Stage::Active, |w| w.stage.clone());
         let mut result = json!({"archived": id, "stopped": false, "title": title});
         let mut inspected = None;
-        let look = || m15::ArchiveEvent::Look {
-            thread: self.seen(id, |o| o),
-            discard,
-            next: identity(),
+        // With the thread's projection: an idle session still attached is
+        // stopped (detached) before anything is removed.
+        let look = || async {
+            m15::ArchiveEvent::Look {
+                thread: self.seen_live(client, id).await,
+                discard,
+                next: identity(),
+            }
         };
-        let mut event = look();
+        let mut event = look().await;
         loop {
             let mut next = None;
             let (archiving, registered) = (id.to_string(), worker.is_some());
@@ -291,9 +325,7 @@ impl Agents {
                         });
                     }
                     m15::ArchiveEffect::AwaitStopped => {
-                        next = Some(m15::ArchiveEvent::Stopped(
-                            self.wait_stopped(id).await.is_ok(),
-                        ))
+                        next = Some(m15::ArchiveEvent::Stopped(self.wait_stopped(id).await))
                     }
                     m15::ArchiveEffect::Inspect => {
                         let found = self.inspect_worker(id, worker.as_ref()).await;
@@ -306,13 +338,10 @@ impl Agents {
                     }
                     m15::ArchiveEffect::Remove => {
                         // Stopped right now, not just when it was inspected.
-                        let removed = match (&inspected, self.stopped(id)) {
-                            (_, None) => {
-                                Err("Its session is live again, so nothing more was removed"
-                                    .to_string())
-                            }
-                            (None, Some(_)) => Ok(()),
-                            (Some((root, state)), Some(receipt)) => {
+                        let removed = match (&inspected, self.stopped(client, id).await) {
+                            (_, Err(error)) => Err(format!("{error:#}")),
+                            (None, Ok(_)) => Ok(()),
+                            (Some((root, state)), Ok(receipt)) => {
                                 match remove(root, state, discard, &receipt).await {
                                     Ok(cleaned) => {
                                         result["removed_worktree"] = json!(cleaned.worktree);
@@ -327,7 +356,7 @@ impl Agents {
                         };
                         next = Some(m15::ArchiveEvent::Removed(removed));
                     }
-                    m15::ArchiveEffect::Look => next = Some(look()),
+                    m15::ArchiveEffect::Look => next = Some(look().await),
                     m15::ArchiveEffect::Refused(why) | m15::ArchiveEffect::Failed(why) => {
                         bail!(why)
                     }
@@ -371,26 +400,39 @@ impl Agents {
         Ok(Some((root, state)))
     }
 
-    /// A receipt if the live shell shows the thread's session stopped, or
-    /// no such thread.
-    pub(super) fn stopped(&self, id: &str) -> Option<StopReceipt> {
-        stopped_in(&self.shell(), id)
+    /// A receipt if T3 shows, right now, no run in progress on the thread
+    /// and its projection no provider session attached, or no such thread.
+    pub(super) async fn stopped(&self, client: &dyn Peer, id: &str) -> Result<StopReceipt> {
+        match self.seen_live(client, id).await {
+            core::Observed::Current { value: None, .. } => Ok(StopReceipt(())),
+            core::Observed::Current { value: Some(o), .. } if o.stopped() => Ok(StopReceipt(())),
+            core::Observed::Current { .. } => {
+                bail!(
+                    "Its session is still attached, so nothing more was removed; run archive again"
+                )
+            }
+            _ => bail!("T3's thread list is not current, so nothing more was removed; try again"),
+        }
     }
 
-    /// Waits for T3 to report a stopped worker's session stopped. A thread
-    /// still waiting on the user, or a disconnected shell, does not count:
-    /// a connection that goes down first ends the wait.
-    pub(super) async fn wait_stopped(&self, id: &str) -> Result<StopReceipt> {
-        let view = self.view_when(|v| stopped_in(&v.shell, id).is_some()).await;
-        view.and_then(|v| stopped_in(&v.shell, id))
-            .context("T3 disconnected before the worker stopped; nothing was removed")
+    /// Waits for the live shell to show no run in progress on the thread
+    /// (or no such thread). A thread still waiting on the user does not
+    /// count; false if the connection goes down first.
+    pub(super) async fn wait_stopped(&self, id: &str) -> bool {
+        self.view_when(|v| match v.shell.observe(id).current() {
+            Some(Some(now)) => now.stopped(),
+            Some(None) => true,
+            None => false,
+        })
+        .await
+        .is_some()
     }
 
     /// Archives the coordinator's finished workers whose work is merged,
     /// deletes merged branches of workers archived earlier, prunes stale
     /// worktree entries, and reports what it leaves and why.
     pub async fn cleanup(&self, coordinator: &str, dry_run: bool) -> Result<Value> {
-        self.ready().await?;
+        let client = self.ready().await?;
         let agent = self
             .agent_for_thread(coordinator)
             .with_context(|| format!("{coordinator} is not an app agent's thread"))?;
@@ -456,9 +498,7 @@ impl Agents {
                     if !dry_run {
                         self.ops
                             .run(id.clone(), async {
-                                let receipt = self
-                                    .stopped(&id)
-                                    .context("Its session is still live; nothing was removed")?;
+                                let receipt = self.stopped(&*client, &id).await?;
                                 remove(&root, &git, false, &receipt).await
                             })
                             .await?;

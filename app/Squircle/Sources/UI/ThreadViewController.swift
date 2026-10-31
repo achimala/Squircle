@@ -156,8 +156,26 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Row heights of the most recently visited threads, so a returning
     /// thread lays out at its true size and opens exactly at the bottom.
     private static let heightCache = RecentCache<ConversationID, [String: CGFloat]>(limit: 16)
-    private var items: [ThreadItem] = []
+    private var items: [ThreadItem] = [] { didSet { openTurns = Self.openTurns(in: items) } }
     private var itemsByID: [String: ThreadItem] = [:]
+    /// Each expanded turn's summary row and the row its turn ends at (its
+    /// answer or the next message; nil: the end of the conversation), found
+    /// when the rows change so scrolling only measures them.
+    private var openTurns: [(summary: TurnSummary, head: String, end: String?)] = []
+    private static func openTurns(in items: [ThreadItem]) -> [(summary: TurnSummary, head: String, end: String?)] {
+        var turns: [(summary: TurnSummary, head: String, end: String?)] = []
+        var waiting = 0
+        for item in items {
+            switch item {
+            case .summary(let summary) where summary.expanded:
+                turns.append((summary, item.id, nil))
+            case .answer, .user, .update:
+                while waiting < turns.count { turns[waiting].end = item.id; waiting += 1 }
+            default: continue
+            }
+        }
+        return turns
+    }
     /// The turn the live line belonged to, so only that turn's own finish pulses.
     private var liveTurn: String?
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
@@ -1143,14 +1161,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private func updateSticky() {
         let top = table.contentOffset.y + table.contentInset.top
         var pinned: (TurnSummary, CGFloat, CGFloat)?
-        for (index, item) in items.enumerated() {
-            guard case .summary(let summary) = item, summary.expanded,
-                  let path = dataSource.indexPath(for: item.id) else { continue }
+        for (summary, id, end) in openTurns {
+            guard let path = dataSource.indexPath(for: id) else { continue }
             let head = table.rectForRow(at: path)
             guard head.minY < top else { continue }
-            // The turn ends at its answer or the next message.
-            let end = items[(index + 1)...].firstIndex { if case .answer = $0 { return true }; if case .user = $0 { return true }; if case .update = $0 { return true }; return false }
-            let endY = end.flatMap { dataSource.indexPath(for: items[$0].id) }.map { table.rectForRow(at: $0).minY } ?? table.contentSize.height
+            let endY = end.flatMap { dataSource.indexPath(for: $0) }.map { table.rectForRow(at: $0).minY } ?? table.contentSize.height
             guard endY > top + head.height * 0.5 else { continue }
             pinned = (summary, min(top, endY - head.height), head.height)
         }
@@ -1288,7 +1303,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // A page made ahead loads its pictures and posters too, so they are
         // there when it slides in.
         let preloading = !active && !covered
-        guard onScreen || preloading, view.window != nil, table.bounds.height > 0 else { media.seen([:]); return }
+        // Each load is for this thread as it is now, whatever opens later.
+        guard onScreen || preloading, view.window != nil, table.bounds.height > 0,
+              let thread = conversation.threadID else { media.seen([:]); return }
         let top = table.contentOffset.y + table.contentInset.top
         let bottom = max(top, table.contentOffset.y + table.bounds.height - table.contentInset.bottom)
         let middle = (top + bottom) / 2, reach = table.bounds.height
@@ -1309,22 +1326,22 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 // It rests on its newest; older ones are off to the left.
                 for (index, shot) in shots.enumerated() where GalleryCell.image(for: shot) == nil {
                     want("image:\(shot.step)#\(shot.index)", after: Double(shots.count - 1 - index) * GalleryCell.height) { [weak self] in
-                        await self?.loadImage(shot, item: id) ?? false
+                        await self?.loadImage(shot, item: id, in: thread) ?? false
                     }
                 }
             case .figure(let id, let shots):
                 for shot in shots where FigureCell.image(for: shot) == nil {
-                    want("figure:" + shot.step) { [weak self] in await self?.loadFigure(shot, item: id) ?? false }
+                    want("figure:" + shot.step) { [weak self] in await self?.loadFigure(shot, item: id, in: thread) ?? false }
                 }
             case .simulator(let use):
                 guard let recording = use.recordingID, StepVideos.url(for: "media:" + recording) == nil else { continue }
-                if StepImages.data(for: "poster:" + recording, index: 0) == nil, !model.conversationMedia.posterless.contains(recording) {
-                    want("poster:" + recording) { [weak self] in await self?.loadPoster(recording, item: item.id) ?? false }
+                if StepImages.data(for: "poster:" + recording, index: 0) == nil, !model.conversationMedia.hasNoPoster(recording, in: thread) {
+                    want("poster:" + recording) { [weak self] in await self?.loadPoster(recording, item: item.id, in: thread) ?? false }
                 }
                 // After the pictures around it.
-                if model.conversationMedia.autoLoadsRecording(recording) {
+                if model.conversationMedia.autoLoadsRecording(recording, in: thread) {
                     want("recording:" + recording, after: reach, whole: true) { [weak self] in
-                        await self?.loadRecording("media:" + recording, item: item.id) ?? false
+                        await self?.loadRecording("media:" + recording, item: item.id, in: thread) ?? false
                     }
                 }
             default: continue
@@ -1333,13 +1350,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         media.seen(wants)
     }
 
-    private func loadPoster(_ id: String, item: String) async -> Bool {
-        guard await model.conversationMedia.recordingPoster(id) != nil else { return false }
+    private func loadPoster(_ id: String, item: String, in thread: String) async -> Bool {
+        guard await model.conversationMedia.recordingPoster(id, in: thread) != nil else { return false }
         if StepVideos.url(for: "media:" + id) == nil { await reconfigure(item) }
         return true
     }
-    private func loadRecording(_ stepID: String, item: String) async -> Bool {
-        guard await model.conversationMedia.loadVideo(stepID) != nil else { return false }
+    private func loadRecording(_ stepID: String, item: String, in thread: String) async -> Bool {
+        guard await model.conversationMedia.loadVideo(stepID, in: thread) != nil else { return false }
         await reconfigure(item)
         return true
     }
@@ -1351,10 +1368,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             if let host, host.expandsSimulators { host.expandSimulator(use) }
             return
         }
-        guard let id = use.recordingID, let window = view.window, let cell = simulatorCell(use.id) else { return }
+        guard let id = use.recordingID, let thread = conversation.threadID, let window = view.window, let cell = simulatorCell(use.id) else { return }
         let origin = MediaOrigin { [weak self] in self?.simulatorCell(use.id)?.spot }
         MediaViewer.open(.video(poster: cell.poster, size: nil, player: cell.recordingPlayer, url: { [weak self] in
-            await self?.model.conversationMedia.loadVideo("media:" + id)
+            await self?.model.conversationMedia.loadVideo("media:" + id, in: thread)
         }), from: origin, in: window)
     }
 
@@ -1565,17 +1582,17 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         present(detail, animated: true)
     }
 
-    private func loadImage(_ shot: Shot, item: String) async -> Bool {
-        guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment) != nil,
+    private func loadImage(_ shot: Shot, item: String, in thread: String) async -> Bool {
+        guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment, in: thread) != nil,
               await GalleryCell.prepare(shot) != nil else { return false }
         await reconfigure(item)
         return true
     }
 
     /// Its size first, so the conversation makes room once, then the picture.
-    private func loadFigure(_ shot: Shot, item: String) async -> Bool {
-        if MediaFiles.sizes[shot.step] == nil, await model.conversationMedia.mediaSize(shot.step) != nil { await reconfigure(item) }
-        guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index) != nil, await FigureCell.prepare(shot) != nil else { return false }
+    private func loadFigure(_ shot: Shot, item: String, in thread: String) async -> Bool {
+        if MediaFiles.sizes[shot.step] == nil, await model.conversationMedia.mediaSize(shot.step, in: thread) != nil { await reconfigure(item) }
+        guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index, in: thread) != nil, await FigureCell.prepare(shot) != nil else { return false }
         await reconfigure(item)
         return true
     }
@@ -1598,11 +1615,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// A screenshot, picture or clip, flown up from where it shows.
     private func showImage(_ shot: Shot) {
-        guard let window = view.window, let found = mediaView(shot) else { return }
+        guard let window = view.window, let thread = conversation.threadID, let found = mediaView(shot) else { return }
         let origin = MediaOrigin { [weak self] in self?.mediaView(shot)?.spot }
         if shot.video {
             MediaViewer.open(.video(poster: found.picture, size: MediaFiles.sizes[shot.step], player: found.player, url: { [weak self] in
-                await self?.model.conversationMedia.loadVideo(shot.step)
+                await self?.model.conversationMedia.loadVideo(shot.step, in: thread)
             }), from: origin, in: window)
             return
         }

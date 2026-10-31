@@ -302,7 +302,8 @@ enum StepImages {
 enum MediaFiles {
     /// Pixel sizes, so a picture's place is reserved before its bytes arrive.
     static var sizes = SizeTable()
-    /// Short-lived URLs T3 signed, by path.
+    /// Short-lived URLs T3 signed, by thread and path: T3 signs a file for
+    /// the thread whose folder it is in.
     static var urls = SignedURLs()
     nonisolated static func isVideo(_ stepID: String) -> Bool {
         ["mp4", "mov", "m4v"].contains((stepID as NSString).pathExtension.lowercased())
@@ -316,9 +317,9 @@ enum MediaFiles {
     }
     struct SignedURLs {
         private var cache = BoundedCache<String, (url: URL, expires: Date)>(budget: 500)
-        subscript(path: String) -> (url: URL, expires: Date)? {
-            get { cache.peek(path) }
-            set { if let newValue { cache.set(newValue, for: path) } else { cache.removeValue(for: path) } }
+        subscript(thread: String, path: String) -> (url: URL, expires: Date)? {
+            get { cache.peek(thread + "\n" + path) }
+            set { if let newValue { cache.set(newValue, for: thread + "\n" + path) } else { cache.removeValue(for: thread + "\n" + path) } }
         }
         mutating func removeAll() { cache.removeAll() }
     }

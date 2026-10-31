@@ -273,6 +273,19 @@ impl Tasks {
             .await
     }
 
+    /// Answered questions whose answer has not reached its asker yet.
+    pub fn owed(&self) -> Vec<(Task, Question)> {
+        self.book.get().owed()
+    }
+
+    /// Settles an answer's delivery once the notification owner has it.
+    pub async fn delivered(&self, question: &str) -> Result<()> {
+        let event = Event::Delivered {
+            question: question.into(),
+        };
+        self.owner.ask(move |s| s.apply(vec![event])).await
+    }
+
     /// The task holding question `id`, and the question.
     pub fn question(&self, id: &str) -> Result<(Task, Question)> {
         self.book

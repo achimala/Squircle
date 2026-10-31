@@ -172,10 +172,14 @@ drops it (`never_started: true`).
 **Stop before removal (W1).** `thread archive` needs a current shell. A
 session that isn't stopped is stopped first; one that is running or waiting
 on the user needs `--discard`. Files are removed only with a `StopReceipt`,
-which only a current observation of a stopped (or absent) session can mint;
-`wait_stopped` gives up after 30 s and removes nothing. Order: stop → stopped
-→ remove files (`stage: files-removed`) → T3 `thread.archive` →
-`archived`. `thread cleanup` needs the same receipt.
+minted right at removal from a current shell showing no run in progress plus
+the thread's projection showing no provider session attached (or a caught-up
+shell without the thread); a shell row alone, or a projection without a
+well-formed session list, is not proof. An accepted stop waits for the run to
+end (or the connection to drop, removing nothing), then looks again: a
+session the interrupt left attached is detached under a new command. Order:
+stop → stopped and detached → remove files (`stage: files-removed`) → T3
+`thread.archive` → `archived`. `thread cleanup` needs the same receipt.
 
 **Restarts (W1).** `agent restart` queues `lifecycle: restart-queued`
 and runs only when a current observation shows the agent not busy, read again
@@ -274,7 +278,9 @@ becomes a thread. That adoption happens as soon as T3 creates the thread,
 before the first turn is sent, so a refused turn still belongs to the new
 thread. A send is a `PendingSend` with a message ID (and turn and create
 command IDs) fixed when it starts, phase `preparing / creating /
-awaitingAcceptance / accepted`; only T3's refusal removes it and returns the
+awaitingAcceptance / accepted`; each stage is saved on the phone first, and
+nothing is sent until that exact save is acknowledged (the save in progress
+is the send's state, 2026-10-31). Only T3's refusal removes it and returns the
 text and pictures to that conversation's field. A lost answer (the socket
 dropped, or the request never got out) is not an outcome: the same command
 goes again on T3's next connection, and T3 answers a command ID it already
@@ -284,14 +290,18 @@ fails them (heartbeat, probe). The socket's own URLSession has no request
 timeout, and T3's silence is allowed 40 s plus the time the request bytes
 T3 hasn't yet acknowledged need at 128 kbit/s (a Pong covers everything
 queued before its Ping; other frames don't), so a picture taking a minute
-on a slow uplink isn't mistaken for a dead link. Recording uploads are `uploading / uploaded /
+on a slow uplink isn't mistaken for a dead link. Silence is judged whatever
+our own writes are doing, and the heartbeat never waits on its own Ping, so a
+stalled uplink can't stall its detection (2026-10-31). Recording uploads are `uploading / uploaded /
 failed` per attachment, and a failed one is tried again on the next send.
 The composer and echo bubble are projections of the pending send.
 
 **Connection (W6).** `ConnectionPhase` is `stopped / suspended / refused /
 connecting(attempt) / ready(session)`. Every subscription callback carries
 its attempt ID; one from an older attempt is ignored, and a subscription
-ending during setup fails that attempt instead of being lost. Status text
+ending during setup fails that attempt instead of being lost. The open
+thread's failures reset only once T3 brings it up to date (its `synchronized`
+marker), and a typed refusal is said at once instead of retried. Status text
 derives from the phase ("Offline" after 8 s). Provider configuration is a
 `ResourceState` (`absent / loading / ready(fetchedAt) / failed(retryAt)`),
 reloaded from the service when T3 connects, when the event stream opens

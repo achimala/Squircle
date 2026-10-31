@@ -97,6 +97,8 @@ pub struct Agents {
     spawning: Lanes<String>,
     /// One flush at a time, so overlapping triggers cannot send twice.
     flushing: Lane,
+    /// One compaction at a time per project, manual or automatic.
+    compacting: Lanes<String>,
     push: std::sync::OnceLock<Arc<crate::push::Push>>,
     tasks: Arc<Tasks>,
 }
