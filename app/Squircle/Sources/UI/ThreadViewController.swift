@@ -1005,9 +1005,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // Embedded, its task's header names it already.
         let header: [ThreadItem] = threadTitle.isEmpty || embedded ? [] : [.header(threadTitle)]
         let messages = displayedMessages(content.messages)
-        let rows = resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
-                                            builds: model.builds, changes: content.changes,
-                                            simulators: content.simulators, thread: currentSessionID))
+        let rows = reserving(resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
+                                                      builds: model.builds, changes: content.changes,
+                                                      simulators: content.simulators, thread: currentSessionID)))
         var placed = ThreadItem.placing(openQuestions, in: rows)
         // The app's agent texts you: one received bubble per paragraph.
         if isAgent {
@@ -1017,6 +1017,43 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             }
         }
         return (header + placed, messages)
+    }
+
+    /// Pictures and clips from the Mac take their final frame when they
+    /// first show, so their sizes are asked for first. A new one waits out
+    /// of the conversation until the
+    /// Mac answers, then arrives at its size; one already showing keeps the
+    /// frame it has (`MediaFiles.frameSize`).
+    private func reserving(_ rows: [ThreadItem]) -> [ThreadItem] {
+        var unknown = Set<String>()
+        for case .figure(_, let shots) in rows {
+            for shot in shots {
+                guard let path = shot.path, MediaFiles.sizes[shot.sizeKey] == nil, !MediaFiles.asked.contains(path) else { continue }
+                unknown.insert(path)
+            }
+        }
+        guard !unknown.isEmpty, let thread = conversation.threadID else { return rows }
+        Task { [weak self] in
+            guard let self, await model.conversationMedia.learnFiles(Array(unknown), in: thread) else { return }
+            // Rows out of sight that showed meanwhile take their real size
+            // when they next show; what is on screen keeps its frame.
+            let visible = Set(table.indexPathsForVisibleRows?.compactMap { dataSource.itemIdentifier(for: $0) } ?? [])
+            for case .figure(let id, let shots) in items where !visible.contains(id) && shots.contains(where: { unknown.contains($0.path ?? "") }) {
+                MediaFiles.unsettle(shots.map(\.sizeKey))
+                heights[id] = nil
+                guesses[id] = nil
+            }
+            renderItems()
+        }
+        // The conversation's first rows show at once; frames still unknown
+        // then are settled as they are.
+        let shown = Set(items.map(\.id))
+        guard shown.contains(where: { $0 != "header" }) else { return rows }
+        return rows.compactMap { row in
+            guard case .figure(let id, let shots) = row, !shown.contains(id) else { return row }
+            let kept = shots.filter { !unknown.contains($0.path ?? "") }
+            return kept.isEmpty ? nil : .figure(id: id, shots: kept)
+        }
     }
 
     private func renderItems(animated: Bool = false) {
@@ -1529,7 +1566,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             (cell as? ChangesCell)?.configure(changes)
         case .build(let build, _):
             guard let cell = cell as? BuildCell else { return }
-            cell.configure(build, installing: installingBuild == build.id)
+            cell.configure(build, installing: installingBuild == build.id, icons: model.buildIcons)
             cell.onInstall = { [weak self] build in self?.install(build) }
         case .simulator(let use):
             guard let cell = cell as? SimulatorCell else { return }
@@ -1870,9 +1907,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return true
     }
 
-    /// Its size first, so the conversation makes room once, then the picture.
+    /// Its frame is already final (`reserving`); only the picture arrives.
     private func loadFigure(_ shot: Shot, item: String, in thread: String) async -> Bool {
-        if MediaFiles.sizes[shot.step] == nil, await model.conversationMedia.mediaSize(shot.step, in: thread) != nil { await reconfigure(item) }
         guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index, in: thread) != nil, await FigureCell.prepare(shot) != nil else { return false }
         await reconfigure(item)
         return true
@@ -1936,9 +1972,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
             }
             guard shot.video else {
-                return ViewerItem(media: .image(inline, size: MediaFiles.sizes[shot.step], full: decode), origin: origin)
+                return ViewerItem(media: .image(inline, size: MediaFiles.sizes[shot.sizeKey], full: decode), origin: origin)
             }
-            return ViewerItem(media: .video(poster: inline, size: MediaFiles.sizes[shot.step], player: found?.player, still: { await decode(1600) }, url: { [weak media] in
+            return ViewerItem(media: .video(poster: inline, size: MediaFiles.sizes[shot.sizeKey], player: found?.player, still: { await decode(1600) }, url: { [weak media] in
                 await media?.loadVideo(shot.step, in: thread)
             }), origin: origin)
         case .recording(let use):

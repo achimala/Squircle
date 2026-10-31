@@ -93,6 +93,9 @@ enum Theme {
         static let text: CGFloat = margin + glyph + glyphGap
         /// One nesting level: a slot and its gap.
         static let indent: CGFloat = glyph + glyphGap
+        /// A built app's icon on a build card or Builds row: as tall as the
+        /// row's two lines, the size iOS shows an app at in a list.
+        static let appIcon: CGFloat = 36
         static let bubble = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
         /// The question card and the build card.
         static let card = UIEdgeInsets(top: 12, left: 14, bottom: 8, right: 14)

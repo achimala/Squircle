@@ -406,7 +406,7 @@ final class StepCell: TimelineCell {
     }
 }
 
-/// Screenshots the agent took, on the page at the small radius, in a row
+/// Screenshots the agent took, on the page at the bubbles' radius, in a row
 /// that scrolls sideways.
 final class GalleryCell: TimelineCell {
     static let height: CGFloat = 188
@@ -465,7 +465,11 @@ final class GalleryCell: TimelineCell {
         guard let data = StepImages.data(for: shot.step, index: shot.index) else { return nil }
         let height = Self.height
         let thumbnail = await Downsample.image(data) { 2 * height / max(1, $0.height) }
-        if let thumbnail { cache.setObject(thumbnail, forKey: "\(shot.step):\(shot.index)" as NSString) }
+        if let thumbnail {
+            cache.setObject(thumbnail, forKey: "\(shot.step):\(shot.index)" as NSString)
+            // Its proportions, so the next time it shows its frame is right from the start.
+            if MediaFiles.sizes[shot.sizeKey] == nil { MediaFiles.sizes[shot.sizeKey] = thumbnail.size }
+        }
         return thumbnail
     }
 
@@ -546,7 +550,7 @@ final class ShotView: UIControl {
         image.contentMode = .scaleAspectFill
         image.clipsToBounds = true
         image.layer.cornerCurve = .continuous
-        image.layer.cornerRadius = Theme.Radius.small
+        image.layer.cornerRadius = Theme.Radius.large
         image.backgroundColor = Theme.codeFill
         image.isUserInteractionEnabled = false
         badge.tintColor = .white
@@ -557,7 +561,10 @@ final class ShotView: UIControl {
         badge.isHidden = !shot.video
         badge.isUserInteractionEnabled = false
         [image, badge].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
-        width = widthAnchor.constraint(equalToConstant: GalleryCell.height * 0.46)
+        // As wide as its picture's proportions when known, else a phone
+        // screen's; the frame then stays, whenever the picture arrives.
+        let size = MediaFiles.frameSize(shot.sizeKey, fallback: CGSize(width: 0.46, height: 1))
+        width = widthAnchor.constraint(equalToConstant: min(320, max(64, GalleryCell.height * size.width / max(1, size.height))))
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: GalleryCell.height), width,
             image.topAnchor.constraint(equalTo: topAnchor), image.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -590,8 +597,6 @@ final class ShotView: UIControl {
         startPlaybackIfReady()
         guard let picture = GalleryCell.image(for: shot) else { waited = true; return }
         guard image.image !== picture else { return }
-        let ratio = picture.size.width / max(1, picture.size.height)
-        width.constant = min(320, max(64, GalleryCell.height * ratio))
         if waited, image.image == nil, window != nil {
             UIView.transition(with: image, duration: 0.35, options: [.transitionCrossDissolve, .allowUserInteraction]) { self.image.image = picture }
         } else {
@@ -665,10 +670,13 @@ final class FigureCell: TimelineCell {
     /// Each picture's frame for a row width: rows filled left to right, each
     /// as tall as fits the width, no taller than `maxHeight`, and a new row
     /// whenever adding the next would make the row shorter than
-    /// `minRowHeight`. Before a size is known, a screen-shaped placeholder.
-    static func layout(_ shots: [Shot], width: CGFloat) -> [CGRect] {
+    /// `minRowHeight`. Each picture's frame is the one it took when it first
+    /// showed (`MediaFiles.frameSize`): the Mac's size, or a 16:10 guess the
+    /// picture fills, never changed by its bytes arriving.
+    static func layout(_ shots: [Shot], width: CGFloat, settle: Bool = true) -> [CGRect] {
         let ratios = shots.map { shot in
-            MediaFiles.sizes[shot.step].map { $0.width / max(1, $0.height) } ?? 16 / 10
+            let size = MediaFiles.frameSize(shot.sizeKey, fallback: CGSize(width: 16, height: 10), settle: settle)
+            return size.width / max(1, size.height)
         }
         func rowHeight(_ row: ArraySlice<CGFloat>) -> CGFloat {
             min(maxHeight, (width - gap * CGFloat(row.count - 1)) / max(0.01, row.reduce(0, +)))
@@ -695,8 +703,9 @@ final class FigureCell: TimelineCell {
         return frames
     }
 
+    /// An estimate: it fixes no frame.
     static func height(_ shots: [Shot], width: CGFloat) -> CGFloat {
-        (layout(shots, width: width - 2 * Theme.Space.margin).map(\.maxY).max() ?? 0) + 2 * Theme.Space.row
+        (layout(shots, width: width - 2 * Theme.Space.margin, settle: false).map(\.maxY).max() ?? 0) + 2 * Theme.Space.row
     }
 
     /// The decoded picture, once `prepare` has made it.
@@ -764,7 +773,7 @@ final class FigureTile: UIControl {
         super.init(frame: .zero)
         clipsToBounds = true
         layer.cornerCurve = .continuous
-        layer.cornerRadius = Theme.Radius.small
+        layer.cornerRadius = Theme.Radius.large
         backgroundColor = Theme.codeFill
         image.contentMode = .scaleAspectFill
         image.isUserInteractionEnabled = false
@@ -906,16 +915,17 @@ final class DocumentCell: TimelineCell {
     }
 }
 
-/// A build in the conversation: what it is, where it stands, and Install.
+/// A build in the conversation: the app's own icon, what it is, where it
+/// stands, and Install. Ready is the Install button, building a quiet
+/// shimmer on its status, failed the reason in the failure colour.
 final class BuildCell: TimelineCell {
     var onInstall: ((AppBuild) -> Void)?
     private var build: AppBuild?
     /// A plain card: the row's one control is Install.
     private let card = UIView()
-    private let icon = UIImageView()
-    private let spinner = UIActivityIndicatorView(style: .medium)
+    private let icon = AppIconTile()
     private let titleLabel = Theme.label("", Theme.Text.body)
-    private let detailLabel = Theme.label("", Theme.Text.line, color: .secondaryLabel)
+    private let detailLabel = ShimmerLabel()
     private let install: UIButton = {
         var config = UIButton.Configuration.filled()
         config.title = "Install"
@@ -929,9 +939,7 @@ final class BuildCell: TimelineCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        icon.preferredSymbolConfiguration = Theme.symbol(Theme.Text.body)
-        icon.contentMode = .center
-        spinner.hidesWhenStopped = true
+        detailLabel.font = Theme.Text.line
         let padding = Theme.Space.bubble
         install.configuration?.contentInsets = NSDirectionalEdgeInsets(top: padding.top, leading: padding.left, bottom: padding.bottom, trailing: padding.right)
         install.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
@@ -947,9 +955,7 @@ final class BuildCell: TimelineCell {
         let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
         text.axis = .vertical
         text.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let glyph = UIView()
-        [icon, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glyph.addSubview($0) }
-        let row = UIStackView(arrangedSubviews: [glyph, text, install])
+        let row = UIStackView(arrangedSubviews: [icon, text, install])
         row.spacing = Theme.Space.glyphGap
         row.alignment = .center
         card.translatesAutoresizingMaskIntoConstraints = false
@@ -966,28 +972,23 @@ final class BuildCell: TimelineCell {
             row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Theme.Space.card.bottom),
             row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Theme.Space.card.left),
             row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Theme.Space.card.right),
-            glyph.widthAnchor.constraint(equalToConstant: Theme.Space.glyph), glyph.heightAnchor.constraint(equalToConstant: Theme.Space.glyph),
-            icon.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), icon.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
-            spinner.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: glyph.centerYAnchor)
+            icon.widthAnchor.constraint(equalToConstant: Theme.Space.appIcon), icon.heightAnchor.constraint(equalToConstant: Theme.Space.appIcon)
         ])
         accessibilityIdentifier = "thread.build"
     }
 
-    func configure(_ build: AppBuild, installing: Bool) {
+    func configure(_ build: AppBuild, installing: Bool, icons: BuildIcons?) {
         self.build = build
         titleLabel.text = build.version.isEmpty ? build.title : build.title + " " + build.version
-        let detail: String
-        switch build.status {
-        case "queued": detail = "Queued"; icon.image = UIImage(systemName: "clock"); icon.tintColor = .secondaryLabel
-        case "running": detail = "Building"; icon.image = nil
-        case "succeeded": detail = "Ready to install"; icon.image = UIImage(systemName: "app.badge.checkmark"); icon.tintColor = Theme.success
-        case "failed":
-            detail = build.error?.split(whereSeparator: \.isNewline).first.map(String.init) ?? "Build failed"
-            icon.image = UIImage(systemName: "xmark.octagon"); icon.tintColor = Theme.failure
-        default: detail = BuildRow.statusText(for: build); icon.image = UIImage(systemName: "hammer"); icon.tintColor = .secondaryLabel
+        icon.configure(build, icons: icons)
+        let failed = build.status == "failed"
+        detailLabel.text = switch build.status {
+        case "succeeded": build.canInstall ? "Ready to install" : "Built"
+        case "failed": BuildRow.failureLine(build)
+        default: BuildRow.statusText(for: build)
         }
-        detailLabel.text = detail
-        if build.status == "running" { spinner.startAnimating() } else { spinner.stopAnimating() }
+        detailLabel.textColor = failed ? Theme.failure : .secondaryLabel
+        detailLabel.isShimmering = build.status == "running"
         install.isHidden = !build.canInstall
         install.isEnabled = !installing
         install.configuration?.showsActivityIndicator = installing

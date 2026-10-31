@@ -52,6 +52,9 @@ struct Shot: Equatable {
     var attachment: String?
     /// A file on the Mac the agent's Markdown shows, read through T3.
     var path: String?
+    /// Where its pixel size is kept (`MediaFiles.sizes`): a file by its
+    /// path, a step's or message's picture by its place.
+    var sizeKey: String { path != nil ? step : "\(step)#\(index)" }
 }
 
 /// What the agent is doing this moment.

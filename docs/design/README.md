@@ -108,8 +108,9 @@ Per element:
 | Worked for… | Check glyph at 20, text at 48, chevron after | Line; detail in tertiary |
 | Changes ("4 files +64 −9") | Glyph at 20, text at 48 | Line, digits in the same size |
 | Live line | Agent jelly (28 points) centred on the slot, text at 48 | Line, elapsed time in the same size at the right margin |
-| Media (screenshots, clips, figures) | From 20; a sideways row scrolls past the edge | 8 points between pictures, 8-point radius |
-| Build card | From 20 to 20 | Card padding; Install is the one filled button |
+| Media (screenshots, clips, figures, simulator recordings) | From 20; a sideways row scrolls past the edge | 8 points between pictures, 18-point radius like the bubbles |
+| Build card | From 20 to 20 | Card padding; the app's own icon (36), Install is the one filled button |
+| Document | From 20, at most 300 wide | Received fill, 18-point radius; a PDF's first page on top ([documents](#media-and-sending)) |
 | Question card | From 20, 56 free on the right | Like a received bubble ([question card](#the-question-card)) |
 
 ### Glyphs and jellies
@@ -129,7 +130,8 @@ One family of shapes, two meanings:
   or two; it never pushes the text.
 - **No containers around glyphs**: no grey wells, no rails between steps,
   no filled status circles (the Builds list's system-green check circles
-  go), and no icon badges inside cards.
+  go), and no icon badges inside cards. The one picture that leads a row
+  is a built app's own icon on a build card or Builds row (below).
 - **Size ladder**: 20 points in lines and rows (workers, the asker of a
   question); 28 for the app's agent in its live line; 26 for the agent
   peeking over its device on Home. Nothing in between.
@@ -164,6 +166,8 @@ both portrait at the device's ratio:
 
 Media in the chat keeps its own sizes (galleries 188 tall, figures up to
 440). There is no placeholder art: with nothing to show, no thumbnail.
+Every picture, clip and recording takes its final frame before its bytes
+arrive ([reserved frames](#media-and-sending)).
 
 **Nesting**: a thread line under a task row moves in by one slot. Its Sprout
 sits at x = 48, under the ask's text, and its text at x = 76. The thread's
@@ -207,9 +211,13 @@ its state (Sprouts tell workers apart by shape).
   tinted glass, the one earlier exception.
 - **Plain fill**: the agent's bubbles, the question card, the build card.
   No other cards. Pictures in the chat lose the card around them.
-- **Radii**: three values. **8** for small things: media, code, thumbnails.
-  **18** for bubbles, cards, fields and sheets' inner surfaces. **Capsule**
-  for buttons and pills. Device frames keep their real geometry. The 21,
+- **Radii**: three values. **8** for small things: code, thumbnails, file
+  type tiles. **18** for bubbles, cards, fields, sheets' inner surfaces and
+  everything in the chat that sits beside a bubble: pictures, clips,
+  simulator recordings and documents (user, 2026-10-31: "inline media match
+  corner radii of message bubbles"); the media viewer opens from and flies
+  back to that same shape. **Capsule** for buttons and pills. Device frames
+  keep their real geometry; a recording in the chat does not draw one. The 21,
   22, 24, 26 and 30-point radii go.
 
 ### Motion and haptics
@@ -518,8 +526,35 @@ it has).
 - **Swipe between media** (built on main): in the viewer,
   pictures and clips of the conversation page sideways under your finger,
   natively, with one spring and no crossfade.
-- Inline media drops its card frame: pictures sit on the page at an 8-point
-  radius, with 8 points between them (built, stage 2).
+- Inline media drops its card frame: pictures sit on the page at the
+  bubbles' 18-point radius, with 8 points between them.
+- **Reserved frames** (user: "When I'm scrolling and medias loading in it
+  pops and changes scroll position"): a picture's frame is decided when its
+  row first shows and never changes after, so nothing in the conversation
+  moves when bytes arrive, scrolling up through history or at the end. The
+  size comes from the Mac with the message (`POST
+  /v1/t3/threads/{thread}/files` reads each linked picture's and clip's
+  header) and is kept on the phone, so a conversation reopens with every
+  frame known. A new picture waits until the Mac answers, then arrives at
+  its size; one the Mac couldn't measure takes a 16:10 frame (a phone
+  screen's in a gallery) that its picture fills.
+- **Documents** (user: "Inline file attachments need proper design"): one
+  family with the bubbles and pictures: a received fill at 18, at most 300
+  wide. A PDF shows its first page across the top (160 tall, the page's top
+  showing), then its name in Line strong and "PDF · 27 pages · 6.4 MB" in
+  Line, secondary. A text, Markdown, JSON, CSV or log file leads with a
+  40 × 48 tile naming its type ("MD", "JSON") in mono, at the small radius.
+  The height is set by the kind alone, so the row never grows as the file
+  arrives. Inside a question card the fill is the page's.
+- **Build card and Builds rows** (user: "Tiny icon on left here is super
+  ugly"): the built app's own icon as iOS shows it, a 36-point tile with
+  iOS's corner, read from the build (or, for a build without a product yet,
+  the app's newest build). An app without one gets Home's blurred
+  placeholder, never a glyph. State is the words, not a badge: ready is
+  Install; building shimmers its status word; failed gives the reason in
+  the failure colour.
+
+  ![Before and after: build card, media and documents](img/chat-media-polish.jpg)
 
 ## In code
 
@@ -533,6 +568,7 @@ font size, colour or radius.
 | A symbol in a line's size and weight | `Theme.symbol(font)` |
 | 4, 8, 12, 16, 20, 24 | `Theme.Space.tight`, `.row`, `.rowPad`, `.group`, `.margin`, `.section` |
 | Glyph slot, its gap, text at 48, one nesting level | `Theme.Space.glyph`, `.glyphGap`, `.text`, `.indent` |
+| A built app's icon | `Theme.Space.appIcon` |
 | Bubble and card padding, a bubble's free side, 44 | `Theme.Space.bubble`, `.card`, `.bubbleFree`, `.tap` |
 | Jellies at 20, 28, 26 | `Theme.Glyph.line`, `.live`, `.home` |
 | Radii 8, 18, capsule | `Theme.Radius.small`, `.large`, `cornerStyle = .capsule` |

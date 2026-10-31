@@ -36,13 +36,10 @@ enum DocumentSource: Hashable {
         default: return "Text"
         }
     }
-    var symbol: String {
-        switch (name as NSString).pathExtension.lowercased() {
-        case "pdf": return "doc.richtext"
-        case "json": return "curlybraces"
-        case "csv": return "tablecells"
-        default: return "doc.text"
-        }
+    /// Its type on a file tile: the extension, short.
+    var typeLabel: String {
+        let ext = (name as NSString).pathExtension.uppercased()
+        return ext == "MARKDOWN" ? "MD" : ext.isEmpty ? "TXT" : ext
     }
 }
 
