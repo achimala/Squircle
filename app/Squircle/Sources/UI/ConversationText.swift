@@ -157,7 +157,7 @@ final class ConversationText {
             // Changes to your tasks and the agent's notes: the verb in
             // Line strong, each task's status word in its colour.
             symbol = action.symbol
-            for (index, piece) in action.phrase({ line.taskAsks[$0] }).enumerated() {
+            for (index, piece) in action.phrase({ line.taskNames[$0] }).enumerated() {
                 let space = index == 0 ? "" : " "
                 switch piece.role {
                 case .verb: add(space + piece.text, bold)

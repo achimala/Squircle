@@ -24,7 +24,7 @@ final class WaitingAnswers {
         switch item {
         case .question(let question):
             let asker = question.from ?? (about ? nil : "Your agent asks")
-            let context = ((about ? [app] : []) + [asker] + (about ? [question.ask] : [])).compactMap { $0 }.joined(separator: " · ")
+            let context = ((about ? [app] : []) + [asker] + (about ? [question.task] : [])).compactMap { $0 }.joined(separator: " · ")
             let jelly = question.from == nil ? JellyLook.agent(.needsYou) : .worker(question.threadID ?? "", .needsYou)
             view.show(context: context, asker: jelly, question: question.text, detail: nil)
             attach(question, to: view)
@@ -34,7 +34,7 @@ final class WaitingAnswers {
             view.reply(placeholder: "Something else…", text: drafts[id].text, busy: busy,
                        edit: { [weak self] text in self?.drafts[id].text = text }) { [weak self] text in self?.send(question, text) }
         case .request(let request):
-            let context = (about ? [app, request.title, request.ask] : [request.worker ? request.title : "Your agent asks"])
+            let context = (about ? [app, request.title, request.task] : [request.worker ? request.title : "Your agent asks"])
                 .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
             let jelly = request.worker ? JellyLook.worker(request.threadID, .needsYou) : .agent(.needsYou)
             view.media([], task: "", documents: model.documents) { _, _ in nil }

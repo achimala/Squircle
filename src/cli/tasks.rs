@@ -13,7 +13,12 @@ pub(super) enum TaskCommand {
         project: Option<String>,
         #[arg(
             long,
-            help = "What the user asked for, in their words, trimmed to a line"
+            help = "A short name for it: a few words, sentence case (\"App agents reply briefly\"); the phone lists it by this"
+        )]
+        title: String,
+        #[arg(
+            long,
+            help = "What the user asked for, verbatim in their words (kept as the record and shown under the title)"
         )]
         ask: String,
         #[arg(long, value_enum)]
@@ -28,14 +33,16 @@ pub(super) enum TaskCommand {
         )]
         replaces: Vec<String>,
     },
-    /// Change a task's status, note or wording.
+    /// Change a task's status, note, title or wording.
     Update {
         id: String,
+        #[arg(long, help = "A new short name: a few words, sentence case")]
+        title: Option<String>,
         #[arg(long, value_enum)]
         status: Option<squircle::tasks::Status>,
         #[arg(long, help = "What it waits on or what happened, in a few words")]
         note: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "The user's words, if they were recorded wrong")]
         ask: Option<String>,
         #[arg(long, help = "Put it first in its group")]
         top: bool,
@@ -131,7 +138,15 @@ pub(super) enum SubCommand {
     Add {
         /// The work item's ID.
         item: String,
-        #[arg(long, help = "What it is, in the user's words when it is their ask")]
+        #[arg(
+            long,
+            help = "A short name for it: a few words, sentence case (\"App agents reply briefly\"); the phone lists it by this"
+        )]
+        title: String,
+        #[arg(
+            long,
+            help = "What it is: the user's words verbatim when it is their ask, else yours"
+        )]
         ask: String,
         #[arg(long, value_enum)]
         status: Option<squircle::tasks::Status>,
@@ -161,6 +176,7 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
         TaskCommand::Add {
             thread,
             project,
+            title,
             ask,
             status,
             note,
@@ -169,12 +185,13 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
             post(
                 cli,
                 "/v1/tasks",
-                json!({"thread":thread,"project":project,"ask":ask,"status":status,"note":note,"replaces":task_ids(replaces)?}),
+                json!({"thread":thread,"project":project,"title":title,"ask":ask,"status":status,"note":note,"replaces":task_ids(replaces)?}),
             )
             .await?
         }
         TaskCommand::Update {
             id,
+            title,
             status,
             note,
             ask,
@@ -191,7 +208,7 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
                 cli,
                 reqwest::Method::PATCH,
                 &format!("/v1/tasks/{}", task_id(id)?),
-                Some(json!({"status":status,"note":note,"ask":ask,"to_top":top,"parent":parent,
+                Some(json!({"title":title,"status":status,"note":note,"ask":ask,"to_top":top,"parent":parent,
                     "replaced_by":replaced_by.as_deref().map(task_id).transpose()?})),
                 false,
             )
@@ -222,6 +239,7 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
             command:
                 SubCommand::Add {
                     item,
+                    title,
                     ask,
                     status,
                     note,
@@ -231,7 +249,7 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
         } => post(
             cli,
             "/v1/tasks",
-            json!({"parent":task_id(item)?,"thread":thread,"ask":ask,"status":status,"note":note,"replaces":task_ids(replaces)?}),
+            json!({"parent":task_id(item)?,"thread":thread,"title":title,"ask":ask,"status":status,"note":note,"replaces":task_ids(replaces)?}),
         )
         .await?,
         TaskCommand::Show { id } => get(cli, &format!("/v1/tasks/{}", task_id(id)?)).await?,

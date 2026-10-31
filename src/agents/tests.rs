@@ -817,6 +817,7 @@ async fn an_answer_saved_before_a_restart_is_delivered_once() {
         .add(
             "p",
             "Pick a colour",
+            "Pick a colour",
             None,
             None,
             crate::tasks::By::Agent,

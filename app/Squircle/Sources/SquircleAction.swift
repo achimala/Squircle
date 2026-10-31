@@ -34,7 +34,7 @@ struct SquircleAction: Equatable {
         case restart, agentOther, perf, media, help, other
         /// Tracker changes, to `task` unless said otherwise: a new ask (one
         /// that replaces `replaces`, if any), a status, a question to you.
-        case taskAdd, taskReplace, taskStatus(String), taskReword, taskMove, taskNote
+        case taskAdd, taskReplace, taskStatus(String), taskRename, taskReword, taskMove, taskNote
         case taskAsk, taskWithdraw, taskAttach(video: Bool), taskLink(build: Bool, remove: Bool), taskLookup, taskHeard
         case noteAdd, noteEdit, noteRemove, notesLookup
     }
@@ -83,8 +83,8 @@ struct SquircleAction: Equatable {
     /// A change to the app's tasks or the agent's notes.
     var isTracker: Bool {
         switch kind {
-        case .taskAdd, .taskReplace, .taskStatus, .taskReword, .taskMove, .taskNote, .taskAsk, .taskWithdraw, .taskAttach, .taskLink,
-             .noteAdd, .noteEdit, .noteRemove: true
+        case .taskAdd, .taskReplace, .taskStatus, .taskRename, .taskReword, .taskMove, .taskNote, .taskAsk, .taskWithdraw, .taskAttach,
+             .taskLink, .noteAdd, .noteEdit, .noteRemove: true
         default: false
         }
     }
@@ -118,7 +118,8 @@ struct SquircleAction: Equatable {
         case .media: return "photo"
         case .agentOther, .help, .other: return "terminal"
         case .taskAsk, .taskWithdraw: return "questionmark.bubble"
-        case .taskLookup, .taskHeard, .taskAdd, .taskReplace, .taskStatus, .taskReword, .taskMove, .taskNote, .taskAttach, .taskLink:
+        case .taskLookup, .taskHeard, .taskAdd, .taskReplace, .taskStatus, .taskRename, .taskReword, .taskMove, .taskNote, .taskAttach,
+             .taskLink:
             return "checklist"
         case .noteAdd, .noteEdit, .noteRemove, .notesLookup: return "note.text"
         }
@@ -163,10 +164,11 @@ struct SquircleAction: Equatable {
         static func quiet(_ text: String) -> Piece { Piece(text: text, role: .quiet) }
     }
 
-    /// What a tracker change did, in your words where it has them: "Added
+    /// What a tracker change did, by the tasks' names: "Added
     /// task: …", "Marked “…” ready to try", "Replaced “…” with “…”", "Asked
     /// you: …". `name` finds a task's ask by ID; a task it can't find reads
-    /// as "a task", never as its ID.
+    /// as "a task", never as its ID. A new task's `text` is its title (its
+    /// ask if it has none).
     func phrase(_ name: (String) -> String?) -> [Piece] {
         // Two asks on a line share it, so both fit before it wraps twice.
         let two = (kind == .taskAdd && !replaces.isEmpty) || kind == .taskReplace
@@ -182,6 +184,7 @@ struct SquircleAction: Equatable {
         case .taskReplace:
             return [.verb("Replaced"), .subject(subject), .plain("with"), .subject(quoted(replacement.flatMap(name)) ?? "a later ask")]
         case .taskStatus(let status): return [.verb("Marked"), .subject(subject), Piece(text: Self.statusWords[status] ?? status, role: .status(status))] + note
+        case .taskRename: return [.verb("Named a task")] + (Self.clip(text).map { [.subject("“" + $0 + "”")] } ?? [])
         case .taskReword: return [.verb("Reworded"), .subject(subject)] + (Self.clip(text).map { [.plain("as"), .subject("“" + $0 + "”")] } ?? [])
         case .taskMove: return [.verb("Moved"), .subject(subject)] + (toTop ? [.plain("to the top")] : [])
         case .taskNote: return [.verb("Noted on"), .subject(subject)] + note
@@ -239,7 +242,7 @@ struct SquircleAction: Equatable {
         case .perf: return "Reading a performance recording"
         case .media: return "Publishing a recording"
         case .taskAdd, .taskReplace: return "Adding a task"
-        case .taskStatus, .taskReword, .taskMove, .taskNote, .taskLink, .taskWithdraw: return "Updating tasks"
+        case .taskStatus, .taskRename, .taskReword, .taskMove, .taskNote, .taskLink, .taskWithdraw: return "Updating tasks"
         case .taskAttach(let video): return video ? "Attaching a clip" : "Attaching a screenshot"
         case .taskAsk: return "Asking you"
         case .taskLookup, .taskHeard: return "Checking tasks"
@@ -449,7 +452,7 @@ struct SquircleAction: Equatable {
         var action: SquircleAction
         switch sub {
         case "add", "sub" where args.first == "add":
-            action = SquircleAction(kind: .taskAdd, text: options["--ask"])
+            action = SquircleAction(kind: .taskAdd, text: options["--title"] ?? options["--ask"])
             action.replaces = (options["--replaces"] ?? "").split(separator: ",").compactMap { uuid(String($0)) }
         case "update":
             if let replacement = options["--replaced-by"] {
@@ -457,6 +460,8 @@ struct SquircleAction: Equatable {
                 action.replacement = uuid(replacement)
             } else if let status = options["--status"] {
                 action = SquircleAction(kind: .taskStatus(status))
+            } else if let title = options["--title"] {
+                action = SquircleAction(kind: .taskRename, text: title)
             } else if let ask = options["--ask"] {
                 action = SquircleAction(kind: .taskReword, text: ask)
             } else if options["--under"] != nil || options["--top"] != nil {

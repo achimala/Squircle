@@ -129,6 +129,7 @@ impl Tasks {
     pub async fn add(
         &self,
         project: &str,
+        title: &str,
         ask: &str,
         status: Option<Status>,
         note: Option<&str>,
@@ -141,6 +142,7 @@ impl Tasks {
         let event = Event::Add {
             id: id.clone(),
             project: project.into(),
+            title: title.into(),
             ask: ask.into(),
             status,
             note: note.map(str::to_string),
@@ -428,6 +430,7 @@ mod tests {
             .add(
                 "p",
                 "Stack the sims",
+                "Stack the sims",
                 None,
                 None,
                 By::Agent,
@@ -465,6 +468,7 @@ mod tests {
         let id = tasks
             .add(
                 "p",
+                "Stack the sims",
                 "Stack the sims",
                 None,
                 None,
@@ -516,6 +520,7 @@ mod tests {
         let id = tasks
             .add(
                 "p",
+                "Stack the sims",
                 "Stack the sims",
                 None,
                 None,

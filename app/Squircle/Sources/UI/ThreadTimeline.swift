@@ -87,8 +87,8 @@ struct ActionLine: Equatable {
     var state: WorkerState?
     /// For a build it started: where that build stands ("running", "succeeded", …).
     var buildStatus: String?
-    /// The asks of the tasks a tracker change names, by ID.
-    var taskAsks: [String: String] = [:]
+    /// The names of the tasks a tracker change names, by ID.
+    var taskNames: [String: String] = [:]
     /// The task a tap opens in Tasks, when the app has it.
     var task: String?
     /// The tool call it came from, whose command shows on tap.

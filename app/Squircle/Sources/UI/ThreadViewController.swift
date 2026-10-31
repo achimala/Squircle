@@ -1310,14 +1310,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let workers = model.workers
         let sessions = Dictionary(model.sessions.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let tasks = model.tasks(for: project).everyTask
-        let asks = Dictionary(tasks.map { ($0.id.lowercased(), $0.ask) }, uniquingKeysWith: { a, _ in a })
+        let asks = Dictionary(tasks.map { ($0.id.lowercased(), $0.name) }, uniquingKeysWith: { a, _ in a })
         return items.compactMap { item in
             guard case .action(var line) = item else { return item }
             if let action = line.action, action.isTracker {
-                for id in action.tasks { line.taskAsks[id] = asks[id] }
-                // A new ask is found by its words; a replaced one opens what replaced it.
+                for id in action.tasks { line.taskNames[id] = asks[id] }
+                // A new task is found by its title or words; a replaced one opens what replaced it.
                 switch action.kind {
-                case .taskAdd: line.task = tasks.first { $0.ask == action.text }?.id
+                case .taskAdd: line.task = tasks.first { $0.name == action.text || $0.ask == action.text }?.id
                 case .taskReplace: line.task = action.replacement.flatMap { asks[$0] == nil ? nil : $0 } ?? action.task
                 default: line.task = action.task.flatMap { asks[$0] == nil ? nil : $0 }
                 }

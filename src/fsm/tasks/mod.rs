@@ -199,6 +199,9 @@ pub struct Task {
     pub parent_id: Option<String>,
     /// A work item's sub-tasks, in order; always empty on a sub-task.
     pub subtasks: Vec<Task>,
+    /// A short name the agent gave it; empty on tasks from before titles
+    /// (2026-10-31) until an agent names them.
+    pub title: String,
     /// The ask in the user's own words.
     pub ask: String,
     pub status: Status,
@@ -223,6 +226,17 @@ pub struct Task {
     pub history: Vec<Change>,
     /// Questions to the user, oldest first, answered ones kept.
     pub questions: Vec<Question>,
+}
+
+impl Task {
+    /// What to call it: its title, or the ask until an agent names it.
+    pub fn name(&self) -> &str {
+        if self.title.is_empty() {
+            &self.ask
+        } else {
+            &self.title
+        }
+    }
 }
 
 /// A linked worker's state as T3 shows it. `Missing` is no fact at all (no
@@ -493,6 +507,8 @@ struct Record {
     project_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    title: String,
     ask: String,
     status: Stage,
     note: String,
@@ -526,6 +542,8 @@ struct StoredRecord {
     project_id: String,
     #[serde(default)]
     parent: Option<String>,
+    #[serde(default)]
+    title: String,
     ask: String,
     status: Status,
     #[serde(default)]
@@ -589,6 +607,7 @@ impl From<StoredRecord> for Record {
             id: s.id,
             project_id: s.project_id,
             parent: s.parent,
+            title: s.title,
             ask: s.ask,
             status,
             note: s.note,
@@ -607,6 +626,17 @@ impl From<StoredRecord> for Record {
             migrated,
         }
     }
+}
+
+/// A title as kept: one line, at most 80 characters.
+fn one_line(title: &str) -> String {
+    title
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(80)
+        .collect()
 }
 
 /// Where an open task rests once nothing runs: queued until work has
@@ -632,6 +662,7 @@ impl Record {
             project_id: self.project_id.clone(),
             parent_id: self.parent.clone(),
             subtasks: vec![],
+            title: self.title.clone(),
             ask: self.ask.clone(),
             status,
             note: self.note.clone(),
@@ -1012,6 +1043,7 @@ impl Book {
 /// A change to a task. Fields left out are kept.
 #[derive(Debug, Default, Deserialize)]
 pub struct Update {
+    pub title: Option<String>,
     pub ask: Option<String>,
     pub status: Option<Status>,
     pub note: Option<String>,
@@ -1033,6 +1065,8 @@ pub enum Event {
     Add {
         id: TaskID,
         project: String,
+        /// A few words naming it, written by the agent.
+        title: String,
         ask: String,
         status: Option<Status>,
         note: Option<String>,
@@ -1205,6 +1239,7 @@ impl Machine for M17 {
             Event::Add {
                 id,
                 project,
+                title,
                 ask,
                 status,
                 note,
@@ -1219,6 +1254,15 @@ impl Machine for M17 {
                     return Reduction::same(
                         book,
                         Disposition::Rejected("A task needs the user's ask".into()),
+                    );
+                }
+                let title = one_line(&title);
+                if title.is_empty() {
+                    return Reduction::same(
+                        book,
+                        Disposition::Rejected(
+                            "A task needs a title: a few words naming it (--title)".into(),
+                        ),
                     );
                 }
                 let item = parent.as_deref().map(|p| {
@@ -1253,6 +1297,7 @@ impl Machine for M17 {
                     id: id.into(),
                     project_id: project,
                     parent,
+                    title,
                     ask: ask.chars().take(500).collect(),
                     status,
                     note: note
@@ -1347,6 +1392,15 @@ impl Machine for M17 {
                     .map(|t| t.order)
                     .fold(f64::INFINITY, f64::min);
                 let task = book.tasks.get_mut(&id).expect("checked above");
+                if let Some(title) = update
+                    .title
+                    .as_deref()
+                    .map(one_line)
+                    .filter(|t| !t.is_empty())
+                {
+                    task.title = title;
+                    task.touch(now);
+                }
                 if let Some(ask) = update
                     .ask
                     .as_deref()
@@ -1635,6 +1689,7 @@ mod tests {
             Event::Add {
                 id: id.clone(),
                 project: "p".into(),
+                title: "Stack the sims".into(),
                 ask: " Stack the sims ".into(),
                 status: None,
                 note: None,
@@ -1773,6 +1828,7 @@ mod tests {
             Event::Add {
                 id: later.clone(),
                 project: "p".into(),
+                title: "Stack the sims".into(),
                 ask: "Stack them, fold only the tall ones".into(),
                 status: None,
                 note: None,
@@ -1893,6 +1949,7 @@ mod tests {
             Event::Add {
                 id: sub.clone(),
                 project: "p".into(),
+                title: "Stack the sims".into(),
                 ask: "Fold from the bottom".into(),
                 status: None,
                 note: None,
@@ -2008,6 +2065,7 @@ mod tests {
                 Event::Add {
                     id: sub.clone(),
                     project: "p".into(),
+                    title: "Fold".into(),
                     ask: "Fold from the bottom".into(),
                     status: None,
                     note: None,

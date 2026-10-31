@@ -317,9 +317,9 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         showFocus()
     }
 
-    /// The work item a thread is for, in the user's words, to name it on top of the thread.
+    /// The work item a thread is for, by name, to name it on top of the thread.
     func taskName(for thread: String) -> String? {
-        list.tasks.first { $0.allThreads.contains { $0.id == thread } }?.ask
+        list.tasks.first { $0.allThreads.contains { $0.id == thread } }?.name
     }
 
     /// The conversation shown on the page in view, while it holds one.
@@ -687,7 +687,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         let detail = [task.subtasks.isEmpty ? nil : "\(task.subtasks.filter { !$0.status.open }.count)/\(task.subtasks.count)",
                       task.note.isEmpty ? nil : task.note].compactMap { $0 }.joined(separator: " · ")
         let threads = task.archivedAt == nil && task.status.open ? lines(of: task, previews: previews) : []
-        return TaskRow(ask: task.ask, status: task.status, joined: asked[task.id] != nil && task.status.open,
+        return TaskRow(title: task.name, status: task.status, joined: asked[task.id] != nil && task.status.open,
                        checked: !task.status.open || ticked, faded: task.archivedAt != nil, detail: detail,
                        threads: Array(threads.prefix(Self.nested)), more: max(0, threads.count - Self.nested),
                        install: installable(task).build.map { _ in installing == task.id ? "Opening…" : "Install" })
@@ -698,7 +698,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         let index = order.firstIndex(of: task.id)
         let previews = previewTargets()
         let sub = { (sub: AppTask) in
-            WorkItemPage.Sub(id: sub.id, ask: sub.ask, note: sub.note, status: sub.status, opens: sub.mainThread != nil,
+            WorkItemPage.Sub(id: sub.id, title: sub.name, note: sub.note, status: sub.status, opens: sub.mainThread != nil,
                              threads: sub.threads.filter { $0.state != "missing" }.sorted { Self.rank($0) < Self.rank($1) }
                                 .map { self.line($0, for: sub, previews: previews) })
         }
@@ -719,7 +719,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         }
         let archived = { (owner: AppTask) in owner.threads.filter { $0.state == "missing" } }
         var seen = Set<String>()
-        return .init(ask: task.ask, status: task.status, note: task.note, shipped: shipped,
+        return .init(title: task.name, said: task.named ? task.ask : nil, status: task.status, note: task.note, shipped: shipped,
                      install: build.map { _ in installing == task.id ? "Opening…" : "Install" },
                      position: index.map { "\($0 + 1) of \(order.count)" } ?? "",
                      threads: own,
@@ -769,7 +769,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         let words = query.lowercased().split(separator: " ")
         let found: (AppTask) -> Bool = { task in
             guard !words.isEmpty else { return true }
-            let text = ([task.ask, task.note] + task.subtasks.map(\.ask) + task.allThreads.compactMap(\.title)).joined(separator: " ").lowercased()
+            let text = ([task.name, task.ask, task.note] + task.subtasks.flatMap { [$0.name, $0.ask] } + task.allThreads.compactMap(\.title)).joined(separator: " ").lowercased()
             return words.allSatisfy { text.contains($0) }
         }
         var snapshot = NSDiffableDataSourceSnapshot<Group, String>()
@@ -1223,7 +1223,7 @@ private final class TaskSearchCell: UITableViewCell {
 
 /// What a task's overview row shows.
 private struct TaskRow: Equatable {
-    let ask: String
+    let title: String
     let status: AppTask.Status
     /// Its questions follow right under it, with no rule between.
     let joined: Bool
@@ -1325,7 +1325,7 @@ private final class TaskCell: UITableViewCell {
     }
 
     func configure(_ row: TaskRow, feeds: SimulatorFeeds?) {
-        ask.text = row.ask
+        ask.text = row.title
         ask.textColor = row.faded || row.checked ? .secondaryLabel : .label
         let symbol = row.checked ? "checkmark" : WorkItemPage.symbol(row.status)
         if symbol != shownSymbol, let image = UIImage(systemName: symbol) {
@@ -1363,7 +1363,7 @@ private final class TaskCell: UITableViewCell {
         install.configuration?.title = row.install
         rule.isHidden = row.joined
         shown = row
-        accessibilityLabel = [row.faded ? nil : WorkItemPage.name(row.status), row.ask, detail.text].compactMap { $0 }.joined(separator: ", ")
+        accessibilityLabel = [row.faded ? nil : WorkItemPage.name(row.status), row.title, detail.text].compactMap { $0 }.joined(separator: ", ")
         accessibilityTraits = .button
     }
 
@@ -1649,7 +1649,7 @@ private final class UndoToast: UIView {
 /// that thread's conversation instead.
 final class WorkItemPage: UIView {
     struct Sub: Equatable {
-        let id, ask, note: String
+        let id, title, note: String
         let status: AppTask.Status
         let opens: Bool
         let threads: [ThreadLine.Content]
@@ -1658,7 +1658,9 @@ final class WorkItemPage: UIView {
     /// A one-thread item's header: its thread, and the way to its outline.
     struct Header: Equatable { let thread: ThreadLine.Content; let more: String }
     struct Content: Equatable {
-        let ask: String
+        let title: String
+        /// The user's words, quoted under a title of the agent's; nil while it has none.
+        let said: String?
         let status: AppTask.Status
         let note: String
         let shipped: String?
@@ -1701,6 +1703,7 @@ final class WorkItemPage: UIView {
     private let status = UIButton(configuration: .plain())
     private let position = Theme.label("", Theme.Text.caption, color: .tertiaryLabel)
     private let ask = Theme.label("", Theme.Text.title, lines: 0)
+    private let said = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
     private let note = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 0)
     private let install = UIButton(configuration: .filled())
     private let shipped = Theme.label("", Theme.Text.line, color: .secondaryLabel)
@@ -1786,6 +1789,8 @@ final class WorkItemPage: UIView {
             return row
         }())
         header.addArrangedSubview(ask)
+        header.addArrangedSubview(said)
+        header.setCustomSpacing(Theme.Space.tight, after: ask)
         [header, note, questions, installRow, crew, steps, pictureScroll, files].forEach(stack.addArrangedSubview)
         stack.setCustomSpacing(Theme.Space.row, after: header)
         stack.setCustomSpacing(Theme.Space.section, after: note)
@@ -1886,7 +1891,9 @@ final class WorkItemPage: UIView {
             Self.statusMenu(current: content.status) { [weak self] in self?.onStatus?($0) }])
         status.accessibilityLabel = "Status, \(Self.name(content.status))"
         position.text = content.position
-        ask.text = content.ask
+        ask.text = content.title
+        said.text = content.said.map { "“" + $0 + "”" }
+        said.isHidden = content.said == nil
         if (content.conversation != nil) != (was?.conversation != nil) || was == nil { arrange(conversation: content.conversation != nil) }
         if let conversation = content.conversation {
             outline = nil
@@ -1928,9 +1935,10 @@ final class WorkItemPage: UIView {
             header.removeFromSuperview()
             header.translatesAutoresizingMaskIntoConstraints = false
             stack.insertArrangedSubview(header, at: 0)
-            header.arrangedSubviews.dropFirst(2).forEach { $0.removeFromSuperview() }
+            header.arrangedSubviews.dropFirst(3).forEach { $0.removeFromSuperview() }
         }
         ask.numberOfLines = conversation ? 3 : 0
+        said.numberOfLines = conversation ? 2 : 0
         scroll.isHidden = conversation
         slot.isHidden = !conversation
     }
@@ -1938,7 +1946,7 @@ final class WorkItemPage: UIView {
     /// A one-thread item: under its status and ask, the way to its outline
     /// and its thread's line, which opens the thread on its own.
     private func renderHeader(_ conversation: WorkItemPage.Header) {
-        header.arrangedSubviews.dropFirst(2).forEach { $0.removeFromSuperview() }
+        header.arrangedSubviews.dropFirst(3).forEach { $0.removeFromSuperview() }
         var config = UIButton.Configuration.plain()
         config.contentInsets = .zero
         config.imagePlacement = .trailing
@@ -2112,7 +2120,7 @@ private final class SubtaskRow: UIControl {
         mark.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         mark.tintColor = WorkItemPage.symbolColor(sub.status)
         mark.isUserInteractionEnabled = false
-        let ask = Theme.label(sub.ask, Theme.Text.body, color: closed ? .secondaryLabel : .label, lines: 0)
+        let ask = Theme.label(sub.title, Theme.Text.body, color: closed ? .secondaryLabel : .label, lines: 0)
         let words = [[.needsYou, .inProgress, .readyToTry].contains(sub.status) ? WorkItemPage.name(sub.status) : nil,
                      sub.note.isEmpty ? nil : sub.note].compactMap { $0 }
         let detail = Theme.label(words.joined(separator: " · "), Theme.Text.line,
@@ -2143,7 +2151,7 @@ private final class SubtaskRow: UIControl {
         isAccessibilityElement = false
         accessibilityElements = [check, text]
         text.isAccessibilityElement = true
-        text.accessibilityLabel = ([sub.ask] + words).joined(separator: ", ")
+        text.accessibilityLabel = ([sub.title] + words).joined(separator: ", ")
         text.accessibilityTraits = sub.opens ? .button : .staticText
     }
 

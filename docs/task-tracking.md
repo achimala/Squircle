@@ -44,6 +44,38 @@ sub-tasks. The note lists open work items with their open sub-tasks (`·`
 lines). (Fresh agents' handoffs, which listed every open item, went with
 fresh starts on 2026-10-30: the agent keeps one thread.)
 
+## Titles (2026-10-31, user decision)
+
+User: "I don't like that all the task titles are literally my message
+verbatim. It should be writing sensible tasks." Every row and page showed
+the raw ask ("I don't think the LA agent got the memo on the brevity
+thing…"). So:
+
+- **A task has a title and an ask.** The title is the agent's: a few words
+  in sentence case naming the work ("App agents reply briefly"), one line,
+  at most 80 characters. The ask stays the user's words verbatim: the
+  record, carried into worker briefs (the work item's line reads
+  "Title: ask") and never paraphrased away.
+- **CLI.** `task add` and `task sub add` require `--title` (the service
+  refuses a task without one); `task update ID --title` renames. The
+  per-turn note lists tasks by title; one without a title shows as
+  `untitled, asked "…"`, and the note asks the agent to name those when it
+  next touches them. The plugin prompt says the same.
+- **No migration, no generated titles.** The service runs no model. Stored
+  records without `title` load with an empty one (and are saved without the
+  key), so older `tasks.json` files read unchanged.
+- **On the phone** rows, sub-task rows, Home's waiting cards and the name
+  over a thread show the title, else the ask. A page shows the title (Title
+  22) with the ask beneath it quoted, in Body secondary, as the user's
+  words. The conversation's tracker lines read "Added task: <title>" and
+  "Named a task “…”". `GET /v1/waiting` adds `task_title` (and
+  `item_title`) beside `ask`.
+
+Checked 2026-10-31 on a simulator (iOS 27.0, DEBUG) with
+`SQUIRCLE_DEMO_TASKS` set to a copy of Squircle's real list (37 work items)
+given titles as an agent would, one left untitled: Tasks listed the titles,
+the untitled one its ask, and a page showed its title over the quoted ask.
+
 ## Needs you is derived, never set (2026-10-31, user decision)
 
 User, on the Tasks outline: "Needs you is really bad here it is completely
@@ -279,7 +311,7 @@ current, and the latest asks lost. So:
 ## Model
 
 Kept per app (T3 project) in `<data>/tasks.json`; attachments in
-`<data>/tasks/<id>/media` (screenshots, clips, and documents: pdf, md, txt, json, csv, which the phone opens in Quick Look). A task has the ask, a status (`queued`,
+`<data>/tasks/<id>/media` (screenshots, clips, and documents: pdf, md, txt, json, csv, which the phone opens in Quick Look). A task has a title (the agent's few words; empty on older ones), the ask (the user's words), a status (`queued`,
 `in_progress` and `needs_you` shown only, `ready_to_try`, `done`, `dropped`), a few-word
 note, the chat message it came from (the agent's latest user message when it
 adds the task), linked worker threads and builds, an order within its group,

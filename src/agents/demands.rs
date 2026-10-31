@@ -97,8 +97,8 @@ impl Agents {
         bail!(
             "Not sent: these messages from the user aren't in the tracker yet:{list}\n\
              Record each demand in them first, in the user's words, corrections and details included: \
-             `{cli} task sub add ITEM --thread {coordinator} --ask \"...\"` under the work item it belongs to, \
-             or `{cli} task add --thread {coordinator} --ask \"...\"` for a new one. If they ask for nothing to track \
+             `{cli} task sub add ITEM --thread {coordinator} --title \"...\" --ask \"...\"` under the work item it belongs to, \
+             or `{cli} task add --thread {coordinator} --title \"...\" --ask \"...\"` for a new one (the title a few words of yours, the ask their words). If they ask for nothing to track \
              (a thanks, a question you answered), run `{cli} task heard --thread {coordinator}`. Then run this again; \
              the worker's brief will carry every ask of its work item.",
             cli = self.cli(),
@@ -190,7 +190,12 @@ pub(super) fn asks_block(
                     format!("\n  - {}{done}", t.ask.replace('\n', " "))
                 })
                 .collect();
-            Some(format!("\n- {}{asks}", item.ask.replace('\n', " ")))
+            let named = if item.title.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", item.title)
+            };
+            Some(format!("\n- {named}{}{asks}", item.ask.replace('\n', " ")))
         })
         .collect();
     if body.is_empty() {
@@ -222,7 +227,17 @@ mod tests {
             })
         };
         let add = async |ask: &str, source: Option<Source>, parent: Option<&str>| {
-            let task = tasks.add("p", ask, None, None, By::Agent, source, vec![], parent);
+            let task = tasks.add(
+                "p",
+                "Folder",
+                ask,
+                None,
+                None,
+                By::Agent,
+                source,
+                vec![],
+                parent,
+            );
             task.await.unwrap().id
         };
         let item = add("Folder close feels like paper", said("1"), None).await;
@@ -256,7 +271,7 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "- Folder close feels like paper",
+                "- Folder: Folder close feels like paper",
                 "  - No wrapping: the card is covered by the flap"
             ]
         );
