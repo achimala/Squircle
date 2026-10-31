@@ -107,7 +107,7 @@ Per element:
 | Worker line, Squircle line, step | Glyph at 20, text at 48 | Line |
 | Worked for… | Check glyph at 20, text at 48, chevron after | Line; detail in tertiary |
 | Changes ("4 files +64 −9") | Glyph at 20, text at 48 | Line, digits in the same size |
-| Live line | Agent jelly (28 points) centred on the slot, text at 48 | Line, elapsed time in the same size at the right margin |
+| Live line | Agent jelly (28 points) centred on the slot, text the 8-point gap past its edge, at 52 (user, 2026-10-31: 48 was "too close to blob") | Line, elapsed time in the same size at the right margin |
 | Media (screenshots, clips, figures) | From 20; a sideways row scrolls past the edge | 8 points between pictures, 8-point radius |
 | Build card | From 20 to 20 | Card padding; Install is the one filled button |
 | Question card | From 20, 56 free on the right | Like a received bubble ([question card](#the-question-card)) |
@@ -120,7 +120,10 @@ One family of shapes, two meanings:
   [jelly crew](../t3-native-migration.md#2026-10-15-jelly-crew-030-71)
   rule). The app's agent is the plain cube; workers are Sprouts. A line
   about a worker leads with that worker's jelly. A question leads with
-  whoever asks.
+  whoever asks. The counts capsule shows only workers: the Sprouts of the
+  workers working or waiting on you; a count with none (the app's agent
+  asking, or working on it itself) gets a dot in its state colour, never
+  the agent (user, 2026-10-31).
 - **Anything else uses an SF Symbol**, drawn in the line's own font (Line:
   15 regular) and coloured secondary, or by its state when it has one. No
   semibold or bold symbols, and no symbol at a size of its own.

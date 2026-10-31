@@ -1128,9 +1128,11 @@ final class LiveCell: TimelineCell {
     /// The conversation is in sight: its jelly draws only then.
     var inSight = true { didSet { renderHero() } }
     /// Where the capsule starts: its mark in the glyph slot (the capsule
-    /// leads it by 12) or, with the jelly there instead, its text at
-    /// `Space.text` (an empty mark slot puts the text 18 in).
-    private static let markLead = Theme.Space.margin - 12, jellyLead = Theme.Space.text - 18
+    /// leads it by 12) or, with the jelly there instead, its text the glyph
+    /// gap past the jelly's drawn edge (it is wider than the slot, centred
+    /// on it; an empty mark slot puts the text 18 in).
+    private static let markLead = Theme.Space.margin - 12
+    private static let jellyLead = Theme.Space.margin + Theme.Space.glyph / 2 + heroSize / 2 + Theme.Space.glyphGap - 18
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
