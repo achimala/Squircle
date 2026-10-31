@@ -439,28 +439,23 @@ mod tests {
             .unwrap()
             .id;
         tasks
-            .tick(|_| worker("1", WorkerPhase::Working))
+            .tick(|_| worker("1", WorkerPhase::Done))
             .await
             .unwrap();
-        let ready = Update {
-            status: Some(Status::ReadyToTry),
+        let queued = Update {
+            status: Some(Status::Queued),
             ..Default::default()
         };
         tasks
-            .update(
-                &id,
-                ready,
-                By::Agent,
-                Some(worker("1", WorkerPhase::Working)),
-            )
+            .update(&id, queued, By::User, Some(worker("1", WorkerPhase::Done)))
             .await
             .unwrap();
         let tasks = Tasks::open(dir.path()).unwrap();
         tasks
-            .tick(|_| worker("1", WorkerPhase::Working))
+            .tick(|_| worker("1", WorkerPhase::Done))
             .await
             .unwrap();
-        assert_eq!(tasks.get(&id).unwrap().status, Status::ReadyToTry);
+        assert_eq!(tasks.get(&id).unwrap().status, Status::Queued);
     }
 
     #[tokio::test]

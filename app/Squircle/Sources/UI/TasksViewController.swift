@@ -3,7 +3,8 @@ import UIKit
 /// The app's tasks, pushed in over its agent (the deck's A · Outline). The
 /// overview lists every work item with its live status up front and its
 /// live threads nested under it (a Sprout, the title, what it is doing, a
-/// tiny preview); needs you and ready to try come first. A row opens the
+/// tiny preview); needs you comes first, then in progress (work running
+/// now), then ready to try. A row opens the
 /// item's page, and pages swipe sideways in the overview's order. A page
 /// lists threads first (each under the sub-task it serves), then the open
 /// sub-tasks, closed ones and earlier threads folded; an item with one live
@@ -126,8 +127,9 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     private static let historyFold = "fold.history"
     /// `about`: it's about one of the item's sub-tasks, so that is named.
     struct AskRow: Equatable { let item: WaitingList.Item; let busy: Bool; let last: Bool; var about = false }
-    /// What needs a look comes first: you, then something to try.
-    private static let statusOrder: [AppTask.Status] = [.needsYou, .readyToTry, .inProgress, .queued]
+    /// What needs you comes first, then what is running now (in progress
+    /// only shows while a linked thread or build runs), then something to try.
+    private static let statusOrder: [AppTask.Status] = [.needsYou, .inProgress, .readyToTry, .queued]
     /// Live threads nested under an overview row; the page has them all.
     private static let nested = 3
 
@@ -1820,10 +1822,11 @@ final class WorkItemPage: UIView {
     }
 
     /// Every status you can set, ticked at `current`, for a page's status
-    /// and a row's menu. Not needs you: only a question or approval makes it.
+    /// and a row's menu. Not needs you or in progress: only a question or
+    /// approval, and running work, make them.
     static func statusMenu(current: AppTask.Status, set: @escaping (AppTask.Status) -> Void) -> UIMenu {
         let statuses: [(AppTask.Status, String)] = [
-            (.inProgress, "hammer"), (.readyToTry, "shippingbox"),
+            (.readyToTry, "shippingbox"),
             (.queued, "tray"), (.done, "checkmark"), (.dropped, "xmark")]
         return UIMenu(options: .displayInline, children: statuses.map { value, symbol in
             UIAction(title: value == .dropped ? "Drop" : name(value), image: UIImage(systemName: symbol),

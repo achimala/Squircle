@@ -22,6 +22,12 @@
 //! sub-tasks, or a linked thread waiting on a question or approval of its
 //! own. Once the last of those is answered or withdrawn it shows its stage
 //! again.
+//!
+//! In progress (2026-10-31, user: "working only while a linked thread or
+//! build is actually running") is never stored either: a task shows as in
+//! progress exactly while a linked thread runs or a linked build is queued or
+//! running (`Record::live`). Otherwise it rests at its stage: queued until
+//! work has happened, then ready to try, or done or dropped as someone set.
 
 use crate::fsm::core::{BuildID, Disposition, Machine, Reduction, TaskID, ThreadID, Violation};
 use serde::{Deserialize, Serialize};
@@ -32,6 +38,8 @@ use std::collections::BTreeMap;
 #[value(rename_all = "snake_case")]
 pub enum Status {
     Queued,
+    /// Shown, never set (`Record::live`); parsed only to refuse it with the reason.
+    #[value(hide = true)]
     InProgress,
     /// Shown, never set (`Stage`); parsed only to refuse it with the reason.
     #[value(hide = true)]
@@ -56,27 +64,26 @@ impl Status {
         }
     }
 
-    /// The stage it names; none for needs you, which only something waiting
-    /// on the user makes.
-    pub fn stage(self) -> Option<Stage> {
+    /// The stage it names, or why it can't be set: needs you and in
+    /// progress are only shown, from what waits on the user and what runs.
+    pub fn stage(self) -> Result<Stage, &'static str> {
         match self {
-            Self::Queued => Some(Stage::Queued),
-            Self::InProgress => Some(Stage::InProgress),
-            Self::NeedsYou => None,
-            Self::ReadyToTry => Some(Stage::ReadyToTry),
-            Self::Done => Some(Stage::Done),
-            Self::Dropped => Some(Stage::Dropped),
+            Self::Queued => Ok(Stage::Queued),
+            Self::InProgress => Err(IN_PROGRESS_REFUSED),
+            Self::NeedsYou => Err(NEEDS_YOU_REFUSED),
+            Self::ReadyToTry => Ok(Stage::ReadyToTry),
+            Self::Done => Ok(Stage::Done),
+            Self::Dropped => Ok(Stage::Dropped),
         }
     }
 }
 
-/// Where a task stands as kept: every status but needs you, which is shown
-/// over it while something waits on the user (`Book::shown`).
+/// Where a task rests as kept: queued, ready to try, done or dropped. Needs
+/// you and in progress are shown over it (`Book::shown`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
     Queued,
-    InProgress,
     ReadyToTry,
     Done,
     Dropped,
@@ -92,7 +99,6 @@ impl From<Stage> for Status {
     fn from(stage: Stage) -> Self {
         match stage {
             Stage::Queued => Status::Queued,
-            Stage::InProgress => Status::InProgress,
             Stage::ReadyToTry => Status::ReadyToTry,
             Stage::Done => Status::Done,
             Stage::Dropped => Status::Dropped,
@@ -104,6 +110,11 @@ impl From<Stage> for Status {
 pub const NEEDS_YOU_REFUSED: &str = "needs_you can't be set: a task shows as needs you only while a question or approval waits on the user. \
 Ask with `squircle task ask TASK_ID --thread YOUR_THREAD_ID --question \"...\"` (it clears when they answer, or `task withdraw QUESTION_ID`); \
 for anything else, keep its status and say what it waits on with --note.";
+
+/// Why in progress can't be set: it only shows while linked work runs.
+pub const IN_PROGRESS_REFUSED: &str = "in_progress can't be set: a task shows as in progress only while a linked thread or build is running. \
+Link the work (`squircle thread spawn ... --task TASK_ID`, `squircle build start ... --task TASK_ID`, or `task link`) and it shows by itself; \
+otherwise the task rests at queued until work has happened, then ready_to_try, and say what is next with --note.";
 
 /// Who changed a task: the app's agent, the user on the phone, or Squircle
 /// following its linked workers and builds.
@@ -223,6 +234,8 @@ pub enum WorkerPhase {
     NeedsYou,
     Done,
     Error,
+    /// T3 has no such thread any more (archived or deleted): not running.
+    Gone,
     Missing,
 }
 
@@ -262,50 +275,24 @@ pub struct Signals {
     pub builds: Vec<BuildSignal>,
 }
 
-impl Signals {
-    /// The stage linked work implies, if any: work (a worker waiting on the
-    /// user is still at work; that it waits shows as needs you), then the
-    /// newest linked build having succeeded.
-    fn implied(&self) -> Option<Stage> {
-        if self
-            .workers
-            .iter()
-            .any(|w| matches!(w.phase, WorkerPhase::Working | WorkerPhase::NeedsYou))
-            || self
-                .builds
-                .iter()
-                .any(|b| matches!(b.phase, BuildPhase::Queued | BuildPhase::Running))
-        {
-            Some(Stage::InProgress)
-        } else if self
-            .builds
-            .last()
-            .is_some_and(|b| b.phase == BuildPhase::Succeeded)
-        {
-            Some(Stage::ReadyToTry)
-        } else {
-            None
-        }
-    }
-}
-
-/// What a work item's sub-tasks and its own linked work (`own`) add up to:
-/// work (also some finished and some still queued), then queued, then
-/// something to try. All closed: done when the user closed the last one
-/// (`by`), ready to try otherwise, dropped if all were dropped. (Whether any
-/// of them waits on the user is shown, not rolled up: `Book::shown`.)
-fn rollup(stages: &[Stage], own: Option<Stage>, by: By) -> Option<Stage> {
-    let all: Vec<Stage> = stages.iter().copied().chain(own).collect();
+/// Where a work item rests given its sub-tasks' stages and whether its own
+/// linked work has done anything (`own`): queued while nothing has, ready to
+/// try once something has and some are still open. All closed: done when
+/// the user closed the last one (`by`), ready to try otherwise, dropped if
+/// all were dropped. (Whether any of them waits on the user or runs is
+/// shown, not rolled up: `Book::shown`.)
+fn rollup(stages: &[Stage], own: bool, by: By) -> Option<Stage> {
+    let all: Vec<Stage> = stages
+        .iter()
+        .copied()
+        .chain(own.then_some(Stage::ReadyToTry))
+        .collect();
     let any = |s: Stage| all.contains(&s);
     if all.is_empty() {
         None
-    } else if any(Stage::InProgress)
-        || (any(Stage::Queued) && (any(Stage::Done) || any(Stage::ReadyToTry)))
-    {
-        Some(Stage::InProgress)
-    } else if any(Stage::Queued) {
+    } else if all.iter().all(|s| *s == Stage::Queued) {
         Some(Stage::Queued)
-    } else if any(Stage::ReadyToTry) {
+    } else if any(Stage::Queued) || any(Stage::ReadyToTry) {
         Some(Stage::ReadyToTry)
     } else if any(Stage::Done) {
         Some(if by == By::User {
@@ -434,6 +421,13 @@ impl Observation {
                 Some(_) if matches!(fact.phase, WorkerPhase::Working | WorkerPhase::NeedsYou) => {
                     News::NewWork
                 }
+                // Archiving a thread that had stopped is no news.
+                Some(old)
+                    if fact.phase == WorkerPhase::Gone
+                        && matches!(old.phase, WorkerPhase::Done | WorkerPhase::Error) =>
+                {
+                    News::None
+                }
                 Some(_) => News::Changed,
             });
             let turn = fact
@@ -470,31 +464,24 @@ impl Observation {
         (next, news)
     }
 
-    /// The stage the last known state of linked work implies.
-    fn implied(&self, threads: &[String], builds: &[String]) -> Option<Stage> {
-        Signals {
-            revision: None,
-            workers: threads
-                .iter()
-                .filter_map(|id| {
-                    self.workers.get(id).map(|w| WorkerSignal {
-                        thread: id.clone(),
-                        turn: None,
-                        phase: w.phase,
-                    })
-                })
-                .collect(),
-            builds: builds
-                .iter()
-                .filter_map(|id| {
-                    self.builds.get(id).map(|phase| BuildSignal {
-                        build: id.clone(),
-                        phase: *phase,
-                    })
-                })
-                .collect(),
-        }
-        .implied()
+    /// Whether any of `threads` was last seen running, or any of `builds`
+    /// queued or running.
+    fn live(&self, threads: &[String], builds: &[String]) -> bool {
+        threads.iter().any(|t| {
+            self.workers
+                .get(t)
+                .is_some_and(|w| w.phase == WorkerPhase::Working)
+        }) || builds.iter().any(|b| {
+            matches!(
+                self.builds.get(b),
+                Some(BuildPhase::Queued | BuildPhase::Running)
+            )
+        })
+    }
+
+    /// Whether linked work has been seen at all.
+    fn any(&self) -> bool {
+        !self.workers.is_empty() || !self.builds.is_empty()
     }
 }
 
@@ -524,7 +511,8 @@ struct Record {
     history: Vec<Change>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     questions: Vec<Question>,
-    /// Read from a file that kept needs you as its status, and not saved since.
+    /// Read from a file that kept needs you or in progress as its status,
+    /// and not saved since.
     #[serde(skip)]
     migrated: bool,
 }
@@ -581,17 +569,13 @@ impl From<StoredRecord> for Record {
                 .0
         });
         let mut history = s.history;
-        // Needs you as a kept status: the stage linked work implies, else the
-        // last other one it had, else at work. Whatever really waits on the
-        // user still shows as needs you over it.
+        // Needs you or in progress as a kept status (from before they were
+        // derived): where it rests. Whatever really waits on the user or runs
+        // still shows over it.
         let (status, migrated) = match s.status.stage() {
-            Some(stage) => (stage, false),
-            None => {
-                let stage = observed
-                    .implied(&s.threads, &s.builds)
-                    .or_else(|| history.iter().rev().find_map(|c| c.status.stage()))
-                    .filter(|stage| stage.open())
-                    .unwrap_or(Stage::InProgress);
+            Ok(stage) => (stage, false),
+            Err(_) => {
+                let stage = resting(&observed, &history);
                 history.push(Change {
                     at: s.updated_at,
                     status: stage.into(),
@@ -622,6 +606,21 @@ impl From<StoredRecord> for Record {
             questions: s.questions,
             migrated,
         }
+    }
+}
+
+/// Where an open task rests once nothing runs: queued until work has
+/// happened (linked work seen, or a result it was ready to try or done
+/// with), ready to try after.
+fn resting(observed: &Observation, history: &[Change]) -> Stage {
+    if observed.any()
+        || history
+            .iter()
+            .any(|c| matches!(c.status, Status::ReadyToTry | Status::Done))
+    {
+        Stage::ReadyToTry
+    } else {
+        Stage::Queued
     }
 }
 
@@ -672,6 +671,15 @@ impl Record {
                 }))
     }
 
+    /// Whether linked work runs on it now: shown as in progress while it is open.
+    fn live(&self) -> bool {
+        self.status.open() && self.observed.live(&self.threads, &self.builds)
+    }
+
+    fn rest(&self) -> Stage {
+        resting(&self.observed, &self.history)
+    }
+
     /// Any change to the task itself: it counts as touched and leaves History.
     fn touch(&mut self, now: u64) {
         self.updated_at = now;
@@ -712,7 +720,9 @@ impl Record {
     }
 
     /// Follows linked workers and builds: when one of them has news since it
-    /// was last seen, the status they imply replaces the current one. A done
+    /// was last seen and nothing of it runs any more, it rests at ready to
+    /// try (a work item: the roll-up of its sub-tasks with that). While
+    /// something runs it shows as in progress over its stage. A done
     /// or dropped task reopens only for new work (a new link, a new turn, a
     /// worker working or asking again), not old work finishing; new work also
     /// brings a task back from History. A replaced one never reopens: its
@@ -731,12 +741,15 @@ impl Record {
         if news == News::NewWork {
             self.touch(now);
         }
-        let implied = if subtasks.is_empty() {
-            signals.implied()
+        if self.live() {
+            return true;
+        }
+        let rest = if subtasks.is_empty() {
+            Some(self.rest())
         } else {
-            rollup(subtasks, signals.implied(), By::Auto)
+            rollup(subtasks, self.observed.any(), By::Auto)
         };
-        if let Some(status) = implied.filter(|s| *s != self.status) {
+        if let Some(status) = rest.filter(|s| *s != self.status) {
             self.set(status, By::Auto, None, now);
         }
         true
@@ -816,18 +829,21 @@ impl Book {
     }
 
     /// The status a task shows: needs you while it or one of its sub-tasks
-    /// waits on the user, otherwise its stage.
+    /// waits on the user, else in progress while linked work of it or of an
+    /// open sub-task runs, otherwise its stage.
     fn shown(&self, record: &Record) -> Status {
-        if record.waiting()
-            || (record.status.open() && self.children(&record.id).any(Record::waiting))
-        {
+        let open = record.status.open();
+        if record.waiting() || (open && self.children(&record.id).any(Record::waiting)) {
             Status::NeedsYou
+        } else if record.live() || (open && self.children(&record.id).any(Record::live)) {
+            Status::InProgress
         } else {
             record.status.into()
         }
     }
 
-    /// Whether it was read with needs you kept as its status and not saved since.
+    /// Whether it was read with needs you or in progress kept as its status
+    /// and not saved since.
     pub fn migrated(&self) -> bool {
         self.tasks.values().any(|t| t.migrated)
     }
@@ -942,16 +958,16 @@ impl Book {
     /// closed, and a replaced one stays closed.
     fn rederive(&mut self, id: &str, by: By, now: u64) {
         let statuses = self.statuses(id);
+        let active = self
+            .children(id)
+            .any(|t| t.status == Stage::Queued || t.live());
         let Some(item) = self.tasks.get_mut(id) else {
             return;
         };
-        let active = statuses
-            .iter()
-            .any(|s| matches!(s, Stage::Queued | Stage::InProgress));
         if !item.status.open() && (!active || item.replaced_by.is_some()) {
             return;
         }
-        let own = item.observed.implied(&item.threads, &item.builds);
+        let own = item.observed.any();
         if let Some(status) = rollup(&statuses, own, by).filter(|s| *s != item.status) {
             item.set(status, By::Auto, None, now);
         }
@@ -1079,8 +1095,9 @@ pub enum Event {
     Withdraw { question: String, now: u64 },
     /// An answered question's answer is queued for its asker.
     Delivered { question: String },
-    /// Saves, once, what was read from a file that kept needs you as a
-    /// status (`Book::migrated`), and rolls up the work items among them.
+    /// Saves, once, what was read from a file that kept needs you or in
+    /// progress as a status (`Book::migrated`), and rolls up the work items
+    /// among or above them.
     Migrate { now: u64 },
 }
 
@@ -1120,8 +1137,8 @@ fn link(
 }
 
 /// Answers or withdraws an open question; the task shows its stage again
-/// once nothing else waits on the user. An answer sets an open task in
-/// progress: the asker has what it waited for and goes on.
+/// once nothing else waits on the user (in progress if the asker, linked,
+/// goes on running).
 fn close_question(
     mut book: Book,
     question: &str,
@@ -1163,15 +1180,10 @@ fn close_question(
         };
         return Reduction::same(book, Disposition::Rejected(reason.into()));
     }
-    let answered = matches!(state, QuestionState::Answered { .. });
     entry.state = state;
-    let (id, before) = (task.id.clone(), task.status);
+    let id = task.id.clone();
     task.touch(now);
-    if answered && task.status.open() {
-        task.set(Stage::InProgress, by, None, now);
-    }
-    let after = task.status;
-    book.bubble(&id, after != before, by, now);
+    book.bubble(&id, false, by, now);
     changed(book)
 }
 
@@ -1232,12 +1244,9 @@ impl Machine for M17 {
                 let order = book.next_order(&project, parent.as_deref());
                 let status = match status.map(Status::stage) {
                     None => Stage::Queued,
-                    Some(Some(stage)) => stage,
-                    Some(None) => {
-                        return Reduction::same(
-                            book,
-                            Disposition::Rejected(NEEDS_YOU_REFUSED.into()),
-                        );
+                    Some(Ok(stage)) => stage,
+                    Some(Err(reason)) => {
+                        return Reduction::same(book, Disposition::Rejected(reason.into()));
                     }
                 };
                 let task = Record {
@@ -1283,14 +1292,10 @@ impl Machine for M17 {
                 let Some(current) = book.tasks.get(&id) else {
                     return missing(book, &id);
                 };
-                let stage = match update.status.map(Status::stage) {
-                    None => None,
-                    Some(Some(stage)) => Some(stage),
-                    Some(None) => {
-                        return Reduction::same(
-                            book,
-                            Disposition::Rejected(NEEDS_YOU_REFUSED.into()),
-                        );
+                let stage = match update.status.map(Status::stage).transpose() {
+                    Ok(stage) => stage,
+                    Err(reason) => {
+                        return Reduction::same(book, Disposition::Rejected(reason.into()));
                     }
                 };
                 let (project, old_parent, before) = (
@@ -1422,10 +1427,13 @@ impl Machine for M17 {
                     }
                     let subtasks = book.statuses(id);
                     let task = book.tasks.get_mut(id).expect("checked above");
-                    let (before, turns) = (task.status, task.updated_at);
+                    let (before, turns, ran) = (task.status, task.updated_at, task.live());
                     any |= task.follow(signals, &subtasks, now);
-                    if task.status != before || task.updated_at != turns {
-                        moved.push((id.clone(), task.status != before));
+                    // A sub-task's work starting counts like a status change:
+                    // it can reopen its closed work item.
+                    let started = task.live() && !ran;
+                    if task.status != before || task.updated_at != turns || started {
+                        moved.push((id.clone(), task.status != before || started));
                     }
                 }
                 for (id, status_changed) in moved {
@@ -1474,7 +1482,8 @@ impl Machine for M17 {
                 task.touch(now);
                 if !task.status.open() {
                     task.replaced_by = None;
-                    task.set(Stage::InProgress, By::Agent, None, now);
+                    let rest = task.rest();
+                    task.set(rest, By::Agent, None, now);
                 }
                 let after = task.status;
                 book.bubble(&id, after != before, By::Agent, now);
@@ -1533,15 +1542,16 @@ impl Machine for M17 {
                     .map(|t| {
                         t.migrated = false;
                         t.revision += 1;
-                        t.id.clone()
+                        t.parent.clone().unwrap_or_else(|| t.id.clone())
                     })
                     .collect();
                 if migrated.is_empty() {
                     return Reduction::same(book, Disposition::Unchanged);
                 }
-                for id in &migrated {
-                    if book.children(id).next().is_some() {
-                        book.rederive(id, By::Auto, now);
+                // The work items among them or above them roll up again.
+                for id in std::collections::BTreeSet::from_iter(migrated) {
+                    if book.children(&id).next().is_some() {
+                        book.rederive(&id, By::Auto, now);
                     }
                 }
                 changed(book)
@@ -1833,6 +1843,7 @@ mod tests {
                 },
             )
         };
+        // Answered, it shows the worker still running.
         let reduction = answer(book, 3);
         let book = reduction.state;
         assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
@@ -1936,6 +1947,141 @@ mod tests {
         assert_eq!(book.get("t").unwrap().status, Status::ReadyToTry);
         let book = step(book, Event::Migrate { now: 9 });
         assert!(!book.migrated());
+        let saved: Book = serde_json::from_value(serde_json::to_value(&book).unwrap()).unwrap();
+        assert!(!saved.migrated());
+    }
+    #[test]
+    fn in_progress_shows_only_while_linked_work_runs_and_is_never_set() {
+        let (book, id) = book();
+        let refused = M17::reduce(
+            book.clone(),
+            Event::Edit {
+                id: id.clone(),
+                update: Update {
+                    status: Some(Status::InProgress),
+                    ..Default::default()
+                },
+                by: By::Agent,
+                observed: None,
+                now: 1,
+            },
+        );
+        assert!(matches!(refused.disposition, Disposition::Rejected(_)));
+        // No work yet: queued. A worker running: in progress over queued.
+        assert_eq!(book.get(&id).unwrap().status, Status::Queued);
+        let (book, _) = observe(book, &id, worker("1", WorkerPhase::Working), 2);
+        assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
+        // It stops: ready to try, as work has happened.
+        let (book, _) = observe(book, &id, worker("1", WorkerPhase::Done), 3);
+        assert_eq!(book.get(&id).unwrap().status, Status::ReadyToTry);
+        // A build queued and running shows; its failing leaves it resting.
+        let (book, _) = observe(
+            book,
+            &id,
+            with_build(worker("1", WorkerPhase::Done), B, BuildPhase::Queued),
+            4,
+        );
+        assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
+        let (book, _) = observe(
+            book,
+            &id,
+            with_build(worker("1", WorkerPhase::Done), B, BuildPhase::Failed),
+            5,
+        );
+        assert_eq!(book.get(&id).unwrap().status, Status::ReadyToTry);
+        // A worker archived mid-turn no longer runs.
+        let (book, _) = observe(book, &id, worker("2", WorkerPhase::Working), 6);
+        assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
+        let (book, _) = observe(book, &id, worker("2", WorkerPhase::Gone), 7);
+        assert_eq!(book.get(&id).unwrap().status, Status::ReadyToTry);
+        // A stale "unknown" read keeps what was last seen.
+        let (book, _) = observe(book, &id, worker("2", WorkerPhase::Missing), 8);
+        assert_eq!(book.get(&id).unwrap().status, Status::ReadyToTry);
+    }
+
+    #[test]
+    fn a_work_item_shows_its_sub_tasks_running_and_rests_by_their_stages() {
+        let (book, id) = book();
+        let add = |book: Book, sub: &TaskID, now: u64| {
+            step(
+                book,
+                Event::Add {
+                    id: sub.clone(),
+                    project: "p".into(),
+                    ask: "Fold from the bottom".into(),
+                    status: None,
+                    note: None,
+                    by: By::Agent,
+                    source: None,
+                    threads: vec!["s".into()],
+                    parent: Some(id.clone()),
+                    now,
+                },
+            )
+        };
+        let (first, second) = (TaskID::fresh(), TaskID::fresh());
+        let book = add(add(book, &first, 1), &second, 1);
+        assert_eq!(book.get(&id).unwrap().status, Status::Queued);
+        let sub = |phase| Signals {
+            revision: None,
+            workers: vec![WorkerSignal {
+                thread: "s".into(),
+                turn: Some("1".into()),
+                phase,
+            }],
+            builds: vec![],
+        };
+        let (book, _) = observe(book, first.as_str(), sub(WorkerPhase::Working), 2);
+        let item = book.get(&id).unwrap();
+        assert_eq!(
+            (
+                item.status,
+                item.subtasks.iter().map(|t| t.status).collect()
+            ),
+            (Status::InProgress, vec![Status::InProgress, Status::Queued])
+        );
+        // One finished, one still queued: the item rests at ready to try.
+        let (book, _) = observe(book, first.as_str(), sub(WorkerPhase::Done), 3);
+        assert_eq!(book.get(&id).unwrap().status, Status::ReadyToTry);
+        // Closed by the user, then a sub-task's worker runs again: it reopens.
+        let book = set(book, &id, Status::Done, By::User, None, 4);
+        let (book, _) = observe(book, first.as_str(), sub(WorkerPhase::Done), 5);
+        assert_eq!(book.get(&id).unwrap().status, Status::Done);
+        let next = Signals {
+            workers: vec![WorkerSignal {
+                thread: "s".into(),
+                turn: Some("2".into()),
+                phase: WorkerPhase::Working,
+            }],
+            ..Default::default()
+        };
+        let (book, _) = observe(book, first.as_str(), next, 6);
+        assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
+    }
+
+    #[test]
+    fn a_kept_in_progress_reads_back_as_where_it_rests() {
+        let record = |id: &str, parent: Option<&str>, status: &str, history: &[&str]| {
+            serde_json::json!({
+                "id": id, "project_id": "p", "parent": parent, "ask": "Stack the sims",
+                "status": status, "note": "Merged; build coming", "threads": [], "builds": [],
+                "order": 1.0, "created_at": 1, "updated_at": 2, "revision": 3,
+                "history": history.iter().map(|s| serde_json::json!({"at": 1, "status": s, "by": "agent"})).collect::<Vec<_>>()
+            })
+        };
+        let json = serde_json::json!({"tasks": {
+            "item": record("item", None, "in_progress", &["queued", "in_progress"]),
+            "a": record("a", Some("item"), "in_progress", &["queued", "in_progress"]),
+            "b": record("b", Some("item"), "in_progress", &["ready_to_try", "in_progress"]),
+        }});
+        let book: Book = serde_json::from_value(json).unwrap();
+        assert!(book.migrated());
+        let status = |book: &Book, id: &str| book.get(id).unwrap().status;
+        // Never worked on: queued; with a result before: ready to try.
+        assert_eq!(status(&book, "a"), Status::Queued);
+        assert_eq!(status(&book, "b"), Status::ReadyToTry);
+        let book = step(book, Event::Migrate { now: 9 });
+        assert_eq!(status(&book, "item"), Status::ReadyToTry);
         let saved: Book = serde_json::from_value(serde_json::to_value(&book).unwrap()).unwrap();
         assert!(!saved.migrated());
     }

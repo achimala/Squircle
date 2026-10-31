@@ -481,7 +481,7 @@ impl Agents {
              Before any work on something the user asks, put it in the tracker in their words: a sub-task (`task sub add ITEM`) of the work item it clearly belongs to, \
              otherwise a new work item (`task add`); never under an unrelated one. Track your own breakdown as sub-tasks; link workers (`thread spawn --task`) \
              and builds (`build start --task`) to the sub-task or item they serve, attach screenshots or clips worth seeing, and set status and note when that changes \
-             (linked workers and builds move them too; an item follows its sub-tasks). A worker's brief (`thread spawn --task`, `thread send`) ends with the user's current asks for its work item \
+             (in progress shows only while a linked worker or build runs and can't be set; an item follows its sub-tasks). A worker's brief (`thread spawn --task`, `thread send`) ends with the user's current asks for its work item \
              from the tracker, so a correction you don't record never reaches it. When the user corrects or adds to work in progress, mark the asks it \
              replaces (`task update ID --replaced-by NEW`) and send the worker the whole current spec, not just the new piece; after many revisions, \
              prefer a fresh worker briefed from the clean spec. \

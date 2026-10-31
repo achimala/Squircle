@@ -20,8 +20,9 @@ pub(super) fn tasks_of(state: &AppState) -> ApiResult<Arc<Tasks>> {
 
 /// What a task's linked workers and builds are doing, from memory only (the
 /// shell's observations and the job index), so every tick can cover History
-/// too. A thread T3 hasn't sent, or a shell that isn't current, is no fact
-/// (`Missing`), never news.
+/// too. A thread a current shell no longer has (archived or deleted) is
+/// `Gone`, so it stops showing as running; one T3 hasn't sent yet, or a
+/// shell that isn't current, is no fact (`Missing`), never news.
 pub(super) fn task_signals(state: &AppState, task: &tasks::Task) -> tasks::Signals {
     use crate::agents::Phase;
     use tasks::{BuildPhase, WorkerPhase};
@@ -30,17 +31,16 @@ pub(super) fn task_signals(state: &AppState, task: &tasks::Task) -> tasks::Signa
         .iter()
         .map(|id| {
             // Only a current shell fact moves a task; stale or unknown is no fact.
-            let observed = state
-                .agents
-                .as_ref()
-                .and_then(|a| a.observe(id).current().flatten());
-            let phase = match observed.as_ref().map(|o| o.phase()) {
-                Some(Phase::NeedsYou) => WorkerPhase::NeedsYou,
-                Some(Phase::Working) => WorkerPhase::Working,
-                Some(Phase::Error) => WorkerPhase::Error,
-                Some(Phase::Done) => WorkerPhase::Done,
+            let observed = state.agents.as_ref().and_then(|a| a.observe(id).current());
+            let phase = match observed.as_ref().map(|o| o.as_ref().map(|o| o.phase())) {
+                Some(Some(Phase::NeedsYou)) => WorkerPhase::NeedsYou,
+                Some(Some(Phase::Working)) => WorkerPhase::Working,
+                Some(Some(Phase::Error)) => WorkerPhase::Error,
+                Some(Some(Phase::Done)) => WorkerPhase::Done,
+                Some(None) => WorkerPhase::Gone,
                 None => WorkerPhase::Missing,
             };
+            let observed = observed.flatten();
             tasks::WorkerSignal {
                 thread: id.clone(),
                 turn: observed.and_then(|o| o.turn),
