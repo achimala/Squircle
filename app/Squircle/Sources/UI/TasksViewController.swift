@@ -736,7 +736,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
                 await self?.model.taskVideo(task: task, media: media.id)
             }), from: origin, in: window)
         } else {
-            MediaViewer.open(.image(poster, full: { [weak self] pixels in
+            MediaViewer.open(.image(poster, size: nil, full: { [weak self] pixels in
                 guard let data = await self?.model.taskMediaData(task: task, media: media.id) else { return nil }
                 return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
             }), from: origin, in: window)

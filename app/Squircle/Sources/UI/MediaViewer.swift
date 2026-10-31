@@ -20,21 +20,32 @@ struct MediaOrigin {
     /// the inline picture, for an owner that draws it itself. The located
     /// view is hidden either way.
     var conceal: (@MainActor (Bool) -> Void)?
-    init(locate: @escaping @MainActor () -> MediaSpot?, conceal: (@MainActor (Bool) -> Void)? = nil) {
+    /// Brings the inline spot into sight behind the viewer (scrolling the
+    /// conversation), when paging comes to rest on it.
+    var reveal: (@MainActor () -> Void)?
+    init(locate: @escaping @MainActor () -> MediaSpot?, conceal: (@MainActor (Bool) -> Void)? = nil, reveal: (@MainActor () -> Void)? = nil) {
         self.locate = locate
         self.conceal = conceal
+        self.reveal = reveal
     }
 }
 
 /// What the viewer shows.
 enum ViewerMedia {
-    /// The inline picture, and a sharper decode at up to a pixel size.
-    case image(UIImage, full: (@MainActor (CGFloat) async -> UIImage?)?)
-    /// A clip: its poster, its size when known, the inline player to carry
-    /// on with (nil: a new one from `url`).
-    case video(poster: UIImage?, size: CGSize?, player: AVPlayer?, url: @MainActor () async -> URL?)
+    /// The inline picture (nil: not loaded yet), its size when known, and a
+    /// sharper decode at up to a pixel size, loading it if needed.
+    case image(UIImage?, size: CGSize?, full: (@MainActor (CGFloat) async -> UIImage?)?)
+    /// A clip: its poster (or how to load one), its size when known, the
+    /// inline player to carry on with (nil: a new one from `url`).
+    case video(poster: UIImage?, size: CGSize?, player: AVPlayer?, still: (@MainActor () async -> UIImage?)? = nil, url: @MainActor () async -> URL?)
     /// A live simulator, touchable while large.
     case simulator(SimulatorUse, feeds: SimulatorFeeds, openThread: (() -> Void)?)
+}
+
+/// One medium the viewer pages to, and where it shows inline.
+struct ViewerItem {
+    let media: ViewerMedia
+    let origin: MediaOrigin
 }
 
 /// Every picture, clip and simulator brought large: it flies up from its
@@ -42,29 +53,40 @@ enum ViewerMedia {
 /// dragged (shrinking a little, the backdrop fading with distance), and a
 /// flick or a long enough drag throws it back into wherever its inline frame
 /// is now, keeping the finger's velocity. Pictures pinch and double-tap zoom.
+/// The conversation's other pictures and clips are a swipe away on either
+/// side, in its order, on a paging scroll view.
 ///
 /// The picture's frame is one spring (centre and size, with velocity). The
 /// route (open or closed) and the zoom pick its target every frame; a finger
 /// holds it, and letting go hands it back with the finger's velocity. Every
 /// other thing drawn (backdrop, corners, controls, who takes touches) is
-/// derived from that frame and the route, so a tap or drag at any moment
-/// takes over from wherever it is.
+/// derived from that frame, the route and the pager's offset, so a tap or
+/// drag at any moment takes over from wherever it is. The spring frames the
+/// page nearest the middle; the others rest fitted where the pager puts them.
 ///
 /// A live simulator takes taps on its picture; it is dismissed by dragging
 /// from the grabber under it or anywhere outside it, a tap outside it, or
 /// the shrink button.
 @MainActor
-final class MediaViewer: UIView, UIGestureRecognizerDelegate {
+final class MediaViewer: UIView, UIGestureRecognizerDelegate, UIScrollViewDelegate {
     enum Route { case open, closed }
     private(set) var route = Route.open
-    let media: ViewerMedia
-    private let origin: MediaOrigin
+    private let items: [ViewerItem]
+    /// What the page nearest the middle shows.
+    var media: ViewerMedia { items[index].media }
     var onClosed: (() -> Void)?
 
     /// Opens `media` from its inline spot over everything in `window`.
     @discardableResult
     static func open(_ media: ViewerMedia, from origin: MediaOrigin, in window: UIWindow) -> MediaViewer {
-        let viewer = MediaViewer(media: media, origin: origin)
+        open([ViewerItem(media: media, origin: origin)], at: 0, in: window)
+    }
+
+    /// Opens `items[index]` from its inline spot; the others page in on
+    /// either side.
+    @discardableResult
+    static func open(_ items: [ViewerItem], at index: Int, in window: UIWindow) -> MediaViewer {
+        let viewer = MediaViewer(items: items, index: index)
         viewer.frame = window.bounds
         viewer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         window.addSubview(viewer)
@@ -87,6 +109,13 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
     }
     private var hold = Hold.none
     private var held: Bool { if case .none = hold { false } else { true } }
+    /// The page nearest the middle: the spring frames it, it goes home.
+    private var index: Int
+    /// The page paging last came to rest on: its clip plays and its inline
+    /// spot was brought into sight.
+    private var settled: Int
+    /// Pages around `index`; the rest are unmounted.
+    private var pages: [Int: ViewerPage] = [:]
     /// Where a zoomed picture rests; nil: fitted to the screen.
     private var zoom: CGRect?
     /// Where it heads when its inline spot can't be seen: on off the
@@ -107,92 +136,40 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
     // MARK: Views
 
     private let backdrop = UIView()
-    /// Frame driven by the spring; draws nothing itself.
-    private let picture = UIView()
-    /// The picture, or a clip's poster: contents only, so its rounded
-    /// corners cost nothing extra to draw.
-    private let content = CALayer()
-    private var playerLayer: AVPlayerLayer?
-    private var screen: SimulatorScreen?
-    private var input: SimulatorInput?
-    private var aspect: CGFloat
+    /// Native paging physics for swiping between media; draws nothing.
+    private let pager = UIScrollView()
+    private static let gap: CGFloat = 20
     private let close = Theme.glassButton(symbol: "xmark", identifier: "viewer.close", accessibilityLabel: "Close")
-    private var video: VideoControls?
     private var sim: SimulatorChrome?
     private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
     private lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched(_:)))
     private lazy var doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
     private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
 
+    private var page: ViewerPage { mount(index) }
     private var zooms: Bool { if case .image = media { true } else { false } }
     private var isSimulator: Bool { if case .simulator = media { true } else { false } }
 
-    private init(media: ViewerMedia, origin: MediaOrigin) {
-        self.media = media
-        self.origin = origin
-        switch media {
-        case .image(let image, _): aspect = image.size.height / max(1, image.size.width)
-        case .video(let poster, let size, _, _):
-            let size = size ?? poster?.size ?? CGSize(width: 16, height: 9)
-            aspect = size.height / max(1, size.width)
-        case .simulator: aspect = 2.17
-        }
+    private init(items: [ViewerItem], index: Int) {
+        self.items = items
+        self.index = index
+        settled = index
         super.init(frame: .zero)
         overrideUserInterfaceStyle = .dark
         backdrop.backgroundColor = .black
         backdrop.isUserInteractionEnabled = false
         addSubview(backdrop)
-        picture.isUserInteractionEnabled = false
-        picture.accessibilityIgnoresInvertColors = true
-        content.contentsGravity = .resizeAspectFill
-        content.masksToBounds = true
-        content.cornerCurve = .continuous
-        picture.layer.addSublayer(content)
-        addSubview(picture)
-        switch media {
-        case .image(let image, _):
-            content.contents = image.cgImage
-            picture.isAccessibilityElement = true
-            picture.accessibilityLabel = "Picture"
-            picture.accessibilityTraits = .image
-        case .video(let poster, _, let player, _):
-            content.contents = poster?.cgImage
-            let layer = AVPlayerLayer()
-            layer.videoGravity = .resizeAspectFill
-            layer.masksToBounds = true
-            layer.cornerCurve = .continuous
-            picture.layer.addSublayer(layer)
-            playerLayer = layer
-            let controls = VideoControls()
-            controls.onPresentationSize = { [weak self] size in
-                guard let self, size.width > 0 else { return }
-                aspect = size.height / size.width
-                retarget()
-            }
-            addSubview(controls)
-            video = controls
-            if let player { use(player, shared: true) }
-        case .simulator(let use, let feeds, let openThread):
-            let screen = SimulatorScreen()
-            screen.layer.masksToBounds = true
-            screen.layer.cornerCurve = .continuous
-            screen.onPictureSize = { [weak self, weak screen] in
-                guard let self, let screen else { return }
-                aspect = screen.aspect
-                retarget()
-            }
-            picture.addSubview(screen)
-            self.screen = screen
-            feeds.attach(screen, to: use.target)
-            aspect = screen.aspect
-            let input = SimulatorInput()
-            input.onTouch = { [weak feeds, weak screen] phase, point in
-                guard let feeds, let screen else { return false }
-                return feeds.touch(phase, at: point, on: screen)
-            }
-            input.screen = screen
-            picture.addSubview(input)
-            self.input = input
+        pager.isPagingEnabled = true
+        pager.showsHorizontalScrollIndicator = false
+        pager.showsVerticalScrollIndicator = false
+        pager.contentInsetAdjustmentBehavior = .never
+        pager.scrollsToTop = false
+        pager.isScrollEnabled = items.count > 1
+        pager.delegate = self
+        addSubview(pager)
+        addSubview(close)
+        if case .simulator(let use, let feeds, let openThread) = items[index].media {
+            close.isHidden = true
             let chrome = SimulatorChrome(showsThread: openThread != nil)
             chrome.home.addAction(UIAction { [weak feeds] _ in
                 guard let target = use.target else { return }
@@ -214,15 +191,16 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
             interactiveObserver = feeds.observeInteractive(refresh)
             refresh()
         }
-        if !isSimulator { addSubview(close) }
         close.addAction(UIAction { [weak self] _ in self?.dismiss() }, for: .touchUpInside)
         pan.maximumNumberOfTouches = 1
         doubleTap.numberOfTapsRequired = 2
-        if zooms { tap.require(toFail: doubleTap) }
+        tap.require(toFail: doubleTap)
         for gesture in [pan, pinch, doubleTap, tap] as [UIGestureRecognizer] {
             gesture.delegate = self
             addGestureRecognizer(gesture)
         }
+        // A drag that starts upright dismisses; one that starts sideways pages.
+        pager.panGestureRecognizer.require(toFail: pan)
         chrome.parameters = SpringDriver.Parameters(response: 0.3, damping: 1)
         chrome.onChange = { [weak self] _ in self?.apply() }
         accessibilityViewIsModal = true
@@ -246,11 +224,11 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
             let fit = fitFrame
             spring.set(CGRect(x: fit.midX - fit.width * 0.4, y: fit.midY - fit.height * 0.4, width: fit.width * 0.8, height: fit.height * 0.8))
         }
-        origin.conceal?(true)
+        items[index].origin.conceal?(true)
         apply(spot)
         run()
-        loadSharper()
-        loadVideo()
+        for page in pages.values { loadSharper(page) }
+        let picture = page.picture
         UIAccessibility.post(notification: .screenChanged, argument: picture.isAccessibilityElement ? picture : nil)
     }
 
@@ -258,11 +236,15 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
     func dismiss(velocity: CGPoint? = nil) {
         guard route == .open else { return }
         if !held { Theme.selectionHaptic() }
+        // Caught between pages: the one nearest the middle goes home from where it shows.
+        if pagerMoving {
+            spring.set(spring.value.offsetBy(dx: shift(index), dy: 0))
+            pager.setContentOffset(CGPoint(x: CGFloat(index) * pageWidth, y: 0), animated: false)
+        }
+        settle()
         route = .closed
         zoom = nil
         if let velocity { spring.velocity = [velocity.x, velocity.y, 0, 0] }
-        video?.closing()
-        input?.interactive = false
         run()
         apply()
     }
@@ -276,15 +258,105 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
         let goal = target(locate())
         let toward = CGPoint(x: goal.midX - spring.value.midX, y: goal.midY - spring.value.midY)
         if toward.x * spring.velocity[0] + toward.y * spring.velocity[1] < 0 { spring.velocity = [0, 0, 0, 0] }
-        video?.reopened()
         run()
+    }
+
+    // MARK: Pages
+
+    private var pageWidth: CGFloat { bounds.width + Self.gap }
+    /// How far page `i` sits from the middle.
+    private func shift(_ i: Int) -> CGFloat { CGFloat(i) * pageWidth - pager.contentOffset.x }
+    /// A finger paging, or the pager gliding to a page, or off one.
+    private var pagerMoving: Bool {
+        pager.isDragging || pager.isDecelerating || abs(shift(index)) > 0.5
+    }
+
+    /// Page `i`, made and loading if it wasn't.
+    @discardableResult
+    private func mount(_ i: Int) -> ViewerPage {
+        if let page = pages[i] { return page }
+        let page = ViewerPage(items[i])
+        pages[i] = page
+        insertSubview(page.picture, aboveSubview: pager)
+        if let video = page.video {
+            insertSubview(video, belowSubview: close)
+            video.onAudible = { [weak self] in self?.updateAudio() }
+        }
+        page.onAspect = { [weak self, weak page] in
+            guard let self, let page, !finished else { return }
+            if pages[index] === page { retarget() } else { apply() }
+        }
+        page.load()
+        loadSharper(page)
+        return page
+    }
+
+    /// The pages either side of the middle one are ready; the rest, all
+    /// off screen, go.
+    private func mountAround() {
+        for i in max(0, index - 1)...min(items.count - 1, index + 1) { mount(i) }
+        for (i, page) in pages where abs(i - index) > 1 {
+            page.finish()
+            pages[i] = nil
+        }
+    }
+
+    /// Paging brought another page nearest the middle: the spring frames it
+    /// now, fitted.
+    private func turn(to next: Int) {
+        index = next
+        zoom = nil
+        away = nil
+        stopLink()
+        spring.velocity = [0, 0, 0, 0]
+        mountAround()
+        spring.set(fitFrame)
+    }
+
+    /// Paging came to rest: its clip plays, the conversation shows its
+    /// inline spot behind the viewer, and it sharpens.
+    private func settle() {
+        guard settled != index else { return }
+        items[settled].origin.conceal?(false)
+        settled = index
+        items[index].origin.conceal?(true)
+        items[index].origin.reveal?()
+        apply()
+        for page in pages.values { showSharper(page) }
+        loadSharper(page)
+    }
+
+    /// The pager being sized for the screen: its offset follows `index`.
+    private var relaying = false
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        guard !finished else { return }
+        if !relaying {
+            let nearest = min(items.count - 1, max(0, Int((scrollView.contentOffset.x / pageWidth).rounded())))
+            if nearest != index { turn(to: nearest) }
+        }
+        apply()
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate, !pagerMoving { settle() }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        if !pagerMoving { settle() }
+    }
+
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        if !pagerMoving { settle() }
     }
 
     // MARK: Geometry
 
     /// Fitted to the screen at its own proportions; a simulator leaves room
     /// for its grabber and buttons.
-    private var fitFrame: CGRect {
+    private var fitFrame: CGRect { fit(page.aspect) }
+
+    private func fit(_ aspect: CGFloat) -> CGRect {
         var area = bounds
         if isSimulator {
             let top = safeAreaInsets.top + 12
@@ -299,7 +371,7 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
 
     /// Its inline spot, if that can be seen, recording its frame and style.
     private func locate() -> MediaSpot? {
-        guard let spot = origin.locate(), spot.view.window === window else { lastSpot = nil; return nil }
+        guard let spot = items[index].origin.locate(), spot.view.window === window else { lastSpot = nil; return nil }
         let rect = spot.view.convert(spot.view.bounds, to: self)
         guard rect.intersects(bounds), rect.width > 1 else { lastSpot = nil; return nil }
         lastSpot = rect
@@ -411,15 +483,15 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
             spring.set(goal)
             stopLink()
             if route == .closed { finish(); return }
-            showSharper()
-            loadSharper()
+            showSharper(page)
+            loadSharper(page)
         }
         apply(spot)
     }
 
     private func apply() { apply(locate()) }
 
-    /// Everything drawn, from the spring's frame and the route.
+    /// Everything drawn, from the spring's frame, the route and the pager.
     private func apply(_ spot: MediaSpot?) {
         guard !finished, bounds.width > 0 else { return }
         if concealed !== spot?.view {
@@ -429,31 +501,35 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
         }
         let frame = spring.value
         let open = openness(frame)
+        let shown = route == .open ? open * open * chrome.value : 0
+        let controls = route == .open && chrome.target > 0.5
+        let width = min(bounds.width - 32, 520)
+        let bar = CGRect(x: bounds.midX - width / 2, y: bounds.height - safeAreaInsets.bottom - 64, width: width, height: 52)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        picture.frame = frame
-        let local = picture.bounds
-        let radius = CGFloat.lerp(spotStyle.radius, isSimulator ? 30 : 0, open)
-        for layer in [content, playerLayer, screen?.layer].compactMap({ $0 }) {
-            layer.frame = local
-            layer.cornerRadius = radius
+        for (i, page) in pages {
+            if i == index {
+                page.place(frame, radius: .lerp(spotStyle.radius, isSimulator ? 30 : 0, open),
+                           border: .lerp(spotStyle.border, 0, open), color: spotStyle.color, shift: shift(i))
+            } else {
+                // Off to the side, gone with the backdrop as the middle one leaves.
+                page.place(fit(page.aspect), radius: 0, border: 0, color: spotStyle.color, shift: shift(i))
+                page.picture.alpha = open
+            }
+            if let video = page.video {
+                video.frame = bar.offsetBy(dx: shift(i), dy: 0)
+                video.alpha = shown
+                video.isUserInteractionEnabled = controls && i == index
+                video.playback = route == .closed ? (i == index ? .closing : .away) : i == settled ? .shown : .away
+            }
         }
-        content.borderWidth = .lerp(spotStyle.border, 0, open)
-        content.borderColor = spotStyle.color
-        input?.frame = local
         CATransaction.commit()
+        page.picture.alpha = 1
         backdrop.frame = bounds
         backdrop.alpha = open
-        let shown = route == .open ? open * open * chrome.value : 0
         close.frame = CGRect(x: bounds.width - safeAreaInsets.right - 64, y: safeAreaInsets.top + 6, width: 48, height: 48)
         close.alpha = shown
-        close.isUserInteractionEnabled = route == .open && chrome.target > 0.5
-        if let video {
-            let width = min(bounds.width - 32, 520)
-            video.frame = CGRect(x: bounds.midX - width / 2, y: bounds.height - safeAreaInsets.bottom - 64, width: width, height: 52)
-            video.alpha = shown
-            video.isUserInteractionEnabled = close.isUserInteractionEnabled
-        }
+        close.isUserInteractionEnabled = controls
         if let sim {
             let fit = fitFrame
             sim.place(grabberAt: CGPoint(x: frame.midX, y: frame.maxY + 14), buttonsAt: fit.maxY + 34, width: bounds.width)
@@ -461,8 +537,16 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
             sim.isUserInteractionEnabled = route == .open
         }
         // A live simulator takes its touches from the first frame it is sent large.
-        input?.interactive = route == .open && !held
-        picture.isUserInteractionEnabled = input?.interactive == true
+        page.input?.interactive = route == .open && !held
+        page.picture.isUserInteractionEnabled = page.input?.interactive == true
+        // Paging only while open, fitted and not held.
+        pager.isScrollEnabled = items.count > 1 && route == .open && zoom == nil && !held
+        updateAudio()
+    }
+
+    /// The audio is taken only while the clip in the middle plays unmuted.
+    private func updateAudio() {
+        MediaAudio.play(audible: !finished && route == .open && pages.values.contains { $0.video?.audible == true })
     }
 
     private func finish() {
@@ -471,15 +555,24 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
         finished = true
         concealed?.alpha = 1
         concealed = nil
-        origin.conceal?(false)
-        video?.finished()
-        if case .simulator(_, let feeds, _) = media, let screen { feeds.attach(screen, to: nil) }
+        items[settled].origin.conceal?(false)
+        for page in pages.values { page.finish() }
+        MediaAudio.play(audible: false)
         removeFromSuperview()
         onClosed?()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        let frame = CGRect(x: -Self.gap / 2, y: 0, width: pageWidth, height: bounds.height)
+        if pager.frame != frame {
+            relaying = true
+            defer { relaying = false }
+            pager.frame = frame
+            pager.contentSize = CGSize(width: pageWidth * CGFloat(items.count), height: bounds.height)
+            pager.contentOffset = CGPoint(x: CGFloat(index) * pageWidth, y: 0)
+            mountAround()
+        }
         if !held, link == nil, route == .open { spring.set(zoom.map(contained) ?? fitFrame) }
         apply()
     }
@@ -489,52 +582,40 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
         setNeedsLayout()
     }
 
-    // MARK: Pictures and clips
+    // MARK: Pictures
 
-    /// A screen-sharp decode as soon as it flies, a zoomable one once it rests.
-    private var sharpness: CGFloat = 0
-    private var sharpening: Task<Void, Never>?
-    private func loadSharper() {
-        guard case .image(_, let full?) = media, sharpening == nil, route == .open else { return }
+    /// A screen-sharp decode as soon as it shows, a zoomable one once the
+    /// middle one rests.
+    private func loadSharper(_ page: ViewerPage) {
+        guard case .image(_, _, let full?) = page.item.media, page.sharpening == nil, route == .open else { return }
         let screenPixels = max(bounds.width, bounds.height) * (window?.screen.scale ?? 3)
-        let wanted = sharpness == 0 ? screenPixels : min(4096, screenPixels * 2.5)
-        guard wanted > sharpness, sharpness == 0 || (link == nil && !held) else { return }
-        sharpening = Task { [weak self] in
+        let wanted = page.sharpness == 0 ? screenPixels : min(4096, screenPixels * 2.5)
+        guard screenPixels > 0, wanted > page.sharpness,
+              page.sharpness == 0 || (pages[index] === page && !moving) else { return }
+        page.sharpening = Task { [weak self, weak page] in
             let image = await full(wanted)
-            guard let self, !finished else { return }
-            sharpening = nil
-            sharpness = wanted
-            sharper = image
-            showSharper()
-            if link == nil, !held { loadSharper() }
+            guard let self, let page, !finished else { return }
+            page.sharpening = nil
+            page.sharpness = wanted
+            page.sharper = image
+            page.take(image)
+            showSharper(page)
+            if pages[index] === page, !moving { loadSharper(page) }
         }
     }
 
-    /// A sharper decode waiting to be shown: swapped in only while the
-    /// picture rests, so its upload never lands on a moving frame.
-    private var sharper: UIImage?
-    private func showSharper() {
-        guard let image = sharper, link == nil, !held, image.size.width > 0 else { return }
-        sharper = nil
+    /// The middle picture or the pager in motion.
+    private var moving: Bool { link != nil || held || pagerMoving }
+
+    /// A sharper decode waiting to be shown: swapped in only while nothing
+    /// moves, so its upload never lands on a moving frame, unless there is
+    /// no picture yet at all.
+    private func showSharper(_ page: ViewerPage) {
+        guard let image = page.sharper, image.size.width > 0, !moving || page.content.contents == nil else { return }
+        page.sharper = nil
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        content.contents = image.cgImage
+        page.content.contents = image.cgImage
         CATransaction.commit()
-    }
-
-    private func loadVideo() {
-        guard case .video(_, _, nil, let url) = media else { return }
-        Task { [weak self] in
-            guard let url = await url(), let self, !finished else { return }
-            let player = AVQueuePlayer()
-            looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))
-            use(player, shared: false)
-        }
-    }
-    private var looper: AVPlayerLooper?
-
-    private func use(_ player: AVPlayer, shared: Bool) {
-        playerLayer?.player = player
-        video?.attach(player, shared: shared)
     }
 
     // MARK: Gestures
@@ -543,11 +624,11 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
         if touch.view is UIControl { return false }
         let point = touch.location(in: self)
         if route == .closed {
-            return picture.frame.insetBy(dx: -12, dy: -12).contains(point) && gesture !== doubleTap && (gesture !== pinch || zooms)
+            return page.picture.frame.insetBy(dx: -12, dy: -12).contains(point) && gesture !== doubleTap && (gesture !== pinch || zooms)
         }
         if isSimulator {
             // The simulator's own picture is the simulator's; everything else dismisses.
-            return gesture !== pinch && gesture !== doubleTap && !picture.frame.contains(point)
+            return gesture !== pinch && gesture !== doubleTap && !page.picture.frame.contains(point)
         }
         if gesture === pinch || gesture === doubleTap { return zooms }
         return true
@@ -558,8 +639,16 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
     }
 
     override func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        guard gesture === pan, case .pinch = hold else { return super.gestureRecognizerShouldBegin(gesture) }
-        return false
+        if gesture === pan, case .pinch = hold { return false }
+        // Between pages nothing else takes hold; the pager settles first.
+        if (gesture === pan || gesture === pinch || gesture === doubleTap), route == .open, pagerMoving { return false }
+        // With pages either side, only a drag that starts upright dismisses
+        // (a zoomed picture pans every way).
+        if gesture === pan, items.count > 1, route == .open, spring.value.width <= fitFrame.width + 0.5 {
+            let v = pan.velocity(in: self)
+            return abs(v.y) > abs(v.x)
+        }
+        return super.gestureRecognizerShouldBegin(gesture)
     }
 
     /// Takes the spring where it is, keeping its velocity for later.
@@ -741,6 +830,7 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
         }
         Theme.selectionHaptic()
         run()
+        apply()
     }
 
     @objc private func tapped(_ gesture: UITapGestureRecognizer) {
@@ -753,7 +843,7 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
         guard !finished else { return nil }
         // Flying home, only the picture itself can be caught; the rest of
         // the screen is already the conversation's.
-        if route == .closed { return picture.frame.insetBy(dx: -12, dy: -12).contains(point) ? self : nil }
+        if route == .closed { return page.picture.frame.insetBy(dx: -12, dy: -12).contains(point) ? self : nil }
         return super.hitTest(point, with: event) ?? self
     }
 
@@ -762,13 +852,20 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
         return true
     }
 
+    override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
+        let next = direction == .left ? index + 1 : direction == .right ? index - 1 : index
+        guard next != index, items.indices.contains(next), route == .open, zoom == nil else { return false }
+        pager.setContentOffset(CGPoint(x: CGFloat(next) * pageWidth, y: 0), animated: true)
+        return true
+    }
+
     // MARK: Profiling
 
     #if DEBUG
     /// Verification only: presses a clip's control ("unmute", "mute", "pause", "play").
-    func debugControl(_ step: String) { video?.debugControl(step) }
+    func debugControl(_ step: String) { page.video?.debugControl(step) }
     /// Verification only: drags the scrubber from one fraction to another over `duration`.
-    func debugScrub(from: Float, to: Float, duration: Double) async { await video?.debugScrub(from: from, to: to, duration: duration) }
+    func debugScrub(from: Float, to: Float, duration: Double) async { await page.video?.debugScrub(from: from, to: to, duration: duration) }
     #endif
 
     #if DEBUG
@@ -784,6 +881,155 @@ final class MediaViewer: UIView, UIGestureRecognizerDelegate {
     }
     #endif
 }
+
+/// One medium in the viewer: its picture, clip or simulator, and what of it
+/// has loaded. The viewer places it.
+@MainActor
+private final class ViewerPage {
+    let item: ViewerItem
+    /// Frame set by the viewer; draws nothing itself.
+    let picture = UIView()
+    /// The picture, or a clip's poster: contents only, so its rounded
+    /// corners cost nothing extra to draw.
+    let content = CALayer()
+    private var playerLayer: AVPlayerLayer?
+    private var screen: SimulatorScreen?
+    private(set) var input: SimulatorInput?
+    private(set) var video: VideoControls?
+    /// Height over width.
+    private(set) var aspect: CGFloat
+    /// Its proportions became known.
+    var onAspect: (() -> Void)?
+    /// The largest decode asked for, one in flight, and one waiting to show.
+    var sharpness: CGFloat = 0
+    var sharpening: Task<Void, Never>?
+    var sharper: UIImage?
+    private var loading: [Task<Void, Never>] = []
+    private var looper: AVPlayerLooper?
+    /// Its size came from the medium itself, not a guess.
+    private var sized: Bool
+
+    init(_ item: ViewerItem) {
+        self.item = item
+        picture.isUserInteractionEnabled = false
+        picture.accessibilityIgnoresInvertColors = true
+        content.contentsGravity = .resizeAspectFill
+        content.masksToBounds = true
+        content.cornerCurve = .continuous
+        // Until its picture loads, a faint frame where it will show.
+        content.backgroundColor = UIColor(white: 1, alpha: 0.08).cgColor
+        picture.layer.addSublayer(content)
+        switch item.media {
+        case .image(let image, let size, _):
+            let size = size ?? image?.size
+            sized = size != nil
+            aspect = size.map { $0.height / max(1, $0.width) } ?? 10 / 16
+            content.contents = image?.cgImage
+            picture.isAccessibilityElement = true
+            picture.accessibilityLabel = "Picture"
+            picture.accessibilityTraits = .image
+        case .video(let poster, let size, _, _, _):
+            let size = size ?? poster?.size
+            sized = size != nil
+            aspect = size.map { $0.height / max(1, $0.width) } ?? 9 / 16
+            content.contents = poster?.cgImage
+            let layer = AVPlayerLayer()
+            layer.videoGravity = .resizeAspectFill
+            layer.masksToBounds = true
+            layer.cornerCurve = .continuous
+            picture.layer.addSublayer(layer)
+            playerLayer = layer
+            let controls = VideoControls()
+            controls.onPresentationSize = { [weak self] size in self?.measured(size) }
+            video = controls
+        case .simulator(let use, let feeds, _):
+            sized = true
+            let screen = SimulatorScreen()
+            aspect = screen.aspect
+            screen.layer.masksToBounds = true
+            screen.layer.cornerCurve = .continuous
+            screen.onPictureSize = { [weak self, weak screen] in
+                guard let self, let screen else { return }
+                aspect = screen.aspect
+                onAspect?()
+            }
+            picture.addSubview(screen)
+            self.screen = screen
+            feeds.attach(screen, to: use.target)
+            let input = SimulatorInput()
+            input.onTouch = { [weak feeds, weak screen] phase, point in
+                guard let feeds, let screen else { return false }
+                return feeds.touch(phase, at: point, on: screen)
+            }
+            input.screen = screen
+            picture.addSubview(input)
+            self.input = input
+        }
+    }
+
+    private func measured(_ size: CGSize) {
+        guard size.width > 0 else { return }
+        sized = true
+        let next = size.height / size.width
+        guard abs(next - aspect) > 0.001 else { return }
+        aspect = next
+        onAspect?()
+    }
+
+    /// A picture decoded for it: its proportions, if they were a guess.
+    func take(_ image: UIImage?) {
+        if !sized, let image { measured(image.size) }
+    }
+
+    /// Its clip, and a poster to show until the clip's first frame.
+    func load() {
+        guard case .video(let poster, _, let player, let still, let url) = item.media else { return }
+        if poster == nil, let still {
+            loading.append(Task { [weak self] in
+                guard let image = await still(), let self, content.contents == nil else { return }
+                take(image)
+                CATransaction.begin(); CATransaction.setDisableActions(true)
+                content.contents = image.cgImage
+                CATransaction.commit()
+            })
+        }
+        if let player { use(player, shared: true); return }
+        loading.append(Task { [weak self] in
+            guard let url = await url(), let self, !Task.isCancelled else { return }
+            let player = AVQueuePlayer()
+            looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))
+            use(player, shared: false)
+        })
+    }
+
+    private func use(_ player: AVPlayer, shared: Bool) {
+        playerLayer?.player = player
+        video?.attach(player, shared: shared)
+    }
+
+    /// Where it shows, `shift` to the side of `frame`, and its corners.
+    func place(_ frame: CGRect, radius: CGFloat, border: CGFloat, color: CGColor, shift: CGFloat) {
+        picture.frame = frame.offsetBy(dx: shift, dy: 0)
+        let local = picture.bounds
+        for layer in [content, playerLayer, screen?.layer].compactMap({ $0 }) {
+            layer.frame = local
+            layer.cornerRadius = radius
+        }
+        content.borderWidth = border
+        content.borderColor = color
+        input?.frame = local
+    }
+
+    func finish() {
+        loading.forEach { $0.cancel() }
+        sharpening?.cancel()
+        video?.finished()
+        video?.removeFromSuperview()
+        picture.removeFromSuperview()
+        if case .simulator(_, let feeds, _) = item.media, let screen { feeds.attach(screen, to: nil) }
+    }
+}
+
 
 /// A rectangle as one spring: centre and size, each with its velocity.
 private struct RectSpring {
@@ -892,13 +1138,28 @@ private final class SimulatorChrome: UIView {
     }
 }
 
-/// Play, a scrubber, the time and mute for a clip. It opens muted unless the
-/// person unmuted one earlier this launch, and holds the audio only while
-/// unmuted and playing. An inline player it carried on with goes back muted
-/// and looping.
+/// Play, a scrubber, the time and mute for a clip. It plays only while its
+/// page is the one shown, muted unless the person unmuted one earlier this
+/// launch; the viewer takes the audio while it plays unmuted. An inline
+/// player it carried on with goes back muted and looping.
 @MainActor
 private final class VideoControls: UIView {
     var onPresentationSize: ((CGSize) -> Void)?
+    /// Whether it would be heard changed.
+    var onAudible: (() -> Void)?
+    enum Playback {
+        /// Its page is the one shown: it plays.
+        case shown
+        /// Paged away: paused where it was.
+        case away
+        /// Flying home: silent, an inline player looping again.
+        case closing
+    }
+    var playback = Playback.away {
+        didSet { if playback != oldValue { follow() } }
+    }
+    /// Playing unmuted on the page shown.
+    var audible: Bool { playback == .shown && player?.isMuted == false && player?.timeControlStatus != .paused }
     private let surface = Theme.glassSurface(cornerRadius: 26)
     private let play = UIButton(type: .system)
     private let mute = UIButton(type: .system)
@@ -916,7 +1177,6 @@ private final class VideoControls: UIView {
     /// position the finger asked for while it runs.
     private var seeking = false
     private var target: CMTime?
-    private var closed = false
     private var presentationSize = CGSize.zero
 
     override init(frame: CGRect) {
@@ -972,12 +1232,11 @@ private final class VideoControls: UIView {
     func attach(_ player: AVPlayer, shared: Bool) {
         self.player = player
         self.shared = shared
-        player.isMuted = !MediaAudio.unmuted
         let changed: @Sendable (AVPlayer) -> Void = { [weak self] _ in Task { @MainActor in self?.sync() } }
         observations = [player.observe(\.isMuted) { player, _ in changed(player) },
                         player.observe(\.timeControlStatus) { player, _ in changed(player) },
                         player.observe(\.currentItem?.presentationSize) { player, _ in changed(player) }]
-        if !closed { player.play() }
+        follow()
         ticker = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -1003,7 +1262,22 @@ private final class VideoControls: UIView {
             presentationSize = size
             onPresentationSize?(size)
         }
-        MediaAudio.play(audible: !closed && !player.isMuted && !paused)
+        onAudible?()
+    }
+
+    /// The player does what its page's state says.
+    private func follow() {
+        guard let player else { return }
+        switch playback {
+        case .shown:
+            player.isMuted = !MediaAudio.unmuted
+            player.play()
+        case .away:
+            player.pause()
+        case .closing:
+            if shared { player.isMuted = true; player.play() }
+        }
+        sync()
     }
 
     private func tick() {
@@ -1051,23 +1325,7 @@ private final class VideoControls: UIView {
     private func settle() {
         guard !holding, let resume = scrubbing else { return }
         scrubbing = nil
-        if resume && !closed { player?.play() }
-    }
-
-    /// Flying home: the audio goes; an inline player goes back to looping muted.
-    func closing() {
-        closed = true
-        guard let player else { return }
-        if shared { player.isMuted = true; player.play() }
-        MediaAudio.play(audible: false)
-    }
-
-    func reopened() {
-        closed = false
-        guard let player else { return }
-        player.isMuted = !MediaAudio.unmuted
-        player.play()
-        sync()
+        if resume && playback == .shown { player?.play() }
     }
 
     #if DEBUG
@@ -1091,11 +1349,12 @@ private final class VideoControls: UIView {
     }
     #endif
 
+    /// Gone: an inline player goes back to looping muted, its own stops.
     func finished() {
-        closed = true
         ticker?.cancel()
         observations = []
-        if let player, !shared { player.pause() }
-        MediaAudio.play(audible: false)
+        onAudible = nil
+        guard let player else { return }
+        if shared { player.isMuted = true; player.play() } else { player.pause() }
     }
 }
