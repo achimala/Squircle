@@ -58,6 +58,13 @@ pub(crate) const CURRENT_STEP: &str = concat!(
      order by i.ordinal desc limit 12"
 );
 
+/// The newest assistant message of each thread in the JSON list `?1`, for
+/// what a task's threads last said.
+pub(crate) const LAST_REPLIES: &str = "select m.thread_id as thread, json_extract(m.payload_json,'$.text') as text
+     from json_each(?1) t join orchestration_v2_projection_messages m on m.thread_id=t.value
+     where m.role='assistant' and m.created_at=(select max(created_at) from orchestration_v2_projection_messages
+         where thread_id=t.value and role='assistant')";
+
 pub(crate) const SIMULATOR_COMMANDS: &str = "select i.thread_id as thread,
     coalesce(json_extract(i.payload_json,'$.startedAt'), i.updated_at) as created_at,
     coalesce(json_extract(i.payload_json,'$.input'), '') as command,

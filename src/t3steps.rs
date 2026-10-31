@@ -72,19 +72,71 @@ fn trim_input(input: &Value) -> Value {
     Value::Object(out)
 }
 
-/// What a working thread is doing now, said briefly ("Edited Theme.swift"):
-/// its latest tool call with an input, for the Live Activity.
+/// What a working thread is doing now, said briefly ("Running the folder
+/// tests"), for the Live Activity and Tasks: the latest of its recent tool
+/// calls the agent described in words, else its latest with an input.
 pub async fn current_step(thread: &str) -> Result<Option<String>> {
     if !valid(thread, &[]) {
         bail!("invalid thread ID");
     }
     let rows = query(sql::CURRENT_STEP, params![thread]).await?;
-    Ok(rows.iter().find_map(|row| {
-        let input = row["input"]
+    let calls: Vec<(&str, Value)> = rows
+        .iter()
+        .filter_map(|row| {
+            let input = row["input"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())?;
+            Some((row["tool"].as_str().unwrap_or(""), input))
+        })
+        .collect();
+    let written = |input: &Value| {
+        input["description"]
             .as_str()
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())?;
-        describe(row["tool"].as_str().unwrap_or(""), &input)
-    }))
+            .is_some_and(|d| !d.trim().is_empty())
+    };
+    Ok(calls
+        .iter()
+        .filter(|(_, input)| written(input))
+        .chain(calls.iter())
+        .find_map(|(tool, input)| describe(tool, input)))
+}
+
+/// The first line of what each of `threads` last said, by thread.
+pub async fn last_replies(threads: &[String]) -> Result<std::collections::HashMap<String, String>> {
+    let threads: Vec<&String> = threads.iter().filter(|t| valid(t, &[])).collect();
+    if threads.is_empty() {
+        return Ok(Default::default());
+    }
+    let rows = query(sql::LAST_REPLIES, params![json!(threads).to_string()]).await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row["thread"].as_str()?.to_string(),
+                first_line(row["text"].as_str()?)?,
+            ))
+        })
+        .collect())
+}
+
+/// A reply's first line of prose, without its Markdown marks, at most 120 characters.
+fn first_line(text: &str) -> Option<String> {
+    let line = text
+        .lines()
+        .map(|l| {
+            l.trim()
+                .trim_start_matches(['#', '>', '-', '*', ' '])
+                .replace("**", "")
+                .replace('`', "")
+        })
+        .find(|l| !l.trim().is_empty())?;
+    let line = line.trim();
+    let mut chars = line.chars();
+    let mut out: String = chars.by_ref().take(120).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    Some(out)
 }
 
 /// Shell commands agents ran that may create or use simulators (`simctl`,

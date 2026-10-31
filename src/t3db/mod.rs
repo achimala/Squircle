@@ -358,6 +358,13 @@ mod tests {
         let column = |rows: &[Value], key: &str| -> Vec<Value> {
             rows.iter().map(|r| r[key].clone()).collect()
         };
+        // Only V2 assistant messages, one per thread asked about.
+        let said = read(sql::LAST_REPLIES, vec![text(r#"["u","t","x"]"#)]);
+        assert_eq!(
+            column(&said, "text"),
+            [json!("test_name rival reply")],
+            "{said:?}"
+        );
         // Thread-scoped reads see t's rows only, never u's under the same call IDs.
         let current = read(sql::CURRENT_STEP, vec![text("t")]);
         assert_eq!(current.len(), 3, "{current:?}");

@@ -367,7 +367,12 @@ struct AppTask: Decodable, Equatable, Identifiable {
         case needsYou = "needs_you", inProgress = "in_progress", readyToTry = "ready_to_try", queued, done, dropped
         var open: Bool { self != .done && self != .dropped }
     }
-    struct Thread: Decodable, Equatable { let id: String; let title: String?; let state: String }
+    struct Thread: Decodable, Equatable {
+        let id: String; let title: String?; let state: String
+        /// What it is doing while it works, and the first line of its last
+        /// reply otherwise (live threads of open tasks only).
+        let step: String?; let said: String?
+    }
     struct Build: Decodable, Equatable {
         let id: String; let state: String; let title: String?; let version: String?
         let buildNumber: String?; let installable: Bool?

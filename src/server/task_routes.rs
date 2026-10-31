@@ -180,7 +180,64 @@ pub(super) async fn list_tasks(
     })
     .await
     .map_err(ApiError::internal)?;
-    Ok(Json(success(view)))
+    Ok(Json(success(with_thread_lines(view).await)))
+}
+
+/// What each open task's live threads are doing, from T3's database: a
+/// working one's current step, the others' first line of their last
+/// reply. Archived (missing) threads and History get neither.
+async fn with_thread_lines(mut view: Value) -> Value {
+    fn threads(task: &mut Value) -> Vec<&mut Value> {
+        let Value::Object(task) = task else {
+            return vec![];
+        };
+        let mut out = vec![];
+        for (key, value) in task.iter_mut() {
+            match (key.as_str(), value) {
+                ("threads", Value::Array(list)) => out.extend(list.iter_mut()),
+                ("subtasks", Value::Array(list)) => out.extend(list.iter_mut().flat_map(threads)),
+                _ => {}
+            }
+        }
+        out
+    }
+    let mut all: Vec<&mut Value> = view["tasks"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .flat_map(threads)
+        .collect();
+    let id = |t: &Value| t["id"].as_str().unwrap_or_default().to_string();
+    let working: std::collections::BTreeSet<String> = all
+        .iter()
+        .filter(|t| t["state"] == "working")
+        .map(|t| id(t))
+        .collect();
+    let idle: Vec<String> = all
+        .iter()
+        .filter(|t| t["state"] != "working" && t["state"] != "missing")
+        .map(|t| id(t))
+        .collect();
+    let steps =
+        futures_util::future::join_all(working.iter().map(|id| crate::t3steps::current_step(id)))
+            .await;
+    let steps: std::collections::HashMap<&String, String> = working
+        .iter()
+        .zip(steps)
+        .filter_map(|(id, step)| Some((id, step.ok().flatten()?)))
+        .collect();
+    let said = crate::t3steps::last_replies(&idle)
+        .await
+        .unwrap_or_default();
+    for thread in all.iter_mut() {
+        let key = id(thread);
+        if let Some(step) = steps.get(&key) {
+            thread["step"] = json!(step);
+        } else if let Some(line) = said.get(&key) {
+            thread["said"] = json!(line);
+        }
+    }
+    view
 }
 
 /// A position in History: entries strictly older than (archived_at, id).

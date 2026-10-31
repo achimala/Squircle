@@ -84,8 +84,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private let builds = Theme.glassButton(symbol: "shippingbox", identifier: "agent.builds", accessibilityLabel: "Builds")
     /// The floating buttons at the top, in reading order.
     private var topControls: [UIView] {
+        guard !embedded else { return [] }
         guard isAgent else { return [back, more] }
         return compactControls ? [more] : [back, tasks, builds, more]
+    }
+    /// Shown inside a task's page, under its header (Tasks): no top
+    /// controls, and the conversation starts right at its top. Set before it loads.
+    var embedded = false
+    /// The task this thread was opened from in Tasks, named on its back button.
+    var crumb: String? {
+        didSet { if crumb != oldValue, isViewLoaded { renderCrumb() } }
     }
     /// The debug overlay's agent shows only ⋯ (its handle closes it, and
     /// Threads and Builds move into the menu). Set before it loads.
@@ -409,6 +417,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         more.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.moreMenu() ?? []) }])
         back.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onBack?() }, for: .touchUpInside)
         view.addSubview(back)
+        renderCrumb()
         if isAgent {
             back.accessibilityLabel = "Apps"
             tasks.addAction(UIAction { [weak self] _ in self?.onTasks?() }, for: .touchUpInside)
@@ -517,7 +526,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         super.viewDidLayoutSubviews()
         // Bounds and centre: the overlay's handle may be shifting them.
         let x = overlayLayout?.inset ?? 16, y = safeArea.top + (overlayLayout?.inset ?? 4)
-        back.place(in: CGRect(x: x, y: y, width: 44, height: 44))
+        let crumbWidth = min(back.intrinsicContentSize.width, view.bounds.width - 2 * x - 2 * Theme.Space.tap - Theme.Space.row)
+        back.place(in: CGRect(x: x, y: y, width: crumb == nil ? 44 : max(44, crumbWidth), height: 44))
         tasks.place(in: CGRect(x: x + 54, y: y, width: 44, height: 44))
         builds.place(in: CGRect(x: x + 108, y: y, width: 44, height: 44))
         more.place(in: CGRect(x: view.bounds.width - x - 44, y: y, width: 44, height: 44))
@@ -525,7 +535,22 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     /// The bottom of the top controls, without the overlay's shift.
-    private var controlsBottom: CGFloat { safeArea.top + (overlayLayout?.inset ?? 4) + 44
+    private var controlsBottom: CGFloat { embedded ? safeArea.top : safeArea.top + (overlayLayout?.inset ?? 4) + 44
+    }
+
+    /// The back button names the task it returns to, or is a plain chevron.
+    private func renderCrumb() {
+        back.configuration?.title = crumb
+        back.configuration?.titleLineBreakMode = .byTruncatingTail
+        back.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var attributes = attributes
+            attributes.font = Theme.Text.lineStrong
+            return attributes
+        }
+        back.configuration?.imagePadding = Theme.Space.tight
+        back.configuration?.contentInsets = NSDirectionalEdgeInsets(top: 11, leading: 11, bottom: 11, trailing: crumb == nil ? 11 : Theme.Space.group)
+        back.accessibilityLabel = crumb.map { "Back to \($0)" } ?? (isAgent ? "Apps" : "Back to threads")
+        view.setNeedsLayout()
     }
 
     /// The conversation runs the full height beneath the floating controls.
@@ -914,7 +939,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// The rows the conversation shows now (nil: nothing to show yet), and its messages.
     private func currentItems() -> (items: [ThreadItem], messages: [ChatMessage])? {
         guard let content = model.content(of: conversation) else { return nil }
-        let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
+        // Embedded, its task's header names it already.
+        let header: [ThreadItem] = threadTitle.isEmpty || embedded ? [] : [.header(threadTitle)]
         let messages = displayedMessages(content.messages)
         let rows = resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
                                             builds: model.builds, changes: content.changes,

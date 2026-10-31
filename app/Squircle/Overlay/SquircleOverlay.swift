@@ -1068,7 +1068,9 @@ final class OverlayController: UIViewController, UIGestureRecognizerDelegate {
     private func presentTasks() {
         guard let project, presentedViewController == nil, route.isOpen, route.panel.thread == nil else { return }
         Theme.selectionHaptic()
-        let controller = TasksViewController(model: model, project: project)
+        let controller = TasksViewController(model: model, project: project, embedsConversations: false)
+        controller.host = self
+        controller.onBack = { [weak controller] in controller?.dismiss(animated: true) }
         controller.onOpen = { [weak self, weak controller] id in
             controller?.dismiss(animated: true) { self?.openThread(id) }
         }

@@ -107,6 +107,13 @@ enum Theme {
         static let line: CGFloat = 20, live: CGFloat = 28, home: CGFloat = 26
     }
 
+    /// A thread's preview, portrait at the device's ratio: at the right of a
+    /// nested thread line, and of a thread row on a work item's page.
+    enum Thumb {
+        static let row = CGSize(width: 24, height: 52), page = CGSize(width: 56, height: 120)
+        static let rowRadius: CGFloat = 6
+    }
+
     /// Three radii: small things, bubbles and cards, and capsules
     /// (`cornerStyle = .capsule`, or half the height).
     enum Radius {
