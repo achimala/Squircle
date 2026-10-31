@@ -13,7 +13,14 @@ impl Sims {
             let saved = self.saved.notified();
             tokio::pin!(saved);
             saved.as_mut().enable();
-            match self.starts.run(self.try_start(thread, device)).await? {
+            // The line advances in the same turn of the lane: a watchdog
+            // look skipped while this start held it is not lost.
+            let started = self.starts.run(async {
+                let started = self.try_start(thread, device).await;
+                self.advance().await;
+                started
+            });
+            match started.await? {
                 Started::Done(value) => return Ok(value),
                 // This thread's previous session on that simulator is still
                 // being cleaned up: its release receipt frees it.
@@ -472,6 +479,8 @@ impl Sims {
     /// saves that, and only then queues the wakes it owes.
     pub(super) async fn advance(&self) {
         let max = self.host.max_leases();
+        // A slot granted while the host fails is a wake whose start is refused.
+        let healthy = self.host.healthy();
         // What T3 says of each thread in line, read before the owner decides;
         // one that joined meanwhile is unknown, which keeps its place.
         let seen: HashMap<String, Seen> = self
@@ -504,7 +513,11 @@ impl Sims {
                         limit: max,
                         reservations: &reservations,
                     },
-                    admission::Event::Advance { now: now(), seen },
+                    admission::Event::Advance {
+                        now: now(),
+                        seen,
+                        healthy,
+                    },
                 );
                 if reduction.effects.contains(&admission::Effect::Commit) {
                     let queue = reduction.state;

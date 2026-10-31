@@ -35,6 +35,9 @@ struct Fake {
     woken: Mutex<Vec<(String, String)>>,
     waiting: Mutex<Vec<String>>,
     max: AtomicUsize,
+    unhealthy: AtomicBool,
+    /// Sent when `seen` or `unhealthy` changes, as T3 and the watch publish.
+    changed: tokio::sync::watch::Sender<()>,
 }
 
 impl Fake {
@@ -86,6 +89,17 @@ impl Host for Fake {
             .get(thread)
             .cloned()
             .unwrap_or_else(|| self.seen.lock().unwrap().clone().unwrap_or(busy("t0")))
+    }
+    fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        futures_util::stream::unfold(self.changed.subscribe(), |mut changed| async move {
+            changed.changed().await.ok()?;
+            Some(((), changed))
+        })
+        .boxed()
+    }
+    fn healthy(&self) -> bool {
+        !self.unhealthy.load(SeqCst)
     }
     fn create<'a>(&'a self, _: &'a str) -> Pending<'a, Result<String>> {
         Box::pin(async { Err(anyhow::anyhow!("no simulators are created in these tests")) })
@@ -477,4 +491,67 @@ async fn no_wake_before_its_grant_is_saved() {
     let saved: Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("sims.json")).unwrap()).unwrap();
     assert_eq!(saved["queue"][0]["grant"]["wake"], "queued");
+}
+
+/// The live stall: after a restart, a leftover stopping session whose
+/// recorder never finishes its movie (SimRenderServer hung) held a slot,
+/// and finishing it ran before the watchdog's first look, so the free
+/// slots never reached the line. Now the line is admitted at startup
+/// while that session finishes alongside; nothing is granted while the
+/// host fails, and its recovery admits the head.
+#[tokio::test(start_paused = true)]
+async fn a_restart_admits_the_line_past_a_session_that_never_finishes() {
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let stuck = uuid::Uuid::new_v4().to_string();
+    // Ignores the stop: it never exits on its own. Killed with its group
+    // however the test ends.
+    struct Group(std::process::Child);
+    impl Drop for Group {
+        fn drop(&mut self) {
+            unsafe { libc::kill(-(self.0.id() as i32), libc::SIGKILL) };
+            let _ = self.0.wait();
+        }
+    }
+    let recorder = Group(
+        std::process::Command::new("/bin/sh")
+            .args(["-c", "trap '' INT; sleep 86400; true", "sh"])
+            .arg(format!("/tmp/.{stuck}.recording.mp4"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap(),
+    );
+    let ledger = json!({"schema": 2,
+        "sessions": [{"id": stuck, "thread_id": THREAD, "host_id": "local", "device_id": "SIM1",
+            "device_name": "iPhone", "started_at": 1.0, "state": "stopping", "stop_reason": "stopped",
+            "recorder_pid": recorder.0.id(), "device_session": {"phase": "open"}, "release": {"phase": "not_due"}}],
+        "queue": [{"id": "w", "thread_id": B, "queued_at": 2.0}]});
+    std::fs::write(dir.path().join("sims.json"), ledger.to_string()).unwrap();
+    let fake = Arc::new(Fake {
+        boot: Mutex::new(Some(Ok(()))),
+        ..Fake::default()
+    });
+    fake.max.store(2, SeqCst);
+    fake.unhealthy.store(true, SeqCst);
+    let sims = Sims::with_host(dir.path(), fake.clone()).unwrap();
+    tokio::spawn(sims.clone().run());
+    crate::clock::settle().await;
+    // The stuck session still holds its slot; the other is free, but the host fails.
+    assert!(only_of(&sims, THREAD).reserves());
+    assert_eq!(
+        (queue(&sims), fake.woken.lock().unwrap().len()),
+        (vec![(B.into(), false)], 0)
+    );
+
+    fake.unhealthy.store(false, SeqCst);
+    fake.changed.send_replace(());
+    crate::clock::settle().await;
+    assert_eq!(queue(&sims), [(B.into(), true)]);
+    assert_eq!(
+        *fake.woken.lock().unwrap(),
+        [(B.to_string(), "w".to_string())]
+    );
+    sims.shutdown(Exit::Handover).await;
 }
