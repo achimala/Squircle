@@ -23,6 +23,26 @@ final class T3Tests: XCTestCase {
         }
     }
 
+    /// Numbers off the wire: a whole number that fits, or nothing; never a
+    /// trap (1e100) or a silent truncation (2.5). A thread event whose
+    /// sequence isn't one is never applied.
+    func testNumbersOffTheWireAreExactOrRejected() throws {
+        func value(_ json: String) throws -> JSONValue { try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)) }
+        XCTAssertEqual(try value("42").int, 42)
+        XCTAssertEqual(try value("-7").int, -7)
+        XCTAssertEqual(try value("3.0").int, 3)
+        for bad in ["1e100", "-1e100", "2.5", "9.3e18", "\"4\"", "true", "null"] { XCTAssertNil(try value(bad).int, bad) }
+        XCTAssertEqual(try value("12").identifier, "12")
+        XCTAssertNil(try value("1e100").identifier)
+        XCTAssertNil(try value("0.5").identifier)
+        var state = T3ThreadState()
+        state.consume(try value(#"{"kind":"snapshot","snapshotSequence":5,"projection":{"thread":{"id":"t"},"messages":[]}}"#))
+        state.consume(try value(#"{"kind":"event","sequence":1e100,"event":{"type":"message.updated","payload":{"id":"a","role":"assistant","text":"x"}}}"#))
+        state.consume(try value(#"{"kind":"event","sequence":6.5,"event":{"type":"message.updated","payload":{"id":"b","role":"assistant","text":"y"}}}"#))
+        XCTAssertEqual(state.sequence, 5)
+        XCTAssertTrue(state.messages.isEmpty)
+    }
+
     func testAVCCHandlesFragmentedAndCoalescedHTTPBytes() throws {
         let packets = Data([0,0,0,4,1,11,12,13, 0,0,0,3,2,21,22, 0,0,0,2,3,31])
         for split in 0...packets.count {
@@ -314,10 +334,10 @@ final class NativeStateTests: XCTestCase {
     @MainActor
     func testFailedUploadIsTriedAgain() async throws {
         let gate = GatedDispatch()
-        var uploads = 0
+        var uploads = 0, reachable = false
         let (model, draft) = await draftWithPicture(gate) { _, _ in
             uploads += 1
-            if uploads == 1 { throw ClientError.connection("Squircle") }
+            guard reachable else { throw ClientError.connection("Squircle") }
             return "/mac/clip.mp4"
         }
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
@@ -325,13 +345,15 @@ final class NativeStateTests: XCTestCase {
         let failed = try start(model, "look", from: draft)
         guard case .rejected = await failed.value else { return XCTFail("Expected a refusal") }
         XCTAssertEqual(Set(model.attachments.map(\.id)), ["picture", "clip"])
+        reachable = true
+        let failedUploads = uploads
         let sending = try start(model, "look", from: draft)
         await gate.until(1); gate.release()
         await gate.until(2)
         XCTAssertTrue((gate.commands[1]["text"].string ?? "").contains("/mac/clip.mp4"))
         gate.release()
         _ = await sending.value
-        XCTAssertEqual(uploads, 2)
+        XCTAssertEqual(uploads, failedUploads + 1)
     }
 
     func testAssetURLsStayOnT3sOrigin() throws {
@@ -412,6 +434,43 @@ final class LinkMachineTests: XCTestCase {
         XCTAssertTrue(refused.effects.contains(.sessionLost))
         XCTAssertFalse(refused.effects.contains { if case .armRetry = $0 { return true }; return false })
     }
+
+    /// A thread T3 keeps ending counts as failing until T3 actually brings
+    /// it up to date, so the user is told after a few; a typed refusal is
+    /// told at once and not retried.
+    func testThreadFailuresResetOnlyOnceSynchronized() {
+        var s = Link.State()
+        func step(_ e: Link.Event) -> Link.Result {
+            let r = Link.reduce(s, e); s = r.state
+            XCTAssertEqual(Link.violations(in: s), [], "\(e)")
+            return r
+        }
+        func warned(_ r: Link.Result) -> Bool { r.effects.contains { if case .report(.set(.threadStopped)) = $0 { return true }; return false } }
+        _ = step(.start); _ = step(.socketOpened(attempt: 1))
+        _ = step(.synchronized(attempt: 1, .shell, now: now)); _ = step(.synchronized(attempt: 1, .devices, now: now))
+        _ = step(.follow("t"))
+        var warnings = 0
+        for round in 1...3 {
+            guard let generation = s.follow?.generation else { return XCTFail() }
+            // Written, then ended by T3 before it is ever up to date.
+            _ = step(.followSubscribed(generation: generation, subscription: "s\(round)"))
+            if warned(step(.followEnded(generation: generation, reason: "no"))) { warnings += 1 }
+            _ = step(.followRetryDue(generation: generation, exists: true))
+        }
+        XCTAssertEqual(warnings, 1, "the third failure in a row warns")
+        guard let generation = s.follow?.generation else { return XCTFail() }
+        _ = step(.followSubscribed(generation: generation, subscription: "s4"))
+        XCTAssertEqual(s.follow?.failures, 3)
+        XCTAssertTrue(step(.followSynchronized(generation: generation)).effects.contains(.report(.clearThread)))
+        XCTAssertEqual(s.follow?.failures, 0)
+        // A refusal: said at once, no retry.
+        let refused = step(.followRefused(generation: generation, reason: "not allowed", exists: true))
+        XCTAssertTrue(warned(refused))
+        XCTAssertFalse(refused.effects.contains { if case .armFollowRetry = $0 { return true }; return false })
+        XCTAssertEqual(s.follow?.phase, .refused)
+        // Opening the thread again asks again.
+        XCTAssertTrue(step(.follow("t")).effects.contains { if case .subscribeThread = $0 { return true }; return false })
+    }
 }
 
 /// T3 as far as a message needs it: a receipt per command ID (kept
@@ -447,6 +506,56 @@ final class DeliveryMachineTests: XCTestCase {
         let thread = UUID().uuidString.lowercased()
         let command = Delivery.createCommand(threadID: thread, projectID: "app", selection: .null, mode: "auto", identity: .fresh())
         return (intent(.newThread(id: thread, command: command), origin: .draft(UUID(), appID: "app", agent: false)), thread)
+    }
+
+    /// The connection comes up while a message's save is still being
+    /// written: nothing is sent until that exact save is acknowledged, an
+    /// older write's acknowledgement doesn't count, and a failed save
+    /// sends nothing.
+    func testSendWaitsForItsOwnSave() {
+        var state = Delivery.State()
+        func reduce(_ e: Delivery.Event) -> [Delivery.Effect] {
+            let r = Delivery.reduce(state, e); state = r.state
+            XCTAssertEqual(Delivery.violations(in: state), [])
+            return r.effects
+        }
+        func sends(_ effects: [Delivery.Effect], _ id: String) -> Bool {
+            effects.contains {
+                switch $0 {
+                case .dispatch(let m, _, _), .createThread(let m, _, _): m == id
+                default: false
+                }
+            }
+        }
+        // Offline: submitting asks for a save, nothing else.
+        let message = intent(.thread("t"), origin: .thread("t", appID: "app"))
+        guard case .save(_, let first)? = reduce(.submit(message)).first else { return XCTFail("no save") }
+        // The connection comes up before the save finishes.
+        XCTAssertFalse(sends(reduce(.sessionReady(attempt: 1)), message.messageID))
+        XCTAssertTrue(sends(reduce(.saved(messageID: message.messageID, sequence: first)), message.messageID))
+
+        // A draft: the thread is made only after the first save, its turn only after the second.
+        let (drafted, _) = draft()
+        guard case .save(_, let creating)? = reduce(.submit(drafted)).first else { return XCTFail("no save") }
+        XCTAssertFalse(sends(reduce(.sessionLost), drafted.messageID))
+        XCTAssertFalse(sends(reduce(.sessionReady(attempt: 2)), drafted.messageID))
+        let created = reduce(.saved(messageID: drafted.messageID, sequence: creating))
+        guard case .createThread(_, _, let attempt)? = created.first(where: { if case .createThread = $0 { return true }; return false })
+        else { return XCTFail("no thread made") }
+        let answered = reduce(.createAnswered(messageID: drafted.messageID, attempt: attempt, .accepted(.null)))
+        guard case .save(_, let sending)? = answered.first(where: { if case .save = $0 { return true }; return false }) else { return XCTFail("turn not saved") }
+        XCTAssertFalse(sends(answered, drafted.messageID))
+        // The earlier save's acknowledgement arriving late is not this one's.
+        XCTAssertEqual(Delivery.reduce(state, .saved(messageID: drafted.messageID, sequence: creating)).disposition, .stale)
+        // This save fails: nothing goes, the next session saves again first.
+        XCTAssertFalse(sends(reduce(.saveFailed(messageID: drafted.messageID, sequence: sending, reason: "disk full")), drafted.messageID))
+        _ = reduce(.sessionLost)
+        let retried = reduce(.sessionReady(attempt: 3))
+        XCTAssertFalse(sends(retried, drafted.messageID))
+        guard case .save(_, let again)? = retried.first(where: {
+            if case .save(let e, _) = $0 { return e.intent.messageID == drafted.messageID }; return false
+        }) else { return XCTFail("not saved again") }
+        XCTAssertTrue(sends(reduce(.saved(messageID: drafted.messageID, sequence: again)), drafted.messageID))
     }
 
     /// The app is killed at every point of a send (before or after each
@@ -485,8 +594,12 @@ final class DeliveryMachineTests: XCTestCase {
                 if Int.random(in: 0..<10, using: &rng) == 0 { crash(); continue }
                 let effect = queue.removeFirst()
                 switch effect {
-                case .save(let entry): disk[entry.intent.messageID] = .init(intent: entry.intent, stage: entry.stage)
-                case .forget(let id): disk[id] = nil
+                case .save(let entry, let sequence):
+                    disk[entry.intent.messageID] = .init(intent: entry.intent, stage: entry.stage)
+                    // The app can die after the write but before its acknowledgement.
+                    if Int.random(in: 0..<10, using: &rng) == 0 { crash(); continue }
+                    reduce(.saved(messageID: entry.intent.messageID, sequence: sequence))
+                case .forget(let id, _): disk[id] = nil
                 case .createThread(let id, let command, let attempt), .dispatch(let id, let command, let attempt):
                     let key = command["type"].string!
                     if let first = commands[key] { XCTAssertEqual(first, command, "seed \(seed): \(key) changed between attempts") }

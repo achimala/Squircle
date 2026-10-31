@@ -26,7 +26,8 @@ enum JSONValue: Codable, Equatable {
     /// A whole number as JSON holds it.
     static func int(_ value: some BinaryInteger) -> Self { .number(Double(value)) }
     var bool: Bool { if case .bool(let v) = self { return v }; return false }
-    var int: Int? { if case .number(let v) = self { return Int(v) }; return nil }
+    /// A whole number that fits: nil for anything else (a fraction, 1e100, NaN), never a trap or a truncation.
+    var int: Int? { if case .number(let v) = self { return Int(exactly: v) }; return nil }
     var double: Double? { if case .number(let v) = self { return v }; return nil }
     var formatted: String {
         if let string { return string }
@@ -48,8 +49,7 @@ enum JSONValue: Codable, Equatable {
     }
     var identifier: String? {
         if let string { return string }
-        if case .number(let number) = self { return String(format: "%.0f", number) }
-        return nil
+        return int.map(String.init)
     }
 }
 

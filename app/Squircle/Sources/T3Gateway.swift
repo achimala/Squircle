@@ -113,7 +113,8 @@ final class T3HTTP {
     let session: URLSession
     /// The RPC socket's session. URLSession's request timeout would fail a
     /// socket write still queued after 45 s (a Ping behind a picture on a
-    /// slow uplink); the gateway's heartbeat judges the socket instead.
+    /// slow uplink); the gateway's heartbeat judges the socket instead, by
+    /// what T3 has read, and drops it (failing any write still queued).
     let socketSession: URLSession
     init(configuration: AppConfiguration, transport: Transport = .network) {
         self.configuration = configuration
@@ -210,6 +211,12 @@ final class T3HTTP {
     }
 }
 
+/// T3 ended a request with one of its typed errors: asking again the same way gets the same answer.
+struct T3Refusal: LocalizedError {
+    let reason: String
+    var errorDescription: String? { reason }
+}
+
 /// Effect RPC JSON framing, speaking T3 0.1.0's orchestration protocol 2.
 @MainActor
 final class T3Gateway {
@@ -232,13 +239,10 @@ final class T3Gateway {
     private var subscriptions: [String: (receive: (JSONValue) -> Void, ended: (Error?) -> Void)] = [:]
     /// When T3 last sent anything; T3 answers every Ping, so silence means a dead socket.
     private var lastFrame = ContinuousClock.now
-    /// Requests being written. A large one (a message with pictures) takes
-    /// as long as the link needs, and a Ping queued behind it can't be
-    /// answered sooner: silence only counts while none is under way, from
-    /// when the last one finished.
-    private var requestsWriting = 0
-    private var requestsWritten = ContinuousClock.now
-    /// Request bytes T3 hasn't shown it has read. A finished write may still
+    /// Request bytes T3 hasn't shown it has read. A large request (a
+    /// message with pictures) takes as long as the link needs, and a Ping
+    /// queued behind it can't be answered sooner, so silence is allowed
+    /// that much longer; a write that makes no progress gets no more. A finished write may still
     /// sit in the send buffer (megabytes on a slow uplink), so T3 gets as
     /// long as the slowest link it should work on needs to receive them.
     /// T3 answers Pings in order, so a Pong covers every byte queued before
@@ -250,11 +254,12 @@ final class T3Gateway {
     private var unanswered: Int { queuedBytes - readBytes }
     private static let slowestLink = 16_000.0 // bytes/s: 128 kbit/s
     private let silenceAllowed: Duration = .seconds(40)
-    /// T3 has said nothing for longer than `limit` with nothing of ours in the way.
+    /// T3 has said nothing for longer than `limit` plus the time the
+    /// slowest link needs for the bytes it hasn't shown it read. Judged
+    /// however our own writes are doing: a stalled uplink is what this catches.
     private func silent(beyond limit: Duration, since asked: ContinuousClock.Instant) -> Bool {
-        guard requestsWriting == 0 else { return false }
         let allowed = limit + .seconds(Double(unanswered) / Self.slowestLink)
-        return max(lastFrame, requestsWritten, asked).duration(to: .now) > allowed
+        return max(lastFrame, asked).duration(to: .now) > allowed
     }
     var onDisconnect: (() -> Void)?
     /// Why T3 refused the last socket's upgrade, if it did.
@@ -273,7 +278,7 @@ final class T3Gateway {
         ConnectionTrace.mark("socket.start")
         let ws = http.socketSession.webSocketTask(with: try http.bearerSocketRequest("/ws"))
         disconnect(notify: false); rejection = nil
-        socket = ws; ws.maximumMessageSize = 32 * 1024 * 1024; ws.resume(); lastFrame = .now; requestsWritten = .now
+        socket = ws; ws.maximumMessageSize = 32 * 1024 * 1024; ws.resume(); lastFrame = .now
         receiver = Task { [weak self] in
             var first = true
             do {
@@ -308,7 +313,8 @@ final class T3Gateway {
                 // A half-open socket (a network change, a suspended app) never
                 // errors on its own; no reply to two pings means it's gone.
                 if silent(beyond: silenceAllowed, since: lastFrame) { drop(ws); return }
-                do { try await ping() } catch { drop(ws); return }
+                // Never waits on its own Ping: one stuck behind a stalled write is judged on the next beat.
+                Task { [weak self] in do { try await self?.ping() } catch { self?.drop(ws) } }
             }
         }
     }
@@ -342,7 +348,7 @@ final class T3Gateway {
     }
     func disconnect(notify: Bool = false, error: Error? = nil) {
         receiver?.cancel(); heartbeat?.cancel(); socket?.cancel(with: .goingAway, reason: nil); socket = nil
-        receiver = nil; heartbeat = nil; requestsWriting = 0
+        receiver = nil; heartbeat = nil
         queuedBytes = 0; readBytes = 0; pings.removeAll()
         let waiting = pending; pending.removeAll(); subscriptions.removeAll()
         for p in waiting.values { p.resume(returning: .lost(error ?? ClientError.connection("T3"))) }
@@ -416,9 +422,9 @@ final class T3Gateway {
     /// `ended` runs if T3 finishes or rejects the subscription while the
     /// socket stays up: nil for an (unexpected) success, else why.
     @discardableResult
-    func subscribe(_ method: String, _ payload: JSONValue = .object([:]), receive: @escaping (JSONValue) -> Void,
+    func subscribe(_ method: String, _ payload: JSONValue = .object([:]), id: String = UUID().uuidString, receive: @escaping (JSONValue) -> Void,
                    ended: @escaping (Error?) -> Void) async throws -> String {
-        let id = UUID().uuidString; track(id, receive: receive, ended: ended)
+        track(id, receive: receive, ended: ended)
         do { try await write(["_tag": "Request", "id": .string(id), "tag": .string(method), "payload": payload, "headers": []], request: true) }
         catch { subscriptions.removeValue(forKey: id); throw error is NotWritten ? ClientError.connection("T3") : error }
         return id
@@ -436,11 +442,7 @@ final class T3Gateway {
     private func write(_ value: JSONValue, request: Bool = false) async throws {
         guard let socket else { throw NotWritten() }
         let text = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
-        guard request else { return try await socket.send(.string(text)) }
-        requestsWriting += 1; queuedBytes += text.utf8.count
-        defer {
-            if self.socket === socket { requestsWriting -= 1; requestsWritten = .now }
-        }
+        if request { queuedBytes += text.utf8.count }
         try await socket.send(.string(text))
     }
     private func ping() async throws {
@@ -457,9 +459,10 @@ final class T3Gateway {
         case "Exit":
             let exit = frame["exit"]
             pending.removeValue(forKey: id)?.resume(returning: .exit(exit))
-            let failure = exit["_tag"].string == "Success" ? nil
-                : ClientError.backend("T3",0,"T3 rejected the request: \(exit["cause"].formatted.prefix(700))")
-            subscriptions.removeValue(forKey:id)?.ended(failure)
+            let failure: Error? = if exit["_tag"].string == "Success" { nil }
+                else if CommandOutcome.typedFailure(exit["cause"]) { T3Refusal(reason: "T3 refused it: \(exit["cause"].formatted.prefix(700))") }
+                else { ClientError.backend("T3", 0, "T3 rejected the request: \(exit["cause"].formatted.prefix(700))") }
+            subscriptions.removeValue(forKey: id)?.ended(failure)
         case "Ping": Task { try? await write(["_tag": "Pong"]) }
         case "Pong": if !pings.isEmpty { readBytes = max(readBytes, pings.removeFirst()) }
         default: break

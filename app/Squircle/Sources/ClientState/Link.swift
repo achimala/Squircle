@@ -50,17 +50,28 @@ enum Link {
             /// No session to subscribe on yet.
             case idle
             case requesting
+            /// Asked for; T3 hasn't brought it up to date yet.
+            case synchronizing(subscription: String)
+            /// Up to date (T3's `synchronized` marker) and following.
             case live(subscription: String)
             /// T3 ended it; subscribing again after a wait.
             case backingOff
+            /// T3 refused it outright: asking again the same way can't help.
+            case refused
             /// The thread is no longer on the Mac.
             case gone
         }
         let threadID: String
         var generation: Int
         var phase: Phase
-        /// T3 ended it this many times running.
+        /// T3 ended it this many times running without bringing it up to date.
         var failures = 0
+        var subscription: String? {
+            switch phase {
+            case .synchronizing(let s), .live(let s): s
+            default: nil
+            }
+        }
     }
     /// What the connection tells the user, through the model's notice.
     enum Notice: Equatable {
@@ -139,7 +150,12 @@ enum Link {
         /// The thread the open conversation shows, if any.
         case follow(String?)
         case followSubscribed(generation: Int, subscription: String)
+        /// T3 brought the followed thread up to date.
+        case followSynchronized(generation: Int)
+        /// T3 ended it, or it couldn't be asked for: worth asking again.
         case followEnded(generation: Int, reason: String)
+        /// T3 refused it with a typed error; `exists`: the shell still has the thread.
+        case followRefused(generation: Int, reason: String, exists: Bool)
         case followRetryDue(generation: Int, exists: Bool)
         /// T3 rewrote the thread's history: subscribe again for a snapshot.
         case followReverted(threadID: String)
@@ -354,12 +370,12 @@ enum Link {
             case .stopped, .suspended, .refused: break
             }
             if s.backgroundLease { s.backgroundLease = false; effects.append(.endBackgroundLease) }
-            if case .live(let sub)? = s.follow?.phase { effects.append(.unsubscribeThread(subscription: sub)) }
+            if let sub = s.follow?.subscription { effects.append(.unsubscribeThread(subscription: sub)) }
             s.phase = .stopped; s.follow = nil
 
         case .follow(let id):
-            if let f = s.follow, f.threadID == id, f.phase != .gone, f.phase != .backingOff { return done(.duplicate) }
-            if case .live(let sub)? = s.follow?.phase { effects.append(.unsubscribeThread(subscription: sub)) }
+            if let f = s.follow, f.threadID == id, ![.gone, .backingOff, .refused].contains(f.phase) { return done(.duplicate) }
+            if let sub = s.follow?.subscription { effects.append(.unsubscribeThread(subscription: sub)) }
             guard let id else { s.follow = nil; return done() }
             s.follow = Follow(threadID: id, generation: s.nextGeneration, phase: .idle)
             s.nextGeneration += 1
@@ -371,16 +387,24 @@ enum Link {
                 effects.append(.unsubscribeThread(subscription: subscription))
                 return done(.stale)
             }
+            f.phase = .synchronizing(subscription: subscription)
+            s.follow = f
+
+        case .followSynchronized(let generation):
+            guard var f = s.follow, f.generation == generation, case .synchronizing(let subscription) = f.phase else { return done(.stale) }
+            // Only a subscription T3 brought up to date ends a run of failures.
             if f.failures > 0 { effects.append(.report(.clearThread)) }
             f.phase = .live(subscription: subscription); f.failures = 0
             s.follow = f
 
+        case .followRefused(let generation, let reason, let exists):
+            guard var f = s.follow, f.generation == generation, f.phase == .requesting || f.subscription != nil else { return done(.stale) }
+            f.phase = exists ? .refused : .gone; f.failures += 1
+            s.follow = f
+            effects.append(.report(.set(exists ? .threadStopped(reason) : .threadGone)))
+
         case .followEnded(let generation, let reason):
-            guard var f = s.follow, f.generation == generation else { return done(.stale) }
-            switch f.phase {
-            case .requesting, .live: break
-            default: return done(.stale)
-            }
+            guard var f = s.follow, f.generation == generation, f.phase == .requesting || f.subscription != nil else { return done(.stale) }
             f.failures += 1
             f.phase = .backingOff
             let delay = min(.seconds(1) * (1 << min(f.failures - 1, 5)), Duration.seconds(30))
@@ -394,7 +418,7 @@ enum Link {
             if let attempt = s.socketAttempt { requestFollow(on: attempt) } else { f.phase = .idle; s.follow = f }
 
         case .followReverted(let id):
-            guard let f = s.follow, f.threadID == id, case .live(let sub) = f.phase, let attempt = s.socketAttempt else { return done(.irrelevant) }
+            guard let f = s.follow, f.threadID == id, let sub = f.subscription, let attempt = s.socketAttempt else { return done(.irrelevant) }
             effects.append(.unsubscribeThread(subscription: sub))
             requestFollow(on: attempt)
         }
@@ -409,7 +433,7 @@ enum Link {
         if let f = s.follow {
             if f.generation >= s.nextGeneration { found.append("follow generation not issued") }
             switch f.phase {
-            case .requesting, .live: if s.socketAttempt == nil { found.append("thread subscribed without a socket") }
+            case .requesting, .synchronizing, .live: if s.socketAttempt == nil { found.append("thread subscribed without a socket") }
             default: break
             }
         }

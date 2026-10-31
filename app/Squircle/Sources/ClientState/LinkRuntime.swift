@@ -137,14 +137,23 @@ final class LinkRuntime {
                 // Holding the thread up to some point, T3 sends only the events since, or a snapshot when it can't.
                 var request: [String: JSONValue] = ["threadId": .string(id), "requestCompletionMarker": true]
                 if let cursor { request["afterSequence"] = .int(cursor) }
+                // Known before it is written, so T3's first values can't arrive ahead of it.
+                let subscription = UUID().uuidString
+                send(.followSubscribed(generation: generation, subscription: subscription))
+                guard state.follow?.subscription == subscription else { return }
                 do {
-                    let subscription = try await gateway.subscribe("orchestration.subscribeThread", .object(request), receive: { [weak self] item in
+                    try await gateway.subscribe("orchestration.subscribeThread", .object(request), id: subscription, receive: { [weak self] item in
                         guard let self, state.follow?.generation == generation else { return }
                         host?.linkReceived(thread: id, item)
+                        if item["kind"].string == "synchronized" { send(.followSynchronized(generation: generation)) }
                     }, ended: { [weak self] failure in
-                        self?.send(.followEnded(generation: generation, reason: failure?.localizedDescription ?? "T3 ended it."))
+                        guard let self else { return }
+                        if let refusal = failure as? T3Refusal {
+                            send(.followRefused(generation: generation, reason: refusal.reason, exists: host?.threadExists(id) ?? true))
+                        } else {
+                            send(.followEnded(generation: generation, reason: failure?.localizedDescription ?? "T3 ended it."))
+                        }
                     })
-                    send(.followSubscribed(generation: generation, subscription: subscription))
                 } catch {
                     send(.followEnded(generation: generation, reason: error.localizedDescription))
                 }
