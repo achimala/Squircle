@@ -4,7 +4,8 @@
 //! a session reserves (from its save until its cleanup is settled, see
 //! `session::Session::reserves`) plus one per grant not yet claimed. Past
 //! that a thread waits in a first-come line saved with the sessions. When a
-//! slot frees, the head is granted it, saved, and only then woken (through
+//! slot is free and the simulator host healthy, the head is granted it,
+//! saved, and only then woken (through
 //! the agents' outbox, once per waiter ID); its next start claims the slot
 //! in the same save that reserves its session. A place is given up by
 //! leaving, when T3 currently has no such thread, or when the woken turn
@@ -142,10 +143,12 @@ pub enum Event {
     /// `thread`'s session is reserved in this same save: its place (and any
     /// grant) becomes the reservation.
     Claim { thread: String },
-    /// One coherent look at the waiting threads, then grants for free slots.
+    /// One coherent look at the waiting threads, then grants for free
+    /// slots while the simulator host is `healthy`.
     Advance {
         now: f64,
         seen: HashMap<String, Seen>,
+        healthy: bool,
     },
     /// The outbox has the wake for this waiter.
     WakeQueued { waiter: String },
@@ -192,7 +195,7 @@ pub fn reduce(
             }
             Reduction::applied(queue, vec![Effect::Commit, Effect::Announce])
         }
-        Event::Advance { now, seen } => advance(queue, capacity, now, &seen),
+        Event::Advance { now, seen, healthy } => advance(queue, capacity, now, &seen, healthy),
         Event::WakeQueued { waiter } => {
             let mut queue = queue;
             match queue
@@ -306,6 +309,7 @@ fn advance(
     capacity: &Capacity,
     now: f64,
     seen: &HashMap<String, Seen>,
+    healthy: bool,
 ) -> Reduction<Vec<Waiter>, Effect> {
     let before = queue.clone();
     let mut queue: Vec<Waiter> = queue
@@ -316,7 +320,7 @@ fn advance(
         })
         .collect();
     let left = queue.len() != before.len();
-    while capacity.used_by_others(&queue, None) < capacity.limit {
+    while healthy && capacity.used_by_others(&queue, None) < capacity.limit {
         let Some(next) = queue.iter_mut().find(|w| w.grant.is_none()) else {
             break;
         };
@@ -434,6 +438,7 @@ mod tests {
         let seen = |s: Seen| Event::Advance {
             now: 2.0,
             seen: [("b".to_string(), s)].into(),
+            healthy: true,
         };
         // Owed: an ended turn (even a later one) isn't the woken one.
         let kept = reduce(queue, &cap, seen(idle("t2")));

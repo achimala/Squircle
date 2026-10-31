@@ -4,21 +4,26 @@ impl Sims {
     // MARK: Watching
 
     /// Ends sessions whose turn has stopped, whose recorder died, or that ran
-    /// too long, and runs owed cleanup and saves. Sessions a previous run
-    /// left unfinished are finished first. Returns once `shutdown` begins.
+    /// too long, runs owed cleanup and saves, and admits the line. Sessions a
+    /// previous run left unfinished are finished alongside, never ahead: one
+    /// whose recorder never finishes its movie must not keep the line from
+    /// the slots that are free. Returns once `shutdown` begins.
     ///
     /// It looks again when something it reads changes: T3's thread states,
-    /// a recorder exiting, the ledger being saved. The only clock is the
-    /// policy's: the next idle grace, recording limit or cleanup retry due.
+    /// the simulator host's health, a recorder exiting, the ledger being
+    /// saved. The only clock is the policy's: the next idle grace, recording
+    /// limit or cleanup retry due.
     pub async fn run(self: Arc<Self>) {
         use futures_util::StreamExt;
         let mut draining = self.draining.subscribe();
         let orphans = self.owner.ask(|s| std::mem::take(&mut s.orphans)).await;
         for id in orphans {
-            if *draining.borrow() {
-                return;
-            }
-            self.resume(&id, "service restarted").await;
+            let sims = self.clone();
+            tokio::spawn(async move {
+                if !*sims.draining.borrow() {
+                    sims.resume(&id, "service restarted").await;
+                }
+            });
         }
         let mut threads = self.host.changes();
         loop {
@@ -88,7 +93,8 @@ impl Sims {
         for id in owed {
             self.cleanup(&id, false).await;
         }
-        // Not while a start is deciding whether it may take a slot.
+        // Not while a start is deciding whether it may take a slot; that
+        // start advances the line itself once it is done.
         self.starts.try_run(self.advance()).await;
     }
 

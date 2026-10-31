@@ -381,6 +381,7 @@ pub struct Pool {
     applying: Lane,
     /// The simulator host's health, as the watch last found it.
     health: crate::actor::Published<crate::simwatch::Health>,
+    health_seen: crate::actor::Snapshot<crate::simwatch::Health>,
 }
 
 fn now() -> f64 {
@@ -423,6 +424,8 @@ impl Pool {
     ) -> Result<Arc<Self>> {
         let file = JsonFile::new(root.join("simpool.json"));
         let (saved, revision) = file.read::<Saved>()?.unwrap_or_default();
+        let (health, health_seen) =
+            crate::actor::Published::new(crate::simwatch::Health::default());
         let state = State {
             root: root.to_path_buf(),
             gate: Gate::restore(saved, revision, file),
@@ -438,7 +441,8 @@ impl Pool {
             owner: Owner::spawn("simulator pool", state),
             holds: OnceLock::new(),
             applying: Lane::new(Rank::PoolApply),
-            health: crate::actor::Published::new(crate::simwatch::Health::default()).0,
+            health,
+            health_seen,
         }))
     }
 
@@ -448,6 +452,12 @@ impl Pool {
 
     pub fn set_health(&self, health: crate::simwatch::Health) {
         self.health.set(health);
+    }
+
+    /// One item each time the health is set: admission looks again.
+    pub fn health_changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
+        use futures_util::StreamExt;
+        self.health_seen.changes().boxed()
     }
 
     /// The owner's keep list.

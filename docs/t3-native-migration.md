@@ -2104,6 +2104,23 @@ start`, all disabled; `sim stop` and `service stop` each filed a valid
 HEVC movie (39.7 s, 12.2 s) and shut the simulator down after the
 recorder exited, with no new SimRenderServer crash report.
 
+**2026-10-31 (owner-reported: a worker waited in line with slots free).**
+A Decision Lab session stopped while SimRenderServer hung; its recorder
+took the SIGINT but never finished the movie (still running two days
+later), so the session stayed `stopping` and kept its slot. Every restart
+then finished leftover sessions before the watchdog's first look, waiting
+on that recorder forever, so no later freed slot reached the line and the
+head was never woken. Now leftover sessions finish alongside the watchdog,
+which admits the line from its first look; a start that held the start
+lane (so a watchdog look skipped admission) advances the line itself when
+done; and nothing is granted while the simulator host is failing (the
+woken start would be refused and lose its place), with each health change
+waking the watchdog. The stuck recorder still holds its slot by design (no
+SIGKILL, see above); it is visible under `recent` as `stopping` in `sim
+status`. Covered by
+`a_restart_admits_the_line_past_a_session_that_never_finishes`; not yet
+run against the live service.
+
 ## 2026-10-14 simulator deck
 
 User, after trying several simulators on the phone: "we need to stack em

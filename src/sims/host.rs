@@ -35,7 +35,7 @@ pub trait Host: Send + Sync {
     fn device_sessions(&self) -> Pending<'_, Result<Vec<(String, String)>>>;
     /// What T3 currently says the thread is doing.
     fn seen(&self, thread: &str) -> Seen;
-    /// One item each time what `seen` reads may have changed.
+    /// One item each time what `seen` or `healthy` reads may have changed.
     fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
         use futures_util::StreamExt;
         futures_util::stream::pending().boxed()
@@ -66,6 +66,12 @@ pub trait Host: Send + Sync {
     fn wake<'a>(&'a self, thread: &'a str, id: &'a str, text: String) -> Pending<'a, Result<()>>;
     /// The threads now waiting in line for a simulator (their ended turns wake nobody).
     fn waiting(&self, threads: Vec<String>);
+
+    /// Whether the simulator host was healthy when last checked; `changes`
+    /// has an item when that may have changed.
+    fn healthy(&self) -> bool {
+        true
+    }
 
     /// Why no simulator can start now, if this Mac's simulator host is failing.
     fn unhealthy<'a>(&'a self, _leases: &'a [Lease]) -> Pending<'a, Option<String>> {
@@ -101,7 +107,12 @@ impl Host for AgentsHost {
     }
 
     fn changes(&self) -> futures_util::stream::BoxStream<'static, ()> {
-        self.0.changes()
+        use futures_util::StreamExt;
+        futures_util::stream::select(self.0.changes(), self.1.health_changes()).boxed()
+    }
+
+    fn healthy(&self) -> bool {
+        self.1.health().problem.is_none()
     }
 
     fn cli(&self) -> String {
