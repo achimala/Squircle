@@ -114,6 +114,7 @@ doesn't stream.
 | How does the phone record performance? | [Performance capture](docs/perf-capture.md) |
 | Why each design, with evidence | [Migration record](docs/t3-native-migration.md), [history](docs/history.md) |
 | The jelly characters (direction B is built; the rest is a proposal) | [Jelly design](docs/design-jelly-language.md) |
+| The design deck: type, spacing, glyphs, colour, chat, Home, Tasks (proposal awaiting approval) | [Design deck](docs/design/README.md) |
 | What every review checks | [Engineering preferences](docs/engineering-preferences.md) |
 | Reviews and audits | [Open-source review](docs/oss-review.md), [code review](docs/code-review-2026-10.md), [second review](docs/code-review-2026-10-b.md), [reinvention audit](docs/reinvention-audit.md) |
 | Publishing this repository | [Publishing](docs/publishing.md) |
