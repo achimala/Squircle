@@ -416,6 +416,17 @@ final class GalleryCell: TimelineCell {
 
     func view(for shot: Shot) -> ShotView? { row.arrangedSubviews.lazy.compactMap { $0 as? ShotView }.first { $0.shot == shot } }
 
+    /// Scrolls sideways so `shot` shows whole.
+    func reveal(_ shot: Shot) {
+        guard let view = view(for: shot) else { return }
+        scroll.layoutIfNeeded()
+        let visible = scroll.bounds
+        guard view.frame.minX < visible.minX || view.frame.maxX > visible.maxX else { return }
+        let lowest = -scroll.contentInset.left
+        let highest = max(lowest, scroll.contentSize.width + scroll.contentInset.right - visible.width)
+        scroll.contentOffset.x = min(highest, max(lowest, view.frame.midX - visible.width / 2))
+    }
+
     /// Decodes a loaded screenshot off the main thread, at the size it shows.
     static func prepare(_ shot: Shot) async -> UIImage? {
         if let cached = image(for: shot) { return cached }

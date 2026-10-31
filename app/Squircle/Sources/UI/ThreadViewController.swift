@@ -1368,11 +1368,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             if let host, host.expandsSimulators { host.expandSimulator(use) }
             return
         }
-        guard let id = use.recordingID, let thread = conversation.threadID, let window = view.window, let cell = simulatorCell(use.id) else { return }
-        let origin = MediaOrigin { [weak self] in self?.simulatorCell(use.id)?.spot }
-        MediaViewer.open(.video(poster: cell.poster, size: nil, player: cell.recordingPlayer, url: { [weak self] in
-            await self?.model.conversationMedia.loadVideo("media:" + id, in: thread)
-        }), from: origin, in: window)
+        openMedia { if case .recording(let other) = $0 { other.id == use.id } else { false } }
     }
 
     private func simulatorCell(_ id: String) -> SimulatorCell? {
@@ -1615,19 +1611,91 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     /// A screenshot, picture or clip, flown up from where it shows.
     private func showImage(_ shot: Shot) {
-        guard let window = view.window, let thread = conversation.threadID, let found = mediaView(shot) else { return }
-        let origin = MediaOrigin { [weak self] in self?.mediaView(shot)?.spot }
-        if shot.video {
-            MediaViewer.open(.video(poster: found.picture, size: MediaFiles.sizes[shot.step], player: found.player, url: { [weak self] in
-                await self?.model.conversationMedia.loadVideo(shot.step, in: thread)
-            }), from: origin, in: window)
-            return
+        openMedia { if case .shot(let other, _, _) = $0 { other == shot } else { false } }
+    }
+
+    /// A picture, clip or recording in the conversation, in the row `row`.
+    private enum Medium {
+        case shot(Shot, row: String, gallery: Bool)
+        case recording(SimulatorUse)
+    }
+
+    /// The one `opened` picks, flown up from where it shows; the
+    /// conversation's other pictures and clips page in on either side, in
+    /// its order, loading as they come.
+    private func openMedia(_ opened: (Medium) -> Bool) {
+        guard let window = view.window, let thread = conversation.threadID else { return }
+        var media: [Medium] = []
+        for id in dataSource.snapshot().itemIdentifiers {
+            switch itemsByID[id] {
+            case .gallery(_, let shots): media += shots.map { .shot($0, row: id, gallery: true) }
+            case .figure(_, let shots): media += shots.map { .shot($0, row: id, gallery: false) }
+            case .simulator(let use) where !use.live && use.recordingID != nil: media.append(.recording(use))
+            default: continue
+            }
         }
-        guard let picture = found.picture else { return }
-        MediaViewer.open(.image(picture, full: { pixels in
-            guard let data = StepImages.data(for: shot.step, index: shot.index) else { return nil }
-            return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
-        }), from: origin, in: window)
+        guard let index = media.firstIndex(where: opened) else { return }
+        MediaViewer.open(media.map { viewerItem($0, in: thread) }, at: index, in: window)
+    }
+
+    private func viewerItem(_ medium: Medium, in thread: String) -> ViewerItem {
+        let media = model.conversationMedia
+        switch medium {
+        case .shot(let shot, let row, let gallery):
+            let found = mediaView(shot)
+            let origin = MediaOrigin(locate: { [weak self] in self?.mediaView(shot)?.spot },
+                                     reveal: { [weak self] in self?.reveal(row, shot: shot) })
+            let inline = found?.picture ?? (gallery ? GalleryCell.image(for: shot) : FigureCell.image(for: shot))
+            let decode: @MainActor (CGFloat) async -> UIImage? = { [weak media] pixels in
+                guard let data = await media?.loadStepImage(shot.step, index: shot.index, attachment: shot.attachment, in: thread) else { return nil }
+                return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
+            }
+            guard shot.video else {
+                return ViewerItem(media: .image(inline, size: MediaFiles.sizes[shot.step], full: decode), origin: origin)
+            }
+            return ViewerItem(media: .video(poster: inline, size: MediaFiles.sizes[shot.step], player: found?.player, still: { await decode(1600) }, url: { [weak media] in
+                await media?.loadVideo(shot.step, in: thread)
+            }), origin: origin)
+        case .recording(let use):
+            let id = use.recordingID ?? ""
+            let cell = simulatorCell(use.id)
+            let origin = MediaOrigin(locate: { [weak self] in self?.simulatorCell(use.id)?.spot },
+                                     reveal: { [weak self] in self?.reveal(use.id, shot: nil) })
+            return ViewerItem(media: .video(poster: cell?.poster, size: nil, player: cell?.recordingPlayer, still: { [weak media] in
+                guard let data = await media?.recordingPoster(id, in: thread) else { return nil }
+                return await Downsample.image(data) { 1600 / max(1, $0.width, $0.height) }
+            }, url: { [weak media] in
+                await media?.loadVideo("media:" + id, in: thread)
+            }), origin: origin)
+        }
+    }
+
+    /// Behind the media viewer, scrolls the conversation so row `row` shows,
+    /// and in a gallery `shot`, for the viewer to go home to.
+    private func reveal(_ row: String, shot: Shot?) {
+        guard let path = dataSource.indexPath(for: row) else { return }
+        scrollSpring.stop()
+        bringIntoSight(table.rectForRow(at: path))
+        table.layoutIfNeeded()
+        let spot: MediaSpot?
+        if let shot {
+            (table.cellForRow(at: path) as? GalleryCell)?.reveal(shot)
+            spot = mediaView(shot)?.spot
+        } else {
+            spot = (table.cellForRow(at: path) as? SimulatorCell)?.spot
+        }
+        if let spot { bringIntoSight(spot.view.convert(spot.view.bounds, to: table)) }
+    }
+
+    /// Centres `rect` (in the table's content) unless it already shows whole.
+    private func bringIntoSight(_ rect: CGRect) {
+        let top = table.contentOffset.y + table.contentInset.top
+        let height = table.bounds.height - table.contentInset.top - table.contentInset.bottom
+        guard rect.minY < top || rect.maxY > top + height else { return }
+        let bottom = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
+        table.contentOffset.y = min(bottom, max(-table.contentInset.top, rect.midY - height / 2 - table.contentInset.top))
+        pinToBottom = bottom - table.contentOffset.y < 60
+        setJumpShown(bottom - table.contentOffset.y > 320)
     }
 
     /// The gallery frame or figure tile showing `shot`, if one is on screen.
