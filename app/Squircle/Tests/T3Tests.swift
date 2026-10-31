@@ -193,6 +193,23 @@ final class T3Tests: XCTestCase {
         XCTAssertEqual(pieces[4], "Last one: with a colon inside.")
     }
 
+    /// A reply's quote goes out as a blockquote and is read back off the
+    /// sent text: long quotes cut at a word, and still find their original.
+    func testReplyQuoteRoundTrips() {
+        let original = "First line\n\n" + String(repeating: "word ", count: 60) + "end."
+        let quote = Reply.quote(original)
+        XCTAssertTrue(quote.hasSuffix("…") && quote.count <= Reply.limit + 1, quote)
+        XCTAssertFalse(quote.contains("\n"))
+        let sent = Reply.compose(quote: quote, text: "  Yes, do that\n\n> not a quote ")
+        let read = Reply.split(sent)
+        XCTAssertEqual(read.quote, quote)
+        XCTAssertEqual(read.body, "Yes, do that\n\n> not a quote")
+        XCTAssertTrue(Reply.matches(quote, original))
+        XCTAssertFalse(Reply.matches(quote, "First line"))
+        XCTAssertNil(Reply.split("No quote > here").quote)
+        XCTAssertEqual(Reply.split(">quoted\n>more\n\nbody").quote, "quoted more")
+    }
+
     func testDiffKeepsDashDashAndPlusPlusLinesInsideHunks() {
         let diff = """
         diff --git a/q.sql b/q.sql

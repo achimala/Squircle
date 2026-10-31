@@ -75,6 +75,7 @@
 		6F5DF790DA62AD3825768741 /* GlassJelly.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD5E21CCB017A11F8E69752C /* GlassJelly.swift */; };
 		6FCE82929BB9D8A7562A1A18 /* BuildsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF232FAAAEAACE3ECF6978 /* BuildsViewController.swift */; };
 		70B9AB47633EBEEAFDE339D4 /* Commands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03A1A3F89F39409756FF7CA2 /* Commands.swift */; };
+		7111D4A66F703B2148BE7293 /* Reply.swift in Sources */ = {isa = PBXBuildFile; fileRef = F531B7C3A8C54CB20CDB0EDB /* Reply.swift */; };
 		7F275A46B1B215258858E66C /* RequestCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5386BA2E356615AB102C8F0 /* RequestCard.swift */; };
 		80634C6AFE018923DA492393 /* LinkRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42E355291AFF2203E6E4CEAE /* LinkRuntime.swift */; };
 		825485BA091840E2DDC3668A /* Jelly.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FC2D42D3BB1254066A5007E /* Jelly.swift */; };
@@ -119,6 +120,7 @@
 		B254903EDAAA3C21EABA5340 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 904A58DF20690F298B1F5381 /* JSONValue.swift */; };
 		B2B96A36977324FDBFA7E8F7 /* MotionAudit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9685CE2D9A277E148073C169 /* MotionAudit.swift */; };
 		B33D4A9C782619416B5ABFD7 /* ClientModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E4E19AF1DC5E561DD3D149 /* ClientModels.swift */; };
+		B3F125037092D9ED7544D461 /* Reply.swift in Sources */ = {isa = PBXBuildFile; fileRef = F531B7C3A8C54CB20CDB0EDB /* Reply.swift */; };
 		B5A57409F7C6F7D79CF583B7 /* AppProject.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0882163016B1D5C885051FAD /* AppProject.swift */; };
 		B656CF2B74D93834C7434DF1 /* SquircleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613DF9097AAA330CB0F89A33 /* SquircleApp.swift */; };
 		B8296CCA730E737FD74E28A9 /* T3ThreadState.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBD483A8574350974655CD0C /* T3ThreadState.swift */; };
@@ -258,6 +260,7 @@
 		EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SquircleModel.swift; sourceTree = "<group>"; };
 		EF7A7F6D85D75DFF1BED9836 /* PushCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushCenter.swift; sourceTree = "<group>"; };
 		F1F0CE024E0D9CAF95FC3396 /* CommandLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLabel.swift; sourceTree = "<group>"; };
+		F531B7C3A8C54CB20CDB0EDB /* Reply.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Reply.swift; sourceTree = "<group>"; };
 		F5C36A3AB6BFF28944AFD17D /* Conversation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Conversation.swift; sourceTree = "<group>"; };
 		FB90071AF89BC6F7195A8900 /* AppImportViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppImportViewController.swift; sourceTree = "<group>"; };
 		FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = T3DeviceStream.swift; sourceTree = "<group>"; };
@@ -376,6 +379,7 @@
 				0C145C181C585068CB76395D /* MediaQueue.swift */,
 				9E3FBED8B705AF489D5D4F09 /* MediaViewer.swift */,
 				9685CE2D9A277E148073C169 /* MotionAudit.swift */,
+				F531B7C3A8C54CB20CDB0EDB /* Reply.swift */,
 				A5386BA2E356615AB102C8F0 /* RequestCard.swift */,
 				D9070E9E79020C426083AA65 /* ScreenshotBinding.swift */,
 				C2B93D9DB47B6609E527BB87 /* SimulatorViews.swift */,
@@ -691,6 +695,7 @@
 				FCD6CE4E2BFA8F5440565BF9 /* PushTarget.swift in Sources */,
 				E4E52A2EEDC5744C917CB75C /* QuestionAnswers.swift in Sources */,
 				857787AA81D421AE636AA038 /* Reduction.swift in Sources */,
+				B3F125037092D9ED7544D461 /* Reply.swift in Sources */,
 				7F275A46B1B215258858E66C /* RequestCard.swift in Sources */,
 				3A3E16EA445BF69E2C979A4F /* ScreenRecorder.swift in Sources */,
 				261E5361EC4C07895B48DF6F /* ScreenshotBinding.swift in Sources */,
@@ -793,6 +798,7 @@
 				8E05EDDC1E59BC47FF661B32 /* PushTarget.swift in Sources */,
 				E56DA1BC4B93F3D4B9AC78DA /* QuestionAnswers.swift in Sources */,
 				52A55DF003085423A2CC75CF /* Reduction.swift in Sources */,
+				7111D4A66F703B2148BE7293 /* Reply.swift in Sources */,
 				1A1F76ACC686D7EF0C0FF6DA /* RequestCard.swift in Sources */,
 				462A9D97A5F00E2C5438DDF7 /* ScreenRecorder.swift in Sources */,
 				59C2E7027B55B03E5809A83B /* ScreenshotBinding.swift in Sources */,

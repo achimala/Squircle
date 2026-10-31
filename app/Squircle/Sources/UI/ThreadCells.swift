@@ -130,6 +130,17 @@ class TimelineCell: UITableViewCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Brought here from a reply's quote: a brief band behind the row, as
+    /// in WhatsApp.
+    func flash() {
+        let tint = Theme.accent.withAlphaComponent(0.14).resolvedColor(with: traitCollection).cgColor
+        let band = CAKeyframeAnimation(keyPath: "backgroundColor")
+        band.values = [UIColor.clear.cgColor, tint, tint, UIColor.clear.cgColor]
+        band.keyTimes = [0, 0.15, 0.6, 1]
+        band.duration = 1.4
+        contentView.layer.add(band, forKey: "flash")
+    }
+
     /// Pressed feedback for tappable rows.
     func setPressed(_ pressed: Bool) {
         UIView.animate(withDuration: pressed ? 0.08 : 0.3, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
@@ -190,9 +201,29 @@ final class MessageCell: TimelineCell {
     let text = UITextView()
     private var style = Style.answer
     private var bubbled: Bool { style == .user || style == .received }
-    /// The text's frame for the last width it was laid out at, and how far
-    /// a bubble reaches past it to be at least `Space.tap` tall.
-    private var measured: (width: CGFloat, frame: CGRect, pad: CGFloat)?
+    /// The text's frame for the last width it was laid out at, how far
+    /// a bubble reaches past it to be at least `Space.tap` tall, and where
+    /// the message yours replies to sits over it.
+    private var measured: (width: CGFloat, frame: CGRect, pad: CGFloat, quote: CGRect)?
+    /// The message yours replies to, over your bubble: its words hang off a
+    /// rule, like a quotation. Tapping them goes to it. Made only for replies.
+    private lazy var quoteLabel: UILabel = {
+        let label = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 2)
+        label.isUserInteractionEnabled = true
+        label.accessibilityIdentifier = "thread.message.quote"
+        label.accessibilityTraits = .button
+        label.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(quoteTapped)))
+        quoteRule.backgroundColor = .separator
+        quoteRule.layer.cornerRadius = 1
+        [quoteRule, label].forEach(contentView.addSubview)
+        hasQuote = true
+        return label
+    }()
+    private let quoteRule = UIView()
+    private var hasQuote = false
+    private var quote: String?
+    var onQuote: (() -> Void)?
+    @objc private func quoteTapped() { onQuote?() }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -216,8 +247,9 @@ final class MessageCell: TimelineCell {
     /// twice more).
     private func textFrame(width: CGFloat) -> (frame: CGRect, pad: CGFloat) {
         if let measured, measured.width == width { return (measured.frame, measured.pad) }
-        let frame: CGRect
+        var frame: CGRect
         var pad: CGFloat = 0
+        var quoted = CGRect.zero
         let margin = Theme.Space.margin
         if bubbled {
             // A bubble hugs its text at its sender's edge (yours trailing,
@@ -229,13 +261,21 @@ final class MessageCell: TimelineCell {
             pad = max(0, Theme.Space.tap - size.height) / 2
             let x = style == .user ? width - margin - Theme.Space.bubble.right - used : margin + Theme.Space.bubble.left
             frame = CGRect(x: x, y: gap.top + pad, width: used, height: size.height)
+            if style == .user, quote != nil {
+                // Over the bubble, at its trailing edge, a little apart from it.
+                let lead: CGFloat = 2 + Theme.Space.row
+                let fits = quoteLabel.sizeThatFits(CGSize(width: available + inset - lead, height: .greatestFiniteMagnitude))
+                let size = CGSize(width: min(available + inset - lead, ceil(fits.width)), height: ceil(fits.height))
+                quoted = CGRect(x: width - margin - size.width, y: gap.top, width: size.width, height: size.height)
+                frame.origin.y += size.height + Theme.Space.tight
+            }
         } else {
             // What an agent sent hangs off its rule in the glyph slot, its text where lines' text starts.
             let x = style == .agent ? Theme.Space.text : margin
             let used = max(0, width - x - margin)
             frame = CGRect(x: x, y: gap.top, width: used, height: text.sizeThatFits(CGSize(width: used, height: .greatestFiniteMagnitude)).height)
         }
-        measured = (width, frame, pad)
+        measured = (width, frame, pad, quoted)
         return (frame, pad)
     }
 
@@ -255,6 +295,23 @@ final class MessageCell: TimelineCell {
         if hasBubble { bubble.frame = around }
         if hasReceived { received.frame = around }
         rule.frame = CGRect(x: Theme.Space.margin, y: frame.minY + 2, width: 2, height: max(0, frame.height - 4))
+        if hasQuote, let quoted = measured?.quote {
+            quoteLabel.frame = quoted
+            quoteRule.frame = CGRect(x: quoted.minX - Theme.Space.row - 2, y: quoted.minY + 2, width: 2, height: max(0, quoted.height - 4))
+        }
+    }
+
+    /// Where a reply's quote sits over the bubble, in the content's space.
+    var quoteFrame: CGRect? {
+        guard hasQuote, !quoteLabel.isHidden else { return nil }
+        return quoteLabel.frame.union(quoteRule.frame)
+    }
+
+    /// Where the row's words sit on screen: its bubble, or its text.
+    var surface: UIView {
+        if hasBubble, !bubble.isHidden { return bubble }
+        if hasReceived, !received.isHidden { return received }
+        return text
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
@@ -272,6 +329,7 @@ final class MessageCell: TimelineCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         touch = nil
+        onQuote = nil
     }
     var touchedFirstLine: Bool {
         guard let touch, text.layoutManager.numberOfGlyphs > 0 else { return false }
@@ -279,9 +337,16 @@ final class MessageCell: TimelineCell {
         return touch.y < text.frame.minY + text.textContainerInset.top + line.maxY
     }
 
-    func configure(_ message: ChatMessage, style: Style, rendered: NSAttributedString, expanded: Bool) {
+    func configure(_ message: ChatMessage, style: Style, rendered: NSAttributedString, expanded: Bool, quote: String? = nil) {
         let user = style == .user
         self.style = style
+        self.quote = quote
+        if quote != nil || hasQuote {
+            quoteLabel.text = quote
+            quoteLabel.accessibilityLabel = quote.map { "In reply to: " + $0 }
+            quoteLabel.isHidden = quote == nil
+            quoteRule.isHidden = quote == nil
+        }
         measured = nil
         // The text last, so it is laid out once, in its final container.
         let padding = Theme.Space.bubble

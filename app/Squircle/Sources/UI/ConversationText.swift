@@ -15,7 +15,8 @@ final class ConversationText {
         let text: NSAttributedString
         switch style {
         case .user:
-            text = NSAttributedString(string: message.content, attributes: [.font: Theme.Text.body, .foregroundColor: UIColor.label])
+            // A reply's quote shows over the bubble, not in it.
+            text = NSAttributedString(string: Reply.split(message.content).body, attributes: [.font: Theme.Text.body, .foregroundColor: UIColor.label])
         case .note, .thought, .action, .agent:
             text = Markdown.render(markdown(message), font: Theme.Text.line, color: .secondaryLabel)
         case .answer, .received:
