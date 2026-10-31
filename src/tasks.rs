@@ -273,6 +273,11 @@ impl Tasks {
             .await
     }
 
+    /// Open questions, each with the task holding it.
+    pub fn asking(&self) -> Vec<(Task, Question)> {
+        self.book.get().asking()
+    }
+
     /// Answered questions whose answer has not reached its asker yet.
     pub fn owed(&self) -> Vec<(Task, Question)> {
         self.book.get().owed()

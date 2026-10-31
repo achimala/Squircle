@@ -329,7 +329,9 @@ and approvals. Ready-to-try items, finished work, notes and task summaries
 never show there. They live in the Tasks sheet (Ready to try, the needs-you
 section).
 
-Today it also shows "needs-you tasks" with no question. A task set to needs
+Built (stage 3, `overhaul-home`): the service lists only open questions and
+thread requests (`Tasks::asking`), and the client has no `.task` item. Before,
+it also showed "needs-you tasks" with no question. A task set to needs
 you with only a note ("Merged; live and connected", "Starts once the
 question-card fix merges", or none at all) is listed as if it were a
 question. They come from the service (`src/server/waiting_routes.rs:203-219`,
