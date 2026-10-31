@@ -205,3 +205,74 @@ pub(super) async fn build_log(
         json!({"text":String::from_utf8_lossy(&bytes),"next_offset":page.offset+count as u64,"has_more":(page.offset+count as u64)<size,"size":size}),
     )))
 }
+
+/// The app's icon for a build: its own bundle's, or for one without a
+/// product yet (queued, running, failed) the newest finished build of the
+/// same app. Missing when no build of the app has an icon.
+pub(super) async fn build_icon(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let jobs = state.jobs.list();
+    let job = &jobs
+        .iter()
+        .find(|view| view.job.id == id)
+        .ok_or_else(|| ApiError::missing(format!("No build {id}")))?
+        .job;
+    let same_app = |other: &crate::model::Job| {
+        other.id == job.id
+            || (job.app_project().is_some() && other.app_project() == job.app_project())
+    };
+    // Newest first, this build ahead of the others.
+    let mut sources: Vec<(
+        String,
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+    )> = jobs
+        .iter()
+        .map(|view| &view.job)
+        .filter(|other| same_app(other))
+        .filter_map(|other| {
+            other.output().map(|output| {
+                (
+                    other.id.clone(),
+                    output.app_path.clone(),
+                    output.ipa_path.clone(),
+                )
+            })
+        })
+        .collect();
+    sources.sort_by_key(|(source, ..)| {
+        let created = jobs
+            .iter()
+            .find(|v| &v.job.id == source)
+            .map_or(0, |v| v.job.created_at);
+        (source != &id, std::cmp::Reverse(created))
+    });
+    let (source, bytes) = in_lane(&state.catalog, move || {
+        for (source, app, ipa) in sources {
+            let icon = match (app, ipa) {
+                (Some(app), _) if app.is_dir() => crate::appicon::from_app(&app),
+                (_, Some(ipa)) if ipa.is_file() => crate::appicon::from_ipa(&ipa),
+                _ => continue,
+            };
+            if let Ok(bytes) = icon {
+                return Some((source, bytes));
+            }
+        }
+        None
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::missing("No build of this app has an icon"))?;
+    let mut response = (
+        private_headers(),
+        [(header::CONTENT_TYPE, "image/png")],
+        bytes,
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::ETAG, format!("\"{source}\"").parse().unwrap());
+    Ok(response)
+}

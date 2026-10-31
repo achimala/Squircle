@@ -293,6 +293,16 @@ final class SquircleClient {
                            to: destination)
     }
 
+    /// Files a thread links, as the Mac sees them: each one's bytes and, for
+    /// a picture or clip, its pixel size. Paths it doesn't link are left out.
+    struct LinkedFile: Decodable { let bytes: Int; let width: Double?; let height: Double? }
+    func linkedFiles(threadID: String, paths: [String]) async throws -> [String: LinkedFile] {
+        var request = try request(["v1", "t3", "threads", threadID, "files"], method: "POST",
+                                  body: JSONEncoder().encode(["paths": paths]))
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return try await call(request)
+    }
+
     /// A linked document's size, without its bytes.
     func documentSize(threadID: String, path: String) async throws -> Int {
         let request = try request(["v1", "t3", "threads", threadID, "document"], query: [URLQueryItem(name: "path", value: path)],
@@ -315,6 +325,12 @@ final class SquircleClient {
     }
 
     /// A simulator recording's poster (a small JPEG), when Squircle took one.
+    /// The app's icon for a build, from its own bundle or the newest
+    /// finished build of the same app.
+    func buildIcon(id: String) async throws -> Data {
+        try await fetchPNG(["v1", "builds", id, "icon"])
+    }
+
     func mediaPoster(threadID: String, id: String) async throws -> Data {
         try await bytes(request(["v1", "t3", "threads", threadID, "media", id, "poster"]))
     }

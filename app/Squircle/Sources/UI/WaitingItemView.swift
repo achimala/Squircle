@@ -333,6 +333,8 @@ final class WaitingItemView: UIView {
         strip.contentOffset = .zero
         for item in media where item.kind == "file" && !compact {
             let row = FileRowView()
+            // Inside the card, on the page's fill.
+            row.surfaceColor = Theme.paper
             row.show(.attached(task: task, media: item.id, name: item.name ?? "Document", bytes: item.bytes.map { Int($0) }), documents: documents)
             row.onOpen = { [weak self] row in self?.onDocument?(row) }
             files.addArrangedSubview(row)

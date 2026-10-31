@@ -745,10 +745,10 @@ final class SimulatorCell: TimelineCell {
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        frameView.layer.cornerRadius = 22 // a device screen's corner at this size
+        // At the bubbles' radius, like every picture in the conversation.
+        frameView.layer.cornerRadius = Theme.Radius.large
         frameView.layer.cornerCurve = .continuous
         frameView.clipsToBounds = true
-        frameView.layer.borderWidth = 2.5
         frameView.backgroundColor = UIColor(white: 0.06, alpha: 1)
         frameView.isUserInteractionEnabled = false
         playerLayer.videoGravity = .resizeAspect
@@ -768,8 +768,6 @@ final class SimulatorCell: TimelineCell {
         button.accessibilityTraits = .button
         button.accessibilityIdentifier = "thread.simulator"
         contentView.addSubview(button)
-        updateBorder()
-        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (cell: SimulatorCell, _: UITraitCollection) in cell.updateBorder() }
     }
 
     @available(*, unavailable)
@@ -886,6 +884,4 @@ final class SimulatorCell: TimelineCell {
                                           verticalFittingPriority v: UILayoutPriority) -> CGSize {
         sizeThatFits(targetSize)
     }
-
-    private func updateBorder() { frameView.layer.borderColor = UIColor.label.resolvedColor(with: traitCollection).withAlphaComponent(0.85).cgColor }
 }

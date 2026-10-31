@@ -18,6 +18,8 @@ struct BoundedCache<Key: Hashable, Value> {
     }
     /// Without counting as a use.
     func peek(_ key: Key) -> Value? { entries[key]?.value }
+    /// Everything held, least recently used first.
+    var all: [(key: Key, value: Value)] { entries.sorted { $0.value.used < $1.value.used }.map { ($0.key, $0.value.value) } }
     /// Stores `value`; returns the values that no longer fit, the replaced
     /// one included.
     @discardableResult

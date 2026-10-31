@@ -8,10 +8,12 @@
 
 pub mod actor;
 pub mod agents;
+pub mod appicon;
 pub mod apps;
 pub mod artifact;
 pub mod buildlog;
 pub mod clock;
+pub mod dimensions;
 pub mod fsm;
 pub mod git;
 pub mod guard;
