@@ -104,6 +104,24 @@ struct T3ThreadState: Codable {
     /// Conversation in time order: messages, the agent's thinking, and one
     /// step per tool call.
     var messages: [ChatMessage] {
+        var steps = StepMemo()
+        return messages(steps: &steps)
+    }
+    /// The same, describing only the calls `steps` hasn't seen as they are
+    /// now; `steps` then holds this pass's calls. Rendering again on every
+    /// event of a long thread otherwise re-parses every command each time.
+    func messages(steps: inout StepMemo) -> [ChatMessage] {
+        var seen = StepMemo()
+        defer { steps = seen }
+        func describe(_ key: String, _ call: ToolCall) -> AgentStep {
+            if let kept = steps.calls[key], kept.tool == call.tool, kept.result == call.result, kept.input == call.input {
+                seen.calls[key] = kept
+                return kept.step
+            }
+            let step = AgentStep.describe(call)
+            seen.calls[key] = StepMemo.Call(tool: call.tool, input: call.input, result: call.result, step: step)
+            return step
+        }
         // A row without an ID is named by its place, so it keeps one identity on every pass.
         var rows: [(String, ChatMessage)] = projection["messages"].array.enumerated().compactMap { index, m in
             guard m["role"].string != "system" else { return nil }
@@ -137,7 +155,7 @@ struct T3ThreadState: Codable {
         let rebuilt: [(String, ChatMessage)] = details.compactMap { key, extra in
             guard !sent.contains(key), let at = extra["started_at"].string, extra["input"] != .null else { return nil }
             let call = ToolCall(tool: extra["tool"].string ?? "", input: extra["input"], result: extra["result"].string)
-            let described = AgentStep.describe(call)
+            let described = describe(key, call)
             guard !described.hidden else { return nil }
             let finished = extra["finished"].string
             return (at, ChatMessage(id: key, role: "tool", content: described.title, isStreaming: running && finished == nil,
@@ -158,7 +176,7 @@ struct T3ThreadState: Codable {
             let extra = details[key]
             if call.input == .null, let input = extra?["input"], input != .null { call.input = input }
             call.result = call.result ?? extra?["result"].string
-            let described = AgentStep.describe(call)
+            let described = describe(key, call)
             if described.hidden { continue }
             rows.append((at, ChatMessage(id: key, role: "tool", content: described.title, isStreaming: streaming, detail: call.detail,
                                          failed: call.failed, symbol: described.symbol, createdAt: at, step: described,
@@ -235,6 +253,17 @@ struct PendingRequest: Equatable {
 
 /// One tool call: the tool and its input, said the way Claude names them,
 /// from a protocol 2 turn item or the Mac's copy of one.
+/// Tool calls already described, by key, with what they were described from.
+struct StepMemo {
+    struct Call {
+        let tool: String
+        let input: JSONValue
+        let result: String?
+        let step: AgentStep
+    }
+    var calls: [String: Call] = [:]
+}
+
 struct ToolCall {
     var tool: String
     var input: JSONValue
