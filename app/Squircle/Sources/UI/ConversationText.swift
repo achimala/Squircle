@@ -112,8 +112,6 @@ final class ConversationText {
         return text
     }
 
-    private static let lineJelly = JellyCanvas.tight(Theme.Glyph.line)
-
     /// A line's glyph in the slot, its text at the slot's end, and wrapped
     /// lines hanging under the text, not the glyph.
     private static func slotted(_ font: UIFont) -> NSParagraphStyle {
@@ -121,7 +119,7 @@ final class ConversationText {
         style.tabStops = [NSTextTab(textAlignment: .natural, location: Theme.Space.indent)]
         style.headIndent = Theme.Space.indent
         style.paragraphSpacing = Theme.Space.tight
-        // Every line keeps the font's height: a jelly rounds over its slot, never pushing the lines apart.
+        // Every line keeps the font's height: a jelly fits its slot, never pushing the lines apart.
         style.minimumLineHeight = ceil(font.lineHeight)
         style.maximumLineHeight = ceil(font.lineHeight)
         return style
@@ -207,11 +205,7 @@ final class ConversationText {
         // A line about a worker leads with the worker itself: its jelly, in
         // the state it is in now (a still; the Tasks row is where it moves).
         if let worker = line.thread?.raw, let mood = workerMood(line),
-           case let look = JellyLook.worker(worker, mood),
-           let image = JellySprites.shared.image(look, Self.lineJelly, traits: traits) {
-            let attachment = NSTextAttachment(image: image)
-            let size = image.size, body = Self.lineJelly.fitting(look).body
-            attachment.bounds = CGRect(x: 0, y: (font.capHeight - Self.lineJelly.size) / 2 - (size.height - body.maxY), width: size.width, height: size.height)
+           let attachment = NSTextAttachment.jelly(.worker(worker, mood), slot: Theme.Glyph.line, font: font, traits: traits) {
             text.insert(NSAttributedString(string: "\t", attributes: [.font: font]), at: 0)
             text.insert(NSAttributedString(attachment: attachment), at: 0)
         } else if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: Theme.symbol(font))?

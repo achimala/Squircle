@@ -1804,7 +1804,7 @@ final class GridCell: UIControl {
     }
     private let name = Theme.label("", Theme.appCaptionFont())
     /// The app's agent, behind the portrait's top edge.
-    private let peek = JellyView(.agent(.working), canvas: .roomy(GridCell.peekSize))
+    private let peek = JellyView(.agent(.working), slot: GridCell.peekSize)
     private static let peekSize = Theme.Glyph.home
     private var peeking = false
     /// Home is the route: the peeking agent may play.

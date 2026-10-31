@@ -692,14 +692,8 @@ private final class PiP: UIView {
         guard labelled?.0 != title || labelled?.1 != jelly else { return }
         labelled = (title, jelly)
         let text = NSMutableAttributedString()
-        let canvas = JellyCanvas.tight(12)
-        if let image = JellySprites.shared.image(jelly, canvas, traits: traitCollection) {
-            let attachment = NSTextAttachment(image: image)
-            let body = canvas.fitting(jelly).body
-            attachment.bounds = CGRect(x: 0, y: (caption.font.capHeight - 12) / 2 - (image.size.height - body.maxY),
-                                       width: image.size.width, height: image.size.height)
+        if let attachment = NSTextAttachment.jelly(jelly, slot: Theme.Glyph.line, font: caption.font, traits: traitCollection) {
             text.append(NSAttributedString(attachment: attachment))
-            text.append(NSAttributedString(string: " "))
         }
         text.append(NSAttributedString(string: title))
         caption.attributedText = text

@@ -161,6 +161,11 @@ struct JellyCanvas: Hashable {
     static func roomy(_ size: CGFloat) -> JellyCanvas { JellyCanvas(size: size, side: 0.22, top: 0.5, bottom: 0.18) }
     /// For a glyph in text: just the body.
     static func tight(_ size: CGFloat) -> JellyCanvas { JellyCanvas(size: size, side: 0.1, top: 0.14, bottom: 0.12) }
+    /// A still leading a line: tight, at least as wide as its slot, the body centred across it.
+    static func glyph(_ role: JellyLook.Role, slot: CGFloat) -> JellyCanvas {
+        let size = JellyBody.size(role, in: slot)
+        var canvas = tight(size); canvas.side = max(canvas.side, (slot / size - 1) / 2); return canvas
+    }
 
     var bounds: CGSize { CGSize(width: size * (1 + 2 * side), height: size * (1 + top + bottom)) }
     /// With room above for a worker's sprout.
@@ -175,6 +180,20 @@ struct JellyCanvas: Hashable {
     var body: CGRect { CGRect(x: size * side, y: size * top, width: size, height: size) }
     /// Where the body's visible bottom sits, the same for every build.
     func baseline(_ role: JellyLook.Role) -> CGFloat { body.midY + JellyBody.reference(role) * size }
+}
+
+extension NSTextAttachment {
+    /// A jelly's still leading a line of `font`, standing in a `slot`-point
+    /// slot: its body centred across the slot and on the text's cap height.
+    @MainActor
+    static func jelly(_ look: JellyLook, slot: CGFloat, font: UIFont, traits: UITraitCollection) -> NSTextAttachment? {
+        let canvas = JellyCanvas.glyph(look.role, slot: slot)
+        guard let image = JellySprites.shared.image(look, canvas, traits: traits) else { return nil }
+        let attachment = NSTextAttachment(image: image)
+        let body = canvas.fitting(look).body, size = image.size
+        attachment.bounds = CGRect(x: 0, y: font.capHeight / 2 - (size.height - body.midY), width: size.width, height: size.height)
+        return attachment
+    }
 }
 
 /// The body as the shader draws it at rest (turned by `JellyBody.yaw` and
@@ -211,6 +230,15 @@ enum JellyBody {
         case .worker:
             reach(SIMD4(1, 1, JellyTraits.workerEyes, JellyTraits.roundness.reduce(0, +) / Float(JellyTraits.roundness.count)))
         }
+    }
+
+    /// How big a body is in a slot `slot` points square (`Theme.Glyph`):
+    /// the whole figure at rest, sprout included, fits the slot with the
+    /// body centred in it, so on the text line beside it. The bare agent
+    /// fills its slot (rounding over it by a point); a worker's body leaves
+    /// its sprout's room above and as much below.
+    static func size(_ role: JellyLook.Role, in slot: CGFloat) -> CGFloat {
+        role == .agent ? slot : (slot / (1 + 2 * JellyTraits.crown)).rounded()
     }
 
     /// Where its centre goes so its bottom sits on `baseline`.
@@ -394,7 +422,9 @@ final class JellyView: UIView {
             JellyDirector.shared.needsUpdate()
         }
     }
-    let canvas: JellyCanvas
+    /// The square it stands in (`Theme.Glyph`); its body is sized to fit.
+    let slot: CGFloat
+    private var canvas: JellyCanvas { .roomy(JellyBody.size(look.role, in: slot)) }
     private let picture = CALayer()
     private var frames: [CGImage] = []
     private var loading: Task<Void, Never>?
@@ -404,11 +434,11 @@ final class JellyView: UIView {
     /// Where its loop starts, so two side by side never blink together.
     private let offset: Double
 
-    init(_ look: JellyLook, canvas: JellyCanvas) {
+    init(_ look: JellyLook, slot: CGFloat) {
         self.look = look
-        self.canvas = canvas
+        self.slot = slot
         offset = Double(look.temper) / 255 * 2
-        super.init(frame: CGRect(origin: .zero, size: CGSize(width: canvas.size, height: canvas.size)))
+        super.init(frame: CGRect(origin: .zero, size: CGSize(width: slot, height: slot)))
         isUserInteractionEnabled = false
         picture.contentsGravity = .resize
         layer.addSublayer(picture)
@@ -419,15 +449,16 @@ final class JellyView: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    override var intrinsicContentSize: CGSize { CGSize(width: canvas.size, height: canvas.size) }
+    override var intrinsicContentSize: CGSize { CGSize(width: slot, height: slot) }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         let canvas = canvas.fitting(look)
-        let k = bounds.width / canvas.size, b = canvas.body, full = canvas.bounds
+        // Drawn at its bounds' scale, the body centred in the slot.
+        let k = bounds.width / slot, b = canvas.body, full = canvas.bounds, inset = (slot - canvas.size) / 2
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        picture.frame = CGRect(x: -b.minX * k, y: -b.minY * k, width: full.width * k, height: full.height * k)
+        picture.frame = CGRect(x: (inset - b.minX) * k, y: (inset - b.minY) * k, width: full.width * k, height: full.height * k)
         CATransaction.commit()
     }
 
@@ -441,9 +472,9 @@ final class JellyView: UIView {
         reload()
         // Done gulps and failed shudders once, as it happens, where it is seen.
         if old.mood != look.mood, look.mood == .done || look.mood == .failed, window != nil, animates, JellyDirector.shared.motionAllowed {
-            let look = look, traits = traitCollection
+            let look = look, canvas = canvas, traits = traitCollection
             Task { [weak self] in
-                let clip = await JellySprites.shared.loop(look, self?.canvas ?? .roomy(20), traits: traits)
+                let clip = await JellySprites.shared.loop(look, canvas, traits: traits)
                 guard let self, self.look == look else { return }
                 arrival = (clip, CACurrentMediaTime())
                 JellyDirector.shared.needsUpdate()
@@ -494,9 +525,9 @@ final class JellyView: UIView {
             if let kept = JellySprites.shared.cachedLoop(look, canvas, traits: traitCollection) {
                 frames = kept
             } else if loading == nil {
-                let look = look, traits = traitCollection
+                let look = look, canvas = canvas, traits = traitCollection
                 loading = Task { [weak self] in
-                    let loop = await JellySprites.shared.loop(look, self?.canvas ?? .roomy(20), traits: traits)
+                    let loop = await JellySprites.shared.loop(look, canvas, traits: traits)
                     guard let self, !Task.isCancelled, self.look == look else { return }
                     loading = nil
                     frames = loop
@@ -694,7 +725,9 @@ final class JellyHero: UIView {
     }
     /// Its screen is showing, from the route; covered, it doesn't draw.
     var inSight = true { didSet { if inSight != oldValue { wake() } } }
-    let canvas: JellyCanvas
+    /// The square it stands in (`Theme.Glyph`); its body is sized to fit.
+    let slot: CGFloat
+    private var canvas: JellyCanvas { .roomy(JellyBody.size(look.role, in: slot)) }
     private let metal = CAMetalLayer()
     private var link: CADisplayLink?
     private var clock: CFTimeInterval = 0
@@ -705,10 +738,10 @@ final class JellyHero: UIView {
     private var drawn: JellyUniforms?
     private var observers: [Task<Void, Never>] = []
 
-    init(_ look: JellyLook, size: CGFloat) {
+    init(_ look: JellyLook, slot: CGFloat) {
         self.look = look
-        canvas = .roomy(size)
-        super.init(frame: CGRect(origin: .zero, size: CGSize(width: size, height: size)))
+        self.slot = slot
+        super.init(frame: CGRect(origin: .zero, size: CGSize(width: slot, height: slot)))
         metal.device = JellyRenderer.device
         metal.pixelFormat = .bgra8Unorm
         metal.isOpaque = false
@@ -733,14 +766,15 @@ final class JellyHero: UIView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    override var intrinsicContentSize: CGSize { CGSize(width: canvas.size, height: canvas.size) }
+    override var intrinsicContentSize: CGSize { CGSize(width: slot, height: slot) }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let canvas = canvas.fitting(look), b = canvas.body, full = canvas.bounds
+        // The body centred in the slot.
+        let canvas = canvas.fitting(look), b = canvas.body, full = canvas.bounds, inset = (slot - canvas.size) / 2
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        metal.frame = CGRect(x: -b.minX, y: -b.minY, width: full.width, height: full.height)
+        metal.frame = CGRect(x: inset - b.minX, y: inset - b.minY, width: full.width, height: full.height)
         let scale = min(3, window?.screen.scale ?? traitCollection.displayScale)
         metal.contentsScale = scale
         metal.drawableSize = CGSize(width: full.width * scale, height: full.height * scale)

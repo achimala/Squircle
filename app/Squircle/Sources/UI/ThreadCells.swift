@@ -1216,7 +1216,7 @@ final class LiveCell: TimelineCell {
     var inSight = true { didSet { renderHero() } }
     /// Where the capsule starts: its mark in the glyph slot (the capsule
     /// leads it by 12) or, with the jelly there instead, its text the glyph
-    /// gap past the jelly's drawn edge (it is wider than the slot, centred
+    /// gap past the jelly's live slot (wider than the glyph slot, centred
     /// on it; an empty mark slot puts the text 18 in).
     private static let markLead = Theme.Space.margin - 12
     private static let jellyLead = Theme.Space.margin + Theme.Space.glyph / 2 + heroSize / 2 + Theme.Space.glyphGap - 18
@@ -1243,11 +1243,11 @@ final class LiveCell: TimelineCell {
     func configure(_ status: LiveStatus, jelly: JellyLook? = nil) {
         if let jelly {
             if let hero { hero.look = jelly } else {
-                let hero = JellyHero(jelly, size: Self.heroSize)
+                let hero = JellyHero(jelly, slot: Self.heroSize)
                 hero.translatesAutoresizingMaskIntoConstraints = false
                 contentView.addSubview(hero)
                 NSLayoutConstraint.activate([
-                    // Centred on the glyph slot, rounding over it on each side.
+                    // Its live slot centred on the glyph slot, wider on each side.
                     hero.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin + Theme.Space.glyph / 2),
                     hero.centerYAnchor.constraint(equalTo: capsule.centerYAnchor),
                     hero.widthAnchor.constraint(equalToConstant: Self.heroSize),

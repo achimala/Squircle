@@ -1513,7 +1513,7 @@ final class ThreadLine: UIControl {
     }
     private(set) var threadID: String?
     private let size: Size
-    private let jelly = JellyView(.worker("", .working), canvas: .roomy(Theme.Glyph.line))
+    private let jelly = JellyView(.worker("", .working), slot: Theme.Glyph.line)
     private let title = Theme.label("", Theme.Text.lineStrong, lines: 1)
     private let doing = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 1)
     private let thumb = UIView()
@@ -2202,26 +2202,26 @@ final class TaskStrip: UIControl {
     private var shown: (texts: [String], crews: [[JellyLook]])?
 
     private static let height: CGFloat = 30
-    /// A Sprout's body here: centred on the capsule's middle line (the
-    /// text's cap-height centre), its sprout fits above with `inset` to spare.
-    private static let inset: CGFloat = 2
-    private static let body = ((height - 2 * inset) / (1 + 2 * JellyTraits.crown)).rounded(.down)
+    /// Sprouts stand in live-size slots, centred on the capsule's middle
+    /// line (the text's cap-height centre), sprouts and all inside it.
+    private static let jellySlot = Theme.Glyph.live
     private static let crewGap: CGFloat = 3
 
-    /// One Sprout in a slot as wide as its body is drawn (turned) and as
-    /// tall as its body: the picture's sprout grows up out of it, and the shader puts
-    /// every build's bottom on the same line, so the crew stands in a row.
+    /// One Sprout in a slot as wide as its body is drawn (turned): the
+    /// shader puts every build's bottom on the same line, so the crew
+    /// stands in a row.
     private static func slot(_ look: JellyLook) -> UIView {
         let slot = UIView()
-        let jelly = JellyView(look, canvas: JellyCanvas(size: body, side: 0.2, top: 0.42, bottom: 0.14))
+        let jelly = JellyView(look, slot: jellySlot)
+        let body = JellyBody.size(look.role, in: jellySlot)
         slot.isUserInteractionEnabled = false
         [slot, jelly].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         slot.addSubview(jelly)
         NSLayoutConstraint.activate([
             slot.widthAnchor.constraint(equalToConstant: (2 * JellyBody.halfWidth(look.traits.look) * body).rounded(.up)),
-            slot.heightAnchor.constraint(equalToConstant: body),
-            jelly.widthAnchor.constraint(equalToConstant: body),
-            jelly.heightAnchor.constraint(equalToConstant: body),
+            slot.heightAnchor.constraint(equalToConstant: jellySlot),
+            jelly.widthAnchor.constraint(equalToConstant: jellySlot),
+            jelly.heightAnchor.constraint(equalToConstant: jellySlot),
             jelly.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
             jelly.centerYAnchor.constraint(equalTo: slot.centerYAnchor)
         ])

@@ -105,7 +105,10 @@ enum Theme {
         static let tap: CGFloat = 44
     }
 
-    /// Jelly sizes: in lines and rows, the app agent's live line, and Home.
+    /// The squares jellies stand in, and the only jelly sizes: lines, rows
+    /// and captions (the glyph slot); the live line, the counts capsule and
+    /// the overlay's crew; the agent peeking on Home. The whole figure,
+    /// sprout included, fits its square, body centred (`JellyBody.size`).
     enum Glyph {
         static let line: CGFloat = 20, live: CGFloat = 28, home: CGFloat = 26
     }
