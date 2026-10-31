@@ -43,7 +43,7 @@ struct AgentStep: Equatable {
                     return AgentStep(kind: .squircle, title: description ?? other, symbol: "terminal", live: other, actions: actions, alsoRan: true)
                 }
                 return AgentStep(kind: .squircle, title: first.sentence(worker: nil) + (first.refused ? " · refused" : ""),
-                                 symbol: first.symbol, actions: actions)
+                                 symbol: first.symbol, live: first.live, actions: actions)
             }
             if let description = args["description"].string, !description.isEmpty {
                 return AgentStep(kind: .command, title: sentence(description), symbol: "terminal")

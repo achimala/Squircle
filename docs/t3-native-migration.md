@@ -2163,7 +2163,7 @@ send each other looked like the user's own.
   and their output. Started worker (its live state: working, done, needs
   you, error), Sent to / Answered (tap for the whole message), Read, Archived,
   Cleaned up, Started build (with its build card), Started/Stopped simulator,
-  Restarted, Started fresh, and Squircle's wake-ups as one "From <worker>"
+  Restarted, Started fresh (folded since 2026-10-31), and Squircle’s wake-ups as one "From <worker>"
   line per worker each stay in view when the turn folds. Lookups (status,
   help, build status) and commands Squircle refused fold with the other steps.
   Tapping a worker's line opens its thread (not once it is archived).
@@ -2996,6 +2996,25 @@ functionality.
   that work. Tapping a Squircle line (other than a worker's, which opens the
   worker) shows its command and output, with Open in Tasks when the app has
   the task; Tasks then opens on that work item's page.
+
+## 2026-10-31 Squircle lines fold into "Worked for…"
+
+User, superseding "each stay in view when the turn folds" above: tracker and
+note changes on every message were spam; the top level should be results.
+
+- A finished turn folds every Squircle line (tasks, notes, workers, builds,
+  simulators) into its "Worked for…" line with the other steps; expanding it
+  shows each as before. What stays at the top level: the reply, media, build
+  cards, question cards, and workers' update lines ("From …").
+- The summary's quiet detail counts them: "3 steps · 4 tasks · 1 note".
+- While live, Squircle lines are ordinary steps in the newest-few window (no
+  longer pinned), and the live line says what one is doing ("Adding a task",
+  "Updating notes", "Starting a worker").
+- Builds a worker started still get their "Started a build" line where they
+  began (unchanged).
+
+Verified in the simulator on the Squircle agent's own conversation, before
+and after at the same turn, and expanded.
 
 ## 2026-10-30 one permanent agent thread
 

@@ -221,6 +221,34 @@ struct SquircleAction: Equatable {
         }
     }
 
+    /// What it is doing while it runs, for the live line ("Adding a task").
+    var live: String {
+        switch kind {
+        case .spawn: return "Starting a worker"
+        case .send: return "Messaging a worker"
+        case .read: return "Reading a worker’s reply"
+        case .answer: return "Answering a worker"
+        case .archive, .cleanup: return "Archiving workers"
+        case .status: return "Checking workers"
+        case .buildStart: return "Starting a build"
+        case .buildStatus: return "Checking builds"
+        case .simStart: return "Starting a simulator"
+        case .simStop: return "Stopping the simulator"
+        case .simOther: return "Checking simulators"
+        case .restart: return "Restarting"
+        case .perf: return "Reading a performance recording"
+        case .media: return "Publishing a recording"
+        case .taskAdd, .taskReplace: return "Adding a task"
+        case .taskStatus, .taskReword, .taskMove, .taskNote, .taskLink, .taskWithdraw: return "Updating tasks"
+        case .taskAttach(let video): return video ? "Attaching a clip" : "Attaching a screenshot"
+        case .taskAsk: return "Asking you"
+        case .taskLookup, .taskHeard: return "Checking tasks"
+        case .noteAdd, .noteEdit, .noteRemove: return "Updating notes"
+        case .notesLookup: return "Reading notes"
+        case .agentOther, .help, .other: return "Running Squircle"
+        }
+    }
+
     // MARK: Parsing
 
     /// Every Squircle command in `command`. `result` is the whole call's

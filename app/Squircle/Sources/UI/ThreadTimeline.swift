@@ -9,6 +9,9 @@ struct TurnSummary: Equatable {
     let files: Int
     let added: Int
     let removed: Int
+    /// Tracker and note changes folded in with the steps.
+    var tasks = 0
+    var notes = 0
     let failed: Bool
     let expanded: Bool
 
@@ -19,6 +22,8 @@ struct TurnSummary: Equatable {
     var detail: String {
         var parts = ["\(steps) step\(steps == 1 ? "" : "s")"]
         if files > 0 { parts.append("\(files) file\(files == 1 ? "" : "s") changed") }
+        if tasks > 0 { parts.append("\(tasks) task\(tasks == 1 ? "" : "s")") }
+        if notes > 0 { parts.append("\(notes) note\(notes == 1 ? "" : "s")") }
         return parts.joined(separator: " · ")
     }
 }
@@ -55,8 +60,8 @@ struct LiveStatus: Equatable {
     let started: Date?
 }
 
-/// A Squircle action or a worker's news, on a line of its own that stays
-/// out of the turn's fold. The conversation fills in the worker's name and
+/// A Squircle action or a worker's news, on a line of its own. Actions fold
+/// with the turn's other steps; news stays in view. The conversation fills in the worker's name and
 /// live state.
 struct ActionLine: Equatable {
     enum Kind: Equatable {
@@ -391,8 +396,8 @@ enum ThreadItem: Equatable {
             items += liveRows(turn: id, work: work, expanded: turn.expanded)
         } else if !steps.isEmpty {
             items.append(.summary(summary(turn: id, user: turn.user, work: work, answer: answer, expanded: turn.expanded)))
-            // Squircle actions stay in view when the work folds.
-            items += turn.expanded ? allRows(work) : gallery("gallery:" + id, work) + steps.flatMap(actionRows)
+            // Squircle actions fold with the other steps (user, 2026-10-31).
+            items += turn.expanded ? allRows(work) : gallery("gallery:" + id, work)
         }
         let head = items
         items = answer.map { withMedia($0, ThreadItem.answer) } ?? []
@@ -411,8 +416,7 @@ enum ThreadItem: Equatable {
         if let last = work.last, last.role == "tool", last.isStreaming { work.removeLast() }
         let noteIndex = work.lastIndex { $0.role == "assistant" }
         let afterNote = work.indices.filter { $0 > (noteIndex ?? -1) && work[$0].role == "tool" }
-        // Squircle actions always show, wherever they fall.
-        let shown = Set(afterNote.suffix(liveWindow)).union(work.indices.filter { !actionRows(work[$0]).isEmpty })
+        let shown = Set(afterNote.suffix(liveWindow))
         let folded = work.indices.filter { work[$0].role == "tool" && !shown.contains($0) }.count
         var rows: [ThreadItem] = folded > 0 ? [.earlier(turn: turn, count: folded)] : []
         rows += gallery("gallery:earlier:" + turn, work.indices.filter { work[$0].role == "tool" && !shown.contains($0) }.map { work[$0] })
@@ -559,10 +563,14 @@ enum ThreadItem: Equatable {
         let duration = user.flatMap { date($0.createdAt) }.flatMap { start in
             end.compactMap { date($0.createdAt) }.max().map { $0.timeIntervalSince(start) }
         }
+        let tracker = steps.flatMap { $0.step?.actions ?? [] }.filter { $0.visible && $0.isTracker }
+        let isNote = { (action: SquircleAction) in [.noteAdd, .noteEdit, .noteRemove].contains(action.kind) }
+        let notes = tracker.filter(isNote).count
+        let tasks = tracker.filter { !isNote($0) }.reduce(0) { $0 + max(1, $1.repeats ?? 1) }
         return TurnSummary(turn: turn, duration: duration, steps: steps.count, files: Set(edits).count,
                            added: steps.reduce(0) { $0 + ($1.step?.added ?? 0) },
                            removed: steps.reduce(0) { $0 + ($1.step?.removed ?? 0) },
-                           failed: steps.contains { $0.failed }, expanded: expanded)
+                           tasks: tasks, notes: notes, failed: steps.contains { $0.failed }, expanded: expanded)
     }
 
     static func date(_ text: String) -> Date? { ISODate.parse(text) }
