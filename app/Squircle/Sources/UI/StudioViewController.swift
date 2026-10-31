@@ -343,11 +343,17 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if let n = environment["SQUIRCLE_MEDIA"].flatMap(Int.init) {
                 Task { [weak self] in try? await Task.sleep(for: .seconds(4)); self?.thread?.debugScrollToMedia(n, kind: environment["SQUIRCLE_MEDIA_KIND"]) }
             }
+            if let up = value("SQUIRCLE_SCROLL_UP") {
+                Task { [weak self] in try? await Task.sleep(for: .seconds(4)); self?.thread?.debugScrollUp(up) }
+            }
             if environment["SQUIRCLE_DEMO_PULSE"] == "1" { later { [weak self] in self?.thread?.debugPulse() } }
             // `SQUIRCLE_SEND` here sends into the opened thread or draft, with
-            // `SQUIRCLE_ATTACH` (an image file) as its picture.
+            // `SQUIRCLE_ATTACH` (an image file) as its picture, after
+            // `SQUIRCLE_SEND_AFTER` seconds (2.5; later, after `SQUIRCLE_MEDIA`
+            // or `SQUIRCLE_SCROLL_UP` has scrolled up, to send from above the end).
             if let text = environment["SQUIRCLE_SEND"] {
-                later { [weak self] in
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(value("SQUIRCLE_SEND_AFTER").map(Double.init) ?? 2.5))
                     if let path = environment["SQUIRCLE_ATTACH"], let image = UIImage(contentsOfFile: path).flatMap({ ImageAttachment($0) }) {
                         self?.model.attach(image)
                     }
