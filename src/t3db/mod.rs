@@ -406,6 +406,19 @@ mod tests {
             ),
             [json!("u")]
         );
+        // A file the phone may open is one this thread's agent named: never
+        // another thread's, never only the user's words.
+        let links = |thread: &str, path: &str| {
+            read(
+                sql::THREAD_LINKS,
+                vec![text(thread), text(path), text(path)],
+            )
+            .len()
+        };
+        assert_eq!(links("t", "not imported"), 1);
+        assert_eq!(links("t", "rival reply"), 0);
+        assert_eq!(links("u", "rival reply"), 1);
+        assert_eq!(links("x", "gone"), 0);
         // Projects: each thread's own, never a deleted project or thread.
         assert_eq!(
             column(&read(sql::THREAD_PROJECT, vec![text("t")]), "project_id"),

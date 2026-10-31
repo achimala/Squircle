@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
             get(thread_media).post(add_thread_media),
         )
         .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
+        .route("/v1/t3/threads/{thread}/document", get(thread_document))
         .route(
             "/v1/t3/threads/{thread}/media/{id}/poster",
             get(thread_media_poster),

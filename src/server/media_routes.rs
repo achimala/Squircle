@@ -76,10 +76,15 @@ pub(super) async fn thread_media_file(
 ) -> ApiResult<Response> {
     let root = state.files.root.clone();
     let media = crate::media::get(&root, &thread, &id).map_err(ApiError::missing)?;
+    serve_file(&media.file, &media.content_type).await
+}
+
+/// Streams a stored file (never through a symlink) with its length.
+pub(super) async fn serve_file(path: &std::path::Path, content_type: &str) -> ApiResult<Response> {
     let file = tokio::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&media.file)
+        .open(path)
         .await
         .map_err(ApiError::missing)?;
     let metadata = file.metadata().await.map_err(ApiError::internal)?;
@@ -88,7 +93,7 @@ pub(super) async fn thread_media_file(
     }
     let mut response = (
         private_headers(),
-        [(header::CONTENT_TYPE, media.content_type.clone())],
+        [(header::CONTENT_TYPE, content_type.to_string())],
         Body::from_stream(ReaderStream::new(file)),
     )
         .into_response();
@@ -97,6 +102,52 @@ pub(super) async fn thread_media_file(
         metadata.len().to_string().parse().unwrap(),
     );
     Ok(response)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DocumentQuery {
+    pub(super) path: String,
+}
+
+/// A document (PDF or plain text) on this Mac that an agent linked in this
+/// thread, for the phone's viewer: only a path an assistant message of the
+/// thread names, only a document type, only a regular file.
+pub(super) async fn thread_document(
+    Path(thread): Path<String>,
+    query: std::result::Result<Query<DocumentQuery>, QueryRejection>,
+) -> ApiResult<Response> {
+    let path = PathBuf::from(parse_query(query)?.path);
+    let content_type = linked_document(&thread, &path).await?;
+    serve_file(&path, content_type).await
+}
+
+/// The content type of `path` if the phone may open it from `thread`.
+async fn linked_document(thread: &str, path: &std::path::Path) -> ApiResult<&'static str> {
+    let text = path
+        .to_str()
+        .filter(|_| path.is_absolute() && crate::media::valid_thread(thread))
+        .ok_or_else(|| ApiError::bad("Pass an absolute file path and a T3 thread"))?;
+    let content_type = crate::media::document_type(path)
+        .ok_or_else(|| ApiError::bad("Only PDF and plain-text documents open here"))?;
+    // The path as the agent wrote it; Markdown escapes a space as %20.
+    let rows = crate::t3db::query(
+        crate::t3db::sql::THREAD_LINKS,
+        crate::t3db::params![thread, text, text.replace(' ', "%20")],
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    if rows.is_empty() {
+        return Err(ApiError::missing("This thread links no such file"));
+    }
+    // Every directory on the way as named: no symlink leads elsewhere.
+    let canonical = tokio::fs::canonicalize(path)
+        .await
+        .map_err(ApiError::missing)?;
+    if canonical != path {
+        return Err(ApiError::missing("This thread links no such file"));
+    }
+    Ok(content_type)
 }
 
 pub(super) async fn thread_media_poster(

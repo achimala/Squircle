@@ -236,11 +236,11 @@ enum MediaFileStore {
     /// A file used this recently may be playing: it stays.
     static let inUse: TimeInterval = 15 * 60
 
-    /// A stable file name for a step ID, keeping a video's extension.
+    /// A stable file name for a step ID, keeping a video's or document's extension.
     static func name(for id: String) -> String {
         let digest = SHA256.hash(data: Data(id.utf8)).prefix(16).hex
         let ext = (id as NSString).pathExtension.lowercased()
-        return digest + "." + (["mp4", "mov", "m4v"].contains(ext) ? ext : "mp4")
+        return digest + "." + (["mp4", "mov", "m4v"].contains(ext) || DocumentSource.extensions.contains(ext) ? ext : "mp4")
     }
 
     /// What to delete: anything unused for `maxAge`, then the least recently

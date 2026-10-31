@@ -196,7 +196,7 @@ current, and the latest asks lost. So:
 ## Model
 
 Kept per app (T3 project) in `<data>/tasks.json`; attachments in
-`<data>/tasks/<id>/media`. A task has the ask, a status (`queued`,
+`<data>/tasks/<id>/media` (screenshots, clips, and documents: pdf, md, txt, json, csv, which the phone opens in Quick Look). A task has the ask, a status (`queued`,
 `in_progress`, `needs_you`, `ready_to_try`, `done`, `dropped`), a few-word
 note, the chat message it came from (the agent's latest user message when it
 adds the task), linked worker threads and builds, an order within its group,

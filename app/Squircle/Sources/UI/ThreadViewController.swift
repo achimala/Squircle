@@ -353,6 +353,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.register(GalleryCell.self, forCellReuseIdentifier: "gallery")
         table.register(FigureCell.self, forCellReuseIdentifier: "figure")
         table.register(MarkdownTableCell.self, forCellReuseIdentifier: "table")
+        table.register(DocumentCell.self, forCellReuseIdentifier: "document")
         table.register(SummaryCell.self, forCellReuseIdentifier: "summary")
         table.register(LiveCell.self, forCellReuseIdentifier: "live")
         table.register(BuildCell.self, forCellReuseIdentifier: "build")
@@ -900,6 +901,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .gallery: return "gallery"
         case .figure: return "figure"
         case .table: return "table"
+        case .document: return "document"
         case .summary: return "summary"
         case .live: return "live"
         case .build: return "build"
@@ -1354,6 +1356,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.onTap = { [weak self] shot in self?.showImage(shot) }
         case .table(let id, let table, let quiet):
             (cell as? MarkdownTableCell)?.configure(tableLayout(id, table, quiet: quiet), id: id)
+        case .document(_, let path):
+            guard let cell = cell as? DocumentCell, let thread = currentSessionID else { return }
+            cell.row.show(.linked(thread: thread, path: path), documents: model.documents)
+            cell.row.onOpen = { [weak self] row in
+                guard let self else { return }
+                DocumentViewer.open(row, documents: model.documents, from: self)
+            }
         case .summary(let summary):
             (cell as? SummaryCell)?.configure(summary)
         case .live(let status):
@@ -1603,6 +1612,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .gallery: return GalleryCell.height + 20
         case .figure(_, let shots): return FigureCell.height(shots, width: tableView.bounds.width)
         case .table(_, let table, let quiet): return CGFloat(table.rows.count + 1) * (quiet ? 26 : 30) + 12
+        case .document: return 70
         case .summary: return 54
         case .live: return 72
         case .build: return 74

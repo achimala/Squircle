@@ -373,7 +373,11 @@ struct AppTask: Decodable, Equatable, Identifiable {
         let buildNumber: String?; let installable: Bool?
         enum CodingKeys: String, CodingKey { case id, state, title, version, installable, buildNumber = "build_number" }
     }
-    struct Media: Decodable, Equatable { let id: String; let kind: String; let caption: String }
+    struct Media: Decodable, Equatable {
+        let id: String; let kind: String; let caption: String
+        /// A document's own file name, and its size.
+        let name: String?; let bytes: Double?
+    }
 
     let id: String
     let ask: String
