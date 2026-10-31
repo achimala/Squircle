@@ -34,6 +34,23 @@ final class Composer: UIView, UITextViewDelegate {
         }
     }
     var onRemoveAttachment: ((String) -> Void)?
+    /// The message you are replying to, quoted over the text; its x cancels.
+    var onCancelQuote: (() -> Void)?
+    private let quoteBar = UIView()
+    private let quoteRule = UIView()
+    private let quoteLabel = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 2)
+    private let quoteClose: UIButton = {
+        var config = UIButton.Configuration.plain()
+        config.image = UIImage(systemName: "xmark")
+        config.preferredSymbolConfigurationForImage = Theme.symbol(Theme.Text.line)
+        config.baseForegroundColor = .secondaryLabel
+        config.contentInsets = .zero
+        let button = UIButton(configuration: config)
+        button.accessibilityIdentifier = "thread.quote.cancel"
+        button.accessibilityLabel = "Cancel reply"
+        return button
+    }()
+    private var quoteCollapsed: NSLayoutConstraint!
     #if DEBUG
     /// Verification only: opens the + menu as a tap would.
     func showAttachMenu() {
@@ -109,9 +126,20 @@ final class Composer: UIView, UITextViewDelegate {
         group.contentView.clipsToBounds = false
         addSubview(group)
         group.contentView.addSubview(glass)
-        [tray, input, placeholder, attach, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
+        quoteRule.backgroundColor = .separator
+        quoteRule.layer.cornerRadius = 1
+        quoteBar.clipsToBounds = true
+        quoteBar.isHidden = true
+        quoteBar.accessibilityIdentifier = "thread.quote"
+        quoteClose.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.onCancelQuote?() }, for: .touchUpInside)
+        [quoteRule, quoteLabel, quoteClose].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; quoteBar.addSubview($0) }
+        [quoteBar, tray, input, placeholder, attach, send].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glass.contentView.addSubview($0) }
         height = input.heightAnchor.constraint(equalToConstant: Self.field)
         trayHeight = tray.heightAnchor.constraint(equalToConstant: 0)
+        quoteCollapsed = quoteBar.heightAnchor.constraint(equalToConstant: 0)
+        // Gives way to the collapsed bar.
+        let quoteBottom = quoteLabel.bottomAnchor.constraint(equalTo: quoteBar.bottomAnchor)
+        quoteBottom.priority = .defaultHigh
         let side = Self.button, edge = Self.edge
         inputLeading = input.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor, constant: edge)
         NSLayoutConstraint.activate([
@@ -125,7 +153,23 @@ final class Composer: UIView, UITextViewDelegate {
             group.leadingAnchor.constraint(equalTo: leadingAnchor), group.trailingAnchor.constraint(equalTo: trailingAnchor),
             glass.topAnchor.constraint(equalTo: topAnchor), glass.bottomAnchor.constraint(equalTo: bottomAnchor),
             glass.leadingAnchor.constraint(equalTo: leadingAnchor), glass.trailingAnchor.constraint(equalTo: trailingAnchor),
-            tray.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
+            quoteBar.topAnchor.constraint(equalTo: glass.contentView.topAnchor),
+            quoteBar.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor),
+            quoteBar.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor),
+            quoteCollapsed,
+            // The quote starts where the field's text does, under its rule.
+            quoteRule.leadingAnchor.constraint(equalTo: quoteBar.leadingAnchor, constant: Self.edge + Theme.Space.rowPad),
+            quoteRule.widthAnchor.constraint(equalToConstant: 2),
+            quoteRule.topAnchor.constraint(equalTo: quoteLabel.topAnchor, constant: 2),
+            quoteRule.bottomAnchor.constraint(equalTo: quoteLabel.bottomAnchor, constant: -2),
+            quoteLabel.leadingAnchor.constraint(equalTo: quoteRule.trailingAnchor, constant: Theme.Space.row),
+            quoteLabel.topAnchor.constraint(equalTo: quoteBar.topAnchor, constant: Theme.Space.rowPad),
+            quoteBottom,
+            quoteLabel.trailingAnchor.constraint(equalTo: quoteClose.leadingAnchor, constant: -Theme.Space.tight),
+            quoteClose.trailingAnchor.constraint(equalTo: quoteBar.trailingAnchor, constant: -Self.edge),
+            quoteClose.centerYAnchor.constraint(equalTo: quoteLabel.centerYAnchor),
+            quoteClose.widthAnchor.constraint(equalToConstant: side), quoteClose.heightAnchor.constraint(equalToConstant: side),
+            tray.topAnchor.constraint(equalTo: quoteBar.bottomAnchor),
             tray.leadingAnchor.constraint(equalTo: glass.contentView.leadingAnchor),
             tray.trailingAnchor.constraint(equalTo: glass.contentView.trailingAnchor),
             trayHeight,
@@ -173,6 +217,16 @@ final class Composer: UIView, UITextViewDelegate {
             }
         }
         trayHeight.constant = attachments.isEmpty ? 0 : 84
+        onChange?()
+    }
+
+    /// The words you are replying to, over the text; nil for none.
+    func showQuote(_ quote: String?) {
+        guard quoteLabel.text != quote || quoteBar.isHidden != (quote == nil) else { return }
+        quoteLabel.text = quote
+        quoteBar.isHidden = quote == nil
+        quoteCollapsed.isActive = quote == nil
+        quoteLabel.accessibilityLabel = quote.map { "Replying to: " + $0 }
         onChange?()
     }
 

@@ -111,19 +111,31 @@ final class ConversationMedia {
         guard let url = await signedURL(["_tag": "attachment", "attachmentId": .string(id)])?.url else { return nil }
         return await signedData(url)
     }
-    /// The pixel size of a picture the agent's Markdown shows, from T3
-    /// before its bytes arrive, so its place in the conversation is reserved.
-    func mediaSize(_ stepID: String, in thread: String) async -> CGSize? {
-        if let size = MediaFiles.sizes[stepID] { return size }
-        guard !MediaFiles.isVideo(stepID), let size = await mediaFileURL(String(stepID.dropFirst("file:".count)), in: thread)?.size else { return nil }
-        MediaFiles.sizes[stepID] = size
-        return size
+    /// Asks the Mac once for files a thread links: pictures' and clips'
+    /// pixel sizes, so their frames are final before their bytes arrive.
+    /// True once it has answered (or failed to); a path
+    /// it couldn't answer stays asked, and shows at a settled guess.
+    func learnFiles(_ paths: [String], in thread: String) async -> Bool {
+        let wanted = Array(Set(paths).subtracting(MediaFiles.asked).subtracting(learning))
+        guard !wanted.isEmpty else { return false }
+        guard let client else { MediaFiles.asked.formUnion(wanted); return true }
+        learning.formUnion(wanted)
+        let facts = try? await client.linkedFiles(threadID: thread, paths: wanted)
+        learning.subtract(wanted)
+        MediaFiles.asked.formUnion(wanted)
+        for (path, fact) in facts ?? [:] {
+            if let width = fact.width, let height = fact.height, width > 0, height > 0 {
+                MediaFiles.sizes["file:" + path] = CGSize(width: width, height: height)
+            }
+        }
+        return true
     }
+    private var learning = Set<String>()
     /// A file on the Mac the agent's Markdown shows. T3 signs a short-lived
     /// URL for it as it does for its own web client, and only for pictures,
     /// video and documents it can preview.
     private func mediaFileURL(_ path: String, in thread: String) async -> (url: URL, size: CGSize?)? {
-        if let signed = MediaFiles.urls[thread, path], signed.expires > .now.addingTimeInterval(30) { return (signed.url, MediaFiles.sizes["file:" + path]) }
+        if let signed = MediaFiles.urls[thread, path], signed.expires > .now.addingTimeInterval(30) { return (signed.url, nil) }
         guard let signed = await signedURL(["_tag": "media-file", "threadId": .string(thread), "path": .string(path)]) else { return nil }
         if let expires = signed.expires { MediaFiles.urls[thread, path] = (signed.url, expires) }
         return (signed.url, signed.size)

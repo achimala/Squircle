@@ -212,6 +212,8 @@ final class SquircleModel {
     private var installWatch: Task<Void, Never>?
     private var media: [JSONValue] { state.media }
     /// Pictures, recordings and files conversations show, each loaded for its own thread.
+    /// Built apps' own icons, for build cards and the Builds sheet.
+    private(set) lazy var buildIcons = BuildIcons { [client] id in try? await client?.buildIcon(id: id) }
     private(set) lazy var conversationMedia = ConversationMedia(
         client: client, gateway: gateway, base: configuration?.t3URL,
         published: { [weak self] thread in self?.publishedMedia(of: thread) ?? [] })

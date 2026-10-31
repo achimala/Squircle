@@ -122,6 +122,64 @@ pub(super) async fn thread_document(
     serve_file(&path, content_type).await
 }
 
+#[derive(Deserialize)]
+pub(super) struct FilesQuery {
+    paths: Vec<String>,
+}
+
+/// What the phone needs to lay out files `thread` links before fetching
+/// them: each one's size in bytes and, for a picture or clip, its pixel
+/// size. Paths the thread doesn't link, or that are gone, are left out.
+pub(super) async fn thread_files(
+    Path(thread): Path<String>,
+    Json(query): Json<FilesQuery>,
+) -> ApiResult<Json<Value>> {
+    if !crate::media::valid_thread(&thread) || query.paths.len() > 500 {
+        return Err(ApiError::bad("Pass a T3 thread and at most 500 paths"));
+    }
+    let mut linked = Vec::new();
+    for text in query.paths {
+        let path = PathBuf::from(&text);
+        if !path.is_absolute() {
+            continue;
+        }
+        let rows = crate::t3db::query(
+            crate::t3db::sql::THREAD_LINKS,
+            crate::t3db::params![thread, text, text.replace(' ', "%20")],
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        if !rows.is_empty() {
+            linked.push((text, path));
+        }
+    }
+    let facts = tokio::task::spawn_blocking(move || {
+        let mut facts = serde_json::Map::new();
+        for (text, path) in linked {
+            // Every directory on the way as named: no symlink leads elsewhere.
+            if std::fs::canonicalize(&path).ok().as_ref() != Some(&path) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let mut fact = json!({"bytes": meta.len()});
+            if let Some((width, height)) = crate::dimensions::read(&path) {
+                fact["width"] = json!(width);
+                fact["height"] = json!(height);
+            }
+            facts.insert(text, fact);
+        }
+        facts
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(success(Value::Object(facts))))
+}
+
 /// The content type of `path` if the phone may open it from `thread`.
 async fn linked_document(thread: &str, path: &std::path::Path) -> ApiResult<&'static str> {
     let text = path

@@ -300,19 +300,66 @@ enum StepImages {
 /// their step ID (`file:` and the path).
 @MainActor
 enum MediaFiles {
-    /// Pixel sizes, so a picture's place is reserved before its bytes arrive.
-    static var sizes = SizeTable()
+    /// Pixel sizes, by `Shot.sizeKey`, so a picture's place is reserved
+    /// before its bytes arrive. Kept on disk: a conversation shown before
+    /// reopens with every frame known.
+    static var sizes = SizeTable.load() { didSet { saveSoon() } }
+    /// The size each picture's frame took when it first showed this
+    /// session. A frame never changes after that: loading its bytes (or
+    /// learning its size late) never moves the conversation.
+    private static var settled: [String: CGSize] = [:]
+    /// `settle` false: what it would take now, for an estimate, without
+    /// fixing it.
+    static func frameSize(_ key: String, fallback: CGSize, settle: Bool = true) -> CGSize {
+        if let size = settled[key] { return size }
+        let size = sizes[key] ?? fallback
+        if settle { settled[key] = size }
+        return size
+    }
+    /// Frames fixed before their sizes were known, for pictures not on
+    /// screen: they take their real size when they next show.
+    static func unsettle(_ keys: some Sequence<String>) {
+        for key in keys { settled[key] = nil }
+    }
+    /// Files whose facts the Mac was asked for this session, answered or not.
+    static var asked = Set<String>()
     /// Short-lived URLs T3 signed, by thread and path: T3 signs a file for
     /// the thread whose folder it is in.
     static var urls = SignedURLs()
     nonisolated static func isVideo(_ stepID: String) -> Bool {
         ["mp4", "mov", "m4v"].contains((stepID as NSString).pathExtension.lowercased())
     }
+    private static var saving = false
+    private static func saveSoon() {
+        guard !saving else { return }
+        saving = true
+        Task {
+            await DisplayFrame.next()
+            saving = false
+            let data = sizes.encoded()
+            await Task.detached { try? data?.write(to: SizeTable.file, options: .atomic) }.value
+        }
+    }
     struct SizeTable {
         private var cache = BoundedCache<String, CGSize>(budget: 4_000)
         subscript(id: String) -> CGSize? {
             get { cache.peek(id) }
             set { if let newValue { cache.set(newValue, for: id) } else { cache.removeValue(for: id) } }
+        }
+        static let file = StepVideos.directory.deletingLastPathComponent().appendingPathComponent("squircle-media-sizes.json")
+        static func load() -> SizeTable {
+            var table = SizeTable()
+            guard let data = try? Data(contentsOf: file),
+                  let pairs = try? JSONDecoder().decode([[String: [Double]]].self, from: data) else { return table }
+            for pair in pairs {
+                guard let (key, size) = pair.first, size.count == 2, size[0] > 0, size[1] > 0 else { continue }
+                table.cache.set(CGSize(width: size[0], height: size[1]), for: key)
+            }
+            return table
+        }
+        /// Least recently used first, so loading keeps the same order.
+        func encoded() -> Data? {
+            try? JSONEncoder().encode(cache.all.map { [$0.key: [Double($0.value.width), Double($0.value.height)]] })
         }
     }
     struct SignedURLs {

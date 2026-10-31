@@ -121,6 +121,7 @@ final class BuildsViewController: UIViewController {
         for build in builds {
             let row = rowViews[build.id] ?? {
                 let row = BuildRow(buildID: build.id)
+                row.icons = model.buildIcons
                 row.addAction(UIAction { [weak self, weak row] _ in
                     guard let self, let build = row?.build else { return }
                     self.showDetail(build)
@@ -204,10 +205,10 @@ final class BuildRow: UIControl {
     let buildID: String
     private(set) var build: AppBuild?
     var showsSeparator = true { didSet { separator.isHidden = !showsSeparator } }
-    private let symbol = UIImageView()
-    private let spinner = UIActivityIndicatorView(style: .medium)
+    var icons: BuildIcons?
+    private let icon = AppIconTile()
     private let titleLabel = Theme.label("", Theme.Text.body)
-    private let detailLabel = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 2)
+    private let detailLabel = ShimmerLabel()
     private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
     private let separator = UIView()
     private let highlight = UIView()
@@ -223,18 +224,15 @@ final class BuildRow: UIControl {
         highlight.layer.cornerRadius = Theme.Radius.large
         highlight.layer.cornerCurve = .continuous
         highlight.alpha = 0
-        symbol.contentMode = .scaleAspectFit
-        symbol.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
-        spinner.hidesWhenStopped = true
+        detailLabel.font = Theme.Text.line
+        detailLabel.numberOfLines = 2
         chevron.tintColor = .tertiaryLabel
         chevron.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
         chevron.setContentHuggingPriority(.required, for: .horizontal)
         let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
         text.axis = .vertical
         text.spacing = Theme.Space.tight
-        let glyph = UIView()
-        [symbol, spinner].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; glyph.addSubview($0) }
-        let content = UIStackView(arrangedSubviews: [glyph, text, chevron])
+        let content = UIStackView(arrangedSubviews: [icon, text, chevron])
         content.alignment = .center
         content.spacing = Theme.Space.glyphGap
         content.isUserInteractionEnabled = false
@@ -245,16 +243,14 @@ final class BuildRow: UIControl {
             highlight.bottomAnchor.constraint(equalTo: bottomAnchor),
             highlight.leadingAnchor.constraint(equalTo: leadingAnchor),
             highlight.trailingAnchor.constraint(equalTo: trailingAnchor),
-            glyph.widthAnchor.constraint(equalToConstant: Theme.Space.glyph),
-            glyph.heightAnchor.constraint(equalToConstant: Theme.Space.glyph),
-            symbol.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), symbol.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
-            spinner.centerXAnchor.constraint(equalTo: glyph.centerXAnchor), spinner.centerYAnchor.constraint(equalTo: glyph.centerYAnchor),
-            // With the list's inset, the glyph sits at the margin and the text at 48.
+            icon.widthAnchor.constraint(equalToConstant: Theme.Space.appIcon),
+            icon.heightAnchor.constraint(equalToConstant: Theme.Space.appIcon),
+            // With the list's inset, the icon sits at the margin.
             content.topAnchor.constraint(equalTo: topAnchor, constant: Theme.Space.rowPad),
             content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.rowPad),
             content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.rowPad),
             content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.rowPad),
-            separator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Theme.Space.glyph + Theme.Space.glyphGap),
+            separator.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Theme.Space.appIcon + Theme.Space.glyphGap),
             separator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.rowPad),
             separator.bottomAnchor.constraint(equalTo: bottomAnchor),
             separator.heightAnchor.constraint(equalToConstant: 1 / max(1, traitCollection.displayScale))
@@ -276,6 +272,12 @@ final class BuildRow: UIControl {
         }
     }
 
+    /// Why a build failed, in one line, without the log's path.
+    static func failureLine(_ build: AppBuild) -> String {
+        guard let line = build.error?.split(whereSeparator: \.isNewline).first.map(String.init) else { return "Build failed" }
+        return line.range(of: "; see ").map { String(line[..<$0.lowerBound]) } ?? line
+    }
+
     static func statusText(for build: AppBuild) -> String {
         switch build.status {
         case "queued": return "Queued"
@@ -292,16 +294,17 @@ final class BuildRow: UIControl {
         guard build != self.build else { updateDate(); return }
         self.build = build
         titleLabel.text = build.version.isEmpty ? build.title : build.version
-        let (symbolName, tint) = Self.symbol(for: build.status)
-        symbol.image = symbolName.map { UIImage(systemName: $0) } ?? nil
-        symbol.tintColor = tint
-        if symbolName == nil { spinner.startAnimating() } else { spinner.stopAnimating() }
+        icon.configure(build, icons: icons)
+        detailLabel.textColor = build.status == "failed" ? Theme.failure : .secondaryLabel
+        detailLabel.isShimmering = build.status == "running"
         updateDate()
     }
 
     private func updateDate() {
         guard let build else { return }
-        var parts = [Self.statusText(for: build)]
+        // Ready is the sheet's Install button; a failure gives its reason.
+        let failure = build.status == "failed" ? Self.failureLine(build) : nil
+        var parts = [failure ?? Self.statusText(for: build)]
         if build.date.timeIntervalSince1970 > 0 { parts.append(Theme.relativeDate.localizedString(for: build.date, relativeTo: .now)) }
         let detail = parts.joined(separator: " · ")
         if detailLabel.text != detail { detailLabel.text = detail }
@@ -314,5 +317,102 @@ final class BuildRow: UIControl {
             let animations = { self.highlight.alpha = self.isHighlighted ? 1 : 0 }
             if isHighlighted { animations() } else { UIView.animate(withDuration: 0.25, animations: animations) }
         }
+    }
+}
+
+/// Built apps' own icons, by build, fetched once from the Mac. A build
+/// without a product yet shows its app's newest icon; asked again once its
+/// state changes, it may have its own.
+@MainActor
+final class BuildIcons {
+    private let fetch: (String) async -> Data?
+    /// nil: the Mac has no icon for it.
+    private var icons: [String: UIImage?] = [:]
+    private var loads: [String: Task<UIImage?, Never>] = [:]
+
+    init(fetch: @escaping (String) async -> Data?) { self.fetch = fetch }
+
+    private static func key(_ build: AppBuild) -> String { build.id + "#" + build.status }
+
+    /// Known: the icon, or nil for none. Unknown: nil outright.
+    func known(_ build: AppBuild) -> UIImage?? { icons[Self.key(build)] }
+
+    func icon(for build: AppBuild) async -> UIImage? {
+        let key = Self.key(build)
+        if let known = icons[key] { return known }
+        if let load = loads[key] { return await load.value }
+        let fetch = fetch, id = build.id
+        let load = Task<UIImage?, Never> { await fetch(id).flatMap(UIImage.init(data:)) }
+        loads[key] = load
+        let icon = await load.value
+        loads[key] = nil
+        icons[key] = .some(icon)
+        return icon
+    }
+}
+
+/// An app's icon the way iOS shows one: its own picture on a rounded tile.
+/// An app with no icon gets the blurred placeholder Home shows for a screen
+/// with no capture, never a generic glyph.
+final class AppIconTile: UIView {
+    private let picture = UIImageView()
+    private var key: String?
+    private var icon: UIImage?
+    private var missing = false
+    private var loading: Task<Void, Never>?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+        layer.cornerCurve = .continuous
+        backgroundColor = Theme.codeFill
+        picture.contentMode = .scaleAspectFill
+        picture.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(picture)
+        NSLayoutConstraint.activate([
+            picture.topAnchor.constraint(equalTo: topAnchor), picture.bottomAnchor.constraint(equalTo: bottomAnchor),
+            picture.leadingAnchor.constraint(equalTo: leadingAnchor), picture.trailingAnchor.constraint(equalTo: trailingAnchor)
+        ])
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (tile: AppIconTile, _: UITraitCollection) in tile.show() }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // iOS's icon corner, in proportion to the tile.
+        layer.cornerRadius = bounds.width * 0.225
+    }
+
+    func configure(_ build: AppBuild, icons: BuildIcons?) {
+        let key = build.id + "#" + build.status
+        guard key != self.key else { return }
+        self.key = key
+        loading?.cancel()
+        loading = nil
+        switch icons?.known(build) {
+        case .some(let known):
+            icon = known; missing = known == nil
+        case nil where icons == nil:
+            icon = nil; missing = true
+        case nil:
+            // Keep what shows (the app's earlier icon) until the new answer.
+            loading = Task { [weak self] in
+                guard let found = await icons?.icon(for: build), let self, self.key == key else {
+                    if let self, self.key == key, self.icon == nil { self.missing = true; self.show() }
+                    return
+                }
+                icon = found; missing = false
+                show()
+            }
+        }
+        show()
+    }
+
+    private func show() {
+        picture.image = icon ?? (missing ? (traitCollection.userInterfaceStyle == .dark ? PhoneAssets.darkPlaceholder : PhoneAssets.lightPlaceholder) : nil)
     }
 }

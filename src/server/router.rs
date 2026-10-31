@@ -17,6 +17,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/builds/{id}", get(status))
         .route("/v1/builds/{id}/cancel", post(cancel))
         .route("/v1/builds/{id}/log", get(build_log))
+        .route("/v1/builds/{id}/icon", get(build_icon))
         .route("/v1/builds/{id}/install-link", post(create_link))
         .route("/v1/builds/{id}/diagnostics", get(diagnostics))
         .route("/v1/t3/threads/{thread}/steps", get(t3_steps))
@@ -30,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/t3/threads/{thread}/media/{id}", get(thread_media_file))
         .route("/v1/t3/threads/{thread}/document", get(thread_document))
+        .route("/v1/t3/threads/{thread}/files", post(thread_files))
         .route(
             "/v1/t3/threads/{thread}/media/{id}/poster",
             get(thread_media_poster),

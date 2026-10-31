@@ -117,6 +117,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private var conversation: ConversationID {
         didSet {
             guard conversation != oldValue else { return }
+            // A reply belongs to the conversation it quotes.
+            reply = nil
             Self.heightCache.set(heights, for: oldValue)
             heights = Self.heightCache.value(for: conversation) ?? [:]
             guesses = [:]
@@ -154,6 +156,27 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// `flyer`, drawn above the field, rides it (`placeFlyer`).
     private var flyingID: String?
     private var flyer: (view: UIView, fill: UIView, from: CGPoint)?
+    /// The message you are replying to: its row and the words quoted, shown
+    /// over the field until you send or cancel.
+    private var reply: (row: String, quote: String)? {
+        didSet { if reply?.row != oldValue?.row || reply?.quote != oldValue?.quote { renderReply() } }
+    }
+    /// Swipe a message right to reply (`replyPanned`).
+    private lazy var replyPan = UIPanGestureRecognizer(target: self, action: #selector(replyPanned(_:)))
+    /// Shows behind the swiped message as it moves aside.
+    private let replyGlyph = UIImageView(image: UIImage(systemName: "arrowshape.turn.up.left.fill", withConfiguration: Theme.symbol(Theme.Text.body)))
+    /// The row being swiped, or springing back, and how far it sits aside.
+    private var swiped: String?
+    private var swipeFrom: CGFloat = 0
+    private var swipeArmed = false
+    private lazy var swipeSpring: SpringDriver = {
+        let spring = SpringDriver()
+        spring.onChange = { [weak self] _ in self?.renderSwipe() }
+        spring.onRest = { [weak self] _ in self?.renderSwipe() }
+        return spring
+    }()
+    /// The row a reply's quote took you to, marked once the scroll arrives.
+    private var marking: String?
     /// Your message on its way to the Mac, until T3's thread has it.
     private var pendingSend: PendingSend? { model.pendingSend(for: conversation) }
     private var showsConversation: Bool { conversation.threadID != nil || pendingSend != nil }
@@ -497,6 +520,14 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             for attachment in attachments { self?.model.attach(attachment) }
         }
         composer.onRemoveAttachment = { [weak self] id in self?.model.removeAttachment(id) }
+        composer.onCancelQuote = { [weak self] in self?.reply = nil }
+        // Swipe a message right to reply. Scrolling waits until a touch is
+        // known not to be one, so the two never move together.
+        replyPan.delegate = self
+        table.addGestureRecognizer(replyPan)
+        table.panGestureRecognizer.require(toFail: replyPan)
+        replyGlyph.isHidden = true
+        table.insertSubview(replyGlyph, at: 0)
         jump.alpha = 0
         jump.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
         jump.addAction(UIAction { [weak self] _ in
@@ -1038,9 +1069,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         // Embedded, its task's header names it already.
         let header: [ThreadItem] = threadTitle.isEmpty || embedded ? [] : [.header(threadTitle)]
         let messages = displayedMessages(content.messages)
-        let rows = resolve(ThreadItem.items(messages: messages, running: content.running || debugRunning, expanded: expanded,
-                                            builds: model.builds, changes: content.changes,
-                                            simulators: content.simulators, thread: currentSessionID))
+        let rows = reserving(resolve(ThreadItem.items(messages: messages, running: content.running || debugRunning, expanded: expanded,
+                                                      builds: model.builds, changes: content.changes,
+                                                      simulators: content.simulators, thread: currentSessionID)))
         var placed = ThreadItem.placing(openQuestions, in: rows)
         // The app's agent texts you: one received bubble per paragraph.
         if isAgent {
@@ -1050,6 +1081,43 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             }
         }
         return (header + placed, messages)
+    }
+
+    /// Pictures and clips from the Mac take their final frame when they
+    /// first show, so their sizes are asked for first. A new one waits out
+    /// of the conversation until the
+    /// Mac answers, then arrives at its size; one already showing keeps the
+    /// frame it has (`MediaFiles.frameSize`).
+    private func reserving(_ rows: [ThreadItem]) -> [ThreadItem] {
+        var unknown = Set<String>()
+        for case .figure(_, let shots) in rows {
+            for shot in shots {
+                guard let path = shot.path, MediaFiles.sizes[shot.sizeKey] == nil, !MediaFiles.asked.contains(path) else { continue }
+                unknown.insert(path)
+            }
+        }
+        guard !unknown.isEmpty, let thread = conversation.threadID else { return rows }
+        Task { [weak self] in
+            guard let self, await model.conversationMedia.learnFiles(Array(unknown), in: thread) else { return }
+            // Rows out of sight that showed meanwhile take their real size
+            // when they next show; what is on screen keeps its frame.
+            let visible = Set(table.indexPathsForVisibleRows?.compactMap { dataSource.itemIdentifier(for: $0) } ?? [])
+            for case .figure(let id, let shots) in items where !visible.contains(id) && shots.contains(where: { unknown.contains($0.path ?? "") }) {
+                MediaFiles.unsettle(shots.map(\.sizeKey))
+                heights[id] = nil
+                guesses[id] = nil
+            }
+            renderItems()
+        }
+        // The conversation's first rows show at once; frames still unknown
+        // then are settled as they are.
+        let shown = Set(items.map(\.id))
+        guard shown.contains(where: { $0 != "header" }) else { return rows }
+        return rows.compactMap { row in
+            guard case .figure(let id, let shots) = row, !shown.contains(id) else { return row }
+            let kept = shots.filter { !unknown.contains($0.path ?? "") }
+            return kept.isEmpty ? nil : .figure(id: id, shots: kept)
+        }
     }
 
     private func renderItems(animated: Bool = false) {
@@ -1405,11 +1473,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let spring = SpringDriver(value: table.contentOffset.y)
         spring.parameters = SpringDriver.Parameters(response: 0.45, damping: 0.92)
         spring.onChange = { [weak self] value in self?.table.contentOffset.y = value }
+        spring.onRest = { [weak self] _ in self?.flashMarked() }
         return spring
     }()
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         scrollSpring.stop()
+        marking = nil
         // The finger takes over from wherever Waiting on you was taking it.
         focus = nil
         held = nil
@@ -1506,11 +1576,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if cell is MessageCell {
             cell.contentView.alpha = item.id == flyingID || (landing.contains(item.id) && riser?.id != item.id) ? 0 : 1
         }
+        // Only the row being swiped to reply sits aside.
+        if item.id != swiped, cell.contentView.bounds.origin.x != 0 { cell.contentView.bounds.origin.x = 0 }
         switch item {
         case .header(let title):
             (cell as? HeaderCell)?.configure(title)
         case .user(let message):
-            (cell as? MessageCell)?.configure(message, style: .user, rendered: rowText.message(message, style: .user), expanded: true)
+            guard let cell = cell as? MessageCell else { return }
+            let quote = Reply.split(message.content).quote
+            cell.configure(message, style: .user, rendered: rowText.message(message, style: .user), expanded: true, quote: quote)
+            cell.onQuote = quote == nil ? nil : { [weak self] in self?.goToQuote(from: message.id) }
         case .update(let message):
             (cell as? MessageCell)?.configure(message, style: .update, rendered: rowText.message(message, style: .update), expanded: true)
         case .agentMessage(let message):
@@ -1563,7 +1638,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             (cell as? ChangesCell)?.configure(changes)
         case .build(let build, _):
             guard let cell = cell as? BuildCell else { return }
-            cell.configure(build, installing: installingBuild == build.id)
+            cell.configure(build, installing: installingBuild == build.id, icons: model.buildIcons)
             cell.onInstall = { [weak self] build in self?.install(build) }
         case .simulator(let use):
             guard let cell = cell as? SimulatorCell else { return }
@@ -1904,9 +1979,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return true
     }
 
-    /// Its size first, so the conversation makes room once, then the picture.
+    /// Its frame is already final (`reserving`); only the picture arrives.
     private func loadFigure(_ shot: Shot, item: String, in thread: String) async -> Bool {
-        if MediaFiles.sizes[shot.step] == nil, await model.conversationMedia.mediaSize(shot.step, in: thread) != nil { await reconfigure(item) }
         guard await model.conversationMedia.loadStepImage(shot.step, index: shot.index, in: thread) != nil, await FigureCell.prepare(shot) != nil else { return false }
         await reconfigure(item)
         return true
@@ -1970,9 +2044,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 return await Downsample.image(data) { pixels / max(1, $0.width, $0.height) }
             }
             guard shot.video else {
-                return ViewerItem(media: .image(inline, size: MediaFiles.sizes[shot.step], full: decode), origin: origin)
+                return ViewerItem(media: .image(inline, size: MediaFiles.sizes[shot.sizeKey], full: decode), origin: origin)
             }
-            return ViewerItem(media: .video(poster: inline, size: MediaFiles.sizes[shot.step], player: found?.player, still: { await decode(1600) }, url: { [weak media] in
+            return ViewerItem(media: .video(poster: inline, size: MediaFiles.sizes[shot.sizeKey], player: found?.player, still: { await decode(1600) }, url: { [weak media] in
                 await media?.loadVideo(shot.step, in: thread)
             }), origin: origin)
         case .recording(let use):
@@ -2030,13 +2104,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private func send() {
         guard isActive else { return }
-        let text = composer.text
+        let typed = composer.text
         let field = model.attachments
-        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, field.isEmpty {
+        if typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, field.isEmpty {
             if model.isRunning { Task { await model.stop() } }
             return
         }
         let source = composer.textOrigin(in: view)
+        // The agent reads what you answer as a blockquote before your words.
+        let quoted = reply
+        let text = quoted.map { Reply.compose(quote: $0.quote, text: typed) } ?? typed
         #if DEBUG
         let start = debugRehearsing ? debugRehearse(text) : model.startSend(text, in: project, from: conversation)
         #else
@@ -2057,21 +2134,25 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             land()
             flyingID = following && !Motion.reduced ? messageID : nil
             composer.text = ""
+            reply = nil
             render()
             if following { flySend(id: messageID, from: source) } else { renderJump() }
             // A long message's field folds back to one line on the same spring.
             UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.84, initialSpringVelocity: 0,
                            options: [.allowUserInteraction, .beginFromCurrentState]) { self.view.layoutIfNeeded() }
-            follow(outcome, text: text)
+            follow(outcome, text: typed, reply: quoted)
         }
     }
 
     /// A message T3 refused goes back into the field.
-    private func follow(_ outcome: Task<SendOutcome, Never>, text: String) {
+    private func follow(_ outcome: Task<SendOutcome, Never>, text: String, reply quoted: (row: String, quote: String)?) {
         Task { [weak self] in
             let result = await outcome.value
             guard let self, !tornDown else { return }
-            if case .rejected = result, composer.text.isEmpty { composer.text = text }
+            if case .rejected = result, composer.text.isEmpty {
+                composer.text = text
+                if reply == nil { reply = quoted }
+            }
             render()
         }
     }
@@ -2101,6 +2182,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         words.textContainer.lineFragmentPadding = cell.text.textContainer.lineFragmentPadding
         words.textContainerInset = cell.text.textContainerInset
         words.attributedText = cell.text.attributedText
+        // A reply's quote rides over its bubble.
+        let quote = cell.quoteCopy()
         table.contentOffset.y = start
         table.layoutIfNeeded()
         guard let bubble = bubbleFrame(of: cell) else { flyingID = nil; return }
@@ -2112,6 +2195,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         view.addSubview(fill)
         words.frame = cell.text.convert(cell.text.bounds, to: cell.bubble)
         view.addSubview(words)
+        if let quote {
+            quote.frame.origin.x -= cell.bubble.frame.minX
+            quote.frame.origin.y -= cell.bubble.frame.minY
+            view.addSubview(quote)
+        }
         self.view.insertSubview(view, aboveSubview: composer)
         #if DEBUG
         debugFlyer = view
@@ -2138,10 +2226,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// The bubble of `cell` on screen, as the table shows it this frame.
     private func bubbleFrame(of cell: MessageCell) -> CGRect? {
         // A row the table is moving shows where its animation has it.
-        let row = cell.layer.animationKeys()?.isEmpty == false ? cell.layer.presentation()?.frame ?? cell.frame : cell.frame
+        // A row, or the conversation's scroll, that the table itself is
+        // animating (a batch update resizing rows) shows where its
+        // animation has it; otherwise the values just set are on screen.
+        func shown(_ layer: CALayer) -> CALayer { layer.animationKeys()?.isEmpty == false ? layer.presentation() ?? layer : layer }
+        let row = shown(cell.layer).frame
+        let scroll = shown(table.layer).bounds.origin
         let bubble = cell.bubble.frame
-        return CGRect(x: table.frame.minX + row.minX + bubble.minX - table.contentOffset.x,
-                      y: table.frame.minY + row.minY + bubble.minY - table.contentOffset.y, width: bubble.width, height: bubble.height)
+        return CGRect(x: table.frame.minX + row.minX + bubble.minX - scroll.x,
+                      y: table.frame.minY + row.minY + bubble.minY - scroll.y, width: bubble.width, height: bubble.height)
     }
 
     /// Puts the flying bubble where its row is plus what is left of its way.
@@ -2427,3 +2520,230 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         return true
     }
 }
+
+// MARK: Replies
+
+extension ThreadViewController: UIGestureRecognizerDelegate {
+    /// How far a message moves before letting go replies to it, and where
+    /// the back swipe's edge ends (a reply swipe starts inside the content).
+    private static let replyReach: CGFloat = 56
+    private static let backEdge: CGFloat = 28
+
+    /// Follows the finger one to one, then resists ever more, as a scroll view's edge does.
+    private static func rubber(_ x: CGFloat) -> CGFloat {
+        let free: CGFloat = 40, give: CGFloat = 60
+        guard x > free else { return max(0, x) }
+        return free + give * (1 - 1 / ((x - free) * 0.55 / give + 1))
+    }
+
+    /// What a row says, to quote or copy; nil for rows you can't reply to.
+    private func words(_ item: ThreadItem?) -> String? {
+        let text: String
+        switch item {
+        case .user(let message): text = Reply.split(message.content).body
+        case .answer(let message), .agentMessage(let message): text = Self.plain(message)
+        case .question(.question(let question), _): text = question.text
+        default: return nil
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// A message as it reads on screen, without its Markdown.
+    private static func plain(_ message: ChatMessage) -> String {
+        let markdown = message.markdown ?? Markdown.parse(message.content)
+        return Markdown.render(markdown, font: Theme.Text.body, color: .label).string.replacingOccurrences(of: "\u{FFFC}", with: "")
+    }
+
+    /// The whole message a received bubble or piece was cut from, when it says more.
+    private func wholeMessage(_ id: String) -> String? {
+        guard case .answer = itemsByID[id] else { return nil }
+        let base = String(id.prefix { $0 != "¶" && $0 != "#" })
+        guard let message = model.content(of: conversation)?.messages.first(where: { $0.id == base }) else { return nil }
+        let whole = Self.plain(message).trimmingCharacters(in: .whitespacesAndNewlines)
+        return whole == words(itemsByID[id]) ? nil : whole
+    }
+
+    private func startReply(_ id: String) {
+        guard let text = words(itemsByID[id]) else { return }
+        reply = (id, Reply.quote(text))
+        composer.input.becomeFirstResponder()
+    }
+
+    private func renderReply() {
+        composer.showQuote(reply?.quote)
+        guard isViewLoaded, view.window != nil else { return }
+        view.setNeedsLayout()
+        UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) { self.view.layoutIfNeeded() }
+    }
+
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === replyPan else { return true }
+        let velocity = replyPan.velocity(in: table)
+        let space = view.window ?? view
+        let start = replyPan.location(in: space).x - replyPan.translation(in: space).x
+        // Rightwards and mostly sideways, away from the back swipe's edge.
+        guard isActive, start > Self.backEdge, velocity.x > 0, velocity.x > abs(velocity.y) * 1.5 else { return false }
+        let point = replyPan.location(in: table) - replyPan.translation(in: table)
+        guard let path = table.indexPathForRow(at: point), let id = dataSource.itemIdentifier(for: path),
+              id != flyingID, riser?.id != id, !landing.contains(id) else { return false }
+        return words(itemsByID[id]) != nil
+    }
+
+    @objc private func replyPanned(_ pan: UIPanGestureRecognizer) {
+        switch pan.state {
+        case .began:
+            let point = pan.location(in: table) - pan.translation(in: table)
+            guard let path = table.indexPathForRow(at: point), let id = dataSource.itemIdentifier(for: path) else { return }
+            // Caught springing back: carry on from where it is.
+            let caught = swiped == id ? swipeSpring.value : 0
+            if swiped != id { swipeSpring.set(0) }
+            swiped = id
+            swipeFrom = caught
+            swipeArmed = false
+        case .changed:
+            guard swiped != nil else { return }
+            let offset = Self.rubber(swipeFrom + pan.translation(in: table).x)
+            swipeSpring.set(offset)
+            let armed = offset >= Self.replyReach
+            if armed != swipeArmed {
+                swipeArmed = armed
+                if armed { Theme.lightHaptic() }
+            }
+        default:
+            if pan.state == .ended, swipeArmed, let id = swiped { startReply(id) }
+            swipeArmed = false
+            swipeSpring.animate(to: 0)
+        }
+    }
+
+    /// The swiped row sits aside by the spring's value, the reply glyph
+    /// fading in behind it; at rest it is back and the glyph gone.
+    private func renderSwipe() {
+        let offset = swipeSpring.value
+        let resting = offset <= 0.01 && replyPan.state != .changed && replyPan.state != .began
+        guard let id = swiped, let path = dataSource.indexPath(for: id) else {
+            replyGlyph.isHidden = true
+            return
+        }
+        let cell = table.cellForRow(at: path)
+        // Moved by its bounds, not a transform: the cell lays its content
+        // view out again whenever it likes, which would undo a transform.
+        cell?.contentView.bounds.origin.x = resting ? 0 : -offset
+        if resting { swiped = nil }
+        replyGlyph.isHidden = resting || cell == nil
+        guard let cell, !resting else { return }
+        let surface: UIView = (cell as? MessageCell)?.surface ?? (cell as? QuestionCell)?.item ?? cell.contentView
+        let progress = min(1, offset / Self.replyReach)
+        replyGlyph.tintColor = swipeArmed ? Theme.accent : .secondaryLabel
+        replyGlyph.alpha = progress
+        replyGlyph.transform = CGAffineTransform(scaleX: 0.5 + 0.5 * progress, y: 0.5 + 0.5 * progress)
+        let mid = surface.convert(CGPoint(x: 0, y: surface.bounds.midY), to: table).y
+        replyGlyph.center = CGPoint(x: max(Theme.Space.margin, (Theme.Space.margin + offset) / 2), y: mid)
+    }
+
+    @objc func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
+        guard isActive, let id = dataSource.itemIdentifier(for: indexPath), let text = words(itemsByID[id]) else { return nil }
+        let whole = wholeMessage(id)
+        return UIContextMenuConfiguration(identifier: id as NSString, previewProvider: nil) { [weak self] _ in
+            var actions = [
+                UIAction(title: "Reply", image: UIImage(systemName: "arrowshape.turn.up.left")) { _ in self?.startReply(id) },
+                UIAction(title: "Copy", image: UIImage(systemName: "doc.on.doc")) { _ in UIPasteboard.general.string = text }
+            ]
+            if let whole {
+                actions.append(UIAction(title: "Copy Message", image: UIImage(systemName: "doc.on.doc.fill")) { _ in UIPasteboard.general.string = whole })
+            }
+            return UIMenu(children: actions)
+        }
+    }
+
+    @objc func tableView(_ tableView: UITableView, previewForHighlightingContextMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        lifted(configuration)
+    }
+
+    @objc func tableView(_ tableView: UITableView, previewForDismissingContextMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        lifted(configuration)
+    }
+
+    /// The message itself lifts with the menu: its bubble or card, or its text.
+    private func lifted(_ configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        guard let id = configuration.identifier as? String, let path = dataSource.indexPath(for: id),
+              let cell = table.cellForRow(at: path) else { return nil }
+        let parameters = UIPreviewParameters()
+        parameters.backgroundColor = .clear
+        if let cell = cell as? MessageCell {
+            // The row's content, cut to its bubble: the bubble and its words lift together.
+            let surface = cell.surface
+            let frame = surface.convert(surface.bounds, to: cell.contentView)
+            if surface === cell.text {
+                // Plain text: a little room around it, on the page's colour.
+                parameters.visiblePath = UIBezierPath(roundedRect: frame.insetBy(dx: -Theme.Space.row, dy: -Theme.Space.row),
+                                                      cornerRadius: Theme.Radius.small)
+                parameters.backgroundColor = Theme.paper
+            } else {
+                parameters.visiblePath = UIBezierPath(roundedRect: frame, cornerRadius: Theme.Radius.large)
+            }
+            return UITargetedPreview(view: cell.contentView, parameters: parameters)
+        }
+        if let cell = cell as? QuestionCell {
+            parameters.visiblePath = UIBezierPath(roundedRect: cell.item.bounds, cornerRadius: Theme.Radius.large)
+            return UITargetedPreview(view: cell.item, parameters: parameters)
+        }
+        return nil
+    }
+
+    /// Tapping a reply's quote goes to the message it quotes and marks it.
+    private func goToQuote(from id: String) {
+        guard case .user(let message)? = itemsByID[id], let quote = Reply.split(message.content).quote else { return }
+        let rows = dataSource.snapshot().itemIdentifiers
+        guard let end = rows.firstIndex(of: id),
+              let target = rows[..<end].last(where: { words(itemsByID[$0]).map { Reply.matches(quote, $0) } ?? false }),
+              let path = dataSource.indexPath(for: target) else { return }
+        Theme.selectionHaptic()
+        focus = nil
+        held = nil
+        pinToBottom = false
+        sentBelow = nil
+        marking = target
+        // Rows are measured as they appear: find where it really sits, then go there.
+        let start = table.contentOffset.y
+        func centred() -> CGFloat {
+            let rect = table.rectForRow(at: path)
+            let visible = table.bounds.height - table.contentInset.top - table.contentInset.bottom
+            let end = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
+            return min(max(-table.contentInset.top, rect.midY - table.contentInset.top - visible / 2), end)
+        }
+        var y = centred()
+        for _ in 0..<6 {
+            table.contentOffset.y = y
+            table.layoutIfNeeded()
+            let next = centred()
+            if abs(next - y) < 0.5 { break }
+            y = next
+        }
+        renderJump()
+        guard !Motion.reduced, abs(start - y) > 0.5 else {
+            scrollSpring.stop()
+            table.contentOffset.y = y
+            flashMarked()
+            return
+        }
+        table.contentOffset.y = start
+        // From far away, glide the last screen rather than racing past every row.
+        let screen = table.bounds.height * 0.9
+        scrollSpring.set(start > y ? min(start, y + screen) : max(start, y - screen))
+        scrollSpring.animate(to: y)
+    }
+
+    private func flashMarked() {
+        guard let id = marking else { return }
+        marking = nil
+        guard let path = dataSource.indexPath(for: id) else { return }
+        (table.cellForRow(at: path) as? TimelineCell)?.flash()
+        renderJump()
+    }
+}
+
+private func - (a: CGPoint, b: CGPoint) -> CGPoint { CGPoint(x: a.x - b.x, y: a.y - b.y) }
+
