@@ -437,10 +437,18 @@ final class GlassJelly: UIView {
         guard !pressed, !gliding, blinkStart < 0, abs(cubeScale - 1) < 0.001,
               hypot(velocity.x, velocity.y) < 0.5, hypot(sizeVelocity.width, sizeVelocity.height) < 0.5,
               hypot(accel.x, accel.y) < 1, hypot(sizeAccel.width, sizeAccel.height) < 1 else { return false }
-        let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, heavy, busy, slump, tint.r, tint.g, tint.b, tint.a]
-        return modes.allSatisfy { $0.isAtRest } && wobbles.allSatisfy { $0.isAtRest }
+        for mode in Self.modes where !self[keyPath: mode].isAtRest { return false }
+        for wobble in Self.wobbles where !self[keyPath: wobble].isAtRest { return false }
+        return true
     }
+
+    /// Every spring of the blob, the creature and the bridge, and every
+    /// wobble of its face and tint, listed once and read in place each frame.
+    private static let modes: [ReferenceWritableKeyPath<GlassJelly, Mode>] = [
+        \.squash, \.shear, \.lagX, \.lagY, \.offsetX, \.offsetY, \.creatureSquash, \.hop, \.stubRoot, \.stubCube]
+    private static let wobbles: [ReferenceWritableKeyPath<GlassJelly, Wobble>] = [
+        \.yaw, \.pitch, \.roll, \.gazeX, \.gazeY, \.happy, \.squint, \.worry, \.sleepy, \.heavy, \.busy, \.slump,
+        \.tint.r, \.tint.g, \.tint.b, \.tint.a]
 
     /// The screen shows the pose it has now (in the foreground, a frame with
     /// these values was presented).
@@ -453,25 +461,27 @@ final class GlassJelly: UIView {
 
     /// Every value finite (a NaN anywhere would never settle and draw nothing).
     private var isValid: Bool {
-        let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, heavy, busy, slump, tint.r, tint.g, tint.b, tint.a]
-        let values = modes.flatMap { [$0.value, $0.velocity] } + wobbles.flatMap { [$0.value, $0.velocity] }
-            + [velocity.x, velocity.y, sizeVelocity.width, sizeVelocity.height, accel.x, accel.y,
-               sizeAccel.width, sizeAccel.height, creatureWorld.x, creatureWorld.y, waist, catenary, cubeScale, time]
-        return values.allSatisfy(\.isFinite)
+        for path in Self.modes {
+            let mode = self[keyPath: path]
+            guard mode.value.isFinite, mode.velocity.isFinite else { return false }
+        }
+        for path in Self.wobbles {
+            let wobble = self[keyPath: path]
+            guard wobble.value.isFinite, wobble.velocity.isFinite else { return false }
+        }
+        return velocity.x.isFinite && velocity.y.isFinite && sizeVelocity.width.isFinite && sizeVelocity.height.isFinite
+            && accel.x.isFinite && accel.y.isFinite && sizeAccel.width.isFinite && sizeAccel.height.isFinite
+            && creatureWorld.x.isFinite && creatureWorld.y.isFinite && waist.isFinite && catenary.isFinite
+            && cubeScale.isFinite && time.isFinite
     }
 
     /// Back to the rest pose on its anchor (after an invalid state).
     private func settleAtRest() {
-        (squash, shear, lagX, lagY, offsetX, offsetY) = (Mode(), Mode(), Mode(), Mode(), Mode(), Mode())
-        (creatureSquash, hop, stubRoot, stubCube) = (Mode(), Mode(), Mode(), Mode())
-        func rest(_ wobble: inout Wobble) {
-            if !wobble.target.isFinite { wobble.target = 0 }
-            (wobble.value, wobble.velocity) = (wobble.target, 0)
+        for path in Self.modes { self[keyPath: path] = Mode() }
+        for path in Self.wobbles {
+            if !self[keyPath: path].target.isFinite { self[keyPath: path].target = 0 }
+            (self[keyPath: path].value, self[keyPath: path].velocity) = (self[keyPath: path].target, 0)
         }
-        rest(&yaw); rest(&pitch); rest(&roll); rest(&gazeX); rest(&gazeY)
-        rest(&happy); rest(&squint); rest(&worry); rest(&sleepy); rest(&heavy); rest(&busy); rest(&slump)
-        rest(&tint.r); rest(&tint.g); rest(&tint.b); rest(&tint.a)
         (velocity, sizeVelocity, accel, sizeAccel) = (.zero, .zero, .zero, .zero)
         (lastPosition, lastSize, gliding) = (nil, nil, false)
         (bridgeConnected, waist, catenary, cubeScale) = (true, Self.restWaist, 10, 1)
@@ -501,9 +511,9 @@ final class GlassJelly: UIView {
     /// Which part of it isn't settled.
     var debugState: String {
         let names = ["squash", "shear", "lagX", "lagY", "offsetX", "offsetY", "creatureSquash", "hop", "stubRoot", "stubCube"]
-        let modes = [squash, shear, lagX, lagY, offsetX, offsetY, creatureSquash, hop, stubRoot, stubCube]
+        let modes = Self.modes.map { self[keyPath: $0] }
         let wobbleNames = ["yaw", "pitch", "roll", "gazeX", "gazeY", "happy", "squint", "worry", "sleepy", "heavy", "busy", "slump", "r", "g", "b", "a"]
-        let wobbles = [yaw, pitch, roll, gazeX, gazeY, happy, squint, worry, sleepy, heavy, busy, slump, tint.r, tint.g, tint.b, tint.a]
+        let wobbles = Self.wobbles.map { self[keyPath: $0] }
         var moving = zip(names, modes).filter { !$0.1.isAtRest }.map { "\($0.0)=\($0.1.value)/\($0.1.velocity)" }
         moving += zip(wobbleNames, wobbles).filter { !$0.1.isAtRest }.map { "\($0.0)=\($0.1.value)→\($0.1.target) v\($0.1.velocity)" }
         return "cadence=\(cadence) paused=\(link?.isPaused ?? true) rest=\(isAtRest) shows=\(showsCurrentPose) pressed=\(pressed) "

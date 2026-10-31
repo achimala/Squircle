@@ -61,8 +61,13 @@ final class SimulatorOutput: @unchecked Sendable {
 
     func show(_ picture: CVPixelBuffer, at time: CFTimeInterval) {
         state.withLock { state in
-            state.targets = state.targets.filter { $0.value.renderer != nil }
-            for key in Array(state.targets.keys) { Self.enqueue(picture, at: time, on: &state.targets[key]!, format: &state.format) }
+            var gone = false
+            for index in state.targets.values.indices {
+                if state.targets.values[index].renderer == nil { gone = true; continue }
+                Self.enqueue(picture, at: time, on: &state.targets.values[index], format: &state.format)
+            }
+            // A screen that went away without detaching: dropped once, when found.
+            if gone { state.targets = state.targets.filter { $0.value.renderer != nil } }
         }
     }
 
