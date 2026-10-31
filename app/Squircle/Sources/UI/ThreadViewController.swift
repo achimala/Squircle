@@ -133,7 +133,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private let composer: Composer
     private lazy var picker = AttachmentPicker(host: self) { [weak self] attachment in self?.model.attach(attachment) }
     private let notice = Theme.label("", Theme.font(.footnote, 13), color: Theme.failure, lines: 3)
-    private let requestCard = RequestCard()
+    private lazy var requestCard = RequestCard(drafts: model.questionAnswers)
     private var request: UIVisualEffectView { requestCard.view }
 
     private var flyingID: String?

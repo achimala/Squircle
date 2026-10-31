@@ -98,7 +98,7 @@ enum Commands {
     struct TaskSight: Equatable {
         let id: String
         let status: AppTask.Status
-        let revision: UInt64?
+        let revision: UInt64
     }
     enum Settlement: Equatable {
         case done
@@ -195,9 +195,7 @@ enum Commands {
                 switch s.entries[i].intent.kind {
                 // The reply was the catalog in this order: the Mac shows it.
                 case .interrupt, .appOrder: remove(i, nil)
-                case .task:
-                    let revision = value["revision"].double.map { UInt64($0) }
-                    if revision == nil { remove(i, nil) } else { s.entries[i].phase = .acknowledged(revision: revision) }
+                case .task: s.entries[i].phase = .acknowledged(revision: value["revision"].double.map { UInt64($0) })
                 default: s.entries[i].phase = .acknowledged(revision: nil)
                 }
             case .refused(let reason):
@@ -253,7 +251,7 @@ enum Commands {
                 guard case .task(let id, let status, _) = s.entries[i].intent.kind, let sight = byID[id] else { continue }
                 switch s.entries[i].phase {
                 case .acknowledged(let receipt):
-                    if (sight.revision ?? 0) >= (receipt ?? 0) { resolved(i); applied = true }
+                    if sight.revision >= (receipt ?? 0) { resolved(i); applied = true }
                 case .unknown:
                     // An edit sets a value, so sending it again is the same edit.
                     if let status, sight.status == status { resolved(i) } else { send(at: i) }

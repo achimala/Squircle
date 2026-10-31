@@ -2,7 +2,8 @@ import UIKit
 
 /// The agent's open request over the message field: an approval with its
 /// choices, or its questions one at a time. The conversation says which
-/// request is open; the card answers through `onRespond`.
+/// request is open; the card answers through `onRespond`. Answers so far
+/// live in `drafts`, shared with Waiting on you.
 @MainActor
 final class RequestCard {
     enum Change { case appeared, changed }
@@ -16,12 +17,10 @@ final class RequestCard {
     private let detail = Theme.label("", Theme.font(.footnote, 12.5, monospaced: true), color: .secondaryLabel, lines: 4)
     private let buttons = UIStackView()
     private var renderedID: String?
-    /// Progress through the agent's questions in the current request.
-    private var questionIndex = 0
-    private var questionAnswers: [String: JSONValue] = [:]
-    private var questionPicks: [String] = []
+    private let drafts: QuestionAnswers
 
-    init() {
+    init(drafts: QuestionAnswers) {
+        self.drafts = drafts
         detail.lineBreakMode = .byTruncatingTail
         buttons.spacing = 8
         buttons.axis = .vertical
@@ -49,9 +48,6 @@ final class RequestCard {
         guard id != renderedID else { return nil }
         let appearing = renderedID == nil && current != nil
         renderedID = id
-        questionIndex = 0
-        questionAnswers = [:]
-        questionPicks = []
         view.isHidden = current == nil
         if let current {
             if current.isQuestion { renderQuestion(current) } else { renderApproval(current) }
@@ -117,12 +113,8 @@ final class RequestCard {
     /// One of the agent's questions at a time, answered by tapping a choice
     /// or typing; the card slides to the next question.
     private func renderQuestion(_ current: PendingRequest, advancing: Bool = false) {
-        let questions = current.questions
-        guard questionIndex < questions.count else {
-            buttons.arrangedSubviews.forEach { $0.isUserInteractionEnabled = false }
-            onRespond?(current, nil, questionAnswers)
-            return
-        }
+        let key = QuestionAnswers.key(request: current.id)
+        let form = QuestionForm(questions: current.questions, draft: drafts[key])
         if advancing, !Motion.reduced {
             let slide = CATransition()
             slide.type = .push
@@ -132,11 +124,9 @@ final class RequestCard {
             view.contentView.layer.add(slide, forKey: "question")
         }
         buttons.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        let question = questions[questionIndex]
-        let id = question["id"].string ?? question["header"].string ?? "answer"
-        let multiple = question["multiSelect"].bool
-        var caption = (question["header"].string ?? "Question").uppercased()
-        if questions.count > 1 { caption += "  ·  \(questionIndex + 1) OF \(questions.count)" }
+        let questions = form.questions
+        var caption = (form.question["header"].string ?? "Question").uppercased()
+        if questions.count > 1 { caption += "  ·  \(form.index + 1) OF \(questions.count)" }
         if let stack = title.superview as? UIStackView {
             stack.insertArrangedSubview(detail, at: 0)
             stack.setCustomSpacing(4, after: detail)
@@ -146,32 +136,34 @@ final class RequestCard {
         detail.textColor = Theme.accent
         detail.text = caption
         detail.isHidden = false
-        title.text = question["question"].string ?? "The agent has a question"
-        func answer(_ value: String) {
-            questionAnswers[id] = .string(value)
-            questionPicks = []
-            questionIndex += 1
-            renderQuestion(current, advancing: true)
-            onResize?()
-        }
-        for option in question["options"].array {
-            let label = option["label"].string ?? option.string ?? "Option"
-            let picked = questionPicks.contains(label)
-            _ = button(label, subtitle: option["description"].string, prominent: picked, leading: true) { [weak self] in
-                guard let self else { return }
-                guard multiple else { answer(option["value"].string ?? label); return }
-                if let index = questionPicks.firstIndex(of: label) { questionPicks.remove(at: index) } else { questionPicks.append(label) }
-                renderQuestion(current)
+        title.text = form.question["question"].string ?? "The agent has a question"
+        // Each tap reads the draft as it is then (typing changes it in between).
+        func step(_ make: (QuestionForm) -> QuestionForm.Step) {
+            let now = QuestionForm(questions: current.questions, draft: drafts[key])
+            switch make(now) {
+            case .edit(let draft):
+                drafts[key] = draft
+                let advanced = draft.answers.count != now.draft.answers.count
+                renderQuestion(current, advancing: advanced)
+                if advanced { onResize?() }
+            case .send(let answers):
+                buttons.arrangedSubviews.forEach { $0.isUserInteractionEnabled = false }
+                onRespond?(current, nil, answers)
             }
+        }
+        for (index, option) in form.options.enumerated() {
+            _ = button(option.label, subtitle: option.detail, prominent: option.picked, leading: true) { step { $0.choose(index) } }
         }
         let field = UITextField()
         field.placeholder = "Something else…"
+        field.text = form.draft.text
         field.font = Theme.font(.body, 16)
         field.returnKeyType = .send
         field.accessibilityIdentifier = "thread.request.other"
+        field.addAction(UIAction { [weak self, weak field] _ in self?.drafts[key].text = field?.text ?? "" }, for: .editingChanged)
         field.addAction(UIAction { [weak field] _ in
             let text = field?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !text.isEmpty { field?.resignFirstResponder(); answer(multiple ? (self.questionPicks + [text]).joined(separator: ", ") : text) }
+            if !text.isEmpty { field?.resignFirstResponder(); step { $0.reply(text) } }
         }, for: .editingDidEndOnExit)
         let wrap = UIView()
         wrap.backgroundColor = .tertiarySystemFill
@@ -186,11 +178,9 @@ final class RequestCard {
             field.centerYAnchor.constraint(equalTo: wrap.centerYAnchor)
         ])
         buttons.addArrangedSubview(wrap)
-        if multiple {
-            let next = button(questionIndex == questions.count - 1 ? "Send" : "Next", prominent: true) {
-                answer(self.questionPicks.joined(separator: ", "))
-            }
-            next.isEnabled = !questionPicks.isEmpty
+        if form.multiple {
+            let next = button(form.isLast ? "Send" : "Next", prominent: true) { step { $0.confirm() } }
+            next.isEnabled = form.canConfirm
         }
     }
 }

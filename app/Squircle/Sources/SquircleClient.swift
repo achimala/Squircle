@@ -101,11 +101,7 @@ final class SquircleClient {
     }
 
     func fetchAppMetadata() async throws -> [AppMetadata] {
-        do {
-            return try await get(["v1", "apps"], revalidate: true)
-        } catch let error as ClientError where error.isMissing {
-            return [] // Older Squircle servers have no persistent app registry.
-        }
+        try await required("/v1/apps") { try await get(["v1", "apps"], revalidate: true) }
     }
 
     func fetchAppPreview(id: String, previewID: String? = nil) async throws -> Data {
@@ -142,11 +138,7 @@ final class SquircleClient {
 
     /// Each app's agent thread on the Mac, and how to run its CLI.
     func agents() async throws -> AgentDirectory {
-        do {
-            return try AgentDirectory.decode(try await perform(request(["v1", "agents"]), revalidate: true))
-        } catch let error as ClientError where error.isMissing {
-            return AgentDirectory() // An older Squircle service has no app agents.
-        }
+        try await required("/v1/agents") { try AgentDirectory.decode(try await perform(request(["v1", "agents"]), revalidate: true)) }
     }
 
     /// Restarts an app agent's session on its thread.
@@ -246,14 +238,14 @@ final class SquircleClient {
     }
 
     /// The user's own change: a status, or first in its group. Returns the
-    /// task's revision that holds it (nil from an older service).
-    func updateTask(id: String, status: AppTask.Status?, toTop: Bool) async throws -> UInt64? {
+    /// task's revision that holds it.
+    func updateTask(id: String, status: AppTask.Status?, toTop: Bool) async throws -> UInt64 {
         var body: [String: Any] = ["by_user": true, "to_top": toTop]
         if let status { body["status"] = status.rawValue }
-        struct Reply: Decodable { struct Task: Decodable { let revision: UInt64? }; let task: Task? }
-        let reply: Reply? = try await envelope(request(["v1", "tasks", id], method: "PATCH",
-                                                       body: JSONSerialization.data(withJSONObject: body)), exposeAPIError: true)
-        return reply?.task?.revision
+        struct Reply: Decodable { struct Task: Decodable { let revision: UInt64 }; let task: Task }
+        let reply: Reply = try await call(request(["v1", "tasks", id], method: "PATCH",
+                                                  body: JSONSerialization.data(withJSONObject: body)), exposeAPIError: true)
+        return reply.task.revision
     }
 
     /// Everything waiting on you, across apps.
@@ -384,6 +376,11 @@ final class SquircleClient {
     /// unchanged one costs no body.
     private func get<T: Decodable>(_ path: [String], query: [URLQueryItem] = [], revalidate: Bool = false) async throws -> T {
         try await call(request(path, query: query), revalidate: revalidate)
+    }
+    /// A list every current service has: missing means the Mac runs a
+    /// service this app doesn't match, never an empty list.
+    private func required<T>(_ route: String, _ fetch: () async throws -> T) async throws -> T {
+        do { return try await fetch() } catch let error as ClientError where error.isMissing { throw ClientError.incompatible(route) }
     }
     /// A reply's `data`, which must be there.
     private func call<T: Decodable>(_ request: URLRequest, exposeAPIError: Bool = false, revalidate: Bool = false) async throws -> T {

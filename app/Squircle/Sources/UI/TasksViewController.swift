@@ -527,7 +527,6 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             if case .task = item, owner == nil { continue }
             if let owner, owner.status.open { asked[owner.id, default: []].append(item) } else { loose.append(item) }
         }
-        answers.keep(Set(waiting.map(\.id)))
         let words = query.lowercased().split(separator: " ")
         let found: (AppTask) -> Bool = { task in
             guard !words.isEmpty else { return true }

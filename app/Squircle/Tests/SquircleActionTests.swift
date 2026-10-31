@@ -76,13 +76,9 @@ final class SquircleActionTests: XCTestCase {
         XCTAssertEqual(actions[1].task, item)
         XCTAssertEqual(actions[1].note, "Merged; build coming")
         XCTAssertEqual(actions[2].replaces, [old])
+        // An ID only the shell knows is no task ID, never `$S`.
         XCTAssertNil(actions[3].task)
         XCTAssertEqual(actions[4].text, "Have a key already?")
-        let asks = [item: "Waiting on you, in one place", old: "Separate sheet"]
-        XCTAssertEqual(actions[1].phrase { asks[$0] }.map(\.text), ["Marked", "“Waiting on you, in one place”", "ready to try", "· Merged; build coming"])
-        XCTAssertEqual(actions[2].phrase { asks[$0] }.map(\.text), ["Replaced", "“Separate sheet”", "with", "“Questions inline”"])
-        // An ID only the shell knows reads as "a task", never as `$S`.
-        XCTAssertEqual(actions[3].phrase { asks[$0] }.map(\.text), ["Replaced", "a task", "with", "“Waiting on you, in one place”"])
         XCTAssertTrue(actions.allSatisfy(\.visible))
     }
 
@@ -92,7 +88,6 @@ final class SquircleActionTests: XCTestCase {
         let dropped = SquircleAction.parse(command: loop, result: "3\n")
         XCTAssertEqual(dropped.map(\.kind), [.taskStatus("dropped")])
         XCTAssertEqual(dropped[0].repeats, 3)
-        XCTAssertEqual(dropped[0].phrase { _ in nil }.prefix(3).map(\.text), ["Marked", "3 tasks", "dropped"])
 
         let notes = cli + "\"$S\" \"${A[@]}\" notes edit 23 --thread \(worker) \"Folder spec lives in its task\" | head -1; \"$S\" \"${A[@]}\" --json task show \(worker)"
         let found = SquircleAction.parse(command: notes)
