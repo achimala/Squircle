@@ -109,6 +109,8 @@ struct Fake {
     detached: Mutex<std::collections::HashSet<String>>,
     /// The next dispatch of this type fails; `true` if T3 applied it anyway (a lost acknowledgement).
     fail: Mutex<Vec<(&'static str, bool)>>,
+    /// The next dispatch of this type never leaves the service.
+    unsent: Mutex<Vec<&'static str>>,
     /// Created thread rows not shown yet; None shows them at once.
     held: Mutex<Option<Vec<Value>>>,
     /// Told when a thread is created.
@@ -206,6 +208,13 @@ impl Peer for Fake {
                 .expect("every command has its identity")
                 .to_string();
             assert!(command["createdAt"].is_string());
+            {
+                let mut unsent = self.unsent.lock().unwrap();
+                if let Some(i) = unsent.iter().position(|kind| command["type"] == *kind) {
+                    unsent.remove(i);
+                    return Dispatched::NotSent("No connection".into());
+                }
+            }
             match self.receipts.lock().unwrap().get(&id) {
                 Some(true) => return Dispatched::Accepted(json!({"sequence": 1})),
                 Some(false) => return Dispatched::Refused("Previously rejected".into()),
@@ -716,6 +725,106 @@ async fn a_send_asked_again_after_a_lost_answer_is_the_same_command() {
     // A new request is a new command.
     agents.message("w1", "go on").await.unwrap();
     assert_eq!(fake.messages.lock().unwrap()["w1"].len(), 2);
+}
+
+/// A lost answer, then an attempt that never left the service: the
+/// command may still have reached T3, so the next ask sends it again as
+/// itself and T3 shows the message once.
+#[tokio::test]
+async fn an_unsent_retry_keeps_an_uncertain_command() {
+    let temp = tempfile::tempdir().unwrap();
+    let (agents, fake) = fake_agents(
+        temp.path(),
+        temp.path(),
+        vec![row("w1", "p", "auto", "t", "completed", false)],
+    )
+    .await;
+    fake.fail.lock().unwrap().push(("message.dispatch", true));
+    assert!(agents.message("w1", "go on").await.is_err());
+    fake.unsent.lock().unwrap().push("message.dispatch");
+    assert!(agents.message("w1", "go on").await.is_err());
+    assert_eq!(agents.registry().intents.len(), 1);
+    agents.message("w1", "go on").await.unwrap();
+    assert_eq!(fake.messages.lock().unwrap()["w1"].len(), 1);
+    let sent = fake.sent("message.dispatch");
+    assert!(sent.iter().all(|c| c["commandId"] == sent[0]["commandId"]));
+    assert!(agents.registry().intents.is_empty());
+}
+
+/// An answer saved when the service stopped before relaying it reaches its
+/// asker and the asker's app agent after a restart, once; the phone sending
+/// the same answer again is accepted, a different one is not.
+#[tokio::test]
+async fn an_answer_saved_before_a_restart_is_delivered_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let threads = vec![
+        row("agent", "p", "full-access", "a", "completed", false),
+        row("w1", "p", "full-access", "t", "completed", false),
+    ];
+    let (agents, fake) = fake_agents(temp.path(), temp.path(), threads.clone()).await;
+    registered(&agents, |r| {
+        r.agents.insert("p".into(), agent("agent"));
+        r.workers.insert("w1".into(), worker("agent"));
+    })
+    .await;
+    let task = agents
+        .tasks
+        .add(
+            "p",
+            "Pick a colour",
+            None,
+            None,
+            crate::tasks::By::Agent,
+            None,
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    let (_, question) = agents
+        .tasks
+        .ask(&task.id, "Red or blue?", vec![], "w1", None)
+        .await
+        .unwrap();
+    agents
+        .tasks
+        .close_question(&question.id, Some("Blue"))
+        .await
+        .unwrap();
+    drop(agents);
+    let agents = reopened(temp.path(), &fake, threads, temp.path()).await;
+    agents
+        .tasks
+        .close_question(&question.id, Some("Blue"))
+        .await
+        .unwrap();
+    agents.relay_answers().await.unwrap();
+    agents.relay_answers().await.unwrap();
+    agents.flush().await.unwrap();
+    let told = format!("{}.told", question.id);
+    let count = |thread: &str, id: &str| {
+        fake.messages.lock().unwrap()[thread]
+            .iter()
+            .filter(|m| *m == id)
+            .count()
+    };
+    assert_eq!((count("w1", &question.id), count("agent", &told)), (1, 1));
+    assert!(agents.tasks.owed().is_empty());
+    assert!(
+        agents
+            .tasks
+            .close_question(&question.id, Some("Red"))
+            .await
+            .is_err()
+    );
+    agents
+        .tasks
+        .close_question(&question.id, Some("Blue"))
+        .await
+        .unwrap();
+    agents.relay_answers().await.unwrap();
+    agents.flush().await.unwrap();
+    assert_eq!((count("w1", &question.id), count("agent", &told)), (1, 1));
 }
 
 async fn run(dir: &Path, args: &[&str]) {

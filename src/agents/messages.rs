@@ -49,7 +49,7 @@ impl Agents {
     /// Sends a command a caller waits for under a saved identity. Asked
     /// again while T3 has left it unanswered, the same request sends that
     /// same command (T3 answers it from its receipt if it has it), never a
-    /// second; any answer settles it.
+    /// second; only T3's answer settles it.
     pub(super) async fn dispatch_intent(
         &self,
         client: &dyn Peer,
@@ -58,22 +58,11 @@ impl Agents {
     ) -> Result<Value> {
         let command = self.owner.ask(move |s| s.intent(purpose, build)).await?;
         let outcome = client.dispatch(&command).await;
-        if !matches!(outcome, Dispatched::Unknown(_)) {
-            let settled = command.clone();
-            let forgotten = self
-                .change_if(move |registry| {
-                    let index = registry
-                        .intents
-                        .iter()
-                        .position(|p| p.command.id() == settled.id())?;
-                    registry.intents.remove(index);
-                    Some(())
-                })
-                .await;
-            // Unsaved, it only stays as a record the same request would send again (T3 answers from its receipt).
-            if let Err(error) = forgotten {
-                eprintln!("Settled command not saved: {error:#}");
-            }
+        let id = command.id().unwrap_or_default().to_string();
+        let seen = outcome.clone();
+        // Unsaved, the record stays as it was: the same request sends it again.
+        if let Err(error) = self.owner.ask(move |s| s.attempted(&id, &seen)).await {
+            eprintln!("Command outcome not saved: {error:#}");
         }
         match outcome {
             Dispatched::Accepted(value) => Ok(value),

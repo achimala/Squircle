@@ -97,6 +97,10 @@ pub enum QuestionState {
     Answered {
         text: String,
         at: u64,
+        /// Saved with the answer: it still has to reach the asking thread
+        /// (`Agents::relay_answers`), until the notification owner has it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        owed: bool,
     },
     /// The asker took it back, or the task was closed.
     Withdrawn {
@@ -739,6 +743,19 @@ impl Book {
         })
     }
 
+    /// Answered questions whose answer has not reached its asker yet.
+    pub fn owed(&self) -> Vec<(Task, Question)> {
+        self.tasks
+            .values()
+            .flat_map(|t| {
+                t.questions
+                    .iter()
+                    .filter(|q| matches!(q.state, QuestionState::Answered { owed: true, .. }))
+                    .map(|q| (t.publish(), q.clone()))
+            })
+            .collect()
+    }
+
     /// Every task, sub-tasks as their own entries.
     pub fn all(&self) -> Vec<Task> {
         self.tasks.values().map(Record::publish).collect()
@@ -930,6 +947,8 @@ pub enum Event {
     },
     /// The asker takes an open question back.
     Withdraw { question: String, now: u64 },
+    /// An answered question's answer is queued for its asker.
+    Delivered { question: String },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -993,8 +1012,20 @@ fn close_question(
         .find(|q| q.id == question)
         .expect("found above");
     if !entry.open() {
-        let reason = match entry.state {
-            QuestionState::Answered { .. } => "That question was already answered",
+        let reason = match (&entry.state, &state) {
+            // The same answer again (the phone retrying): nothing changes,
+            // and an answer not yet delivered is saved again, which wakes its relay.
+            (
+                QuestionState::Answered { text, owed, .. },
+                QuestionState::Answered { text: again, .. },
+            ) if text == again => {
+                return if *owed {
+                    changed(book)
+                } else {
+                    Reduction::same(book, Disposition::Unchanged)
+                };
+            }
+            (QuestionState::Answered { .. }, _) => "That question was already answered",
             _ => "That question was withdrawn",
         };
         return Reduction::same(book, Disposition::Rejected(reason.into()));
@@ -1321,6 +1352,7 @@ impl Machine for M17 {
                 let state = QuestionState::Answered {
                     text: text.chars().take(4000).collect(),
                     at: now,
+                    owed: true,
                 };
                 close_question(book, &question, state, By::User, now)
             }
@@ -1331,6 +1363,25 @@ impl Machine for M17 {
                 By::Agent,
                 now,
             ),
+            Event::Delivered { question } => {
+                let owed = book
+                    .tasks
+                    .values_mut()
+                    .flat_map(|t| t.questions.iter_mut())
+                    .find_map(|q| match &mut q.state {
+                        QuestionState::Answered { owed, .. } if q.id == question && *owed => {
+                            Some(owed)
+                        }
+                        _ => None,
+                    });
+                match owed {
+                    Some(owed) => {
+                        *owed = false;
+                        changed(book)
+                    }
+                    None => Reduction::same(book, Disposition::Unchanged),
+                }
+            }
             Event::AgeDue { now } => {
                 let mut any = false;
                 for task in book.tasks.values_mut().filter(|t| t.ages(now)) {
@@ -1622,8 +1673,10 @@ mod tests {
         let reduction = answer(book, 3);
         let book = reduction.state;
         assert_eq!(book.get(&id).unwrap().status, Status::InProgress);
+        // The same answer again (the phone retrying) is no new answer.
         let again = answer(book, 4);
-        assert!(matches!(again.disposition, Disposition::Rejected(_)));
+        assert!(!matches!(again.disposition, Disposition::Rejected(_)));
+        assert_eq!(again.state.get(&id).unwrap().status, Status::InProgress);
         // Closing the task withdraws a question still open.
         let book = set(
             ask(again.state, "q2", 5),

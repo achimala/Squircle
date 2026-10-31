@@ -84,11 +84,16 @@ pub enum Dispatched {
 /// A command a caller waits for (`thread send`, `thread answer`), saved
 /// with its identity before it is sent. `purpose` is the request itself
 /// (its thread, kind and text): the same request asked again while T3 has
-/// left this one unanswered sends this command again, never a second. Only
-/// an unanswered one is kept; the service never sends it by itself.
+/// left this one unanswered sends this command again, never a second. It is
+/// kept until T3 accepts or refuses it; the service never sends it by itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pending {
     pub purpose: String,
     pub command: Command,
     pub at: u64,
+    /// Some attempt may have reached T3 (an answer was lost, or the request
+    /// was asked again while one was out). From then on only T3's answer
+    /// settles it: an attempt that never left the service does not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub uncertain: bool,
 }

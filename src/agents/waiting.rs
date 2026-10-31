@@ -1,4 +1,5 @@
 use super::*;
+use crate::tasks::QuestionState;
 
 /// A thread of an app with an agent that T3 shows waiting on the user: a
 /// question or an approval it asked for itself.
@@ -90,6 +91,54 @@ impl Agents {
         })
         .await?;
         Ok(said)
+    }
+}
+
+impl Agents {
+    /// Hands every answered tracker question still owed to its asker to the
+    /// outbox, then settles it with the task owner. The answer and the
+    /// obligation were saved together, so a crash or a failure on the way
+    /// leaves it owed and the next relay hands it over again; the outbox
+    /// takes a message ID it already has as no change. Runs only from the
+    /// service's task loop, so two relays never overlap.
+    pub async fn relay_answers(self: &Arc<Self>) -> Result<()> {
+        for (task, question) in self.tasks.owed() {
+            let QuestionState::Answered { text, .. } = &question.state else {
+                continue;
+            };
+            let ask = task.ask.replace('\n', " ");
+            let message = format!(
+                "[answer] The user answered your question on “{ask}” in the tracker:\nQ: {}\nA: {text}\n\
+                 Go on with it; record any new demand in the answer as a sub-task first.",
+                question.text,
+            );
+            let payload = json!({"task": task.id, "question": question.id});
+            self.notify(
+                &question.thread_id,
+                &question.id,
+                message,
+                Note::Answer,
+                payload.clone(),
+            )
+            .await?;
+            if let Some(coordinator) = self.coordinator_of(&question.thread_id) {
+                let title = self.worker_title(&question.thread_id).unwrap_or_default();
+                let told = format!(
+                    "[answer] The user answered “{title}”'s question on “{ask}” directly; it has the answer, nothing to relay:\n“{}” → “{text}”",
+                    question.text,
+                );
+                self.notify(
+                    &coordinator,
+                    &format!("{}.told", question.id),
+                    told,
+                    Note::Answer,
+                    payload,
+                )
+                .await?;
+            }
+            self.tasks.delivered(&question.id).await?;
+        }
+        Ok(())
     }
 }
 

@@ -63,6 +63,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
         // Linked workers and builds move tasks on, as T3, the builds and the
         // tasks themselves change; old ones age into History when due.
         let state = state.clone();
+        let agents = agents.clone();
         let mut changes = futures_util::stream::select_all([
             agents.changes(),
             state.jobs.changes(),
@@ -73,6 +74,11 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
             loop {
                 if let Err(error) = tasks.tick(|task| task_signals(&state, task)).await {
                     eprintln!("Tasks not updated: {error:#}");
+                }
+                // Answers saved but not yet handed to the outbox, a restart's
+                // included; one left owed goes again on the next change.
+                if let Err(error) = agents.relay_answers().await {
+                    eprintln!("Answer not delivered yet: {error:#}");
                 }
                 let aged = tasks.next_age().map(|at| at as f64);
                 tokio::select! {
