@@ -183,10 +183,11 @@ status from the agent or the user holds until a linked worker's or build's
 state changes after the moment it was chosen. A link going missing (an
 archived worker, or a shell that isn't current) is no fact at all and
 doesn't count. Once done or dropped, a task reopens only for new work: a new
-linked worker or build, a new turn of a linked worker (T3's
-`latestTurn.turnId`), or a linked worker working or asking again; old work
-finishing leaves it closed (2026-10-14, after the user's Done kept
-reverting). The service checks every 3 s.
+linked worker or build, a new run of a linked worker (T3's `latestRunId`),
+or a linked worker working or asking again; old work finishing leaves it
+closed (2026-10-14, after the user's Done kept reverting). The service looks
+again whenever T3's view of the threads, a build or the tasks change, and when
+the next task is due to age into History; it never polls.
 
 **History:** done and dropped tasks leave the active list after a day, open
 ones that nothing touched for three days too. Nothing is deleted; any change
@@ -206,9 +207,10 @@ links are all finished builds are skipped.
   tasks age into History too).
 
 An explicit status records the observation the caller read with it
-(`hold`), unless a newer one was already recorded. A tick reads signals
-outside the lock and applies them only to tasks still at the revision it
-read; anything changed meanwhile waits for the next tick. Every change is
+(`hold`), unless a newer one was already recorded. A tick reads signals from
+the published tasks, without the tasks' owner, and the owner applies them
+only to tasks still at the revision they were read at; anything changed
+meanwhile waits for the next tick. Every change is
 saved to `tasks.json` first and becomes visible only once saved; a change
 that can't be saved is not seen. The decisions are the M17 reducer in
 `src/fsm/tasks/`, saved through the C00 commit gate

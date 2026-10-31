@@ -175,7 +175,7 @@ pub(super) enum Commands {
     },
     /// Search an app's past where it lives (T3 conversations and tool activity, tasks, builds, git, docs); read-only, no copied store.
     #[command(
-        after_help = "Results are short ranked snippets with a reference; show expands one.\n  squircle history search \"why did we drop the 3D tilt\" --thread YOUR_THREAD_ID\n  squircle history search simulator deck --in messages,commits --since 14d\n  squircle history show msg:ID | thread:ID | act:ID | task:ID | build:ID | commit:SHA | doc:PATH#L12\nThe app is the project of --thread or --project, else of the current folder. Text unless --json. Nothing is indexed: each search reads T3's state.sqlite (read-only), Squircle's tasks and builds, git log and the project's Markdown files."
+        after_help = "Results are short ranked snippets with a reference; show expands one.\n  squircle history search \"why did we drop the 3D tilt\" --thread YOUR_THREAD_ID\n  squircle history search simulator deck --in messages,commits --since 14d\n  squircle history show msg:ID | thread:ID | act:ID | task:ID | build:ID | commit:SHA | doc:PATH#L12\nThe app is the project of --thread or --project, else of the current folder. Text unless --json. Nothing is indexed: each search reads T3's statev2.sqlite (read-only), Squircle's tasks and builds, git log and the project's Markdown files."
     )]
     History {
         #[command(subcommand)]
