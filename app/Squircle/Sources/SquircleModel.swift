@@ -210,12 +210,13 @@ final class SquircleModel {
     private var debugDrops: Task<Void, Never>?
     private var installWatch: Task<Void, Never>?
     private var media: [JSONValue] { state.media }
-    /// Pictures, recordings and files the open conversation shows.
+    /// Pictures, recordings and files conversations show, each loaded for its own thread.
     private(set) lazy var conversationMedia = ConversationMedia(
         client: client, gateway: gateway, base: configuration?.t3URL,
-        thread: { [weak self] in self?.selectedSessionID },
-        message: { [weak self] id in self?.messages.first { $0.id == id } },
-        published: { [weak self] in self?.media ?? [] })
+        published: { [weak self] thread in self?.publishedMedia(of: thread) ?? [] })
+    private func publishedMedia(of thread: String) -> [JSONValue] {
+        thread == selectedSessionID ? media : threadCache.peek(thread)?.state.media ?? []
+    }
     private let commandDispatch: ((JSONValue) async throws -> JSONValue)?
     private let upload: ((URL, String) async throws -> String)?
     private let preferences: UserDefaults
