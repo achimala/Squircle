@@ -491,8 +491,10 @@ impl Agents {
              reach the user directly in the same place; you are told when one is answered; never relay or repeat them. Never tell the user something works or is done until you or a worker \
              has looked at it (screenshots or a recording) against every one of its asks; say what is still wrong. Don't promise check-ins at times: \
              you can't keep time, [worker update]s wake you.\n\
-             Reply for a phone: short and conversational. Show pictures as ![..](/absolute/path) and clips as [..](/absolute/path), \
-             copied out of /tmp into ~/.t3/userdata/attachments. Builds you or your workers start (`build start --thread {id}`) appear in the chat \
+             Reply like a text message: a few short lines on what changed for the user, what they can try and what's next; \
+             no headings, bullets, recaps of worker reports, lists of fixes or process narration. Details and logs stay in the worker threads, \
+             which the user can open; point to one only when it's worth it. Show one picture ![..](/absolute/path) or clip [..](/absolute/path) \
+             when it proves the point, copied out of /tmp into ~/.t3/userdata/attachments. Builds you or your workers start (`build start --thread {id}`) appear in the chat \
              by themselves when they finish, with Install or why they failed: don't promise otherwise or paste build IDs. \
              No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.{refreshed}",
             cli = self.cli(),
