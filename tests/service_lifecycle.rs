@@ -123,7 +123,6 @@ fn fixture_job(root: &Path, state: BuildState) -> Job {
             "mode": "simulator",
             "export_options": null,
             "allow_provisioning_updates": false,
-            "capture_preview": false,
             "request_id": null
         },
         "output": output,

@@ -17,10 +17,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/builds/{id}", get(status))
         .route("/v1/builds/{id}/cancel", post(cancel))
         .route("/v1/builds/{id}/log", get(build_log))
-        .route(
-            "/v1/builds/{id}/preview",
-            get(download_preview).post(capture_preview),
-        )
         .route("/v1/builds/{id}/install-link", post(create_link))
         .route("/v1/builds/{id}/diagnostics", get(diagnostics))
         .route("/v1/t3/threads/{thread}/steps", get(t3_steps))

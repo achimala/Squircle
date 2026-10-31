@@ -3030,3 +3030,23 @@ scheduled tasks bound to it, links).
 Checked: `cargo test` and clippy pass, and the app builds for the simulator.
 Not run against the live service or looked at on a phone yet.
 
+## 2026-10-31 previews only from agents
+
+Owner decision, after the deep service review found the build capture to be
+a second simulator path that booted its own simulator outside the lease and
+waited three seconds before its screenshot. No signal says an arbitrary app
+has drawn the screen worth showing, so the service's own capture is gone:
+`build start --preview`, `preview capture`, `POST`/`GET
+/v1/builds/{id}/preview`, `SQUIRCLE_SIMULATOR_ID` (and the pool's reserved
+simulator) and the build's preview state. An app's picture is what an agent
+publishes with `app preview ID --file PATH` after looking at the app on a
+simulator it took through `sim start`; without one, Home shows the newest
+simulator screenshot from the app's threads. Build recipes no longer accept
+`capture_preview`; the service removes it from saved jobs and app recipes
+once at startup (`Store::drop_capture_preview`, to delete once every data
+directory has run it).
+
+Checked: `cargo test` and clippy pass, the app and its tests build for the
+simulator, and on a copy of the live data directory all 255 job records load
+after the cleanup (249 would otherwise have been skipped). Not run against
+the live service or looked at on a phone.

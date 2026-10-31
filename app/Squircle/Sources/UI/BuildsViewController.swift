@@ -301,7 +301,6 @@ final class BuildRow: UIControl {
     private func updateDate() {
         guard let build else { return }
         var parts = [Self.statusText(for: build)]
-        if build.previewState == "pending" || build.previewState == "running" { parts.append("Capturing screenshot") }
         if build.date.timeIntervalSince1970 > 0 { parts.append(Theme.relativeDate.localizedString(for: build.date, relativeTo: .now)) }
         let detail = parts.joined(separator: " · ")
         if detailLabel.text != detail { detailLabel.text = detail }

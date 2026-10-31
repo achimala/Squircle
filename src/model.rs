@@ -20,8 +20,6 @@ pub struct BuildRequest {
     pub export_options: Option<PathBuf>,
     #[serde(default)]
     pub allow_provisioning_updates: bool,
-    #[serde(default)]
-    pub capture_preview: bool,
     pub request_id: Option<String>,
     /// Device builds get the Squircle debug overlay unless this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -32,8 +30,7 @@ pub struct BuildRequest {
     pub thread: Option<String>,
 }
 
-/// A finished product's artifacts and app metadata. Preview captures are a
-/// separate operation (`PreviewState`) and never change what is installable.
+/// A finished product's artifacts and app metadata.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuildOutput {
     pub archive_path: Option<PathBuf>,
@@ -92,7 +89,7 @@ pub struct Provenance {
 }
 
 /// A job's lifecycle. Each phase carries exactly what it has: only a
-/// succeeded job has artifacts, and only it can have a preview.
+/// succeeded job has artifacts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(
     clippy::large_enum_variant,
@@ -103,7 +100,6 @@ pub enum JobPhase {
     Running,
     Succeeded {
         output: BuildOutput,
-        preview: PreviewState,
     },
     Failed {
         message: String,
@@ -127,95 +123,6 @@ impl JobPhase {
             Self::Failed { .. } => BuildState::Failed,
             Self::Cancelled { .. } => BuildState::Cancelled,
             Self::Interrupted { .. } => BuildState::Interrupted,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PreviewSource {
-    /// The simulator product this job built.
-    BuiltSimulatorProduct,
-    /// A simulator rebuild of the project's current working tree.
-    CurrentWorkingTree,
-}
-
-impl PreviewSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::BuiltSimulatorProduct => "built_simulator_product",
-            Self::CurrentWorkingTree => "current_working_tree",
-        }
-    }
-    pub fn parse(value: &str) -> Option<Self> {
-        [Self::BuiltSimulatorProduct, Self::CurrentWorkingTree]
-            .into_iter()
-            .find(|s| s.as_str() == value)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreviewArtifact {
-    pub path: PathBuf,
-    pub captured_at: u64,
-    /// None for captures recorded before the source was kept.
-    pub source: Option<PreviewSource>,
-}
-
-/// A succeeded build's screenshot, captured as its own operation. A failed
-/// or running recapture keeps the prior image.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum PreviewState {
-    #[default]
-    Absent,
-    Queued {
-        prior: Option<PreviewArtifact>,
-    },
-    Capturing {
-        prior: Option<PreviewArtifact>,
-    },
-    Ready(PreviewArtifact),
-    Failed {
-        reason: String,
-        prior: Option<PreviewArtifact>,
-    },
-}
-
-impl PreviewState {
-    /// The newest image this build has, whatever its latest attempt did.
-    pub fn artifact(&self) -> Option<&PreviewArtifact> {
-        match self {
-            Self::Absent => None,
-            Self::Ready(artifact) => Some(artifact),
-            Self::Queued { prior } | Self::Capturing { prior } | Self::Failed { prior, .. } => {
-                prior.as_ref()
-            }
-        }
-    }
-    pub fn in_progress(&self) -> bool {
-        matches!(self, Self::Queued { .. } | Self::Capturing { .. })
-    }
-    pub fn queued(&self) -> Self {
-        Self::Queued {
-            prior: self.artifact().cloned(),
-        }
-    }
-    pub fn capturing(&self) -> Self {
-        Self::Capturing {
-            prior: self.artifact().cloned(),
-        }
-    }
-    pub fn failed(&self, reason: impl Into<String>) -> Self {
-        Self::Failed {
-            reason: reason.into(),
-            prior: self.artifact().cloned(),
-        }
-    }
-    /// A capture's result; a failure keeps the previous image.
-    pub fn finish(&self, result: anyhow::Result<PreviewArtifact>) -> Self {
-        match result {
-            Ok(artifact) => Self::Ready(artifact),
-            Err(error) => self.failed(format!("{error:#}")),
         }
     }
 }
@@ -270,22 +177,6 @@ impl Job {
             _ => None,
         }
     }
-    pub fn preview(&self) -> Option<&PreviewState> {
-        match &self.phase {
-            JobPhase::Succeeded { preview, .. } => Some(preview),
-            _ => None,
-        }
-    }
-    /// Replaces a succeeded job's preview; other phases have none.
-    pub fn set_preview(&mut self, next: PreviewState) -> bool {
-        match &mut self.phase {
-            JobPhase::Succeeded { preview, .. } => {
-                *preview = next;
-                true
-            }
-            _ => false,
-        }
-    }
     pub fn error(&self) -> Option<&str> {
         match &self.phase {
             JobPhase::Failed { message } | JobPhase::Interrupted { message } => Some(message),
@@ -312,7 +203,7 @@ struct JobRecord {
     updated_at: u64,
     state: BuildState,
     request: Option<BuildRequest>,
-    output: Option<OutputRecord>,
+    output: Option<BuildOutput>,
     error: Option<String>,
     source: String,
     /// Git HEAD observed at submission, not a source snapshot.
@@ -324,23 +215,6 @@ struct JobRecord {
     /// The project in the main checkout when built from a linked worktree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_main_project: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct OutputRecord {
-    #[serde(default)]
-    preview_path: Option<PathBuf>,
-    /// `pending`, `running`, `succeeded` or `failed`.
-    #[serde(default)]
-    preview_state: Option<String>,
-    #[serde(default)]
-    preview_error: Option<String>,
-    #[serde(default)]
-    preview_captured_at: Option<u64>,
-    #[serde(default)]
-    preview_source: Option<String>,
-    #[serde(flatten)]
-    output: BuildOutput,
 }
 
 impl TryFrom<JobRecord> for Job {
@@ -363,15 +237,13 @@ impl TryFrom<JobRecord> for Job {
                 ));
             }
         };
-        let no_output = |phase: JobPhase, output: &Option<OutputRecord>| match output {
+        let no_output = |phase: JobPhase, output: &Option<BuildOutput>| match output {
             Some(_) => Err(format!("{:?} job has build output", phase.state())),
             None => Ok(phase),
         };
         let phase = match (r.state, r.error) {
             (BuildState::Succeeded, None) => {
-                let record = r.output.ok_or("succeeded job has no output")?;
-                let preview = preview_from_record(&record)?;
-                let output = record.output;
+                let output = r.output.ok_or("succeeded job has no output")?;
                 let artifact = match &origin {
                     BuildOrigin::Project { request, .. }
                         if request.mode == BuildMode::Simulator =>
@@ -383,7 +255,7 @@ impl TryFrom<JobRecord> for Job {
                 if !artifact {
                     return Err("succeeded job is missing its product".into());
                 }
-                JobPhase::Succeeded { output, preview }
+                JobPhase::Succeeded { output }
             }
             (BuildState::Succeeded, Some(_)) => return Err("succeeded job has an error".into()),
             (_, _) if origin == BuildOrigin::Imported => {
@@ -417,41 +289,6 @@ impl TryFrom<JobRecord> for Job {
     }
 }
 
-fn preview_from_record(record: &OutputRecord) -> Result<PreviewState, String> {
-    let source = match record.preview_source.as_deref() {
-        None => None,
-        Some(value) => Some(
-            PreviewSource::parse(value)
-                .ok_or_else(|| format!("unknown preview source {value:?}"))?,
-        ),
-    };
-    let artifact = match (&record.preview_path, record.preview_captured_at) {
-        (Some(path), Some(captured_at)) => Some(PreviewArtifact {
-            path: path.clone(),
-            captured_at,
-            source,
-        }),
-        (None, None) => None,
-        _ => return Err("preview path and capture time must come together".into()),
-    };
-    let reason = record.preview_error.clone();
-    Ok(match (record.preview_state.as_deref(), artifact, reason) {
-        (None, None, None) => PreviewState::Absent,
-        // Records from before preview state was kept.
-        (None | Some("succeeded"), Some(artifact), None) => PreviewState::Ready(artifact),
-        (Some("pending"), prior, None) => PreviewState::Queued { prior },
-        (Some("running"), prior, None) => PreviewState::Capturing { prior },
-        (Some("failed"), prior, Some(reason)) => PreviewState::Failed { reason, prior },
-        (state, artifact, reason) => {
-            return Err(format!(
-                "inconsistent preview: state {state:?}, image {}, error {}",
-                artifact.is_some(),
-                reason.is_some()
-            ));
-        }
-    })
-}
-
 impl From<Job> for JobRecord {
     fn from(job: Job) -> Self {
         let state = job.state();
@@ -464,26 +301,7 @@ impl From<Job> for JobRecord {
             BuildOrigin::Imported => (IMPORTED_SOURCE, None, Provenance::default()),
         };
         let output = match job.phase {
-            JobPhase::Succeeded { output, preview } => {
-                let artifact = preview.artifact().cloned();
-                let (preview_state, preview_error) = match &preview {
-                    PreviewState::Absent => (None, None),
-                    PreviewState::Queued { .. } => (Some("pending"), None),
-                    PreviewState::Capturing { .. } => (Some("running"), None),
-                    PreviewState::Ready(_) => (Some("succeeded"), None),
-                    PreviewState::Failed { reason, .. } => (Some("failed"), Some(reason.clone())),
-                };
-                Some(OutputRecord {
-                    preview_path: artifact.as_ref().map(|a| a.path.clone()),
-                    preview_state: preview_state.map(str::to_owned),
-                    preview_error,
-                    preview_captured_at: artifact.as_ref().map(|a| a.captured_at),
-                    preview_source: artifact
-                        .and_then(|a| a.source)
-                        .map(|s| s.as_str().to_owned()),
-                    output,
-                })
-            }
+            JobPhase::Succeeded { output } => Some(output),
             _ => None,
         };
         JobRecord {

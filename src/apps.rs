@@ -4,7 +4,7 @@
 //! A record stays readable when its preview bytes go missing: the artifact is
 //! reported unavailable and a new publication repairs it.
 use crate::{
-    model::{BuildRequest, Job, PreviewArtifact, PreviewSource, PreviewState, now},
+    model::{BuildRequest, Job, now},
     store::{
         Store, atomic_json, check_dir, open_private_read, private_dir, read_json, write_private,
     },
@@ -41,12 +41,13 @@ pub struct AppPreview {
     /// Internal private copy. HTTP clients receive an authenticated image route,
     /// not a path they can use to request arbitrary files from the Mac.
     pub path: PathBuf,
-    /// Simulator capture completion, or server acceptance time for agent files.
+    /// When the service accepted the file (older records: a capture's completion).
     pub captured_at: u64,
     pub build_id: Option<String>,
     pub source_revision: Option<String>,
     pub caption: String,
-    /// `agent` or `simulator`; supplied provenance is not image attestation.
+    /// `agent` (older records: `simulator`, the service's own capture);
+    /// supplied provenance is not image attestation.
     pub source: String,
 }
 
@@ -84,7 +85,6 @@ pub struct PreviewPublication {
     pub caption: String,
     pub build_id: Option<String>,
     pub source_revision: Option<String>,
-    pub source: Option<String>,
 }
 
 /// The catalog in Home's order (see `AppOrder`).
@@ -297,17 +297,18 @@ pub fn publish_preview(
     id: &str,
     publication: PreviewPublication,
 ) -> Result<AppRecord> {
-    publish_at(store, id, publication, now())
+    let staged = stage_preview(&store.root, id, &publication.file)?;
+    commit_preview(store, id, publication, staged)
 }
 
-/// Build metadata fills missing identity and imports only newer captures. This
-/// never replaces agent-edited names/summaries or a more recent agent preview.
-pub fn sync_build_preview(store: &Store, job: &Job) -> Result<AppRecord> {
+/// Registers a succeeded build's app: build metadata fills missing
+/// identity and never replaces agent-edited names or summaries.
+pub fn sync_build(store: &Store, job: &Job) -> Result<AppRecord> {
     let request = job
         .request()
         .context("build has no project recipe to associate with an app")?;
     let output = job.output().context("build has no app metadata")?;
-    let app = register(
+    register(
         store,
         AppRegistration {
             name: if output.title.trim().is_empty() {
@@ -320,59 +321,7 @@ pub fn sync_build_preview(store: &Store, job: &Job) -> Result<AppRecord> {
             bundle_id: Some(output.bundle_id.clone()),
             summary: String::new(),
         },
-    )?;
-    let Some(PreviewArtifact {
-        path: file,
-        captured_at,
-        source,
-    }) = job.preview().and_then(PreviewState::artifact)
-    else {
-        return Ok(app);
-    };
-    let captured_at = *captured_at;
-    if app
-        .preview
-        .as_ref()
-        .is_some_and(|preview| preview.captured_at >= captured_at)
-    {
-        return Ok(app);
-    }
-    let from_current_tree = *source == Some(PreviewSource::CurrentWorkingTree);
-    let from_built_product = *source == Some(PreviewSource::BuiltSimulatorProduct);
-    publish_at(
-        store,
-        &app.id,
-        PreviewPublication {
-            file: file.clone(),
-            caption: if from_current_tree {
-                "Simulator capture of the current working tree; associated with this build".into()
-            } else if from_built_product {
-                "Simulator capture of this build's simulator product".into()
-            } else {
-                "Simulator capture associated with this build".into()
-            },
-            build_id: Some(job.id.clone()),
-            // An archive's later simulator rebuild did not capture its submission
-            // revision. Do not turn the old observation into false provenance.
-            source_revision: if from_built_product {
-                job.provenance().and_then(|p| p.revision.clone())
-            } else {
-                None
-            },
-            source: Some("simulator".into()),
-        },
-        captured_at,
     )
-}
-
-fn publish_at(
-    store: &Store,
-    id: &str,
-    publication: PreviewPublication,
-    captured_at: u64,
-) -> Result<AppRecord> {
-    let staged = stage_preview(&store.root, id, &publication.file)?;
-    commit_preview(store, id, publication, staged, captured_at)
 }
 
 /// A validated, synced preview file that no record references yet. Dropping
@@ -418,7 +367,7 @@ pub fn publish_staged(
     publication: PreviewPublication,
     staged: StagedPreview,
 ) -> Result<AppRecord> {
-    commit_preview(store, id, publication, staged, now())
+    commit_preview(store, id, publication, staged)
 }
 
 fn commit_preview(
@@ -426,18 +375,12 @@ fn commit_preview(
     id: &str,
     publication: PreviewPublication,
     mut staged: StagedPreview,
-    captured_at: u64,
 ) -> Result<AppRecord> {
     let mut app = get(store, id)?;
     text_limit(&publication.caption, "preview caption", 4096)?;
     if let Some(revision) = &publication.source_revision {
         nonempty(revision, "source revision", 200)?;
     }
-    let source = publication.source.unwrap_or_else(|| "agent".into());
-    ensure!(
-        matches!(source.as_str(), "agent" | "simulator"),
-        "preview source must be agent or simulator"
-    );
     if let Some(build_id) = &publication.build_id {
         validate_id(build_id)?;
         let job = store.load_job(build_id)?;
@@ -469,11 +412,11 @@ fn commit_preview(
     app.preview = Some(AppPreview {
         id: staged.id.clone(),
         path,
-        captured_at,
+        captured_at: now(),
         build_id: publication.build_id,
         source_revision: publication.source_revision,
         caption: publication.caption,
-        source,
+        source: "agent".into(),
     });
     app.updated_at = now();
     // A failed directory fsync can occur after app.json was atomically renamed.
@@ -647,7 +590,6 @@ mod tests {
             caption: "Settings screen".into(),
             build_id: None,
             source_revision: Some("abc123".into()),
-            source: None,
         }
     }
 
@@ -680,7 +622,7 @@ mod tests {
         let source = temp.path().join("capture.png");
         fs::write(&source, PNG)?;
         let mut request = publication(source);
-        request.source = Some("forged".into());
+        request.caption = "x".repeat(4097);
         assert!(publish_preview(&store, &app.id, request).is_err());
         let previews = app_dir(&store, &app.id)?.join("previews");
         assert_eq!(fs::read_dir(previews)?.count(), 0);

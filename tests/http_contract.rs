@@ -7,7 +7,6 @@ use axum::{
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use squircle::{
-    model::{PreviewArtifact, PreviewState},
     server::{AppState, router},
     store::Store,
 };
@@ -18,7 +17,6 @@ use zip::write::SimpleFileOptions;
 
 struct Fixture {
     _directory: TempDir,
-    state: AppState,
     app: Router,
     control: String,
     diagnostic: String,
@@ -69,24 +67,15 @@ impl Fixture {
         archive.finish().unwrap();
         let ipa_bytes = fs::read(&ipa).unwrap();
         let state = AppState::new(store, Some("https://mac.test".into())).unwrap();
-        let app = router(state.clone());
+        let app = router(state);
         Self {
             _directory: directory,
-            state,
             app,
             control,
             diagnostic,
             ipa,
             ipa_bytes,
         }
-    }
-
-    /// A new service over the same data directory, which rereads its records.
-    fn reopen(&mut self) {
-        let root = self.state.files.root.clone();
-        self.state =
-            AppState::new(Store::open(root).unwrap(), Some("https://mac.test".into())).unwrap();
-        self.app = router(self.state.clone());
     }
 
     async fn request(
@@ -173,101 +162,6 @@ impl Fixture {
         assert_eq!(status, StatusCode::OK, "{value}");
         value["data"].clone()
     }
-}
-
-#[tokio::test]
-async fn preview_download_is_bound_to_its_job_and_control_token() {
-    let mut fixture = Fixture::new();
-    let id = fixture.import().await;
-    let other = fixture.import().await;
-    let path = format!("/v1/builds/{id}/preview");
-    assert_eq!(
-        fixture
-            .request("GET", &path, Some(&fixture.control), None)
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-    // Artifact transport fixture only; this is not a claimed simulator capture.
-    let png = b"\x89PNG\r\n\x1a\npreview transport fixture";
-    {
-        let store = fixture.state.files.clone();
-        let mut job = store.load_job(&id).unwrap();
-        let artifact = store.job_dir(&id).unwrap().join("preview.png");
-        fs::write(&artifact, png).unwrap();
-        job.set_preview(PreviewState::Ready(PreviewArtifact {
-            path: artifact,
-            captured_at: 1,
-            source: None,
-        }));
-        store.save_job(&job).unwrap();
-    }
-    fixture.reopen();
-    let response = fixture
-        .request("GET", &path, Some(&fixture.control), None)
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
-    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
-    assert_eq!(
-        response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .as_ref(),
-        png
-    );
-    assert_eq!(
-        fixture
-            .request(
-                "GET",
-                &format!("/v1/builds/{other}/preview"),
-                Some(&fixture.control),
-                None
-            )
-            .await
-            .status(),
-        StatusCode::NOT_FOUND
-    );
-    {
-        let store = fixture.state.files.clone();
-        let mut job = store.load_job(&other).unwrap();
-        let path = store.job_dir(&id).unwrap().join("preview.png");
-        job.set_preview(PreviewState::Ready(PreviewArtifact {
-            path,
-            captured_at: 1,
-            source: None,
-        }));
-        store.save_job(&job).unwrap();
-    }
-    fixture.reopen();
-    assert_eq!(
-        fixture
-            .request(
-                "GET",
-                &format!("/v1/builds/{other}/preview"),
-                Some(&fixture.control),
-                None
-            )
-            .await
-            .status(),
-        StatusCode::INTERNAL_SERVER_ERROR
-    );
-    {
-        let store = fixture.state.files.clone();
-        let artifact = store.job_dir(&id).unwrap().join("preview.png");
-        fs::remove_file(&artifact).unwrap();
-        std::os::unix::fs::symlink(&fixture.ipa, artifact).unwrap();
-    }
-    assert_ne!(
-        fixture
-            .request("GET", &path, Some(&fixture.control), None)
-            .await
-            .status(),
-        StatusCode::OK
-    );
 }
 
 /// A body that records whether anything polled it.

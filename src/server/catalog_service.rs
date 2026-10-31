@@ -1,15 +1,15 @@
 use super::*;
 
 /// The catalog app a finished build belongs to. A succeeded build registers
-/// its app and publishes a newer preview; any other build is matched to an
+/// its app; any other build is matched to an
 /// app already registered for its project and scheme (or bundle, for an
 /// import), so its notification can still open the app.
 pub(super) async fn build_app(state: &AppState, job: &Job) -> Option<apps::AppRecord> {
     let (store, job) = (state.files.clone(), job.clone());
-    // Copies the preview in the catalog's lane, off the async workers.
+    // In the catalog's lane, off the async workers.
     let result = in_catalog(state.catalog_writes(), move || {
         if job.output().is_some() && job.request().is_some() {
-            apps::sync_build_preview(&store, &job)
+            apps::sync_build(&store, &job)
                 .map(Some)
                 .map_err(|e| (job.id.clone(), e))
         } else {

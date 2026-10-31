@@ -373,7 +373,6 @@ pub struct Pool {
     simctl: Arc<dyn Simctl>,
     world: Arc<dyn World>,
     pub policy: Policy,
-    reserved: Vec<String>,
     owner: Owner<State>,
     /// The session owner, attached once it exists.
     holds: OnceLock<Weak<dyn Holds>>,
@@ -401,17 +400,11 @@ struct Snapshot {
 
 impl Pool {
     pub fn open(root: &Path, agents: Arc<crate::agents::Agents>) -> Result<Arc<Self>> {
-        let reserved = std::env::var("SQUIRCLE_SIMULATOR_ID")
-            .ok()
-            .map(|s| s.trim().to_ascii_uppercase())
-            .into_iter()
-            .collect();
         Self::with(
             root,
             Arc::new(Xcrun),
             Arc::new(T3World(agents)),
             Policy::from_env(),
-            reserved,
         )
     }
 
@@ -420,7 +413,6 @@ impl Pool {
         simctl: Arc<dyn Simctl>,
         world: Arc<dyn World>,
         policy: Policy,
-        reserved: Vec<String>,
     ) -> Result<Arc<Self>> {
         let file = JsonFile::new(root.join("simpool.json"));
         let (saved, revision) = file.read::<Saved>()?.unwrap_or_default();
@@ -437,7 +429,6 @@ impl Pool {
             simctl,
             world,
             policy,
-            reserved,
             owner: Owner::spawn("simulator pool", state),
             holds: OnceLock::new(),
             applying: Lane::new(Rank::PoolApply),
@@ -633,7 +624,6 @@ impl Pool {
             thread: &thread,
             activity_complete: complete,
             idle_since: &idle_since,
-            reserved: &self.reserved,
             policy: self.policy,
             now_please,
             keep: &keep,
@@ -1360,14 +1350,7 @@ mod tests {
     const ADHOC: &str = "AAAAAAAA-0000-4000-8000-000000000000";
 
     fn pool(dir: &Path, fake: &Arc<Fake>, owner: &Arc<Sessions>) -> Arc<Pool> {
-        let pool = Pool::with(
-            dir,
-            fake.clone(),
-            Arc::new(Quiet(fake.clone())),
-            POLICY,
-            vec![],
-        )
-        .unwrap();
+        let pool = Pool::with(dir, fake.clone(), Arc::new(Quiet(fake.clone())), POLICY).unwrap();
         let holds: Arc<dyn Holds> = owner.clone();
         pool.attach(Arc::downgrade(&holds));
         pool

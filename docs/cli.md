@@ -41,7 +41,6 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `app list`, `app show ID`, `app register` | Persistent app catalog; `register` adds metadata only, without a build recipe |
 | `app update ID --name NAME --summary TEXT` | Edit app metadata without replacing its identity or preview |
 | `app preview ID --file PATH` | Publish a real PNG as the app's latest immutable preview artifact |
-| `preview capture BUILD_ID --simulator UUID` | Build-associated capture on an explicitly selected simulator |
 | `install-link ID --ttl-seconds 3600` | Expiring HTML page, manifest and IPA URLs |
 | `media add --thread T3_ID --file PATH --caption TEXT` | Publish an mp4/mov/png/jpg into a T3 thread; Squircle shows it inline. Writes this Mac's data directory (private whatever the umask) and refuses a non-loopback `--server`; the service's `POST /v1/t3/threads/{thread}/media` does the same remotely. Simulator flows use `sim start`/`sim stop`, which file their own recordings |
 | `media list --thread T3_ID` | Media published into that thread |
@@ -160,22 +159,22 @@ Each publication validates a regular PNG file (signature, bounded chunks and
 nonzero dimensions; maximum 20 MiB), makes a private copy and assigns a new preview
 UUID. Existing image files are immutable. The app record points to the latest
 preview and retains timestamp, caption and optional build/revision association.
-`captured_at` is simulator capture-completion time for built-in captures; for
-agent-supplied files it is server publication time, not an inferred file-creation
-time. `updated_at` records app metadata changes. Published files use source
-`agent`; built-in captures use `simulator`. Supplying a build ID checks the app
+`captured_at` is server publication time, not an inferred file-creation time
+(records from before 2026-10-31 may carry a built-in capture's completion time
+and source `simulator`). `updated_at` records app metadata changes. Published
+files use source `agent`. Supplying a build ID checks the app
 association but does not establish that the pixels came from that exact binary.
 The client fetches the image through authenticated HTTP. It displays an empty or
 unavailable state when there is no capture; it must not substitute generated UI.
 An app whose preview file has gone missing still lists, with
 `preview_unavailable: true`; publishing a new preview repairs it.
 
-Build capture is optional (`build start --preview`), runs in the same worker lane
-as Xcode, and requires a dedicated simulator configured by UUID. Capture failure
-preserves the IPA and any previous image. Simulator builds reuse their product;
-archive previews rebuild the current working tree, so they must not claim to be
-pixels from a frozen archived revision. App synchronization accepts only newer
-captures and does not overwrite edited names/summaries. 
+Previews come only from agents (2026-10-31): the service no longer captures
+one itself after a build, since nothing tells it when an arbitrary app has drawn
+the screen worth showing. An agent takes a simulator through `sim start` (the
+same lease, cap and release as any session), installs and looks at the app,
+then publishes what it saw. A succeeded build still registers its app without
+overwriting edited names or summaries.
 
 ## Output and persistence contract
 

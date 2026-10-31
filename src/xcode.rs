@@ -225,20 +225,12 @@ pub async fn build(
 }
 
 /// What a finished build leaves that nothing reads again: an archive job's
-/// DerivedData (its app and dSYMs are in the archive, the IPA in the export)
-/// and each preview rebuild's. A simulator job keeps its own: its app and
-/// dSYM live there.
+/// DerivedData (its app and dSYMs are in the archive, the IPA in the export).
+/// A simulator job keeps its own: its app and dSYM live there.
 pub fn spent(job_dir: &Path, mode: Option<&BuildMode>) -> Vec<PathBuf> {
     let mut spent = Vec::new();
     if matches!(mode, Some(BuildMode::Archive)) {
         spent.push(job_dir.join("DerivedData"));
-    }
-    if let Ok(rebuilds) = fs::read_dir(job_dir.join("preview-builds")) {
-        for rebuild in rebuilds.flatten() {
-            if let Ok(inner) = fs::read_dir(rebuild.path()) {
-                spent.extend(inner.flatten().map(|d| d.path().join("DerivedData")));
-            }
-        }
     }
     spent.retain(|p| p.is_dir());
     spent
