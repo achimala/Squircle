@@ -1532,7 +1532,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.contentView.alpha = item.id == flyingID || (landing.contains(item.id) && riser?.id != item.id) ? 0 : 1
         }
         // Only the row being swiped to reply sits aside.
-        if item.id != swiped, cell.contentView.transform.tx != 0 { cell.contentView.transform = .identity }
+        if item.id != swiped, cell.contentView.bounds.origin.x != 0 { cell.contentView.bounds.origin.x = 0 }
         switch item {
         case .header(let title):
             (cell as? HeaderCell)?.configure(title)
@@ -2409,7 +2409,9 @@ extension ThreadViewController: UIGestureRecognizerDelegate {
             return
         }
         let cell = table.cellForRow(at: path)
-        cell?.contentView.transform = resting ? .identity : CGAffineTransform(translationX: offset, y: 0)
+        // Moved by its bounds, not a transform: the cell lays its content
+        // view out again whenever it likes, which would undo a transform.
+        cell?.contentView.bounds.origin.x = resting ? 0 : -offset
         if resting { swiped = nil }
         replyGlyph.isHidden = resting || cell == nil
         guard let cell, !resting else { return }
@@ -2437,32 +2439,33 @@ extension ThreadViewController: UIGestureRecognizerDelegate {
         }
     }
 
-    @objc func tableView(_ tableView: UITableView, contextMenuConfiguration configuration: UIContextMenuConfiguration,
-                   highlightPreviewForItemAt indexPath: IndexPath) -> UITargetedPreview? {
-        lifted(at: indexPath)
+    @objc func tableView(_ tableView: UITableView, previewForHighlightingContextMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        lifted(configuration)
     }
 
-    @objc func tableView(_ tableView: UITableView, contextMenuConfiguration configuration: UIContextMenuConfiguration,
-                   dismissalPreviewForItemAt indexPath: IndexPath) -> UITargetedPreview? {
-        lifted(at: indexPath)
+    @objc func tableView(_ tableView: UITableView, previewForDismissingContextMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        lifted(configuration)
     }
 
     /// The message itself lifts with the menu: its bubble or card, or its text.
-    private func lifted(at path: IndexPath) -> UITargetedPreview? {
-        guard let cell = table.cellForRow(at: path) else { return nil }
+    private func lifted(_ configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        guard let id = configuration.identifier as? String, let path = dataSource.indexPath(for: id),
+              let cell = table.cellForRow(at: path) else { return nil }
         let parameters = UIPreviewParameters()
         parameters.backgroundColor = .clear
         if let cell = cell as? MessageCell {
+            // The row's content, cut to its bubble: the bubble and its words lift together.
             let surface = cell.surface
+            let frame = surface.convert(surface.bounds, to: cell.contentView)
             if surface === cell.text {
                 // Plain text: a little room around it, on the page's colour.
-                let room = surface.bounds.insetBy(dx: -Theme.Space.row, dy: -Theme.Space.row)
-                parameters.visiblePath = UIBezierPath(roundedRect: room, cornerRadius: Theme.Radius.small)
+                parameters.visiblePath = UIBezierPath(roundedRect: frame.insetBy(dx: -Theme.Space.row, dy: -Theme.Space.row),
+                                                      cornerRadius: Theme.Radius.small)
                 parameters.backgroundColor = Theme.paper
             } else {
-                parameters.visiblePath = UIBezierPath(roundedRect: surface.bounds, cornerRadius: Theme.Radius.large)
+                parameters.visiblePath = UIBezierPath(roundedRect: frame, cornerRadius: Theme.Radius.large)
             }
-            return UITargetedPreview(view: surface, parameters: parameters)
+            return UITargetedPreview(view: cell.contentView, parameters: parameters)
         }
         if let cell = cell as? QuestionCell {
             parameters.visiblePath = UIBezierPath(roundedRect: cell.item.bounds, cornerRadius: Theme.Radius.large)
