@@ -268,6 +268,15 @@ blank lines in the raw text. Each top-level block is one bubble:
 
 ### Where bubbles apply
 
+**Built (stage 2, `overhaul-chat`)**: `Markdown.paragraphs` cuts each
+answer (tested: lists, code, headings and colon lines stay whole);
+`ConversationText.bubbles` keeps the last paragraph back while a message
+streams; the conversation lands new bubbles one at a time on the send
+spring, each with `Theme.openHaptic`, the next once the last settles (one
+haptic and no rise under Reduce Motion). The spacing table is
+`ThreadViewController.halfGap`, applied to every row through
+`TimelineCell.gap`.
+
 **The app's agent conversation only.** Worker threads keep
 today's plain full-width text. A worker's messages are working notes: long
 Markdown with code, paths and tables that read better across the full width,
@@ -290,6 +299,10 @@ line is Line size with its check glyph in the slot, like every other line.
 ![Question card before](img/question-before.jpg)
 
 ![Question card after](img/question-after.jpg)
+
+Built (stage 2): `WaitingItemView` is the card, fill included, used by the
+chat's `QuestionCell`, Tasks, Home's deck and, without its fill, the
+thread's `RequestCard` on glass.
 
 One card, the same in the chat (under its "Asked you" line), in the Tasks
 sheet (under its task) and on Home (`WaitingItemView`, shared):
@@ -329,7 +342,9 @@ and approvals. Ready-to-try items, finished work, notes and task summaries
 never show there. They live in the Tasks sheet (Ready to try, the needs-you
 section).
 
-Today it also shows "needs-you tasks" with no question. A task set to needs
+Built (stage 3, `overhaul-home`): the service lists only open questions and
+thread requests (`Tasks::asking`), and the client has no `.task` item. Before,
+it also showed "needs-you tasks" with no question. A task set to needs
 you with only a note ("Merged; live and connected", "Starts once the
 question-card fix merges", or none at all) is listed as if it were a
 question. They come from the service (`src/server/waiting_routes.rs:203-219`,
@@ -497,7 +512,7 @@ it has).
   pictures and clips of the conversation page sideways under your finger,
   natively, with one spring and no crossfade.
 - Inline media drops its card frame: pictures sit on the page at an 8-point
-  radius, with 8 points between them.
+  radius, with 8 points between them (built, stage 2).
 
 ## In code
 

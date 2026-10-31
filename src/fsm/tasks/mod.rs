@@ -743,6 +743,19 @@ impl Book {
         })
     }
 
+    /// Open questions, each with the task holding it.
+    pub fn asking(&self) -> Vec<(Task, Question)> {
+        self.tasks
+            .values()
+            .flat_map(|t| {
+                t.questions
+                    .iter()
+                    .filter(|q| q.open())
+                    .map(|q| (t.publish(), q.clone()))
+            })
+            .collect()
+    }
+
     /// Answered questions whose answer has not reached its asker yet.
     pub fn owed(&self) -> Vec<(Task, Question)> {
         self.tasks

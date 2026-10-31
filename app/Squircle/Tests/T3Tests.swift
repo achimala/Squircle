@@ -156,8 +156,41 @@ final class T3Tests: XCTestCase {
             case .text(let text): "text:" + String(text.characters)
             case .media(let media): (media.video ? "video:" : "image:") + media.path
             case .table(let table): "table:" + ([table.header] + table.rows).map { $0.map { String($0.characters) }.joined(separator: ",") }.joined(separator: "/")
+            case .document(let path): "document:" + path
             }
         }
+    }
+
+    /// The app agent's bubbles: never a list, code block or a heading's or
+    /// colon line's block cut apart.
+    func testParagraphsKeepListsCodeAndLeadInsWhole() {
+        let text = """
+        Done. The **build** is on its way.
+
+        Still running:
+
+        - one
+
+        - two with `code`
+
+        ```
+        let a = 1
+
+        let b = 2
+        ```
+
+        ## Next
+        A paragraph after a heading.
+
+        Last *one*: with a colon inside.
+        """
+        let pieces = Markdown.paragraphs(Markdown.parse(text)).map { String($0.characters) }
+        XCTAssertEqual(pieces.count, 5, "\(pieces)")
+        XCTAssertEqual(pieces[0], "Done. The build is on its way.")
+        XCTAssertTrue(pieces[1].hasPrefix("Still running:") && pieces[1].contains("two with code"), pieces[1])
+        XCTAssertTrue(pieces[2].contains("let a = 1") && pieces[2].contains("let b = 2"), pieces[2])
+        XCTAssertTrue(pieces[3].hasPrefix("Next") && pieces[3].hasSuffix("after a heading."), pieces[3])
+        XCTAssertEqual(pieces[4], "Last one: with a colon inside.")
     }
 
     func testDiffKeepsDashDashAndPlusPlusLinesInsideHunks() {

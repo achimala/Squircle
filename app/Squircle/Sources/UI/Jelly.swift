@@ -336,8 +336,15 @@ final class JellyView: UIView {
     var look: JellyLook {
         didSet { if look != oldValue { lookChanged(from: oldValue) } }
     }
-    /// Plays its loop when allowed; false keeps it still (old lines, previews).
-    var animates = true { didSet { if animates != oldValue { JellyDirector.shared.needsUpdate() } } }
+    /// Plays its loop when allowed; false keeps it still (old lines,
+    /// previews), from this frame rather than the director's next tick.
+    var animates = true {
+        didSet {
+            guard animates != oldValue else { return }
+            if !animates, playing { play(false, now: 0) }
+            JellyDirector.shared.needsUpdate()
+        }
+    }
     let canvas: JellyCanvas
     private let picture = CALayer()
     private var frames: [CGImage] = []

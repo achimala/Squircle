@@ -18,7 +18,7 @@ final class ConversationText {
             text = NSAttributedString(string: message.content, attributes: [.font: Theme.Text.body, .foregroundColor: UIColor.label])
         case .note, .thought, .action, .agent:
             text = Markdown.render(markdown(message), font: Theme.Text.line, color: .secondaryLabel)
-        case .answer:
+        case .answer, .received:
             text = Markdown.render(markdown(message), font: Theme.Text.body, color: message.failed ? Theme.failure : .label)
         case .update:
             let font = Theme.Text.line
@@ -29,7 +29,7 @@ final class ConversationText {
                 line.append(NSAttributedString(string: "\t"))
             }
             line.append(NSAttributedString(string: message.content))
-            line.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: Self.slotted],
+            line.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: Self.slotted(font)],
                                range: NSRange(location: 0, length: line.length))
             text = line
         }
@@ -42,12 +42,35 @@ final class ConversationText {
         switch style {
         case .user: "user"
         case .answer: "answer"
+        case .received: "received"
         case .note: "note"
         case .thought: "thought"
         case .update: "update"
         case .action: "action"
         case .agent: "agent"
         }
+    }
+
+    private var cut: [String: (source: AnyHashable, pieces: [ChatMessage])] = [:]
+
+    /// The app agent's answer as received bubbles, one per paragraph
+    /// (`Markdown.paragraphs`). While it still streams, its last paragraph
+    /// waits: every one before it is final once the next has begun.
+    func bubbles(_ message: ChatMessage) -> [ChatMessage] {
+        let source: AnyHashable = [message.markdown.map(AnyHashable.init) ?? AnyHashable(message.content), AnyHashable(message.isStreaming)]
+        if let cached = cut[message.id], cached.source == source { return cached.pieces }
+        var paragraphs = Markdown.paragraphs(markdown(message))
+        if message.isStreaming { paragraphs.removeLast(min(1, paragraphs.count)) }
+        let pieces = paragraphs.enumerated().map { index, paragraph in
+            var piece = message
+            // The first keeps the message's identity.
+            if index > 0 { piece.id = message.id + "¶\(index)" }
+            piece.content = String(paragraph.characters)
+            piece.markdown = paragraph
+            return piece
+        }
+        cut[message.id] = (source, pieces)
+        return pieces
     }
 
     private func markdown(_ message: ChatMessage) -> AttributedString {
@@ -92,13 +115,16 @@ final class ConversationText {
 
     /// A line's glyph in the slot, its text at the slot's end, and wrapped
     /// lines hanging under the text, not the glyph.
-    private static let slotted: NSParagraphStyle = {
+    private static func slotted(_ font: UIFont) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.tabStops = [NSTextTab(textAlignment: .natural, location: Theme.Space.indent)]
         style.headIndent = Theme.Space.indent
         style.paragraphSpacing = Theme.Space.tight
+        // Every line keeps the font's height: a jelly rounds over its slot, never pushing the lines apart.
+        style.minimumLineHeight = ceil(font.lineHeight)
+        style.maximumLineHeight = ceil(font.lineHeight)
         return style
-    }()
+    }
 
     /// The state a worker line shows its jelly in: what the news said, or
     /// the worker's live state.
@@ -193,7 +219,7 @@ final class ConversationText {
             text.insert(NSAttributedString(string: "\t", attributes: [.font: font]), at: 0)
             text.insert(NSAttributedString(attachment: NSTextAttachment(image: symbol)), at: 0)
         }
-        text.addAttribute(.paragraphStyle, value: Self.slotted, range: NSRange(location: 0, length: text.length))
+        text.addAttribute(.paragraphStyle, value: Self.slotted(font), range: NSRange(location: 0, length: text.length))
         if expanded, let message = line.text?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {
             add("\n", font)
             text.append(Markdown.render(message, font: Theme.Text.line, color: .secondaryLabel))

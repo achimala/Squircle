@@ -871,7 +871,7 @@ final class SimulatorCell: TimelineCell {
         super.layoutSubviews()
         let height = Self.height
         let width = (height / 2.17).rounded()
-        button.frame = CGRect(x: Theme.Space.margin, y: 6, width: width, height: height)
+        button.frame = CGRect(x: Theme.Space.margin, y: gap.top, width: width, height: height)
         frameView.frame = button.bounds
         screen.frame = frameView.bounds
         posterView.frame = frameView.bounds
@@ -881,10 +881,10 @@ final class SimulatorCell: TimelineCell {
         CATransaction.commit()
     }
 
-    override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.height + 16) }
+    override func sizeThatFits(_ size: CGSize) -> CGSize { CGSize(width: size.width, height: Self.height + gap.top + gap.bottom) }
     override func systemLayoutSizeFitting(_ targetSize: CGSize, withHorizontalFittingPriority h: UILayoutPriority,
                                           verticalFittingPriority v: UILayoutPriority) -> CGSize {
-        CGSize(width: targetSize.width, height: Self.height + 16)
+        sizeThatFits(targetSize)
     }
 
     private func updateBorder() { frameView.layer.borderColor = UIColor.label.resolvedColor(with: traitCollection).withAlphaComponent(0.85).cgColor }
