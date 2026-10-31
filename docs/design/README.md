@@ -494,6 +494,12 @@ are clearly visible and part of the task list."
   holds only work items with something to answer there (2026-10-31: needs
   you is derived from open questions and approvals, never set; see
   [tasks](../task-tracking.md#needs-you-is-derived-never-set-2026-10-31-user-decision)).
+- **In progress next** (2026-10-31, user: "working tasks with live threads
+  should sort to top"): after Needs you, the work items whose linked thread
+  or build is running right now, their threads nested under them; in
+  progress is derived from that, never set (see
+  [tasks](../task-tracking.md#in-progress-is-derived-never-set-2026-10-31-user-decision)).
+  Then Ready to try, Queued, Done, History.
 - **Row swipe actions** (2026-10-31, user: "lol what is this illegible",
   a white Top pill with white text): swipe left for Drop and Done, each its
   glyph in Body over its label in Caption, in `onAccent` on `failure` and

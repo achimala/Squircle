@@ -21,15 +21,17 @@ and the same following of linked work. `squircle task sub add ITEM --ask
 task's; `task update ID --under ITEM|none` moves a misfiled ask. Existing
 `tasks.json` records load as work items with no sub-tasks (no `parent`).
 
-**Roll-up** (`rollup` in `src/fsm/tasks/`): a work item with sub-tasks takes
-the roll-up of its sub-tasks and its own linked work whenever a sub-task's
-status changes (or its own linked work has news): any in progress, or some finished and some still queued → in progress; all
-queued → queued; else any ready to try → ready to try; all closed → done if
-the user closed the last one, ready to try if the agent or linked work did
-(the user decides done), dropped if all were dropped. A status set on the
-work item explicitly holds until then. A closed work item reopens only when
-a sub-task has work again (added, queued, in progress, asked about). Needs
-you is not rolled up but shown (below). Closing a
+**Roll-up** (`rollup` in `src/fsm/tasks/`; since 2026-10-31 over resting
+stages, below): a work item with sub-tasks rests at the roll-up of its
+sub-tasks and its own linked work whenever a sub-task's status changes (or
+its own linked work has news): all queued (and no work of its own) → queued;
+else any still open → ready to try; all closed → done if the user closed the
+last one, ready to try if the agent or linked work did (the user decides
+done), dropped if all were dropped. A status set on the work item explicitly
+holds until then. A closed work item reopens only when a sub-task has work
+again (added, queued, its work running, asked about). Needs you and in
+progress are not rolled up but shown (below): an item shows in progress
+while any of its open sub-tasks' work runs. Closing a
 work item (done or dropped) closes its open sub-tasks the same way. Sub-tasks
 don't age on their own: they move to History with their work item, and any
 change to one touches its work item.
@@ -76,6 +78,44 @@ behind after a question was answered or withdrawn. So:
   the spot), what it is about as a short strip, the answers and a write-in
   row. A task that shows needs you but whose question hasn't reached the
   phone yet sits in In progress until it does.
+
+## In progress is derived, never set (2026-10-31, user decision)
+
+User: "I think working tasks with live threads should sort to top", then:
+"working only while a linked thread or build is actually running, sorted to
+the top; everything else falls to queued or ready to try." Agents set in
+progress by hand ("Merged; build coming"), and sub-tasks left there rolled
+up, so tasks showed as working with nothing live: 41 of the Mac's 464 tasks
+were kept at in progress.
+
+- **A task rests at a stage** (`Stage`: queued, ready to try, done,
+  dropped) and **shows as in progress** (`Book::shown`, after needs you)
+  exactly while it is open and a linked thread is running (T3's run state:
+  the shell row's `status` is a running one, `Phase::Working`) or a linked
+  build is queued or running; a work item also while one of its open
+  sub-tasks does. A thread T3's current shell no longer has (archived or
+  deleted) is `Gone`, not running; a shell that isn't current is no fact and
+  keeps what was last seen.
+- **Resting.** When linked work with news stops, an open task rests at queued
+  if no work has happened yet (no linked work ever seen, never ready to try
+  or done), otherwise ready to try. A failed build or a stopped worker rests
+  it at ready to try too. While its work runs, its stage doesn't move (no
+  history entry for it starting); a done or dropped task still reopens only
+  for new work, to where it rests. Answering a question no longer sets
+  anything: the asker running again shows it.
+- **It can't be set.** `task add|sub add|update --status in_progress` is
+  refused with a message to link the work instead (hidden from the CLI's
+  choices); the phone's status menu has no In progress. Agents still set
+  queued, ready to try (work done themselves), done and dropped.
+- **Migrated once.** Records kept at in progress load where they rest (by
+  the rule above) and are saved at startup (`Event::Migrate`, which also
+  rolls up the work items among or above them). Checked on a copy of the
+  Mac's `tasks.json` (464 tasks): the 41 came back as 26 ready to try, 11
+  queued and 4 still shown in progress (each with a linked worker last seen
+  running); a second read had nothing left to migrate.
+- **On the phone** the outline puts In progress first, right under Needs you,
+  each with its live threads nested under it; then Ready to try, Queued,
+  Done and History as before.
 
 ## Questions and what waits on you (2026-10-26, user decision)
 
@@ -240,15 +280,15 @@ current, and the latest asks lost. So:
 
 Kept per app (T3 project) in `<data>/tasks.json`; attachments in
 `<data>/tasks/<id>/media` (screenshots, clips, and documents: pdf, md, txt, json, csv, which the phone opens in Quick Look). A task has the ask, a status (`queued`,
-`in_progress`, `needs_you`, `ready_to_try`, `done`, `dropped`), a few-word
+`in_progress` and `needs_you` shown only, `ready_to_try`, `done`, `dropped`), a few-word
 note, the chat message it came from (the agent's latest user message when it
 adds the task), linked worker threads and builds, an order within its group,
 attached screenshots and clips, and a history of status changes (by agent,
 user or auto).
 
-**Status follows linked work** (`Signals::implied`): a linked worker waiting
-on a question → needs you; a worker working or a build queued/running → in
-progress; the newest linked build succeeded → ready to try. An explicit
+**Status follows linked work** (since 2026-10-31 shown, above: a worker
+waiting → needs you, running work → in progress; once linked work with news
+stops it rests at ready to try). An explicit
 status from the agent or the user holds until a linked worker's or build's
 state changes after the moment it was chosen. A link going missing (an
 archived worker, or a shell that isn't current) is no fact at all and
@@ -315,7 +355,7 @@ unusable" on a real list (LanguageApp: 24 open items, long asks): 24 pages
 swiped blind with no way to scan, find or compare. The Tasks tab now opens
 on an overview of every work item: a search field (once there are more than
 six tasks; it looks through History too), then groups Needs you, Ready to
-try, In progress, Queued, Done (today's) and History (folded). Rows are
+try, In progress, Queued, Done (today's) and History (folded; since 2026-10-31 In progress comes right after Needs you, above). Rows are
 compact: the round tick in the status colour (one tap marks it done; the
 batch, 0.65 s settle and the 4 s Undo capsule are back), the ask's first two
 lines, then sub-task progress ("2/5") and the note on one line, and the
