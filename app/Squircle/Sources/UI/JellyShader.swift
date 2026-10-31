@@ -15,6 +15,8 @@ struct JellyUniforms {
     var stubs: SIMD4<Float>
     /// Who it is: eye spacing, cube aspect (wide > 1), eye size, corner roundness.
     var look: SIMD4<Float> = JellyUniforms.plainLook
+    /// A worker's sprout (`JellyTraits`): kind (0 none), lean, scale, -.
+    var sprout: SIMD4<Float> = .zero
     var center: SIMD2<Float>
     var half: SIMD2<Float>
     var origin: SIMD2<Float>
@@ -32,7 +34,7 @@ struct JellyUniforms {
     static let plainLook = SIMD4<Float>(1, 1, 1, 0.28)
 
     var isFinite: Bool {
-        [tint, fill, face, inverse, creature, pose, gaze, bridge, stubs, look].allSatisfy { v in (0..<4).allSatisfy { v[$0].isFinite } }
+        [tint, fill, face, inverse, creature, pose, gaze, bridge, stubs, look, sprout].allSatisfy { v in (0..<4).allSatisfy { v[$0].isFinite } }
             && [center, half, origin].allSatisfy { $0.x.isFinite && $0.y.isFinite } && pillow.isFinite && opened.isFinite
     }
 
@@ -42,7 +44,7 @@ struct JellyUniforms {
         func near(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Bool { (0..<2).allSatisfy { Swift.abs(a[$0] - b[$0]) < 0.02 } }
         return near(tint, o.tint, 0.002) && near(fill, o.fill, 0.002) && near(inverse, o.inverse, 0.0005)
             && near(face, o.face, 0.003) && near(pose, o.pose, 0.0008) && near(gaze, o.gaze, 0.01)
-            && near(bridge, o.bridge, 0.005) && near(stubs, o.stubs, 0.01) && look == o.look
+            && near(bridge, o.bridge, 0.005) && near(stubs, o.stubs, 0.01) && look == o.look && sprout == o.sprout
             && near(creature, o.creature, 0.05) && near(center, o.center) && near(half, o.half) && near(origin, o.origin)
             && Swift.abs(pillow - o.pillow) < 0.02 && radius == o.radius && dark == o.dark && Swift.abs(opened - o.opened) < 0.002
     }
@@ -103,6 +105,7 @@ enum JellyRenderer {
         float4 bridge;    // waist, catenoid c, end radius, connected
         float4 stubs;     // stub at the root, stub at the cube, cube scale, -
         float4 look;      // eye spacing, cube aspect, eye size, corner roundness
+        float4 sprout;    // kind (0 none), lean, scale, -
         float2 center;
         float2 half_;
         float2 origin;
@@ -145,6 +148,22 @@ enum JellyRenderer {
         float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
         return length(pa - ba * h);
     }
+
+    static float capsule(float3 p, float3 a, float3 b, float r) {
+        float3 pa = p - a, ba = b - a;
+        float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+        return length(pa - ba * h) - r;
+    }
+
+    static float ellipsoid(float3 p, float3 r) {
+        float k0 = length(p / r), k1 = length(p / (r * r));
+        return k0 * (k0 - 1.0) / max(k1, 1e-4);
+    }
+
+    static float3 spin(float3 v, float a) { return float3(cos(a) * v.x - sin(a) * v.y, sin(a) * v.x + cos(a) * v.y, v.z); }
+
+    // A leaf: a flat ellipsoid at c, its long axis turned by a from upright.
+    static float leaf(float3 v, float2 c, float a, float3 r) { return ellipsoid(spin(v - float3(c, 0.0), -a), r); }
 
     // Two eyes in a face plane (points). Coverage in .a, ink in .rgb.
     static float4 eyes(float2 q, float px, float3 tint, constant Uniforms& u) {
@@ -233,6 +252,84 @@ enum JellyRenderer {
         return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
     }
 
+    // A worker's sprout, upright in units of the cube's size, rooted at the
+    // middle of its top (y up is negative): its shape is who it is.
+    static float sproutShape(float3 v, int kind) {
+        float3 m = float3(abs(v.x), v.yz);  // mirrored, for pairs
+        switch (kind) {
+        case 1:  // antenna
+            return min(capsule(v, 0.0, float3(0, -0.34, 0), 0.05), length(v - float3(0, -0.38, 0)) - 0.11);
+        case 2:  // two leaves
+            return min(capsule(v, 0.0, float3(0, -0.2, 0), 0.045), leaf(m, float2(0.12, -0.25), 1.1, float3(0.065, 0.14, 0.06)));
+        case 3:  // cat ears
+            return leaf(m, float2(0.26, -0.06), 0.4, float3(0.085, 0.2, 0.07));
+        case 4: {  // tuft
+            float d = capsule(v, 0.0, float3(0, -0.3, 0), 0.04);
+            return min(d, capsule(m, 0.0, float3(0.13, -0.22, 0), 0.04));
+        }
+        case 5:  // bun
+            return min(length(v - float3(0, -0.14, 0)) - 0.17, length(v - float3(0, -0.34, 0)) - 0.09);
+        case 6:  // one big leaf
+            return min(capsule(v, 0.0, float3(0, -0.12, 0), 0.04), leaf(v, float2(0.1, -0.25), 0.75, float3(0.075, 0.18, 0.06)));
+        case 7:  // clover
+            return min(capsule(v, 0.0, float3(0, -0.2, 0), 0.04),
+                       min(length(v - float3(0, -0.33, 0)) - 0.085, length(m - float3(0.1, -0.25, 0)) - 0.085));
+        case 8:  // two antennae
+            return min(capsule(m, float3(0.05, 0, 0), float3(0.17, -0.3, 0), 0.04), length(m - float3(0.18, -0.32, 0)) - 0.08);
+        case 9:  // hook
+            return min(min(capsule(v, 0.0, float3(0, -0.22, 0), 0.045), capsule(v, float3(0, -0.22, 0), float3(0.12, -0.31, 0), 0.045)),
+                       capsule(v, float3(0.12, -0.31, 0), float3(0.17, -0.21, 0), 0.04));
+        case 10:  // horns
+            return min(capsule(m, float3(0.2, 0, 0), float3(0.26, -0.12, 0), 0.07), capsule(m, float3(0.26, -0.12, 0), float3(0.34, -0.22, 0), 0.04));
+        case 11:  // bunny ears
+            return leaf(m, float2(0.11, -0.22), 0.15, float3(0.07, 0.22, 0.06));
+        case 12: {  // flower
+            float d = min(capsule(v, 0.0, float3(0, -0.2, 0), 0.04), length(v - float3(0, -0.31, 0)) - 0.065);
+            for (int i = 0; i < 5; i++) {
+                float a = float(i) * 1.2566 - 1.5708;
+                d = min(d, length(v - float3(0.105 * cos(a), -0.31 + 0.105 * sin(a), 0)) - 0.06);
+            }
+            return d;
+        }
+        case 13:  // drop
+            return smin(length(v - float3(0, -0.14, 0)) - 0.12, capsule(v, float3(0, -0.2, 0), float3(0, -0.36, 0), 0.02), 0.12);
+        case 14:  // kinked stalk
+            return min(min(capsule(v, 0.0, float3(0.08, -0.18, 0), 0.04), capsule(v, float3(0.08, -0.18, 0), float3(-0.04, -0.32, 0), 0.04)),
+                       length(v - float3(-0.05, -0.34, 0)) - 0.075);
+        case 15:  // three prongs
+            return min(min(capsule(v, 0.0, float3(0, -0.18, 0), 0.04), length(v - float3(0, -0.21, 0)) - 0.07),
+                       min(capsule(m, float3(0.12, 0, 0), float3(0.2, -0.12, 0), 0.04), length(m - float3(0.21, -0.15, 0)) - 0.065));
+        case 16:  // fin, front to back
+            return ellipsoid(v - float3(0, -0.12, 0), float3(0.06, 0.25, 0.26));
+        case 17:  // bear ears
+            return length(m - float3(0.26, -0.08, 0)) - 0.135;
+        case 18:  // sapling
+            return min(min(capsule(v, 0.0, float3(0, -0.4, 0), 0.035), leaf(v, float2(0.07, -0.31), 0.95, float3(0.04, 0.09, 0.04))),
+                       leaf(v, float2(-0.06, -0.2), -0.95, float3(0.035, 0.075, 0.035)));
+        case 19:  // cherries
+            return min(min(capsule(v, 0.0, float3(0, -0.36, 0), 0.03), capsule(m, float3(0, -0.36, 0), float3(0.12, -0.2, 0), 0.028)),
+                       length(m - float3(0.13, -0.17, 0)) - 0.075);
+        default:  // sprig
+            return min(leaf(v, float2(0, -0.15), 0.0, float3(0.05, 0.15, 0.05)), leaf(m, float2(0.08, -0.12), 0.5, float3(0.045, 0.13, 0.045)));
+        }
+    }
+
+    static float sproutD(float3 P, Scene sc, constant Uniforms& u) {
+        float s = sc.s, squash = u.pose.w;
+        float3 l = sc.inv * (P - sc.cube);
+        l.y -= s * 0.5 * squash;
+        float top = -s * 0.5 * (1.0 - squash) / sqrt(u.look.y);
+        float k = s * u.sprout.z;
+        float3 v = spin(l - float3(0, top + s * 0.05, 0), -u.sprout.y * 0.38) / k;
+        return sproutShape(v, int(u.sprout.x + 0.5)) * k;
+    }
+
+    // The cube, with its sprout grown out of it.
+    static float headD(float3 P, Scene sc, constant Uniforms& u) {
+        float d = cubeD(P, sc, u);
+        return u.sprout.x > 0.5 ? smin(d, sproutD(P, sc, u), sc.s * 0.08) : d;
+    }
+
     // The liquid bridge: a catenoid, r(t) = waist·cosh((t − L/2)/c), the
     // shape surface tension pulls a neck between two bodies into.
     static float bridgeD(float3 P, Scene sc, constant Uniforms& u) {
@@ -272,7 +369,7 @@ enum JellyRenderer {
 
     // Menisci: each join is a smooth union, a concave fillet.
     static float scene(float3 P, Scene sc, constant Uniforms& u) {
-        float body = slab(P, u), neck = bridgeD(P, sc, u), head = cubeD(P, sc, u);
+        float body = slab(P, u), neck = bridgeD(P, sc, u), head = headD(P, sc, u);
         return smin(smin(body, neck, 7.0), head, 7.0);
     }
 
@@ -325,7 +422,7 @@ enum JellyRenderer {
         float2 slope = float2(dfdx(d2), dfdy(d2)) * u.scale;
         // How close the cube and the neck come, as seen from the front (a
         // bound on their 3D distance, squashed or turned).
-        float near = min(length(p - u.creature.xy) - sc.s * 1.15, segment(p, u.gaze.zw, u.creature.xy) - u.bridge.z);
+        float near = min(length(p - u.creature.xy) - sc.s * (u.sprout.x > 0.5 ? 1.4 : 1.15), segment(p, u.gaze.zw, u.creature.xy) - u.bridge.z);
         // Far from everything: nothing to draw.
         if (min(d2, near) > 10.0) { return float4(0.0); }
 
@@ -361,7 +458,7 @@ enum JellyRenderer {
                            + float3(-1, -1, 1) * scene(pos + float3(-1, -1, 1) * e, sc, u)
                            + float3(-1, 1, -1) * scene(pos + float3(-1, 1, -1) * e, sc, u)
                            + float3(1, 1, 1) * scene(pos + float3(1, 1, 1) * e, sc, u));
-        return shade(pos, n, slab(pos, u), cubeD(pos, sc, u), rest(pos.xy, u), px, sc, u) * cover;
+        return shade(pos, n, slab(pos, u), headD(pos, sc, u), rest(pos.xy, u), px, sc, u) * cover;
     }
     """
 }

@@ -170,9 +170,10 @@ final class ConversationText {
         // the state it is in now (a still; the Tasks row is where it moves).
         var lead: CGFloat = 27
         if let worker = line.thread?.raw, let mood = workerMood(line),
-           let image = JellySprites.shared.image(.worker(worker, mood), Self.lineJelly, traits: traits) {
+           case let look = JellyLook.worker(worker, mood),
+           let image = JellySprites.shared.image(look, Self.lineJelly, traits: traits) {
             let attachment = NSTextAttachment(image: image)
-            let size = image.size, body = Self.lineJelly.body
+            let size = image.size, body = Self.lineJelly.fitting(look).body
             attachment.bounds = CGRect(x: 0, y: (font.capHeight - Self.lineJelly.size) / 2 - (size.height - body.maxY), width: size.width, height: size.height)
             text.insert(NSAttributedString(string: " ", attributes: [.font: font]), at: 0)
             text.insert(NSAttributedString(attachment: attachment), at: 0)
