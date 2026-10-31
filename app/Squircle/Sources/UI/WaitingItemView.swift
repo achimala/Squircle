@@ -360,12 +360,15 @@ final class WaitingCell: UITableViewCell {
 
 /// Everything waiting on you across apps, at the top of Home above the
 /// devices: each app's name, then what waits there (a few, then how many
-/// more), answerable with a tap where the answers are a few choices. The
-/// rest open the app's Tasks sheet at the item.
+/// more), answerable with a tap where the answers are a few choices.
+/// Tapping a question's text opens the conversation that asked it, at the
+/// spot; a needs-you task opens the app's Tasks sheet at it.
 @MainActor
 final class HomeWaitingView: UIView {
     /// Opens an app's Tasks sheet, at an item's task when it has one.
     var onOpen: ((_ project: String, _ task: String?) -> Void)?
+    /// Opens the thread that asked, where it asked.
+    var onJump: ((_ project: String, _ item: WaitingList.Item) -> Void)?
     private let answers: WaitingAnswers
     private let stack = UIStackView()
     private var shown: (list: WaitingList, busy: Set<String>)?
@@ -398,6 +401,11 @@ final class HomeWaitingView: UIView {
     func update(_ list: WaitingList, order: [String], busy: Set<String>) -> Bool {
         var list = list
         list.apps.sort { (order.firstIndex(of: $0.projectID) ?? .max) < (order.firstIndex(of: $1.projectID) ?? .max) }
+        // Questions first: a needs-you task can wait in Tasks, an agent can't.
+        list.apps = list.apps.map { app in
+            let asks = app.items.filter { if case .task = $0 { false } else { true } }
+            return WaitingList.App(projectID: app.projectID, name: app.name, items: asks + app.items.filter { if case .task = $0 { true } else { false } })
+        }
         if let shown, shown.list == list, shown.busy == busy { return false }
         shown = (list, busy)
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
@@ -442,16 +450,15 @@ final class HomeWaitingView: UIView {
         return wrap
     }
 
-    /// One item: tapping beside its answers opens it in the app's Tasks.
+    /// One item: tapping beside its answers opens where it was asked (a
+    /// needs-you task, in the app's Tasks).
     private func row(_ item: WaitingList.Item, project: String) -> UIView {
         let control = HomeWaitingRow()
         answers.configure(control.item, item, about: true) { [weak self] in self?.superview?.setNeedsLayout() }
-        let task: String? = switch item {
-        case .question(let question): question.taskID
-        case .task(let task): task.taskID
-        case .request: nil
-        }
-        control.addAction(UIAction { [weak self] _ in self?.onOpen?(project, task) }, for: .touchUpInside)
+        control.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            if case .task(let task) = item { onOpen?(project, task.taskID) } else { onJump?(project, item) }
+        }, for: .touchUpInside)
         return control
     }
 }

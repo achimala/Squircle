@@ -10,6 +10,8 @@ import UIKit
 final class TasksViewController: UIViewController, UIScrollViewDelegate, UITableViewDelegate, UIGestureRecognizerDelegate {
     /// A thread to open; nil starts a new one.
     var onOpen: ((String?) -> Void)?
+    /// A question's text tapped: the conversation that asked it, at the spot.
+    var onJump: ((WaitingList.Item) -> Void)?
     private let model: SquircleModel
     private var project: AppProject
     private let tabs = UISegmentedControl(items: ["Tasks", "Threads"])
@@ -792,17 +794,22 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         tableView.deselectRow(at: indexPath, animated: true)
         guard let id = dataSource.itemIdentifier(for: indexPath), id != Self.searchRow else { return }
         // A sub-task that needs you opens its work item's page.
-        if case .task(let sub)? = asks[id]?.item {
+        switch asks[id]?.item {
+        case .task(let sub)?:
             list.tasks.first { $0.subtasks.contains { $0.id == sub.taskID } }.map { showItem($0.id) }
             return
+        case let item? where item.threadID != nil:
+            onJump?(item)
+            return
+        default: break
         }
         showItem(id)
     }
 
     func tableView(_ tableView: UITableView, shouldHighlightRowAt indexPath: IndexPath) -> Bool {
         guard let id = dataSource.itemIdentifier(for: indexPath) else { return false }
-        if case .task? = asks[id]?.item { return true }
-        return id != Self.searchRow && !id.hasPrefix(Self.askPrefix)
+        if let item = asks[id]?.item { if case .task = item { return true }; return item.threadID != nil }
+        return id != Self.searchRow
     }
 
     func tableView(_ tableView: UITableView, willBeginEditingRowAt indexPath: IndexPath) { swiping = true }

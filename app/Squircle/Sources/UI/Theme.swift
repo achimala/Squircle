@@ -195,3 +195,24 @@ extension NSObjectProtocol {
         if self[keyPath: property] != value { self[keyPath: property] = value }
     }
 }
+
+extension CALayer {
+    /// Where Waiting on you took you: an accent ring that fades as the card
+    /// gives a small nod. Animations only, so touches pass as ever.
+    func markSpot(in traits: UITraitCollection) {
+        borderColor = Theme.accent.resolvedColor(with: traits).cgColor
+        let ring = CAKeyframeAnimation(keyPath: "borderWidth")
+        ring.values = [0, 2.5, 2.5, 0]
+        ring.keyTimes = [0, 0.12, 0.55, 1]
+        ring.duration = 1.8
+        add(ring, forKey: "mark")
+        guard !Motion.reduced else { return }
+        let nod = CASpringAnimation(keyPath: "transform.scale")
+        nod.fromValue = 0.96
+        nod.toValue = 1
+        nod.damping = 9
+        nod.stiffness = 170
+        nod.duration = nod.settlingDuration
+        add(nod, forKey: "nod")
+    }
+}

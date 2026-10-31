@@ -23,6 +23,8 @@ struct WaitingList: Decodable, Equatable {
         /// The worker that asked; nil for the app's agent.
         let from: String?
         let threadID: String?
+        /// When it was asked, to find it in the asking thread's conversation.
+        let askedAt: Date?
     }
 
     /// A thread's own question or approval, answered straight to it.
@@ -47,6 +49,15 @@ struct WaitingList: Decodable, Equatable {
         case question(Question)
         case request(Request)
         case task(NeedsYou)
+
+        /// The thread that asked: where it shows in a conversation.
+        var threadID: String? {
+            switch self {
+            case .question(let q): q.threadID
+            case .request(let r): r.threadID
+            case .task: nil
+            }
+        }
 
         /// Stable across replies, for rows.
         var id: String {
@@ -78,7 +89,8 @@ struct WaitingList: Decodable, Equatable {
             guard let id = value["id"].string, let task = value["task_id"].string, let text = value["text"].string else { return nil }
             return .question(Question(id: id, taskID: task, ask: value["ask"].string ?? "", itemAsk: value["item_ask"].string,
                                       text: text, options: value["options"].array.compactMap(\.string), from: value["from"].string,
-                                      threadID: value["thread_id"].string))
+                                      threadID: value["thread_id"].string,
+                                      askedAt: value["asked_at"].double.map(Date.init(timeIntervalSince1970:))))
         case "request":
             guard let thread = value["thread_id"].string, let request = value["request_id"].string else { return nil }
             return .request(Request(threadID: thread, title: value["title"].string ?? "", worker: value["worker"].bool,

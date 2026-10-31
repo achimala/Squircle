@@ -134,6 +134,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private lazy var picker = AttachmentPicker(host: self) { [weak self] attachment in self?.model.attach(attachment) }
     private let notice = Theme.label("", Theme.font(.footnote, 13), color: Theme.failure, lines: 3)
     private lazy var requestCard = RequestCard(drafts: model.questionAnswers)
+    /// Answers the questions shown in the conversation, as Waiting on you does.
+    private lazy var answers = WaitingAnswers(model: model)
     private var request: UIVisualEffectView { requestCard.view }
 
     private var flyingID: String?
@@ -182,7 +184,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// Row text rendered once per source; tables measured per width and text size.
     private let rowText = ConversationText()
     private var expanded = Set<String>()
-    private var pinToBottom = true
+    private var pinToBottom = true { didSet { if pinToBottom { held = nil } } }
     /// The debug overlay's even inset and the safe area its glass will have
     /// at rest (the glass stretches, so UIKit's own would change every frame).
     private var overlayLayout: (inset: CGFloat, safe: UIEdgeInsets, contentWidth: CGFloat?)?
@@ -339,7 +341,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.showsVerticalScrollIndicator = false
         table.contentInsetAdjustmentBehavior = .never
         table.delegate = self
-        table.onLayout = { [weak self] wasAtEnd in self?.keepEnd(wasAtEnd) }
+        table.onLayout = { [weak self] wasAtEnd in self?.keepEnd(wasAtEnd); self?.hold() }
         table.estimatedRowHeight = 60
         table.register(MessageCell.self, forCellReuseIdentifier: "message")
         table.register(HeaderCell.self, forCellReuseIdentifier: "header")
@@ -352,6 +354,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         table.register(BuildCell.self, forCellReuseIdentifier: "build")
         table.register(ChangesCell.self, forCellReuseIdentifier: "changes")
         table.register(SimulatorCell.self, forCellReuseIdentifier: "simulator")
+        table.register(QuestionCell.self, forCellReuseIdentifier: "question")
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] table, indexPath, id in
             guard let self, let item = itemsByID[id] else { return UITableViewCell() }
             let cell = table.dequeueReusableCell(withIdentifier: Self.reuseIdentifier(for: item), for: indexPath)
@@ -827,6 +830,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             view.setNeedsLayout()
         }
         renderItems()
+        // Caught up with T3 without a row changing: the spot may be found now.
+        applyFocus()
     }
 
     /// Shown on the app's agent while it has open tasks.
@@ -892,6 +897,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .build: return "build"
         case .changes: return "changes"
         case .simulator: return "simulator"
+        case .question: return "question"
         }
     }
 
@@ -900,9 +906,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard let content = model.content(of: conversation) else { return nil }
         let header: [ThreadItem] = threadTitle.isEmpty ? [] : [.header(threadTitle)]
         let messages = displayedMessages(content.messages)
-        return (header + resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
-                                                  builds: model.builds, changes: content.changes,
-                                                  simulators: content.simulators, thread: currentSessionID)), messages)
+        let rows = resolve(ThreadItem.items(messages: messages, running: content.running, expanded: expanded,
+                                            builds: model.builds, changes: content.changes,
+                                            simulators: content.simulators, thread: currentSessionID))
+        return (header + ThreadItem.placing(openQuestions, in: rows), messages)
     }
 
     private func renderItems(animated: Bool = false) {
@@ -986,6 +993,70 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if !quiet, previous["live"] != nil, liveTurn == nil, let turn = wasLive, itemsByID["summary:" + turn] != nil {
             celebrate("summary:" + turn)
         }
+        applyFocus()
+    }
+
+    // MARK: Focus
+
+    /// What Waiting on you opened this conversation at (`WaitingList.Item.id`),
+    /// until it shows: a question's card where it was asked, or the open request.
+    private var focus: String?
+
+    /// Opens at `item`: scrolled to where it was asked and marked, as soon
+    /// as the conversation has it. A scroll takes over.
+    func focus(on item: String) {
+        focus = item
+        // A thread's open request is the newest thing in it, its card at the end.
+        pinToBottom = item.hasPrefix("r.")
+        applyFocus()
+    }
+
+    private func applyFocus() {
+        guard let target = focus, isActive, preparedHeight == nil, table.bounds.height > 0 else { return }
+        if target.hasPrefix("r.") {
+            guard model.requests.first.map({ QuestionAnswers.key(request: $0.id) }) == target else { return }
+            focus = nil
+            scrollToBottom()
+            requestCard.mark()
+            return
+        }
+        // Everything T3 has of the thread first, so the card sits where it was asked.
+        guard conversation.threadID == nil || model.caughtUp else { return }
+        let row = "ask:" + target
+        guard let path = dataSource.indexPath(for: row) else {
+            // Answered meanwhile: nothing to show.
+            if !model.waiting.apps.contains(where: { $0.items.contains { $0.id == target } }) { focus = nil }
+            return
+        }
+        focus = nil
+        scrollSpring.stop()
+        held = row
+        for _ in 0..<6 where hold() { table.layoutIfNeeded() }
+        let bottom = table.contentSize.height + table.contentInset.bottom - table.bounds.height
+        setJumpShown(bottom - table.contentOffset.y > 320)
+        (table.cellForRow(at: path) as? QuestionCell)?.mark()
+    }
+
+    /// The card Waiting on you brought you to, kept in place as rows around
+    /// it are measured or arrive (as the end is when pinned), until you
+    /// scroll or the conversation goes to its end.
+    private var held: String?
+
+    /// Puts the held card low on screen, what led up to it above, its top
+    /// never under the controls. True when it moved.
+    @discardableResult
+    private func hold() -> Bool {
+        guard let row = held, !pinToBottom, !table.isTracking, !table.isDecelerating, !scrollSpring.isAnimating,
+              let path = dataSource.indexPath(for: row) else { return false }
+        let rect = table.rectForRow(at: path)
+        let visible = table.bounds.height - table.contentInset.top - table.contentInset.bottom
+        let low = rect.maxY + 28 - table.contentInset.top - visible
+        let top = rect.minY - 16 - table.contentInset.top
+        let end = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
+        let y = min(max(-table.contentInset.top, min(low, top)), end)
+        guard abs(table.contentOffset.y - y) > 0.5 else { return false }
+        table.contentOffset.y = y
+        return true
     }
 
     /// A row in view whose new content keeps its height is updated where
@@ -1001,6 +1072,16 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         guard abs(fitted - height) < 0.5 else { return false }
         cell.setNeedsLayout()
         return true
+    }
+
+    /// What this thread asked you in the tracker and you haven't answered yet.
+    private var openQuestions: [(question: WaitingList.Question, busy: Bool)] {
+        guard let thread = conversation.threadID else { return [] }
+        let busy = model.answering
+        return model.waiting.apps.first { $0.projectID == project.id }?.items.compactMap { item in
+            guard case .question(let question) = item, question.threadID == thread else { return nil }
+            return (question, busy.contains(item.id))
+        } ?? []
     }
 
     /// Names and live states for the workers action lines mention.
@@ -1143,6 +1224,9 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         scrollSpring.stop()
+        // The finger takes over from wherever Waiting on you was taking it.
+        focus = nil
+        held = nil
         // The finger scrolls: no tap is coming; the scroll has the frames.
         onScrollBegan?()
     }
@@ -1262,6 +1346,13 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             cell.configure(use, feeds: simulatorFeeds, video: stepID.flatMap(StepVideos.url(for:)), poster: poster, tappable: tappable)
             cell.showing = onScreen
             cell.onTap = tappable ? { [weak self] in self?.openSimulator(use) } : nil
+        case .question(let item, _):
+            guard let cell = cell as? QuestionCell else { return }
+            cell.item.fitWidth = max(0, table.bounds.width - 60)
+            answers.configure(cell.item, item, about: true) { [weak self] in
+                // The next of several questions: the row takes its new height.
+                UIView.performWithoutAnimation { self?.table.performBatchUpdates(nil) }
+            }
         }
     }
 
@@ -1493,6 +1584,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .build: return 74
         case .changes: return 46
         case .simulator: return SimulatorCell.height + 16
+        case .question: return 190
         case nil: return 60
         }
     }
@@ -1728,6 +1820,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
 
     private var debugRequest: PendingRequest?
     private func renderRequest() {
+        defer { applyFocus() }
         guard let change = requestCard.show(debugRequest ?? model.requests.first) else { return }
         view.setNeedsLayout()
         guard change == .appeared, !Motion.reduced else { return }
