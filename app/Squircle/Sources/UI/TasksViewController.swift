@@ -1521,6 +1521,8 @@ final class ThreadLine: UIControl {
     private let screen = SimulatorScreen()
     private var thumbWidth: NSLayoutConstraint!
     private var thumbHeight: NSLayoutConstraint!
+    /// Room above the words for the jelly's sprout and hop.
+    private var headroom: NSLayoutConstraint!
     private var shown: Content?
 
     init(size: Size) {
@@ -1540,18 +1542,20 @@ final class ThreadLine: UIControl {
         [jelly, text, thumb].forEach { $0.isUserInteractionEnabled = false; $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
         thumbWidth = thumb.widthAnchor.constraint(equalToConstant: dimensions.width)
         thumbHeight = thumb.heightAnchor.constraint(equalToConstant: dimensions.height)
-        let tall = heightAnchor.constraint(greaterThanOrEqualTo: thumb.heightAnchor)
+        let tall = bottomAnchor.constraint(greaterThanOrEqualTo: thumb.bottomAnchor)
+        headroom = text.topAnchor.constraint(equalTo: topAnchor)
         NSLayoutConstraint.activate([
-            jelly.leadingAnchor.constraint(equalTo: leadingAnchor),
+            // Its body centred on the glyph slot and the title's capitals.
+            jelly.centerXAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.glyph / 2),
             jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
             jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
             title.centred(on: jelly.centerYAnchor),
             text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.indent),
-            text.topAnchor.constraint(equalTo: topAnchor),
+            headroom,
             text.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
             text.trailingAnchor.constraint(equalTo: thumb.leadingAnchor, constant: -Theme.Space.row),
             thumb.trailingAnchor.constraint(equalTo: trailingAnchor),
-            thumb.topAnchor.constraint(equalTo: topAnchor),
+            thumb.topAnchor.constraint(equalTo: text.topAnchor),
             thumbWidth, thumbHeight, tall
         ])
         isAccessibilityElement = true
@@ -1566,6 +1570,7 @@ final class ThreadLine: UIControl {
         guard content != shown else { return }
         shown = content
         jelly.look = .worker(content.id, content.mood)
+        headroom.constant = JellyBody.room(jelly.look, size: Theme.Glyph.line, moving: true, centre: title.font.capCentre, height: title.font.lineHeight).top
         title.text = content.title
         doing.text = content.doing
         doing.textColor = content.mood == .failed ? Theme.failure : .secondaryLabel
@@ -2215,11 +2220,14 @@ final class TaskStrip: UIControl {
 
     private var shown: (texts: [String], crews: [[JellyLook]])?
 
-    private static let height: CGFloat = 30
-    /// A Sprout's body here: centred on the capsule's middle line (the
-    /// text's cap-height centre), its sprout fits above with `inset` to spare.
-    private static let inset: CGFloat = 2
-    private static let body = ((height - 2 * inset) / (1 + 2 * JellyTraits.crown)).rounded(.down)
+    /// A Sprout's body here, the size of the capsule's words; centred on its
+    /// middle line (the words' cap-height centre).
+    private static let body = Theme.Glyph.caption
+    /// Tall enough, on the 4-point grid, that a hopping Sprout stays inside it.
+    private static let height: CGFloat = {
+        let hop = JellyBody.reach(JellyLook(role: .worker, mood: .needsYou, traits: .worker(0), temper: 0), moving: true).above
+        return (2 * hop * body / Theme.Space.tight).rounded(.up) * Theme.Space.tight
+    }()
     private static let crewGap: CGFloat = 3
 
     /// One Sprout in a slot as wide as its body is drawn (turned) and as
@@ -2227,7 +2235,7 @@ final class TaskStrip: UIControl {
     /// every build's bottom on the same line, so the crew stands in a row.
     private static func slot(_ look: JellyLook) -> UIView {
         let slot = UIView()
-        let jelly = JellyView(look, canvas: JellyCanvas(size: body, side: 0.2, top: 0.42, bottom: 0.14))
+        let jelly = JellyView(look, canvas: .roomy(body))
         slot.isUserInteractionEnabled = false
         [slot, jelly].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         slot.addSubview(jelly)

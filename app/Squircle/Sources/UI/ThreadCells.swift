@@ -104,12 +104,16 @@ struct RowGap: Equatable {
 }
 
 class TimelineCell: UITableViewCell {
-    var gap = RowGap.line {
-        didSet {
-            guard gap != oldValue else { return }
-            gapConstraints?.top.constant = gap.top
-            gapConstraints?.bottom.constant = -gap.bottom
-        }
+    var gap = RowGap.line { didSet { if gap != oldValue { paddingChanged() } } }
+    /// How far its jelly reaches past its content (`JellyBody.room`).
+    var room = RowGap(top: 0, bottom: 0) { didSet { if room != oldValue { paddingChanged() } } }
+    /// The room above and below its content: its gap, or more where its
+    /// jelly needs it, so a sprout or hop stays in this row.
+    var padding: RowGap { RowGap(top: max(gap.top, room.top), bottom: max(gap.bottom, room.bottom)) }
+
+    func paddingChanged() {
+        gapConstraints?.top.constant = padding.top
+        gapConstraints?.bottom.constant = -padding.bottom
     }
     private var gapConstraints: (top: NSLayoutConstraint, bottom: NSLayoutConstraint)?
 
@@ -121,8 +125,8 @@ class TimelineCell: UITableViewCell {
 
     /// The row's content from its top to its bottom, `gap` from each edge.
     func pinGap(_ content: UIView) -> [NSLayoutConstraint] {
-        let top = content.topAnchor.constraint(equalTo: contentView.topAnchor, constant: gap.top)
-        let bottom = content.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -gap.bottom)
+        let top = content.topAnchor.constraint(equalTo: contentView.topAnchor, constant: padding.top)
+        let bottom = content.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -padding.bottom)
         gapConstraints = (top, bottom)
         return [top, bottom]
     }
@@ -173,7 +177,7 @@ final class HeaderCell: TimelineCell {
 /// answers fill the column; notes and thoughts are quieter.
 final class MessageCell: TimelineCell {
     enum Style { case user, answer, received, note, thought, update, action, agent }
-    override var gap: RowGap { didSet { if gap != oldValue { measured = nil; setNeedsLayout() } } }
+    override func paddingChanged() { measured = nil; setNeedsLayout() }
     /// The app agent's paragraph: a plain fill. Made only for its rows.
     private lazy var received: UIView = {
         let view = UIView()
@@ -260,20 +264,20 @@ final class MessageCell: TimelineCell {
             let used = min(available, size.width)
             pad = max(0, Theme.Space.tap - size.height) / 2
             let x = style == .user ? width - margin - Theme.Space.bubble.right - used : margin + Theme.Space.bubble.left
-            frame = CGRect(x: x, y: gap.top + pad, width: used, height: size.height)
+            frame = CGRect(x: x, y: padding.top + pad, width: used, height: size.height)
             if style == .user, quote != nil {
                 // Over the bubble, at its trailing edge, a little apart from it.
                 let lead: CGFloat = 2 + Theme.Space.row
                 let fits = quoteLabel.sizeThatFits(CGSize(width: available + inset - lead, height: .greatestFiniteMagnitude))
                 let size = CGSize(width: min(available + inset - lead, ceil(fits.width)), height: ceil(fits.height))
-                quoted = CGRect(x: width - margin - size.width, y: gap.top, width: size.width, height: size.height)
+                quoted = CGRect(x: width - margin - size.width, y: padding.top, width: size.width, height: size.height)
                 frame.origin.y += size.height + Theme.Space.tight
             }
         } else {
             // What an agent sent hangs off its rule in the glyph slot, its text where lines' text starts.
             let x = style == .agent ? Theme.Space.text : margin
             let used = max(0, width - x - margin)
-            frame = CGRect(x: x, y: gap.top, width: used, height: text.sizeThatFits(CGSize(width: used, height: .greatestFiniteMagnitude)).height)
+            frame = CGRect(x: x, y: padding.top, width: used, height: text.sizeThatFits(CGSize(width: used, height: .greatestFiniteMagnitude)).height)
         }
         measured = (width, frame, pad, quoted)
         return (frame, pad)
@@ -282,7 +286,7 @@ final class MessageCell: TimelineCell {
     override func systemLayoutSizeFitting(_ targetSize: CGSize, withHorizontalFittingPriority horizontalFittingPriority: UILayoutPriority,
                                           verticalFittingPriority: UILayoutPriority) -> CGSize {
         let (frame, pad) = textFrame(width: targetSize.width)
-        return CGSize(width: targetSize.width, height: frame.maxY + pad + gap.bottom)
+        return CGSize(width: targetSize.width, height: frame.maxY + pad + padding.bottom)
     }
 
     override func layoutSubviews() {
@@ -369,6 +373,8 @@ final class MessageCell: TimelineCell {
             quoteRule.isHidden = quote == nil
         }
         measured = nil
+        let jelly = rendered.jellyRoom
+        room = RowGap(top: jelly.top, bottom: jelly.bottom)
         // The text last, so it is laid out once, in its final container.
         let padding = Theme.Space.bubble
         text.update(\.textContainerInset, to: bubbled ? UIEdgeInsets(top: padding.top, left: 0, bottom: padding.bottom, right: 0) : .zero)
@@ -1211,15 +1217,19 @@ final class LiveCell: TimelineCell {
     private let capsule = LiveCapsule()
     private var hero: JellyHero?
     private var heroLead: NSLayoutConstraint!
-    private static let heroSize = Theme.Glyph.live
+    /// The line's height: the app agent's jelly fills it.
+    private static let height = Theme.Glyph.live
     /// The conversation is in sight: its jelly draws only then.
     var inSight = true { didSet { renderHero() } }
     /// Where the capsule starts: its mark in the glyph slot (the capsule
-    /// leads it by 12) or, with the jelly there instead, its text the glyph
-    /// gap past the jelly's drawn edge (it is wider than the slot, centred
-    /// on it; an empty mark slot puts the text 18 in).
+    /// leads it by 12) or, with a jelly there instead, its text the glyph
+    /// gap past the agent's jelly's edge (wider than the slot, centred on
+    /// it; an empty mark slot puts the text 18 in), whoever's jelly it is.
     private static let markLead = Theme.Space.margin - 12
-    private static let jellyLead = Theme.Space.margin + Theme.Space.glyph / 2 + heroSize / 2 + Theme.Space.glyphGap - 18
+    private static let jellyLead = Theme.Space.margin + Theme.Space.glyph / 2 + height / 2 + Theme.Space.glyphGap - 18
+
+    /// The app's agent fills the line; a worker is the size of the text.
+    private static func size(_ jelly: JellyLook) -> CGFloat { jelly.role == .agent ? Theme.Glyph.live : Theme.Glyph.line }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -1230,7 +1240,7 @@ final class LiveCell: TimelineCell {
         NSLayoutConstraint.activate(pinGap(capsule) + [
             heroLead,
             capsule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
-            capsule.heightAnchor.constraint(equalToConstant: Self.heroSize)
+            capsule.heightAnchor.constraint(equalToConstant: Self.height)
         ])
         accessibilityIdentifier = "thread.working"
         isAccessibilityElement = true
@@ -1242,20 +1252,21 @@ final class LiveCell: TimelineCell {
     /// `jelly`: who is working, drawn beside the line (nil: the line's mark).
     func configure(_ status: LiveStatus, jelly: JellyLook? = nil) {
         if let jelly {
-            if let hero { hero.look = jelly } else {
-                let hero = JellyHero(jelly, size: Self.heroSize)
+            if let hero { hero.look = jelly; hero.size = Self.size(jelly) } else {
+                let hero = JellyHero(jelly, size: Self.size(jelly))
                 hero.translatesAutoresizingMaskIntoConstraints = false
                 contentView.addSubview(hero)
                 NSLayoutConstraint.activate([
-                    // Centred on the glyph slot, rounding over it on each side.
+                    // Its body centred on the glyph slot and the line (the agent's rounds over the slot).
                     hero.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin + Theme.Space.glyph / 2),
-                    hero.centerYAnchor.constraint(equalTo: capsule.centerYAnchor),
-                    hero.widthAnchor.constraint(equalToConstant: Self.heroSize),
-                    hero.heightAnchor.constraint(equalToConstant: Self.heroSize)
+                    hero.centerYAnchor.constraint(equalTo: capsule.centerYAnchor)
                 ])
                 self.hero = hero
             }
         }
+        // The row holds whatever the jelly reaches past the line.
+        let reach = jelly.map { JellyBody.room($0, size: Self.size($0), moving: true, centre: Self.height / 2, height: Self.height) }
+        room = RowGap(top: reach?.top ?? 0, bottom: reach?.bottom ?? 0)
         hero?.isHidden = jelly == nil
         renderHero()
         capsule.markSlot = jelly == nil ? nil : 0

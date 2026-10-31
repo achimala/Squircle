@@ -174,7 +174,7 @@ final class WaitingItemView: UIView {
     /// Who asks and the question, above the answers.
     let head = UIStackView()
     private let context = Theme.label("", Theme.Text.caption, color: .secondaryLabel)
-    private let jelly = JellyView(.agent(.needsYou), canvas: .roomy(Theme.Glyph.line))
+    private let jelly = JellyView(.agent(.needsYou), canvas: .roomy(Theme.Glyph.caption))
     private let jellySlot = UIView()
     private let title = Theme.label("", Theme.Text.body, lines: 0)
     private let detail = Theme.label("", Theme.Text.mono, color: .secondaryLabel, lines: 6)
@@ -218,10 +218,10 @@ final class WaitingItemView: UIView {
         let about = UIStackView(arrangedSubviews: [slot, context])
         about.spacing = Theme.Space.glyphGap
         about.alignment = .fill
-        NSLayoutConstraint.activate([slot.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
-                                     jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
-                                     jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
-                                     jelly.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+        NSLayoutConstraint.activate([slot.widthAnchor.constraint(equalToConstant: Theme.Space.glyph),
+                                     jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.caption),
+                                     jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.caption),
+                                     jelly.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
                                      context.centred(on: jelly.centerYAnchor)])
         rows.axis = .vertical
 

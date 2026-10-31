@@ -107,7 +107,7 @@ Per element:
 | Worker line, Squircle line, step | Glyph at 20, text at 48 | Line |
 | Worked for… | Check glyph at 20, text at 48, chevron after | Line; detail in tertiary |
 | Changes ("4 files +64 −9") | Glyph at 20, text at 48 | Line, digits in the same size |
-| Live line | Agent jelly (28 points) centred on the slot, text the 8-point gap past its edge, at 52 (user, 2026-10-31: 48 was "too close to blob") | Line, elapsed time in the same size at the right margin |
+| Live line | Its jelly's body centred on the glyph slot (the app's agent 28 points, a worker 16), text at 52, the 8-point gap past the agent's edge (user, 2026-10-31: 48 was "too close to blob") | Line, elapsed time in the same size at the right margin |
 | Media (screenshots, clips, figures, simulator recordings) | From 20; a sideways row scrolls past the edge | 8 points between pictures, 18-point radius like the bubbles |
 | Build card | From 20 to 20 | Card padding; the app's own icon (36), Install is the one filled button |
 | Document | From 20, at most 300 wide | Received fill, 18-point radius; a PDF's first page on top ([documents](#media-and-sending)) |
@@ -129,15 +129,25 @@ One family of shapes, two meanings:
   15 regular) and coloured secondary, or by its state when it has one. No
   semibold or bold symbols, and no symbol at a size of its own.
 - **Both sit in the same 20-point slot**, so a jelly line and a symbol line
-  line up and wrap the same way. A jelly may round over its slot by a point
-  or two; it never pushes the text.
+  line up and wrap the same way. A jelly never pushes the text.
 - **No containers around glyphs**: no grey wells, no rails between steps,
   no filled status circles (the Builds list's system-green check circles
   go), and no icon badges inside cards. The one picture that leads a row
   is a built app's own icon on a build card or Builds row (below).
-- **Size ladder**: 20 points in lines and rows (workers, the asker of a
-  question); 28 for the app's agent in its live line; 26 for the agent
-  peeking over its device on Home. Nothing in between.
+- **Size ladder**: a jelly's body is about the size of the text's glyphs
+  beside it: 16 beside Line and Body text (worker lines, Tasks rows, a
+  worker's live line, the overlay's crew); 11 beside Caption text (the
+  counts capsule, a question's asker, a simulator's caption). The app's
+  agent is larger only as itself: 28 in its own live line, 26 peeking over
+  its device on Home. Nothing in between.
+- **Its row holds the whole figure** (user, 2026-10-31: "they should fit
+  and layout properly"): the body is centred on the text's cap height and
+  never shrunk to fit; the sprout (up to half the body above it) and a
+  needs-you hop rise into the row's own top padding, never into a
+  neighbouring row or line. Where that padding is too small, the row gets
+  more, on the 4-point grid (`JellyBody.room`): a worker line or Tasks
+  thread line 8 above, 16 while a Tasks Sprout hops; the counts capsule is
+  32 tall so a hopping Sprout stays inside it.
 - **Answer marks** are SF Symbols in Body: an empty circle (pick one), an
   empty or filled square (pick several), and a pencil (write your own).
 
@@ -452,14 +462,14 @@ Approved by the user ("Sprouts stuff lgtm for now"), built in stage 1:
   phone, so a worker stays the same jelly everywhere.
 - **The face shows status**, the same on every jelly: working, needs you,
   done, idle, failed (`> <`). Colour is state.
-- At 20 points in lines and rows, canvases leave room above for the sprout.
+- The sprout grows into the room its row keeps above the body (the
+  tallest, a stalk, reaches half the body's height), never past the row.
 - **Laid out by the body** (user, 2026-10-31: "don't allow the antenna
   things to offset them"): every worker's body bottom sits on one baseline
   whatever its build (squat, square, tall), the sprout only grows up into
   the room above, and the body square is centred on the cap-height centre of
   the text beside it, never on the text's frame (`JellyBody`,
-  `UILabel.centred(on:)`). In the counts capsule the bodies are sized so a
-  full sprout still fits inside it.
+  `UILabel.centred(on:)`).
 
 ![All 20 sprouts](img/sprouts-all.jpg)
 
@@ -606,7 +616,7 @@ font size, colour or radius.
 | Glyph slot, its gap, text at 48, one nesting level | `Theme.Space.glyph`, `.glyphGap`, `.text`, `.indent` |
 | A built app's icon | `Theme.Space.appIcon` |
 | Bubble and card padding, a bubble's free side, 44 | `Theme.Space.bubble`, `.card`, `.bubbleFree`, `.tap` |
-| Jellies at 20, 28, 26 | `Theme.Glyph.line`, `.live`, `.home` |
+| Jellies at 16, 11, 28, 26 (the room each needs past its row: `JellyBody.room`) | `Theme.Glyph.line`, `.caption`, `.live`, `.home` |
 | Radii 8, 18, capsule | `Theme.Radius.small`, `.large`, `cornerStyle = .capsule` |
 | Colour roles | `Theme.accent`, `.onAccent`, `.paper`, `.working`, `.warning`, `.success`, `.failure`, `.idle`, `.receivedFill`, `.userGlass`, `.codeFill`, `.pressedFill` |
 
