@@ -167,13 +167,17 @@ impl AppState {
 
 /// Runs blocking file work in `lane`, off the async workers, to its end even
 /// if the request that asked for it goes away (so the lane is held for as
-/// long as the work runs).
+/// long as the work runs). The work starts only once the lane admits it.
 async fn in_lane<T: Send + 'static>(
     lane: &Arc<Lane>,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> std::result::Result<T, tokio::task::JoinError> {
     let lane = lane.clone();
-    tokio::spawn(async move { lane.run(tokio::task::spawn_blocking(work)).await }).await?
+    tokio::spawn(async move {
+        lane.run(async move { tokio::task::spawn_blocking(work).await })
+            .await
+    })
+    .await?
 }
 
 /// Where catalog writes run: its lane, and the count they bump.

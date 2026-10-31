@@ -135,3 +135,28 @@ async fn queued_cancellation_does_not_wait_for_the_active_build_and_retries_dedu
     }
     assert!(!state.files.job_dir(&id).unwrap().join("build.log").exists());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_registrations_make_one_catalog_entry() -> Result<()> {
+    use tower::ServiceExt;
+    let dir = tempfile::tempdir()?;
+    let state = AppState::new(Store::open(dir.path().join("state"))?, None)?;
+    let project = dir.path().join("Probe.xcodeproj");
+    std::fs::create_dir_all(&project)?;
+    let token = state.files.settings.control_token.clone();
+    let registrations = (0..32).map(|_| {
+        let request = axum::http::Request::post("/v1/apps")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(
+                json!({"name": "Probe", "project": project, "scheme": "Probe"}).to_string(),
+            ))
+            .unwrap();
+        tokio::spawn(router(state.clone()).oneshot(request))
+    });
+    for response in futures_util::future::join_all(registrations).await {
+        assert_eq!(response??.status(), StatusCode::OK);
+    }
+    assert_eq!(apps::list(&state.files)?.len(), 1);
+    Ok(())
+}

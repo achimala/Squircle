@@ -35,6 +35,7 @@ impl Agents {
             ops: Lanes::new("agent operations", Rank::AgentOp),
             spawning: Lanes::new("worker spawns", Rank::AgentSpawn),
             flushing: Lane::new(Rank::AgentFlush),
+            compacting: Lanes::new("compactions", Rank::Compaction),
             push: std::sync::OnceLock::new(),
             tasks,
         }))

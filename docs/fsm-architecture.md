@@ -1393,10 +1393,11 @@ Lanes, in the only order a task may hold them (`actor::Rank`):
 | 1 `AgentSpawn` | one `thread spawn` per agent and branch | the worker's `AgentOp` lane, T3 calls, git |
 | 2 `AgentOp` | an app's agent (create, reset) or one worker (bootstrap, archive) | T3 calls, git |
 | 3 `AgentFlush` | delivering queued wake-ups | T3 calls |
-| 4 `SimStart` | admitting simulator starts | T3's device calls, the pool's refresh (no lane) |
-| 5 `PoolApply` | one pool plan-and-apply (tick, cleanup, a session's release) | simctl, T3, sims' exclusion (an ask) |
-| 6 `Catalog` | one app-catalog read/modify/write | a blocking-pool file job |
-| 7 `Diagnostics` | one diagnostics append or read | a blocking-pool file job |
+| 4 `Compaction` | one compaction per app, manual or automatic, from its context read to T3's answer | T3's database, T3 calls |
+| 5 `SimStart` | admitting simulator starts | T3's device calls, the pool's refresh (no lane) |
+| 6 `PoolApply` | one pool plan-and-apply (tick, cleanup, a session's release) | simctl, T3, sims' exclusion (an ask) |
+| 7 `Catalog` | one app-catalog read/modify/write | a blocking-pool file job, started only once the lane admits it |
+| 8 `Diagnostics` | one diagnostics append or read | a blocking-pool file job, started only once the lane admits it |
 
 A session's close and release run under try-claims (no wait) and enter `PoolApply`; nothing in the pool waits for sims except by asking its owner. The rank check follows a task, not tasks it spawns: a task in a lane must not await a task it spawned that enters a lane (`server::in_lane` spawns its lane work and is only used with no lane held). What can still wait indefinitely is I/O (T3, simctl, git), which no local design makes answer, and which this service bounds only where it already did.
 
