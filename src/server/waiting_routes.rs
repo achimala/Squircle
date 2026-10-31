@@ -167,7 +167,7 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
             json!({
                 "kind": "request", "thread_id": thread.thread_id, "request_id": request,
                 "title": thread.title, "worker": thread.coordinator.is_some(),
-                "task_id": task.map(|t| t.id.clone()), "ask": task.map(|t| t.ask.clone()),
+                "task_id": task.map(|t| t.id.clone()), "ask": task.map(|t| t.ask.clone()), "task_title": task.map(|t| t.name().to_string()),
                 "item": item,
             }),
         ));
@@ -183,11 +183,11 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
         let from = agents
             .coordinator_of(&question.thread_id)
             .and(agents.worker_title(&question.thread_id));
-        let item_ask = task
+        let item_title = task
             .parent_id
             .as_ref()
             .and_then(|p| all.iter().find(|t| &t.id == p))
-            .map(|item| item.ask.clone());
+            .map(|item| item.name().to_string());
         let media: Vec<Value> = question
             .media
             .iter()
@@ -197,8 +197,8 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
         apps.entry(task.project_id.clone()).or_default().push((
             question.asked_at,
             json!({
-                "kind": "question", "id": question.id, "task_id": task.id, "ask": task.ask,
-                "item_ask": item_ask, "text": question.text, "options": question.options, "media": media,
+                "kind": "question", "id": question.id, "task_id": task.id, "ask": task.ask, "task_title": task.name(),
+                "item_title": item_title, "text": question.text, "options": question.options, "media": media,
                 "from": from, "thread_id": question.thread_id, "asked_at": question.asked_at,
             }),
         ));

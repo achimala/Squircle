@@ -106,7 +106,7 @@ impl Agents {
             let QuestionState::Answered { text, .. } = &question.state else {
                 continue;
             };
-            let ask = task.ask.replace('\n', " ");
+            let ask = task.name().replace('\n', " ");
             let message = format!(
                 "[answer] The user answered your question on “{ask}” in the tracker:\nQ: {}\nA: {text}\n\
                  Go on with it; record any new demand in the answer as a sub-task first.",

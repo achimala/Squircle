@@ -324,11 +324,16 @@ impl Agents {
         if open.is_empty() {
             return " none".to_string();
         }
+        // Untitled ones (from before titles) show their ask until named.
         let line = |t: &crate::tasks::Task| {
             format!(
                 "[{}] {}{} ({})",
                 t.status.label(),
-                t.ask.replace('\n', " "),
+                if t.title.is_empty() {
+                    format!("untitled, asked “{}”", t.ask.replace('\n', " "))
+                } else {
+                    t.title.clone()
+                },
                 if t.note.is_empty() {
                     String::new()
                 } else {
@@ -449,7 +454,7 @@ impl Agents {
         let tasks = self.open_tasks(&agent.project_id);
         let unheard = match self.unheard(&agent.thread_id).await {
             Ok(unheard) => super::demands::listed(&unheard).map(|list| format!(
-                "\nThe user's messages not in the tracker yet; record each demand in them (`task sub add ITEM --thread {id} --ask` in their words, \
+                "\nThe user's messages not in the tracker yet; record each demand in them (`task sub add ITEM --thread {id} --title ... --ask` in their words, \
                  corrections and details like \"from bottom\" included) or run `task heard --thread {id}` if they ask for nothing, \
                  before anything else: thread spawn, send and answer refuse until then:{list}",
                 id = agent.thread_id,
@@ -485,7 +490,9 @@ impl Agents {
              Your work items and their open sub-tasks, the user's open asks (`{cli} task --help`):{tasks}{unheard}\n\
              Your notes (`{cli} notes --help`; keep them current):{notes}\n\
              Before any work on something the user asks, put it in the tracker in their words: a sub-task (`task sub add ITEM`) of the work item it clearly belongs to, \
-             otherwise a new work item (`task add`); never under an unrelated one. Track your own breakdown as sub-tasks; link workers (`thread spawn --task`) \
+             otherwise a new work item (`task add`); never under an unrelated one. Give each a title (`--title`): a few words in sentence case naming it, \
+             as the phone lists it (\"App agents reply briefly\", not their sentence); the ask stays their words verbatim, never paraphrased. \
+             Name untitled ones above with `task update ID --title` when you next touch them. Track your own breakdown as sub-tasks; link workers (`thread spawn --task`) \
              and builds (`build start --task`) to the sub-task or item they serve, attach screenshots or clips worth seeing, and set status and note when that changes \
              (in progress shows only while a linked worker or build runs and can't be set; an item follows its sub-tasks). A worker's brief (`thread spawn --task`, `thread send`) ends with the user's current asks for its work item \
              from the tracker, so a correction you don't record never reaches it. When the user corrects or adds to work in progress, mark the asks it \

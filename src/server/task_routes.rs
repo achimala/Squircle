@@ -327,6 +327,9 @@ pub(super) struct AddTask {
     pub(super) parent: Option<String>,
     pub(super) project: Option<String>,
     pub(super) thread: Option<String>,
+    /// Required; left out, the reducer refuses it with how to name it.
+    #[serde(default)]
+    pub(super) title: String,
     pub(super) ask: String,
     pub(super) status: Option<tasks::Status>,
     pub(super) note: Option<String>,
@@ -359,6 +362,7 @@ pub(super) async fn add_task(
     let task = tasks
         .add(
             &project,
+            &r.title,
             &r.ask,
             r.status,
             r.note.as_deref(),

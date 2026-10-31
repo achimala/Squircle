@@ -15,9 +15,8 @@ struct WaitingList: Decodable, Equatable {
     struct Question: Equatable {
         let id: String
         let taskID: String
-        /// The task it is about, in your words; and its work item's, for a sub-task.
-        let ask: String
-        let itemAsk: String?
+        /// The task it is about, by name.
+        let task: String
         let text: String
         let options: [String]
         /// The screenshots, clips and documents it is about, kept with its task.
@@ -34,7 +33,8 @@ struct WaitingList: Decodable, Equatable {
         let threadID: String
         let title: String
         let worker: Bool
-        let ask: String?
+        /// The task that links the thread, by name.
+        let task: String?
         let pending: PendingRequest
     }
 
@@ -77,7 +77,7 @@ struct WaitingList: Decodable, Equatable {
         switch value["kind"].string {
         case "question":
             guard let id = value["id"].string, let task = value["task_id"].string, let text = value["text"].string else { return nil }
-            return .question(Question(id: id, taskID: task, ask: value["ask"].string ?? "", itemAsk: value["item_ask"].string,
+            return .question(Question(id: id, taskID: task, task: value["task_title"].string ?? value["ask"].string ?? "",
                                       text: text, options: value["options"].array.compactMap(\.string),
                                       media: value["media"].array.compactMap(Self.media), from: value["from"].string,
                                       threadID: value["thread_id"].string,
@@ -85,7 +85,7 @@ struct WaitingList: Decodable, Equatable {
         case "request":
             guard let thread = value["thread_id"].string, let request = value["request_id"].string else { return nil }
             return .request(Request(threadID: thread, title: value["title"].string ?? "", worker: value["worker"].bool,
-                                    ask: value["ask"].string, pending: PendingRequest(id: request, item: value["item"])))
+                                    task: value["task_title"].string ?? value["ask"].string, pending: PendingRequest(id: request, item: value["item"])))
         default:
             return nil
         }

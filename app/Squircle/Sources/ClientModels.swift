@@ -385,7 +385,14 @@ struct AppTask: Decodable, Equatable, Identifiable {
     }
 
     let id: String
+    /// The agent's short name for it; nil or empty on tasks from before titles.
+    private let title: String?
+    /// The ask in the user's own words, kept verbatim.
     let ask: String
+    /// What to call it: its title, or the ask until an agent names it.
+    var name: String { title.flatMap { $0.isEmpty ? nil : $0 } ?? ask }
+    /// Whether it has a title of its own, so the ask reads as the user's words beneath it.
+    var named: Bool { name != ask }
     var status: Status
     let note: String
     let order: Double
@@ -416,7 +423,7 @@ struct AppTask: Decodable, Equatable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, ask, status, note, order, threads, builds, media, revision
+        case id, title, ask, status, note, order, threads, builds, media, revision
         case updatedAt = "updated_at", archivedAt = "archived_at", subtaskList = "subtasks"
     }
 }

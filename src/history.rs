@@ -450,7 +450,13 @@ async fn gather(
                         .map(|c| c.note.as_str())
                         .filter(|n| !n.is_empty())
                         .collect();
-                    let text = format!("{} {} {}", task.ask, task.note, notes.join(" "));
+                    let text = format!(
+                        "{} {} {} {}",
+                        task.title,
+                        task.ask,
+                        task.note,
+                        notes.join(" ")
+                    );
                     if matches(&text) && after.is_none_or(|a| task.updated_at as i64 >= a) {
                         items.push(Item {
                             kind: Kind::Task,
@@ -848,10 +854,11 @@ pub async fn show(
                 .get(id)
                 .with_context(|| format!("No task {id}"))?;
             let mut text = format!(
-                "{reference} · {} · created {}, updated {}\nAsk: {}\n",
+                "{reference} · {} · created {}, updated {}\nTitle: {}\nAsk: {}\n",
                 task.status.label(),
                 when(task.created_at as i64),
                 when(task.updated_at as i64),
+                task.title,
                 task.ask
             );
             if !task.note.is_empty() {
@@ -865,7 +872,7 @@ pub async fn show(
                     "Sub-task task:{} ({}): {}\n",
                     sub.id,
                     sub.status.label(),
-                    sub.ask
+                    sub.name()
                 );
             }
             for thread in &task.threads {
