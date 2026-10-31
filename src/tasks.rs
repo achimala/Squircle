@@ -89,8 +89,17 @@ impl Tasks {
         let (book, revision) = file
             .read()?
             .unwrap_or((Book::default(), Revision::default()));
+        let migrated = book.migrated();
         let (book, snapshot) = Saved::new(Gate::restore(book, revision, file));
-        let owner = Owner::spawn("tasks", State { book });
+        let mut state = State { book };
+        // Needs you kept as a status, from before it was derived: saved
+        // once as the stage underneath (2026-10-31).
+        if migrated {
+            state.apply(vec![Event::Migrate {
+                now: crate::model::now(),
+            }])?;
+        }
+        let owner = Owner::spawn("tasks", state);
         Ok(Self {
             root: root.to_path_buf(),
             owner,
@@ -213,8 +222,8 @@ impl Tasks {
 
     /// Puts a question to the user on task `id` for `thread`, which gets the
     /// answer, with `files` (screenshots, clips, documents) copied into the
-    /// task's media for it. Holds the task at needs you from `observed`, like
-    /// an explicit status.
+    /// task's media for it. The task shows as needs you until it is answered
+    /// or withdrawn.
     pub async fn ask(
         &self,
         id: &str,
@@ -222,7 +231,6 @@ impl Tasks {
         options: Vec<String>,
         files: &[PathBuf],
         thread: &str,
-        observed: Option<Signals>,
     ) -> Result<(Task, Question)> {
         ensure!(
             files.iter().all(|f| f.is_absolute()),
@@ -248,7 +256,6 @@ impl Tasks {
             options,
             media: media.iter().map(|m| m.id.clone()).collect(),
             thread: thread.into(),
-            observed,
             now: crate::model::now(),
         };
         let asked = self
@@ -435,14 +442,14 @@ mod tests {
             .tick(|_| worker("1", WorkerPhase::Working))
             .await
             .unwrap();
-        let needs_you = Update {
-            status: Some(Status::NeedsYou),
+        let ready = Update {
+            status: Some(Status::ReadyToTry),
             ..Default::default()
         };
         tasks
             .update(
                 &id,
-                needs_you,
+                ready,
                 By::Agent,
                 Some(worker("1", WorkerPhase::Working)),
             )
@@ -453,7 +460,7 @@ mod tests {
             .tick(|_| worker("1", WorkerPhase::Working))
             .await
             .unwrap();
-        assert_eq!(tasks.get(&id).unwrap().status, Status::NeedsYou);
+        assert_eq!(tasks.get(&id).unwrap().status, Status::ReadyToTry);
     }
 
     #[tokio::test]
@@ -478,7 +485,7 @@ mod tests {
             .tick(|_| worker("1", WorkerPhase::Working))
             .await
             .unwrap();
-        // While the tick reads the worker, the agent says the task needs the user,
+        // While the tick reads the worker, the agent says the task is ready to try,
         // having seen the worker finish.
         let reads = tasks.read(|_| worker("1", WorkerPhase::Working));
         let finished = Signals {
@@ -489,7 +496,7 @@ mod tests {
             .update(
                 &id,
                 Update {
-                    status: Some(Status::NeedsYou),
+                    status: Some(Status::ReadyToTry),
                     ..Default::default()
                 },
                 By::Agent,
@@ -498,13 +505,13 @@ mod tests {
             .await
             .unwrap();
         tasks.observe(reads).await.unwrap();
-        assert_eq!(tasks.get(&id).unwrap().status, Status::NeedsYou);
+        assert_eq!(tasks.get(&id).unwrap().status, Status::ReadyToTry);
         // The finish it saw is no news afterwards either.
         tasks
             .tick(|_| worker("1", WorkerPhase::Done))
             .await
             .unwrap();
-        assert_eq!(tasks.get(&id).unwrap().status, Status::NeedsYou);
+        assert_eq!(tasks.get(&id).unwrap().status, Status::ReadyToTry);
     }
 
     #[tokio::test]

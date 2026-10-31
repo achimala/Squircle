@@ -211,6 +211,13 @@ enum Theme {
 }
 
 enum Motion {
+    /// What every display link in the app asks for: the display's full rate
+    /// (ProMotion to 120 Hz; Info.plist sets
+    /// `CADisableMinimumFrameDurationOnPhone`). Slower clocks (the jellies)
+    /// take every few frames themselves: one link asking for less held the
+    /// phone's display at 80 Hz with every animation ticking at 40.
+    static let displayRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+
     /// The system setting, plus a DEBUG-only launch argument used by UI tests.
     #if DEBUG
     /// Verification only: overrides the setting (the overlay's jelly stress).
@@ -310,5 +317,14 @@ extension CALayer {
         nod.stiffness = 170
         nod.duration = nod.settlingDuration
         add(nod, forKey: "nod")
+    }
+}
+
+extension UILabel {
+    /// Its first line's visual centre (half its cap height above the
+    /// baseline, not its frame's middle) on `line`: how a glyph or jelly
+    /// beside text lines up with it.
+    func centred(on line: NSLayoutYAxisAnchor) -> NSLayoutConstraint {
+        firstBaselineAnchor.constraint(equalTo: line, constant: font.capHeight / 2)
     }
 }

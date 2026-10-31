@@ -1072,6 +1072,7 @@ pub async fn show(root: &Path, which: &str, given: &[PathBuf]) -> Result<(String
         screen::Source::OnGlass => "Metal drawables' on-screen times".to_owned(),
         screen::Source::PresentCalls => "the app's Metal present calls (this device reports no on-screen times, so frames the compositor dropped can't be seen)".to_owned(),
         screen::Source::Refreshes if capture.version < 2 => "display refreshes: this recording predates presented-frame tracking, so this is NOT a frame rate".to_owned(),
+        screen::Source::Refreshes if !drawables.is_empty() => "display refreshes the main thread was free for (its Metal layers cover too little of the screen to stand for it; animations the render server runs itself aren't seen in-process)".to_owned(),
         screen::Source::Refreshes => "display refreshes the main thread was free for (no Metal drawables; animations the render server runs itself aren't seen in-process)".to_owned(),
     };
     if capture.version < 2 {

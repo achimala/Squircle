@@ -780,9 +780,12 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         for group in groups {
             var ids = list.tasks.filter { task in
                 guard found(task) else { return false }
-                // Anything with a question for you is in Needs you.
+                // Needs you is what you can answer here, nothing else: a task
+                // whose question hasn't reached the phone yet waits in In progress.
                 if task.status.open, asked[task.id] != nil { return group == .status(.needsYou) }
                 return switch group {
+                case .status(.needsYou): false
+                case .status(.inProgress): task.status == .inProgress || task.status == .needsYou
                 case .status(let status): task.status == status
                 default: !task.status.open
                 }
@@ -1074,18 +1077,14 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
     func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
         guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id), task.status.open else { return nil }
-        let done = UIContextualAction(style: .normal, title: "Done") { [weak self] _, _, finish in self?.set(task, .done); finish(true) }
-        done.backgroundColor = Theme.success
-        let drop = UIContextualAction(style: .destructive, title: "Drop") { [weak self] _, _, finish in self?.set(task, .dropped); finish(true) }
-        drop.backgroundColor = Theme.failure
+        let done = UIContextualAction(style: .normal, title: nil) { [weak self] _, _, finish in self?.set(task, .done); finish(true) }
+        let drop = UIContextualAction(style: .destructive, title: nil) { [weak self] _, _, finish in self?.set(task, .dropped); finish(true) }
+        for (action, symbol, title, color) in [(done, "checkmark", "Done", Theme.success), (drop, "xmark", "Drop", Theme.failure)] {
+            action.image = SwipeLabel.image(symbol: symbol, title: title, in: tableView.traitCollection)
+            action.backgroundColor = color
+            action.accessibilityLabel = title
+        }
         return UISwipeActionsConfiguration(actions: [drop, done])
-    }
-
-    func tableView(_ tableView: UITableView, leadingSwipeActionsConfigurationForRowAt indexPath: IndexPath) -> UISwipeActionsConfiguration? {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id), task.status.open else { return nil }
-        let top = UIContextualAction(style: .normal, title: "Top") { [weak self] _, _, finish in self?.set(task, toTop: true); finish(true) }
-        top.backgroundColor = Theme.accent
-        return UISwipeActionsConfiguration(actions: [top])
     }
 
     /// Long press: any status, to bring one back, or Move to Top.
@@ -1544,7 +1543,7 @@ final class ThreadLine: UIControl {
             jelly.leadingAnchor.constraint(equalTo: leadingAnchor),
             jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
             jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
-            jelly.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            title.centred(on: jelly.centerYAnchor),
             text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.indent),
             text.topAnchor.constraint(equalTo: topAnchor),
             text.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
@@ -1820,10 +1819,11 @@ final class WorkItemPage: UIView {
         slot.frame = CGRect(x: 0, y: below, width: bounds.width, height: max(0, bounds.height - below))
     }
 
-    /// Every status, ticked at `current`, for a page's status and a Done row's menu.
+    /// Every status you can set, ticked at `current`, for a page's status
+    /// and a row's menu. Not needs you: only a question or approval makes it.
     static func statusMenu(current: AppTask.Status, set: @escaping (AppTask.Status) -> Void) -> UIMenu {
         let statuses: [(AppTask.Status, String)] = [
-            (.needsYou, "hand.raised"), (.inProgress, "hammer"), (.readyToTry, "shippingbox"),
+            (.inProgress, "hammer"), (.readyToTry, "shippingbox"),
             (.queued, "tray"), (.done, "checkmark"), (.dropped, "xmark")]
         return UIMenu(options: .displayInline, children: statuses.map { value, symbol in
             UIAction(title: value == .dropped ? "Drop" : name(value), image: UIImage(systemName: symbol),
@@ -2199,15 +2199,15 @@ final class TaskStrip: UIControl {
     private var shown: (texts: [String], crews: [[JellyLook]])?
 
     private static let height: CGFloat = 30
-    /// A Sprout's body here: its slot (body and sprout) fits the capsule
-    /// with `inset` above and below.
-    private static let inset: CGFloat = 3
-    private static let body = (height - 2 * inset) / (1 + JellyTraits.crown)
+    /// A Sprout's body here: centred on the capsule's middle line (the
+    /// text's cap-height centre), its sprout fits above with `inset` to spare.
+    private static let inset: CGFloat = 2
+    private static let body = ((height - 2 * inset) / (1 + 2 * JellyTraits.crown)).rounded(.down)
     private static let crewGap: CGFloat = 3
 
-    /// One Sprout in a slot as wide as its body is drawn and as tall as its
-    /// sprout reaches, so the stack spaces bodies evenly and nothing leaves
-    /// the capsule.
+    /// One Sprout in a slot as wide as its body is drawn (turned) and as
+    /// tall as its body: the picture's sprout grows up out of it, and the shader puts
+    /// every build's bottom on the same line, so the crew stands in a row.
     private static func slot(_ look: JellyLook) -> UIView {
         let slot = UIView()
         let jelly = JellyView(look, canvas: JellyCanvas(size: body, side: 0.2, top: 0.42, bottom: 0.14))
@@ -2215,14 +2215,32 @@ final class TaskStrip: UIControl {
         [slot, jelly].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
         slot.addSubview(jelly)
         NSLayoutConstraint.activate([
-            slot.widthAnchor.constraint(equalToConstant: (body * CGFloat(look.traits.look.y)).rounded(.up)),
-            slot.heightAnchor.constraint(equalToConstant: body * (1 + JellyTraits.crown)),
+            slot.widthAnchor.constraint(equalToConstant: (2 * JellyBody.halfWidth(look.traits.look) * body).rounded(.up)),
+            slot.heightAnchor.constraint(equalToConstant: body),
             jelly.widthAnchor.constraint(equalToConstant: body),
             jelly.heightAnchor.constraint(equalToConstant: body),
             jelly.centerXAnchor.constraint(equalTo: slot.centerXAnchor),
-            jelly.bottomAnchor.constraint(equalTo: slot.bottomAnchor)
+            jelly.centerYAnchor.constraint(equalTo: slot.centerYAnchor)
         ])
         return slot
+    }
+
+    /// A count: its lead (Sprouts or a dot) centred on the middle line, and
+    /// its words with their cap height centred on it too, not their frame.
+    private static func part(_ lead: UIView, _ label: UILabel) -> UIView {
+        let part = UIView()
+        part.isUserInteractionEnabled = false
+        [part, lead, label].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        [lead, label].forEach(part.addSubview)
+        NSLayoutConstraint.activate([
+            part.heightAnchor.constraint(equalToConstant: height),
+            lead.leadingAnchor.constraint(equalTo: part.leadingAnchor),
+            lead.centerYAnchor.constraint(equalTo: part.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: lead.trailingAnchor, constant: Theme.Space.tight),
+            label.trailingAnchor.constraint(equalTo: part.trailingAnchor),
+            label.centred(on: part.centerYAnchor)
+        ])
+        return part
     }
 
     /// Counts of open tasks; working and needing you are shown by the
@@ -2263,15 +2281,33 @@ final class TaskStrip: UIControl {
                 let group = UIStackView(arrangedSubviews: item.4.map(Self.slot))
                 // A little crew, shoulder to shoulder: the bodies never overlap.
                 group.spacing = Self.crewGap
-                group.alignment = .bottom
+                group.alignment = .center
                 lead = group
             }
             let label = Theme.label(texts[index], Theme.Text.caption, color: item.3 ? .label : .secondaryLabel)
-            let part = UIStackView(arrangedSubviews: [lead, label])
-            part.spacing = Theme.Space.tight
-            part.alignment = .center
-            parts.addArrangedSubview(part)
+            parts.addArrangedSubview(Self.part(lead, label))
         }
         accessibilityLabel = "Tasks: " + texts.joined(separator: ", ")
+    }
+}
+
+/// A row's swipe action, drawn rather than left to UIKit's white title: its
+/// glyph in Body over its label in Caption, both in `onAccent` on the
+/// action's state colour, which reads in light and dark.
+private enum SwipeLabel {
+    static func image(symbol: String, title: String, in traits: UITraitCollection) -> UIImage? {
+        let ink = Theme.onAccent.resolvedColor(with: traits)
+        guard let glyph = UIImage(systemName: symbol, withConfiguration: Theme.symbol(Theme.Text.body))?
+            .withTintColor(ink, renderingMode: .alwaysOriginal) else { return nil }
+        let text = NSAttributedString(string: title, attributes: [
+            .font: Theme.Text.caption, .foregroundColor: ink])
+        let label = text.size()
+        let size = CGSize(width: ceil(max(glyph.size.width, label.width)),
+                          height: ceil(glyph.size.height + Theme.Space.tight + label.height))
+        let format = UIGraphicsImageRendererFormat(for: traits)
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            glyph.draw(at: CGPoint(x: (size.width - glyph.size.width) / 2, y: 0))
+            text.draw(at: CGPoint(x: (size.width - label.width) / 2, y: glyph.size.height + Theme.Space.tight))
+        }.withRenderingMode(.alwaysOriginal)
     }
 }

@@ -138,6 +138,22 @@ pub fn cluster(mut times: Vec<f64>, within: f64) -> Vec<f64> {
 /// Screen frames with new content and where they come from; `dropped`
 /// counts drawables the app presented that never reached the screen.
 pub fn screen_frames(metal: &Metal, refreshes: &[f64]) -> (Vec<f64>, Source, usize) {
+    // A small Metal layer (an animated glyph in a Core Animation screen) is
+    // not the screen: its own pacing says nothing about the rest, which
+    // moves on the main thread's refreshes. Older captures carry no share.
+    // Some captures report no share; then pixels: a phone screen is ~3 M.
+    let small = |l: &Layer| match l.screen_share {
+        s if s > 0.0 => s < 0.25,
+        _ => l.pixels.len() == 2 && l.pixels[0] * l.pixels[1] < 300_000.0,
+    };
+    let share: f64 = metal.layers.iter().map(|l| l.screen_share).sum();
+    if !metal.layers.is_empty()
+        && metal.layers.iter().all(small)
+        && share < 0.25
+        && !refreshes.is_empty()
+    {
+        return (refreshes.to_vec(), Source::Refreshes, 0);
+    }
     let drawables = metal.drawables();
     let on_glass: Vec<f64> = drawables
         .iter()
@@ -330,6 +346,15 @@ mod tests {
         .unwrap();
         let (frames, source, _) = screen_frames(&sim, &[]);
         assert_eq!((frames.len(), source), (2, Source::PresentCalls));
+
+        // A glyph-sized Metal layer: the screen is the refreshes.
+        let glyph: Metal = serde_json::from_value(serde_json::json!({
+            "layers": [{"name": "CAMetalLayer", "screen_share": 0.01}],
+            "drawables": [[0, 0.0, 0.0, 0.0331, 1, 0.010]]
+        }))
+        .unwrap();
+        let (frames, source, _) = screen_frames(&glyph, &[0.0, 0.0083]);
+        assert_eq!((frames.len(), source), (2, Source::Refreshes));
     }
 
     #[test]

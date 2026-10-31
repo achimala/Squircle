@@ -189,15 +189,9 @@ pub async fn build(
             // directories, so guessing inside DerivedData can report a stale app.
             let settings_path = job_dir.join("build-settings.json");
             let mut args = common_args(request, &project, &job_dir)?;
+            args.extend(simulator_args());
             args.extend(
-                [
-                    "-destination",
-                    "generic/platform=iOS Simulator",
-                    "CODE_SIGNING_ALLOWED=NO",
-                    "-showBuildSettings",
-                    "-json",
-                ]
-                .map(OsString::from),
+                ["CODE_SIGNING_ALLOWED=NO", "-showBuildSettings", "-json"].map(OsString::from),
             );
             run_command(&args, &log, Some(&settings_path), cancel).await?;
             let settings: Vec<TargetSettings> =
@@ -298,10 +292,10 @@ fn common_args(request: &BuildRequest, project: &Path, job_dir: &Path) -> Result
 
 fn build_args(request: &BuildRequest, project: &Path, job_dir: &Path) -> Result<Vec<OsString>> {
     let mut args = common_args(request, project, job_dir)?;
-    args.push("-destination".into());
     match &request.mode {
         BuildMode::Archive => {
             args.extend([
+                "-destination".into(),
                 "generic/platform=iOS".into(),
                 "-archivePath".into(),
                 job_dir.join("App.xcarchive").into_os_string(),
@@ -316,8 +310,8 @@ fn build_args(request: &BuildRequest, project: &Path, job_dir: &Path) -> Result<
             }
         }
         BuildMode::Simulator => {
+            args.extend(simulator_args());
             args.extend([
-                "generic/platform=iOS Simulator".into(),
                 "-resultBundlePath".into(),
                 job_dir.join("build.xcresult").into_os_string(),
             ]);
@@ -325,6 +319,22 @@ fn build_args(request: &BuildRequest, project: &Path, job_dir: &Path) -> Result<
         }
     }
     Ok(args)
+}
+
+/// Simulator builds target only this Mac's simulator architecture. The generic
+/// destination alone builds every simulator architecture, and a dependency
+/// shipped for one (an arm64-only static library) then fails to link the other.
+fn simulator_args() -> [OsString; 3] {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x86_64"
+    };
+    [
+        "-destination".into(),
+        "generic/platform=iOS Simulator".into(),
+        format!("ARCHS={arch}").into(),
+    ]
 }
 
 fn export_args(

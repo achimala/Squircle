@@ -152,10 +152,13 @@ final class WaitingAnswers {
 /// needs, its description under it, and a last row to write something
 /// else. Several picks go with Send. What the question is about (pictures
 /// and clips, documents) sits between the question and the answers: a row
-/// of thumbnails, then a line per document. `compact` (Home): the question
-/// in three lines, a short strip of thumbnails, no documents and no
-/// write-in row.
+/// of thumbnails, then a line per document. `compact` (Tasks' Needs you)
+/// and `deck` (Home): the question in three lines, a short strip of
+/// thumbnails, no documents and the command in three lines; the deck has no
+/// write-in row and its strip only clips.
 final class WaitingItemView: UIView {
+    enum Size { case full, compact, deck }
+
     struct Answer {
         var title: String
         var detail: String?
@@ -165,12 +168,14 @@ final class WaitingItemView: UIView {
 
     /// The item drawn, so a late redraw never lands on a reused view.
     var itemID: String?
-    private let compact: Bool
+    private let size: Size
+    private var compact: Bool { size != .full }
     private let filled: Bool
     /// Who asks and the question, above the answers.
     let head = UIStackView()
     private let context = Theme.label("", Theme.Text.caption, color: .secondaryLabel)
     private let jelly = JellyView(.agent(.needsYou), canvas: .roomy(Theme.Glyph.line))
+    private let jellySlot = UIView()
     private let title = Theme.label("", Theme.Text.body, lines: 0)
     private let detail = Theme.label("", Theme.Text.mono, color: .secondaryLabel, lines: 6)
     private let rows = UIStackView()
@@ -194,23 +199,30 @@ final class WaitingItemView: UIView {
     private var tileHeight: CGFloat { compact ? Theme.Thumb.row.height : Theme.Thumb.page.height }
 
     /// `filled` false: no bubble of its own (the request card's glass is its surface).
-    init(compact: Bool = false, filled: Bool = true) {
-        self.compact = compact
+    init(_ size: Size = .full, filled: Bool = true) {
+        self.size = size
         self.filled = filled
         super.init(frame: .zero)
         title.numberOfLines = compact ? 3 : 0
+        detail.numberOfLines = compact ? 3 : 6
         if filled {
             backgroundColor = Theme.receivedFill
             layer.cornerRadius = Theme.Radius.large
             layer.cornerCurve = .continuous
         }
         context.lineBreakMode = .byTruncatingTail
+        // The jelly's body centred on the words' cap height, not their frame.
+        let slot = jellySlot
+        slot.addSubview(jelly)
         jelly.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
-                                     jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line)])
-        let about = UIStackView(arrangedSubviews: [jelly, context])
+        let about = UIStackView(arrangedSubviews: [slot, context])
         about.spacing = Theme.Space.glyphGap
-        about.alignment = .center
+        about.alignment = .fill
+        NSLayoutConstraint.activate([slot.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
+                                     jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
+                                     jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
+                                     jelly.leadingAnchor.constraint(equalTo: slot.leadingAnchor),
+                                     context.centred(on: jelly.centerYAnchor)])
         rows.axis = .vertical
 
         field.font = Theme.Text.body
@@ -253,7 +265,7 @@ final class WaitingItemView: UIView {
         strip.addSubview(tiles)
         strip.showsHorizontalScrollIndicator = false
         // On Home a sideways swipe is the deck's: the strip only clips.
-        strip.isScrollEnabled = !compact
+        strip.isScrollEnabled = size != .deck
         strip.isHidden = true
         NSLayoutConstraint.activate([
             tiles.topAnchor.constraint(equalTo: strip.contentLayoutGuide.topAnchor),
@@ -294,12 +306,12 @@ final class WaitingItemView: UIView {
         context.text = text
         context.isHidden = text.isEmpty
         if let asker { jelly.look = asker }
-        jelly.isHidden = asker == nil
-        context.superview?.isHidden = context.isHidden && jelly.isHidden
+        jellySlot.isHidden = asker == nil
+        context.superview?.isHidden = context.isHidden && jellySlot.isHidden
         title.text = question
         detail.text = more
         // Home keeps to who asks and the question.
-        detail.isHidden = compact || (more ?? "").isEmpty
+        detail.isHidden = size == .deck || (more ?? "").isEmpty
     }
 
     /// What the question is about, attached to `task`: pictures and clips as
@@ -393,14 +405,14 @@ final class WaitingItemView: UIView {
     }
 
     /// The write-in row, last, showing `text`; none without a placeholder,
-    /// and never when compact. `edit` gets each change.
+    /// and never in the deck. `edit` gets each change.
     func reply(placeholder: String?, text: String, busy: Bool, edit: @escaping (String) -> Void, send: @escaping (String) -> Void) {
         onSend = send
         onEdit = edit
         if field.text != text { field.text = text }
         field.placeholder = placeholder
         field.isEnabled = !busy
-        fieldRow.isHidden = compact || placeholder == nil
+        fieldRow.isHidden = size == .deck || placeholder == nil
     }
 
     /// Where Waiting on you took you.
@@ -482,7 +494,7 @@ private final class OptionRow: UIControl {
 /// A question or request under its task in the Tasks overview, lined up
 /// with the task's text.
 final class WaitingCell: UITableViewCell {
-    let item = WaitingItemView()
+    let item = WaitingItemView(.compact)
     private let rule = UIView()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -625,7 +637,7 @@ final class HomeWaitingView: UIView, UIScrollViewDelegate {
 /// One page of Home's deck: the shared card, which opens where it was
 /// asked when its question is tapped.
 private final class HomeWaitingCard: UIControl {
-    let item = WaitingItemView(compact: true)
+    let item = WaitingItemView(.deck)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
