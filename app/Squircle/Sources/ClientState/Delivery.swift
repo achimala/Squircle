@@ -58,6 +58,9 @@ enum Delivery {
         case accepted(Resolved)
     }
     enum Flight: Equatable {
+        /// Its current stage being written on the phone; nothing is sent
+        /// until that exact write is acknowledged.
+        case saving(sequence: UInt64)
         /// On the phone or the Mac's service (recordings, the agent).
         case local
         /// A T3 request on this session.
@@ -85,6 +88,8 @@ enum Delivery {
         var session: Int?
         /// The conversation on screen: an accepted message stays shown there until the thread has it.
         var watching: ConversationID?
+        /// The journal's last write or removal, so a slow write never replaces a newer one.
+        var journal: UInt64 = 0
         func entry(for conversation: ConversationID) -> Entry? {
             entries.values.first { $0.owner == conversation || $0.intent.origin == conversation }
         }
@@ -102,7 +107,9 @@ enum Delivery {
         case submit(Intent)
         /// Unfinished messages saved before the app last quit.
         case restore([Saved])
-        case saveFailed(messageID: String, reason: String)
+        /// The journal holds the entry as its save `sequence` wrote it.
+        case saved(messageID: String, sequence: UInt64)
+        case saveFailed(messageID: String, sequence: UInt64, reason: String)
         /// The message with its recordings linked, once they're on the Mac.
         case prepared(messageID: String, text: String)
         case prepareFailed(messageID: String, reason: String)
@@ -123,9 +130,9 @@ enum Delivery {
         case watch(ConversationID?)
     }
     enum Effect: Equatable {
-        /// Saves the entry on the phone. What follows runs only once it is saved.
-        case save(Entry)
-        case forget(messageID: String)
+        /// Writes the entry on the phone, answered by `saved` or `saveFailed`.
+        case save(Entry, sequence: UInt64)
+        case forget(messageID: String, sequence: UInt64)
         case prepare(Intent)
         case createThread(messageID: String, command: JSONValue, attempt: Int)
         case ensureAgent(messageID: String, projectID: String, model: String?, mode: String)
@@ -146,7 +153,8 @@ enum Delivery {
         var effects: [Effect] = []
         func done(_ disposition: Disposition = .applied) -> Result { Result(state: s, effects: effects, disposition: disposition) }
 
-        /// The requests the entry's stage needs now, if it can make them.
+        /// The requests the entry's stage needs now, if it can make them:
+        /// never while its stage is still being saved.
         func drive(_ e: inout Entry) {
             guard e.flight == nil, e.blocked == nil else { return }
             switch (e.stage, e.intent.destination) {
@@ -166,11 +174,15 @@ enum Delivery {
             case (.creating, .thread), (.accepted, _): break
             }
         }
-        /// Saves `e` at its new stage, then drives it.
+        /// Saves `e` at its new stage; it is driven once the save is acknowledged.
         func commit(_ e: inout Entry) {
-            e.flight = nil
-            effects.append(.save(e))
-            drive(&e)
+            s.journal += 1
+            e.flight = .saving(sequence: s.journal)
+            effects.append(.save(e, sequence: s.journal))
+        }
+        func forget(_ id: String) {
+            s.journal += 1
+            effects.append(.forget(messageID: id, sequence: s.journal))
         }
         func resolve(_ e: inout Entry, text: String, thread: String) {
             e.stage = .sending(Resolved(threadID: thread, command: turnCommand(e.intent, text: text, threadID: thread)))
@@ -183,7 +195,8 @@ enum Delivery {
         }
         func reject(_ e: Entry, _ reason: String) {
             s.entries[e.intent.messageID] = nil
-            effects += [.forget(messageID: e.intent.messageID), .restoreField(e.owner, e.intent),
+            forget(e.intent.messageID)
+            effects += [.restoreField(e.owner, e.intent),
                         .settle(messageID: e.intent.messageID, .rejected(e.owner, reason: reason)), .report(e.owner, reason)]
         }
         /// The thread exists: the message belongs to it, and its turn goes next.
@@ -191,17 +204,16 @@ enum Delivery {
             guard case .creating(let text) = e.stage else { return }
             let draft = e.intent.origin
             resolve(&e, text: text, thread: thread)
-            e.flight = nil
-            effects.append(.save(e))
+            commit(&e)
             let agentOf: String? = if case .agent = e.intent.destination { e.intent.projectID } else { nil }
             effects.append(.adopt(draft: draft, thread: e.owner, agentOf: agentOf))
-            drive(&e)
         }
         /// T3 has the message: nothing more to send. Shown until the thread has it, while anyone looks.
         func accepted(_ e: Entry, observed: Bool) {
             guard case .sending(let r) = e.stage else { return }
             let id = e.intent.messageID
-            effects += [.forget(messageID: id), .settle(messageID: id, .accepted(e.owner))]
+            forget(id)
+            effects.append(.settle(messageID: id, .accepted(e.owner)))
             if !observed, let watching = s.watching, watching == e.owner || watching == e.intent.origin {
                 var kept = e; kept.stage = .accepted(r); kept.flight = nil; kept.uncertain = false
                 s.entries[id] = kept
@@ -231,8 +243,14 @@ enum Delivery {
                 s.entries[record.intent.messageID] = e
             }
 
-        case .saveFailed(let id, let reason):
-            guard var e = s.entries[id] else { return done(.stale) }
+        case .saved(let id, let sequence):
+            guard var e = s.entries[id], e.flight == .saving(sequence: sequence) else { return done(.stale) }
+            e.flight = nil
+            drive(&e)
+            s.entries[id] = e
+
+        case .saveFailed(let id, let sequence, let reason):
+            guard var e = s.entries[id], e.flight == .saving(sequence: sequence) else { return done(.stale) }
             let said = "Couldn’t keep the message on this phone: " + reason
             if e.stage == .preparing, !e.uncertain { reject(e, said); return done() }
             e.flight = nil; e.blocked = reason

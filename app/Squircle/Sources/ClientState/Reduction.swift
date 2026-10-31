@@ -64,9 +64,13 @@ extension CommandOutcome {
             return value["status"].string == "rejected" ? .refused("T3 rejected the command: \(value.formatted.prefix(700))") : .accepted(value)
         }
         let cause = exit["cause"], detail = "T3 rejected the command: \(cause.formatted.prefix(700))"
+        return typedFailure(cause) ? .refused(detail) : .unknown(detail)
+    }
+    /// A failed Exit's cause holds one of T3's typed errors: T3 decided
+    /// no, rather than a defect or interruption.
+    static func typedFailure(_ cause: JSONValue) -> Bool {
         let reasons = cause.array.isEmpty ? [cause] : cause.array
-        let typed = reasons.contains { $0["_tag"].string == "Fail" && ($0["error"]["_tag"].string.map { $0 != "InternalError" } ?? false) }
-        return typed ? .refused(detail) : .unknown(detail)
+        return reasons.contains { $0["_tag"].string == "Fail" && ($0["error"]["_tag"].string.map { $0 != "InternalError" } ?? false) }
     }
 }
 
