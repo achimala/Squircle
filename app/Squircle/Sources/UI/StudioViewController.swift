@@ -8,19 +8,29 @@ enum Route: Equatable {
     case grid
     /// The app's agent: the conversation an app opens to.
     case app(String)
+    /// The app's tasks, pushed over its agent.
+    case tasks(String)
     /// Another of the app's threads, over its agent. `overHome`: opened
     /// straight from Home (what waits on you there); it covers its agent
-    /// and goes back to Home.
-    case thread(app: String, ThreadDestination, overHome: Bool = false)
+    /// and goes back to Home. `overTasks`: opened from Tasks, over it; it
+    /// goes back to Tasks.
+    case thread(app: String, ThreadDestination, overHome: Bool = false, overTasks: Bool = false)
 
     var app: String? {
         switch self {
         case .grid: nil
-        case .app(let id), .thread(let id, _, _): id
+        case .app(let id), .tasks(let id), .thread(let id, _, _, _): id
         }
     }
-    var thread: ThreadDestination? { if case .thread(_, let thread, _) = self { thread } else { nil } }
-    var overHome: Bool { if case .thread(_, _, true) = self { true } else { false } }
+    var thread: ThreadDestination? { if case .thread(_, let thread, _, _) = self { thread } else { nil } }
+    var overHome: Bool { if case .thread(_, _, true, _) = self { true } else { false } }
+    /// Tasks is open: in front, or under a thread opened from it.
+    var withTasks: Bool {
+        switch self {
+        case .tasks, .thread(_, _, _, true): true
+        default: false
+        }
+    }
 }
 
 /// A conversation over the app's agent: one of its T3 threads, or a new
@@ -76,11 +86,15 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     private lazy var waitingList = HomeWaitingView(model: model)
     /// Holds the app's agent; touches pass through when empty.
     private let agentHost = PassthroughView()
-    /// Holds a thread over the agent; touches pass through when empty.
+    /// Holds Tasks over the agent; touches pass through when empty.
+    private let tasksHost = PassthroughView()
+    /// Holds a thread over the agent (or Tasks); touches pass through when empty.
     private let threadHost = PassthroughView()
     /// 0 = grid, 1 = agent.
     private let appSpring = SpringDriver()
-    /// 0 = agent, 1 = thread over it.
+    /// 0 = agent, 1 = Tasks over it.
+    private let tasksSpring = SpringDriver()
+    /// 0 = agent (or Tasks), 1 = thread over it.
     private let spring = SpringDriver()
     private var cells: [String: GridCell] = [:]
     private var bindings: [String: ScreenshotBinding] = [:]
@@ -103,11 +117,18 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let controller: ThreadViewController
         /// A thread opened straight from Home (`Route.thread`'s `overHome`).
         var overHome = false
+        /// A thread opened from Tasks (`Route.thread`'s `overTasks`).
+        var overTasks = false
     }
     /// The app whose agent (and device) is mounted. Changes only at `appSpring` 0.
     private var mountedApp: Mounted<String>?
     /// The conversation over the agent. Changes only at `spring` 0.
     private var mountedThread: Mounted<ThreadDestination>?
+    /// The app's Tasks over its agent. Changes only at `tasksSpring` 0.
+    private var mountedTasks: (app: String, controller: TasksViewController)?
+    private var tasks: TasksViewController? { mountedTasks?.controller }
+    /// Where Tasks opens once it is mounted: a task's row, or its page.
+    private var tasksFocus: (focus: String?, task: String?)?
     /// The app's threads closed lately, newest first: off screen and let go
     /// of the model, so going back to one puts it back as it was instead of
     /// building its page and every row again.
@@ -168,6 +189,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         view.addSubview(stage)
         view.addSubview(home)
         view.addSubview(agentHost)
+        view.addSubview(tasksHost)
         view.addSubview(threadHost)
         view.addSubview(dock)
         dock.onExpand = { [weak self] use in self?.expandSimulator(use) }
@@ -208,7 +230,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         edge.delegate = self
         view.addGestureRecognizer(edge)
 
-        for driver in [appSpring, spring] {
+        for driver in [appSpring, tasksSpring, spring] {
             driver.onChange = { [weak self] value in
                 guard let self else { return }
                 // Off screen: whatever the route wants mounted can mount now.
@@ -328,7 +350,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                     Task { [weak self] in try? await Task.sleep(for: .seconds(4)); self?.agent?.debugReplyArrives() }
                 }
                 if let tab = environment["SQUIRCLE_TASKS"] {
-                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentTasks(threads: tab == "threads", focus: tab.count > 8 ? tab : nil) }
+                    Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.showTasks(focus: tab.count > 8 ? tab : nil) }
                 }
                 if environment["SQUIRCLE_BUILDS"] == "1" {
                     Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.presentBuilds() }
@@ -427,6 +449,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                     case .app:
                         if let project = selectedProject, let first = model.sessions(for: project).first,
                            Int.random(in: 0...1) == 0 { openThread(first.id) } else { closeApp() }
+                    case .tasks: closeTasks()
                     case .thread: closeThread()
                     }
                 }
@@ -577,6 +600,13 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                         for session in model.sessions(for: project).prefix(2) { actions.append { [weak self] in self?.openThread(session.id) } }
                     }
                     actions.append { [weak self] in self?.openThread(nil) }
+                    actions.append { [weak self] in self?.showTasks() }
+                case .tasks:
+                    actions.append { [weak self] in self?.closeTasks() }
+                    if let tasks {
+                        actions += tasks.debugActions()
+                        for id in tasks.debugThreads.shuffled().prefix(2) { actions.append { [weak self] in self?.openThread(id, overTasks: true) } }
+                    }
                 case .thread:
                     actions.append { [weak self] in self?.closeThread() }
                 }
@@ -588,9 +618,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         if dragging != nil { endBack(velocity: 0, closing: Bool.random()) }
         dropLift()
         await appSpring.rest()
+        await tasksSpring.rest()
         await spring.rest()
-        let settled = !appSpring.isAnimating && !spring.isAnimating
-            && appSpring.value == appTarget && spring.value == threadTarget
+        let settled = !appSpring.isAnimating && !tasksSpring.isAnimating && !spring.isAnimating
+            && appSpring.value == appTarget && tasksSpring.value == tasksTarget && spring.value == threadTarget
             && selectedID == (route.app ?? selectedID) && mountedThread?.key == route.thread
         NSLog("STRESS end route=%@ settled=%d a=%.3f t=%.3f violations=%d", "\(route)", settled,
               appSpring.value, spring.value, auditViolations)
@@ -613,10 +644,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if let cell = cells[project.id], cell.center != CGPoint(x: frame.midX, y: frame.midY) { fail("app out of its place") }
         }
         if let problem = JellyDirector.shared.debugViolation() { fail(problem) }
-        guard !appSpring.isAnimating, !spring.isAnimating, dragging == nil else { return }
+        guard !appSpring.isAnimating, !tasksSpring.isAnimating, !spring.isAnimating, dragging == nil else { return }
+        let k = tasksSpring.value
         switch route {
         case .grid: if home.isHidden || home.alpha < 0.99 { fail("grid not showing at rest") }
-        case .app: if agent == nil || agentHost.isHidden || a < 1 || t > 0 || agent?.view.transform != .identity { fail("agent not showing at rest") }
+        case .app: if agent == nil || agentHost.isHidden || a < 1 || t > 0 || k > 0 || agent?.view.transform != .identity { fail("agent not showing at rest") }
+        case .tasks:
+            if tasks == nil || k < 1 || t > 0 || tasks?.view.transform != .identity || tasks?.view.isUserInteractionEnabled != true { fail("tasks not showing at rest") }
+            if let problem = tasks?.debugViolation() { fail(problem) }
         case .thread: if thread == nil || t < 1 || thread?.view.transform != .identity { fail("thread not showing at rest") }
         }
     }
@@ -631,8 +666,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         home.place(in: bounds)
         agentHost.frame = bounds
         grid.frame = bounds
+        tasksHost.frame = bounds
         threadHost.frame = bounds
         agent?.view.place(in: bounds)
+        tasks?.view.place(in: bounds)
+        tasks?.view.layer.shadowPath = UIBezierPath(rect: bounds).cgPath
         thread?.view.place(in: bounds)
         let current = makeLayout()
         if current != laidOut {
@@ -719,7 +757,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         var titles: [String: String] = [:]
         for session in model.sessions(for: project, includingAgent: true) { titles[session.id] = session.displayTitle(in: project) }
         if let agent = model.agentThreadID(for: project) { titles[agent] = project.name }
-        let front = route.thread != nil ? thread : agent
+        let front = self.front
         dock.agentThread = model.agentThreadID(for: project)
         let uses = model.activeSimulators(for: project)
         dock.update(uses: uses, currentThread: front?.currentSessionID, titles: titles)
@@ -772,9 +810,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// Where each spring is headed: open only while the route wants exactly
     /// what is mounted. Anything else first goes back to zero, off screen.
     private var appTarget: CGFloat { route.app != nil && route.app == selectedID ? 1 : 0 }
+    private var tasksTarget: CGFloat { appTarget == 1 && route.withTasks && mountedTasks?.app == selectedID ? 1 : 0 }
     private var threadTarget: CGFloat {
         guard let mounted = mountedThread else { return 0 }
-        if appTarget == 1, route.thread == mounted.key, route.overHome == mounted.overHome { return 1 }
+        if appTarget == 1, route.thread == mounted.key, route.overHome == mounted.overHome,
+           route.withTasks == mounted.overTasks { return 1 }
         // One opened from Home leaves with its app, over it.
         return mounted.overHome && route == .grid ? 1 : 0
     }
@@ -794,17 +834,37 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     }
 
     /// A thread of the mounted app; nil starts a new conversation.
-    func openThread(_ sessionID: String?) {
+    /// `overTasks`: opened from Tasks, over it.
+    func openThread(_ sessionID: String?, overTasks: Bool = false) {
         guard presentedViewController == nil, let app = selectedID, route.app == app else { return }
         Theme.openHaptic()
-        route = .thread(app: app, sessionID.map(ThreadDestination.existing) ?? .draft(UUID()))
+        route = .thread(app: app, sessionID.map(ThreadDestination.existing) ?? .draft(UUID()), overTasks: overTasks)
         sync()
     }
 
     func closeThread() {
-        guard case .thread(let app, _, let overHome) = route, presentedViewController == nil else { return }
+        guard case .thread(let app, _, let overHome, let overTasks) = route, presentedViewController == nil else { return }
         view.endEditing(true)
-        route = overHome ? .grid : .app(app)
+        route = overHome ? .grid : overTasks ? .tasks(app) : .app(app)
+        sync()
+    }
+
+    /// The app's Tasks, pushed over its agent; from Home (or another app)
+    /// it opens the app too. `focus`: a task whose row shows first; `task`:
+    /// a task whose work item's page it opens on.
+    func showTasks(project id: String? = nil, focus: String? = nil, task: String? = nil) {
+        guard presentedViewController == nil, let id = id ?? route.app, projects.contains(where: { $0.id == id }) else { return }
+        Theme.selectionHaptic()
+        view.endEditing(true)
+        if let tasks, mountedTasks?.app == id { tasks.show(focus: focus, task: task) } else { tasksFocus = (focus, task) }
+        route = .tasks(id)
+        sync()
+    }
+
+    func closeTasks() {
+        guard case .tasks(let app) = route, presentedViewController == nil else { return }
+        view.endEditing(true)
+        route = .app(app)
         sync()
     }
 
@@ -819,7 +879,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         if thread == model.agentThreadID(for: project) {
             route = .app(id)
         } else {
-            route = .thread(app: id, .existing(thread), overHome: route == .grid || route.overHome)
+            route = .thread(app: id, .existing(thread), overHome: route == .grid || route.overHome,
+                            overTasks: route.withTasks && route.app == id)
         }
         jumping = (thread, item.id)
         sync()
@@ -891,7 +952,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                     .first { $0.allThreads.contains { $0.id == request.threadID } }?.id : nil
                 }
             }.first
-            presentTasks(project: id, focus: task)
+            showTasks(project: id, focus: task)
             return
         }
         if let thread = target.thread, thread != model.agentThreadID(for: resolved.project) {
@@ -928,26 +989,41 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             syncing = false
             renderSimulators()
             applyScene()
-            onViewing?(route == .grid ? nil : route.thread != nil ? thread?.currentSessionID : agent?.currentSessionID)
+            tasks?.inFront = route == .tasks(selectedID ?? "")
+            onViewing?(route == .grid ? nil : front?.currentSessionID)
         }
         // The thread level only exists inside its app; it leaves first,
         // once off screen (one from Home rides out with its app).
         if spring.value <= 0.001 || appSpring.value <= 0.001, let mounted = mountedThread,
-           route.thread != mounted.key || route.app != selectedID || route.overHome != mounted.overHome {
+           route.thread != mounted.key || route.app != selectedID || route.overHome != mounted.overHome
+            || route.withTasks != mounted.overTasks {
             unmountThread()
             if spring.value > 0.001 { spring.set(0) }
         }
+        // Tasks leaves once off screen, after a thread over it.
+        if tasksSpring.value <= 0.001 || appSpring.value <= 0.001, let mounted = mountedTasks,
+           !route.withTasks || route.app != mounted.app, mountedThread?.overTasks != true {
+            unmountTasks()
+            if tasksSpring.value > 0.001 { tasksSpring.set(0) }
+        }
         if appSpring.value <= 0.001, let app = route.app, app != selectedID {
             unmountThread()
+            unmountTasks()
             unmountAgent()
             mountApp(app)
+        }
+        if tasksSpring.value <= 0.001, mountedTasks == nil, route.withTasks, let app = route.app, app == selectedID {
+            mountTasks(app)
         }
         if spring.value <= 0.001, mountedThread == nil, let key = route.thread, route.app == selectedID {
             mountThread(key)
             mountedThread?.overHome = route.overHome
+            mountedThread?.overTasks = route.withTasks
             // From Home, off screen still: it slides in with its app, covering the agent.
             if route.overHome, appSpring.value <= 0.001 { spring.set(1) }
         }
+        // A thread from Tasks is named for its task.
+        if let id = route.thread?.threadID, mountedThread?.overTasks == true { thread?.crumb = tasks?.taskName(for: id) } else { thread?.crumb = nil }
         // The conversation `jump` opened is mounted: it goes to the spot.
         if let jumping {
             let shown = route.thread?.threadID ?? route.app.flatMap { id in projects.first { $0.id == id } }.flatMap(model.agentThreadID)
@@ -955,7 +1031,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             if shown != jumping.thread { self.jumping = nil }
             else if let page, page.currentSessionID == jumping.thread { page.focus(on: jumping.item); self.jumping = nil }
         }
-        for (driver, target) in [(appSpring, appTarget), (spring, threadTarget)] where driver !== dragging {
+        for (driver, target) in [(appSpring, appTarget), (tasksSpring, tasksTarget), (spring, threadTarget)] where driver !== dragging {
             if driver.target != target || (!driver.isAnimating && driver.value != target) {
                 driver.redirect(to: target)
             }
@@ -964,10 +1040,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
 
     private func rested() {
         sync()
-        guard dragging == nil, !appSpring.isAnimating, !spring.isAnimating else { return }
+        guard dragging == nil, !appSpring.isAnimating, !tasksSpring.isAnimating, !spring.isAnimating else { return }
         let focus: Any? = switch route {
         case .grid: selectedID.flatMap { cells[$0] }
         case .app: agent?.view
+        case .tasks: tasks?.view
         case .thread: thread?.view
         }
         UIAccessibility.post(notification: .screenChanged, argument: focus)
@@ -998,8 +1075,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         controller.onOpenThread = { [weak self] id in self?.openThread(id) }
         controller.onPrepareThread = { [weak self] id in self?.prepareThread(id) }
         controller.onScrollBegan = { [weak self] in self?.stopPreparing() }
-        controller.onTasks = { [weak self] in self?.presentTasks() }
-        controller.onOpenTask = { [weak self] id in self?.presentTasks(project: project.id, task: id) }
+        controller.onTasks = { [weak self] in self?.showTasks() }
+        controller.onOpenTask = { [weak self] id in self?.showTasks(project: project.id, task: id) }
         controller.onBuilds = { [weak self] in self?.presentBuilds() }
         controller.onBack = { [weak self] in self?.closeApp() }
         return controller
@@ -1063,6 +1140,49 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 last = CACurrentMediaTime() - started
             } while !done && CACurrentMediaTime() - frame + last < 0.004
         }
+    }
+
+    /// The conversation in front: a thread, Tasks' page in view, or the agent.
+    private var front: ThreadViewController? {
+        if route.thread != nil { return thread }
+        if route.withTasks { return tasks?.conversation }
+        return agent
+    }
+
+    /// Tasks, made off screen at the right, over the agent, which lets go
+    /// of the model while it is covered.
+    private func mountTasks(_ app: String) {
+        guard let project = selectedProject else { return }
+        let focus = tasksFocus
+        tasksFocus = nil
+        agent?.deactivate()
+        let controller = TasksViewController(model: model, project: project, embedsConversations: true, focus: focus?.focus, task: focus?.task)
+        controller.host = self
+        controller.onBack = { [weak self] in self?.closeTasks() }
+        controller.onOpen = { [weak self] id in self?.openThread(id, overTasks: true) }
+        controller.onPrepare = { [weak self] id in self?.prepareThread(id) }
+        controller.onJump = { [weak self] item in self?.jump(to: item, project: app) }
+        addChild(controller)
+        controller.view.frame = view.bounds
+        controller.view.layer.shadowColor = UIColor.black.cgColor
+        controller.view.layer.shadowRadius = 18
+        controller.view.layer.shadowOffset = CGSize(width: -6, height: 0)
+        controller.view.layer.shadowOpacity = 0.14
+        controller.view.layer.shadowPath = UIBezierPath(rect: view.bounds).cgPath
+        controller.view.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
+        tasksHost.addSubview(controller.view)
+        controller.didMove(toParent: self)
+        mountedTasks = (app, controller)
+    }
+
+    private func unmountTasks() {
+        guard let mounted = mountedTasks else { return }
+        mountedTasks = nil
+        mounted.controller.tearDown()
+        mounted.controller.willMove(toParent: nil)
+        mounted.controller.view.removeFromSuperview()
+        mounted.controller.removeFromParent()
+        if mountedThread == nil { agent?.reactivate() }
     }
 
     private func unmountAgent() {
@@ -1138,7 +1258,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// tapped and the sheet is leaving), made off screen a few milliseconds
     /// per frame. Its push takes it as it is and builds whatever is left.
     func prepareThread(_ id: String) {
-        guard let project = selectedProject, route == .app(project.id) else { return }
+        guard let project = selectedProject, route == .app(project.id) || route == .tasks(project.id) else { return }
         let key = ThreadDestination.existing(id)
         guard preparing?.key != key, !parked.contains(where: { $0.key == key }) else { return }
         preparing?.task.cancel()
@@ -1248,7 +1368,8 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         } else {
             dismount(mounted.controller)
         }
-        agent?.reactivate()
+        // Under Tasks, the agent stays covered; Tasks takes the front back itself.
+        if mountedTasks == nil { agent?.reactivate() }
     }
 
     // MARK: Arranging
@@ -1366,12 +1487,14 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         }
     }
 
-    /// The top level on screen: the thread if it is showing, else the app.
+    /// The top level on screen: the thread if it is showing, else Tasks,
+    /// else the app.
     private func beginBack() {
         guard dragging == nil, route != .grid else { return }
         // A thread from Home goes back to Home with its app.
-        let driver = route.thread != nil && threadTarget == 1 && !route.overHome ? spring : appSpring
-        guard driver === spring || appTarget == 1 else { return }
+        let driver = route.thread != nil && threadTarget == 1 && !route.overHome ? spring
+            : route.thread == nil && route.withTasks && tasksTarget == 1 ? tasksSpring : appSpring
+        guard driver !== appSpring || appTarget == 1 else { return }
         driver.stop()
         dragging = driver
         dragStart = driver.value
@@ -1386,9 +1509,9 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         guard let driver = dragging else { return }
         dragging = nil
         if closing {
-            if driver === spring || route.overHome { closeThread() } else { closeApp() }
+            if driver === spring || route.overHome { closeThread() } else if driver === tasksSpring { closeTasks() } else { closeApp() }
         }
-        let target = driver === spring ? threadTarget : appTarget
+        let target = driver === spring ? threadTarget : driver === tasksSpring ? tasksTarget : appTarget
         driver.animate(to: target, initialVelocity: velocity)
         sync()
     }
@@ -1403,6 +1526,10 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         if route.thread != nil {
             guard let thread, threadTarget == 1 else { return false }
             return thread.allowsBackSwipe(at: pan.location(in: thread.view))
+        }
+        if route.withTasks {
+            guard let tasks, tasksTarget == 1 else { return false }
+            return tasks.allowsBackSwipe(at: pan.location(in: tasks.view))
         }
         guard let agent, appTarget == 1 else { return false }
         return agent.allowsBackSwipe(at: pan.location(in: agent.view))
@@ -1478,7 +1605,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         guard width > 0, !syncing else { return }
         let layout = self.layout
         // A spring may overshoot its end a little; screens never travel past it.
-        let a = appSpring.value.clamped(), t = spring.value.clamped()
+        let a = appSpring.value.clamped(), k = tasksSpring.value.clamped(), t = spring.value.clamped()
         let scroll = grid.contentOffset.y
         var origin = CGPoint(x: width / 2, y: view.safeAreaInsets.top + 58)
         let shown = self.shown
@@ -1507,33 +1634,41 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         dock.update(\.alpha, to: a)
         dock.update(\.isUserInteractionEnabled, to: route.app != nil && a > 0.5)
 
-        // Flat pushes. The agent's conversation slides over Home; a thread
-        // slides over the agent while the agent drifts a third as far left.
-        // The device travels on its own.
+        // Flat pushes. The agent's conversation slides over Home; Tasks and
+        // a thread slide over what is beneath, which drifts a third as far
+        // left. The device travels on its own.
         agentHost.update(\.isHidden, to: a <= 0.001)
-        agent?.setTransitionProgress(a * (1 - t))
-        // A thread opened from Home covers its agent exactly and rides with it.
-        let overHome = mountedThread?.overHome == true
-        agent?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - a) - (layout.reducedMotion || overHome ? 0 : width * 0.3 * t), y: 0))
+        // A thread opened from Home covers its agent exactly and rides with
+        // it; one from Tasks covers Tasks, the agent already covered.
+        let overHome = mountedThread?.overHome == true, overTasks = mountedThread?.overTasks == true
+        let covered = max(k, overTasks ? 0 : t)
+        agent?.setTransitionProgress(a * (1 - covered))
+        agent?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - a) - (layout.reducedMotion || overHome ? 0 : width * 0.3 * covered), y: 0))
+        tasksHost.update(\.isHidden, to: a <= 0.001 || k <= 0.001)
+        tasks?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - k * a) - (layout.reducedMotion || !overTasks ? 0 : width * 0.3 * t), y: 0))
         thread?.setTransitionProgress(t * a)
         thread?.view.update(\.transform, to: CGAffineTransform(translationX: width * (1 - t * a), y: 0))
         // The agent, fully covered and still, may change unseen.
-        agent?.outOfSight = thread != nil && t >= 1 && !spring.isAnimating && dragging == nil
+        agent?.outOfSight = (thread != nil && t >= 1 && !spring.isAnimating || tasks != nil && k >= 1 && !tasksSpring.isAnimating) && dragging == nil
 
         // Touches go to the screen the route names, from the first frame of its
         // transition. A conversation on its way out still covers the one
         // beneath, so touches on it stop there.
         let onGrid = route == .grid
-        let onAgent = route.app != nil && route.app == selectedID && route.thread == nil
+        let onAgent = route.app != nil && route == .app(selectedID ?? "")
+        let onTasks = route == .tasks(selectedID ?? "") && tasksTarget == 1
         let onThread = route.thread != nil && threadTarget == 1
         home.update(\.isUserInteractionEnabled, to: onGrid)
         home.update(\.accessibilityElementsHidden, to: !onGrid)
         agent?.view.update(\.isUserInteractionEnabled, to: onAgent)
         agent?.view.update(\.accessibilityElementsHidden, to: !onAgent)
+        tasks?.view.update(\.isUserInteractionEnabled, to: onTasks)
+        tasks?.view.update(\.accessibilityElementsHidden, to: !onTasks)
         thread?.view.update(\.isUserInteractionEnabled, to: onThread)
         thread?.view.update(\.accessibilityElementsHidden, to: !onThread)
         // Home takes touches as soon as it is the destination, as it does from an agent.
         threadHost.swallowsTouches = thread != nil && !onThread && !onGrid
+        tasksHost.swallowsTouches = tasks != nil && !onTasks && !onThread && !onGrid
         #if DEBUG
         audit(a: a, t: t)
         #endif
@@ -1557,35 +1692,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         present(controller, animated: true)
     }
 
-    /// The app's Tasks sheet; from Home (or another app) it opens the app
-    /// first, under the sheet. `focus`: a task whose row shows first;
-    /// `task`: a task whose work item's page it opens on.
-    private func presentTasks(project id: String? = nil, threads: Bool = false, focus: String? = nil, task: String? = nil) {
-        guard presentedViewController == nil, let id = id ?? selectedProject.flatMap({ route == .app($0.id) ? $0.id : nil }),
-              let project = projects.first(where: { $0.id == id }) else { return }
-        Theme.selectionHaptic()
-        if route != .app(id) {
-            view.endEditing(true)
-            route = .app(id)
-            sync()
-        }
-        let controller = TasksViewController(model: model, project: project, threads: threads, focus: focus, task: task)
-        controller.onOpen = { [weak self, weak controller] id in
-            // Made while the sheet leaves.
-            if let id { self?.prepareThread(id) }
-            controller?.dismiss(animated: true) { self?.openThread(id) }
-        }
-        controller.onJump = { [weak self, weak controller] item in
-            controller?.dismiss(animated: true) { self?.jump(to: item, project: project.id) }
-        }
-        controller.modalPresentationStyle = .pageSheet
-        if let sheet = controller.sheetPresentationController {
-            sheet.detents = [.large()]
-            sheet.prefersGrabberVisible = true
-        }
-        present(controller, animated: true)
-    }
-
     private func presentImport() {
         guard route == .grid, presentedViewController == nil else { return }
         let importer = AppImportNavigationController(model: model)
@@ -1604,6 +1710,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     override func accessibilityPerformEscape() -> Bool {
         switch route {
         case .thread: closeThread(); return true
+        case .tasks: closeTasks(); return true
         case .app: closeApp(); return true
         case .grid: return false
         }
@@ -1618,21 +1725,21 @@ extension StudioViewController: ConversationHost {
     /// or its picture in the dock, and back to whichever shows it then.
     func expandSimulator(_ use: SimulatorUse) {
         guard use.live, simulatorViewer?.route != .open, let window = view.window else { return }
-        let front = route.thread != nil ? thread : agent
+        let front = self.front
         let other = use.threadID != front?.currentSessionID
         let origin = MediaOrigin(locate: { [weak self] in
             guard let self else { return nil }
-            return (route.thread != nil ? thread : agent)?.simulatorSpot(use.id) ?? dock.spot(use.id)
+            return self.front?.simulatorSpot(use.id) ?? dock.spot(use.id)
         }, conceal: { [weak self] hidden in
             if hidden { self?.dock.lent.insert(use.id) } else { self?.dock.lent.remove(use.id) }
         })
         simulatorViewer = MediaViewer.open(.simulator(use, feeds: feeds, openThread: other ? { [weak self] in
             guard let self else { return }
-            if use.threadID == agent?.currentSessionID { closeThread() } else if route.thread?.threadID != use.threadID { openThread(use.threadID) }
+            if use.threadID == agent?.currentSessionID { closeThread() } else if route.thread?.threadID != use.threadID { openThread(use.threadID, overTasks: route.withTasks) }
         } : nil), from: origin, in: window)
     }
     func conversation(_ conversation: ThreadViewController, showsSimulators ids: Set<String>) {
-        guard conversation === (thread ?? agent) else { return }
+        guard conversation === front else { return }
         dock.docked = ids
     }
 }

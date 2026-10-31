@@ -1,58 +1,76 @@
 import UIKit
 
-/// The app's tasks beside its agent. The Tasks tab opens on every work item
-/// at a glance, grouped by what each needs (needs you and ready to try on
-/// top); a row opens the item's page, and pages swipe sideways through the
-/// list in the same order. Questions waiting on you sit under their task in
-/// Needs you (and on its page), answered right there. Done work ages into
-/// History; the Threads tab is every thread of the app.
+/// The app's tasks, pushed in over its agent (the deck's A · Outline). The
+/// overview lists every work item with its live status up front and its
+/// live threads nested under it (a Sprout, the title, what it is doing, a
+/// tiny preview); needs you and ready to try come first. A row opens the
+/// item's page, and pages swipe sideways in the overview's order. A page
+/// lists threads first (each under the sub-task it serves), then the open
+/// sub-tasks, closed ones and earlier threads folded; an item with one live
+/// thread is that thread, its conversation under a short header. Opening a
+/// thread pushes it over Tasks, named for its task; back returns here.
+/// Questions waiting on you sit under their task as the question card.
+/// Threads on no task: working ones at the foot, idle ones folded; History
+/// folded below them.
 @MainActor
 final class TasksViewController: UIViewController, UIScrollViewDelegate, UITableViewDelegate, UIGestureRecognizerDelegate {
-    /// A thread to open; nil starts a new one.
-    var onOpen: ((String?) -> Void)?
+    /// Back to the agent (or closing the overlay's sheet).
+    var onBack: (() -> Void)?
+    /// A thread to push over Tasks.
+    var onOpen: ((String) -> Void)?
+    /// A finger went down on a line that opens a thread: its page can be made ahead.
+    var onPrepare: ((String) -> Void)?
     /// A question's text tapped: the conversation that asked it, at the spot.
     var onJump: ((WaitingList.Item) -> Void)?
+    /// Simulator streams for previews, and the host of an item's conversation.
+    weak var host: ConversationHost?
     private let model: SquircleModel
     private var project: AppProject
-    private let tabs = UISegmentedControl(items: ["Tasks", "Threads"])
-    private let close = Theme.glassButton(symbol: "xmark", identifier: "tasks.close", accessibilityLabel: "Close")
-    private let back = Theme.glassButton(symbol: "chevron.left", identifier: "tasks.back", accessibilityLabel: "All tasks")
-    private let header = UIView()
-    /// The switch sits on glass like the close button, so rows passing
-    /// under it don't show through.
-    private let tabsGlass = Theme.glassSurface(cornerRadius: Theme.Space.tap / 2)
+    /// An item with one live thread shows its conversation (not in the
+    /// overlay's sheet, where a field would fight the sheet's drag).
+    private let embedsConversations: Bool
+    private let back = Theme.glassButton(symbol: "chevron.left", identifier: "tasks.back", accessibilityLabel: "Back")
 
-    /// Where the Tasks tab is: the overview, or one work item's page. Every
-    /// frame, visibility and touch below is derived from this and `push`.
+    /// Where Tasks is: the overview, or one work item's page. Every frame,
+    /// visibility and touch below is derived from this and `push`.
     enum Route: Equatable { case overview, item(String) }
     private var route = Route.overview
     /// 0 shows the overview, 1 the pages; one interruptible spring, which an
     /// edge swipe takes over at any frame.
     private let push = SpringDriver()
     private var dragStart: CGFloat?
-    /// Back from a page: a swipe right that starts at the left edge. A
-    /// plain pan, as a screen-edge one never starts inside a sheet.
+    /// Back from a page: a swipe right that starts at the left edge.
     private let edgePan = UIPanGestureRecognizer()
+    /// Tasks is the screen in front (its host says), so the page in view
+    /// may hold its conversation.
+    var inFront = false { didSet { if inFront != oldValue { syncConversations() } } }
 
-    // The overview. Grouped, so the small group names scroll with their
-    // rows instead of sticking over them.
     private let table = UITableView(frame: .zero, style: .grouped)
+    private let heading = TasksHeading()
     /// Pages side by side, in the overview's order; native paging, so a
     /// page follows the finger. Only the shown page and its neighbours exist.
     private let pager = UIScrollView()
     private var pages: [String: WorkItemPage] = [:]
     /// The work items the pages run through: the overview's rows, in order.
     private var order: [String] = []
+    /// Conversations shown inside one-thread pages, by work item; one per
+    /// mounted page, the one in view in front.
+    private var conversations: [String: ThreadViewController] = [:]
+    private var frontConversation: String?
+    /// One-thread items whose outline was asked for instead of their conversation.
+    private var outlined: Set<String> = []
     private let notice = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
-    private lazy var threads = ThreadsViewController(model: model, project: project, embedded: true)
     private var dataSource: UITableViewDiffableDataSource<Group, String>!
     private var list = AppTasks()
     private var showsHistory = false
+    private var showsLoose = false
     private var query = ""
     private var installing: String?
     /// What each row shows. A row is drawn again only when this changes:
     /// the tasks also carry times and orders that tick without showing.
     private var rows: [String: TaskRow] = [:]
+    private var lines: [String: ThreadLine.Content] = [:]
+    private var folds: [String: FoldCell.Content] = [:]
     /// A row's swipe actions are open. The list holds still under the
     /// finger and catches up when they close.
     private var swiping = false
@@ -66,49 +84,56 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     private var undoExpiry: Task<Void, Never>?
     private let undo = UndoToast()
     private var observation: Task<Void, Never>?
-    /// Keeps the app's tasks fresh while the sheet is up.
+    /// Keeps the app's tasks fresh while Tasks is up.
     private var freshness: RefreshLease?
-    /// The next History page is on its way.
     private var loadingHistory = false
     private lazy var answers = WaitingAnswers(model: model)
     /// What each question row shows, by row ID (`ask.` and the item's ID).
     private var asks: [String: AskRow] = [:]
     /// What waits on you for each work item.
     private var asked: [String: [WaitingList.Item]] = [:]
+    /// What each thread waiting on you asks, by thread.
+    private var asking: [String: String] = [:]
+    /// Pictures for previews, by media ID, once loaded.
+    private var pictures: [String: UIImage] = [:]
+    private var loadingPictures: Set<String> = []
     /// A task to show first, once it's listed (a question tapped elsewhere).
     private var focus: String?
+    /// The task to open on, at its work item's page.
+    private var initialTask: String?
 
     /// Sections top to bottom; done and dropped tasks stay a day before History.
     enum Group: Hashable {
-        case search, status(AppTask.Status), finished, history
+        case search, status(AppTask.Status), finished, loose, history
         var title: String {
             switch self {
             case .status(let status): WorkItemPage.name(status)
             case .finished: "Done"
-            case .history: "History"
-            case .search: ""
+            case .search, .loose, .history: ""
             }
         }
     }
     private static let searchRow = "search"
     private static let askPrefix = "ask."
+    private static let loosePrefix = "loose."
+    private static let looseFold = "fold.loose"
+    private static let historyFold = "fold.history"
     /// `about`: it's about one of the item's sub-tasks, so that is named.
     struct AskRow: Equatable { let item: WaitingList.Item; let busy: Bool; let last: Bool; var about = false }
     /// What needs a look comes first: you, then something to try.
     private static let statusOrder: [AppTask.Status] = [.needsYou, .readyToTry, .inProgress, .queued]
-
-    /// The task to open on, at its work item's page.
-    private var initialTask: String?
+    /// Live threads nested under an overview row; the page has them all.
+    private static let nested = 3
 
     /// `focus`: a task whose row (or work item's row) shows first; `task`:
     /// a task whose work item's page it opens on.
-    init(model: SquircleModel, project: AppProject, threads: Bool = false, focus: String? = nil, task: String? = nil) {
+    init(model: SquircleModel, project: AppProject, embedsConversations: Bool, focus: String? = nil, task: String? = nil) {
         self.model = model
         self.project = project
+        self.embedsConversations = embedsConversations
         self.focus = focus
         initialTask = task?.lowercased()
         super.init(nibName: nil, bundle: nil)
-        tabs.selectedSegmentIndex = threads ? 1 : 0
     }
 
     @available(*, unavailable)
@@ -120,9 +145,10 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         ScrollSweep.start(table)
         #endif
         view.backgroundColor = Theme.paper
-        close.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
-        back.addAction(UIAction { [weak self] _ in self?.showOverview() }, for: .touchUpInside)
-        tabs.addAction(UIAction { [weak self] _ in Theme.selectionHaptic(); self?.renderChrome() }, for: .valueChanged)
+        back.addAction(UIAction { [weak self] _ in
+            Theme.selectionHaptic()
+            if self?.route == .overview { self?.onBack?() } else { self?.showOverview() }
+        }, for: .touchUpInside)
 
         table.backgroundColor = .clear
         table.separatorStyle = .none
@@ -130,13 +156,21 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         table.keyboardDismissMode = .onDrag
         table.sectionHeaderTopPadding = 0
         table.sectionFooterHeight = 0
-        table.tableHeaderView = UIView(frame: CGRect(x: 0, y: 0, width: 0, height: CGFloat.leastNonzeroMagnitude))
         table.contentInsetAdjustmentBehavior = .never
         table.accessibilityIdentifier = "tasks.overview"
+        heading.configure(app: project.name)
+        table.tableHeaderView = heading
         table.register(TaskGroupHeader.self, forHeaderFooterViewReuseIdentifier: "group")
         table.register(TaskCell.self, forCellReuseIdentifier: "task")
         table.register(TaskSearchCell.self, forCellReuseIdentifier: Self.searchRow)
         table.register(WaitingCell.self, forCellReuseIdentifier: "ask")
+        table.register(ThreadCell.self, forCellReuseIdentifier: "thread")
+        table.register(FoldCell.self, forCellReuseIdentifier: "fold")
+        // A finger down on a thread line: its page can start being made.
+        table.addGestureRecognizer(TouchDown { [weak self] point in
+            guard let self, let id = threadLine(at: point, in: table) else { return }
+            onPrepare?(id)
+        })
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] table, path, id in
             guard let self else { return UITableViewCell() }
             if id.hasPrefix(Self.askPrefix) {
@@ -154,11 +188,22 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
                 cell.onChange = { [weak self] text in self?.query = text; self?.render() }
                 return cell
             }
+            if let fold = folds[id] {
+                let cell = table.dequeueReusableCell(withIdentifier: "fold", for: path) as! FoldCell
+                cell.configure(fold)
+                return cell
+            }
+            if let line = lines[id] {
+                let cell = table.dequeueReusableCell(withIdentifier: "thread", for: path) as! ThreadCell
+                cell.line.configure(line, feeds: host?.simulatorFeeds)
+                return cell
+            }
             let cell = table.dequeueReusableCell(withIdentifier: "task", for: path) as! TaskCell
             guard let row = rows[id] else { return cell }
-            cell.configure(row)
+            cell.configure(row, feeds: host?.simulatorFeeds)
             cell.onCheck = { [weak self] in self?.toggleCheck(id) }
             cell.onInstall = { [weak self] in self?.task(id).map { self?.install($0) } }
+            cell.onThread = { [weak self] thread in self?.openThread(thread) }
             return cell
         }
         dataSource.defaultRowAnimation = .fade
@@ -177,47 +222,20 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
         notice.textAlignment = .center
         [table, pager, notice].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; view.addSubview($0) }
-        undo.onUndo = { [weak self] in self?.undoLast() }
-        addChild(threads)
-        threads.view.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(threads.view)
-        threads.didMove(toParent: self)
-        // The lists run under the controls, which float on the sheet's own
-        // glass; content fades softly beneath them.
-        header.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(header)
-        [close, back, tabsGlass].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; header.addSubview($0) }
-        tabs.translatesAutoresizingMaskIntoConstraints = false
-        tabsGlass.contentView.addSubview(tabs)
+        back.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(back)
         if #available(iOS 26.0, *) {
             table.topEdgeEffect.style = .soft
-            threads.scrollView.topEdgeEffect.style = .soft
             let edge = UIScrollEdgeElementContainerInteraction()
             edge.edge = .top
-            header.addInteraction(edge)
+            back.addInteraction(edge)
             self.edge = edge
         }
-        threads.scrollView.contentInsetAdjustmentBehavior = .never
-        threads.onOpen = { [weak self] id in self?.onOpen?(id) }
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: Theme.Space.rowPad),
-            header.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.group),
-            header.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.group),
-            header.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
-            close.leadingAnchor.constraint(equalTo: header.leadingAnchor),
-            close.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            close.widthAnchor.constraint(equalToConstant: Theme.Space.tap), close.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
-            back.leadingAnchor.constraint(equalTo: header.leadingAnchor),
-            back.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            // Where every conversation's back button is.
+            back.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: Theme.Space.tight),
+            back.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.group),
             back.widthAnchor.constraint(equalToConstant: Theme.Space.tap), back.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
-            tabsGlass.centerXAnchor.constraint(equalTo: header.centerXAnchor),
-            tabsGlass.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            tabsGlass.widthAnchor.constraint(equalToConstant: 196),
-            tabsGlass.heightAnchor.constraint(equalToConstant: Theme.Space.tap),
-            tabs.topAnchor.constraint(equalTo: tabsGlass.contentView.topAnchor, constant: Theme.Space.tight),
-            tabs.bottomAnchor.constraint(equalTo: tabsGlass.contentView.bottomAnchor, constant: -Theme.Space.tight),
-            tabs.leadingAnchor.constraint(equalTo: tabsGlass.contentView.leadingAnchor, constant: Theme.Space.tight),
-            tabs.trailingAnchor.constraint(equalTo: tabsGlass.contentView.trailingAnchor, constant: -Theme.Space.tight),
             table.topAnchor.constraint(equalTo: view.topAnchor),
             table.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             table.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -227,11 +245,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             pager.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pager.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             pager.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            threads.view.topAnchor.constraint(equalTo: view.topAnchor),
-            threads.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            threads.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            threads.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            notice.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2 * Theme.Space.section),
+            notice.topAnchor.constraint(equalTo: back.bottomAnchor, constant: 4 * Theme.Space.section),
             notice.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Theme.Space.margin),
             notice.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Theme.Space.margin)
         ])
@@ -242,41 +256,89 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             undo.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -Theme.Space.rowPad)
         ])
         push.onChange = { [weak self] _ in self?.applyPush() }
-        // No pull to refresh: the lease keeps the list current while it's up,
-        // so pulling down at the top dismisses the sheet like any other.
+        push.onRest = { [weak self] _ in self?.syncConversations() }
         observation = model.observe(by: self, after: .milliseconds(100)) { $0.render() }
         freshness = model.keepFresh(.tasks(appID: project.id))
         Task { await model.refreshTasks() }
         render()
         if let task = initialTask { initialTask = nil; open(task: task) }
         renderUndo(animated: false)
+        #if DEBUG
+        // `SQUIRCLE_TASKS_SCROLL=POINTS`: for stills, the shown list scrolled that far (at most to its end).
+        if let points = ProcessInfo.processInfo.environment["SQUIRCLE_TASKS_SCROLL"].flatMap(Double.init) {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(4))
+                guard let self else { return }
+                let scroll = openItem.flatMap { self.pages[$0]?.scroll } ?? table
+                let end = max(-scroll.contentInset.top, scroll.contentSize.height + scroll.contentInset.bottom - scroll.bounds.height)
+                scroll.setContentOffset(CGPoint(x: 0, y: min(end, -scroll.contentInset.top + points)), animated: false)
+            }
+        }
+        #endif
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        // Ticks still waiting for their beat are sent before the sheet goes.
+        // Ticks still waiting for their beat are sent before Tasks goes.
         finishChecks()
     }
 
+    /// Leaving for good: ticks are sent, and the conversations let go.
+    func tearDown() {
+        finishChecks()
+        observation?.cancel()
+        freshness = nil
+        for id in Array(conversations.keys) { dropConversation(id) }
+    }
+
     override func accessibilityPerformEscape() -> Bool {
-        if onTasks, route != .overview { showOverview(); return true }
-        dismiss(animated: true)
+        if route != .overview { showOverview() } else { onBack?() }
         return true
     }
 
-    private var onTasks: Bool { tabs.selectedSegmentIndex == 0 }
+    /// Back swipes from the left edge belong to the host only on the
+    /// overview; on a page they go back to the overview here.
+    func allowsBackSwipe(at point: CGPoint) -> Bool { route == .overview && push.value <= 0.001 }
+
+    /// Shows a task: its row first (`focus`), or its work item's page (`task`).
+    func show(focus: String?, task: String?) {
+        if let task { open(task: task.lowercased()); return }
+        guard let focus else { return }
+        if route != .overview { route = .overview; push.set(0); applyPush() }
+        self.focus = focus
+        showFocus()
+    }
+
+    /// The work item a thread is for, in the user's words, to name it on top of the thread.
+    func taskName(for thread: String) -> String? {
+        list.tasks.first { $0.allThreads.contains { $0.id == thread } }?.ask
+    }
+
+    /// The conversation shown on the page in view, while it holds one.
+    var conversation: ThreadViewController? { frontConversation.flatMap { conversations[$0] } }
+
     private var openItem: String? { if case .item(let id) = route { id } else { nil } }
     /// Tells the soft top edge of the shown list where the controls are.
     private var edge: UIInteraction?
+    /// Where lists and pages start: just below the back button.
+    private var contentTop: CGFloat { view.safeAreaInsets.top + Theme.Space.tight + Theme.Space.tap + Theme.Space.tight }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         layoutPages()
         applyPush()
         defer { showFocus() }
+        let width = table.bounds.width
+        // The table sets its header's width, never its height.
+        let fitted = width > 0 ? heading.systemLayoutSizeFitting(CGSize(width: width, height: 0), withHorizontalFittingPriority: .required,
+                                                                 verticalFittingPriority: .fittingSizeLevel) : .zero
+        if width > 0, heading.frame.size != fitted {
+            heading.frame.size = fitted
+            table.tableHeaderView = heading
+        }
         // Every list starts just below the controls and scrolls up under them.
-        let top = header.frame.maxY + Theme.Space.tight, bottom = view.safeAreaInsets.bottom + Theme.Space.section
-        let scrolls = [table, threads.scrollView] + pages.values.map(\.scroll)
+        let top = contentTop, bottom = view.safeAreaInsets.bottom + Theme.Space.section
+        let scrolls = [table] + pages.values.map(\.scroll)
         for scroll in scrolls where scroll.contentInset.top != top || scroll.contentInset.bottom != bottom {
             let atTop = scroll.contentOffset.y <= -scroll.contentInset.top
             scroll.contentInset.top = top
@@ -284,6 +346,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             scroll.verticalScrollIndicatorInsets.top = top
             if atTop { scroll.contentOffset.y = -top }
         }
+        pages.values.forEach { $0.top = top }
     }
 
     // MARK: Route
@@ -299,7 +362,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         renderChrome()
     }
 
-    /// Already on its work item's page as the sheet comes up.
+    /// Already on its work item's page as Tasks comes up.
     private func open(task id: String) {
         let list = model.tasks(for: project)
         guard let item = (list.tasks + list.history).first(where: { $0.id.lowercased() == id || $0.subtasks.contains { $0.id.lowercased() == id } }),
@@ -308,44 +371,62 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         layoutPages()
         push.set(1)
         applyPush()
+        syncConversations()
     }
 
     private func showOverview() {
         guard route != .overview else { return }
         Theme.selectionHaptic()
+        view.endEditing(true)
         route = .overview
         push.redirect(to: 0)
         renderChrome()
+    }
+
+    private func openThread(_ id: String) {
+        Theme.selectionHaptic()
+        view.endEditing(true)
+        onOpen?(id)
     }
 
     /// The overview slides out to the left as the pages come in from the
     /// right, side by side: a flat push, never one over the other.
     private func applyPush() {
         let width = view.bounds.width, progress = push.value
-        table.transform = CGAffineTransform(translationX: -progress * width, y: 0)
-        pager.transform = CGAffineTransform(translationX: (1 - progress) * width, y: 0)
+        table.update(\.transform, to: CGAffineTransform(translationX: -progress * width, y: 0))
+        pager.update(\.transform, to: CGAffineTransform(translationX: (1 - progress) * width, y: 0))
         renderChrome()
         mountPages()
     }
 
-    /// Visibility and touches, from the route, the tab and where the push is.
+    /// Visibility and touches, from the route and where the push is.
     private func renderChrome() {
-        let item = onTasks && route != .overview
+        let item = route != .overview
         // Whatever the route points at takes touches from its first frame.
-        table.isUserInteractionEnabled = !item
-        pager.isUserInteractionEnabled = item
-        table.isHidden = !onTasks || (item && push.value >= 1)
-        pager.isHidden = !onTasks || (!item && push.value <= 0)
+        table.update(\.isUserInteractionEnabled, to: !item)
+        pager.update(\.isUserInteractionEnabled, to: item)
+        table.update(\.isHidden, to: item && push.value >= 1)
+        pager.update(\.isHidden, to: !item && push.value <= 0)
         table.accessibilityElementsHidden = item
         pager.accessibilityElementsHidden = !item
-        close.isHidden = item
-        back.isHidden = !item
+        back.accessibilityLabel = item ? "All tasks" : "Back"
         edgePan.isEnabled = item
-        threads.view.isHidden = onTasks
-        notice.isHidden = !onTasks || !list.tasks.isEmpty || !list.history.isEmpty
+        notice.isHidden = item || !list.tasks.isEmpty || !list.history.isEmpty
         if #available(iOS 26.0, *), let edge = edge as? UIScrollEdgeElementContainerInteraction {
-            edge.scrollView = !onTasks ? threads.scrollView : openItem.flatMap { pages[$0]?.scroll } ?? table
+            edge.scrollView = openItem.flatMap { pages[$0]?.scroll } ?? table
         }
+        syncConversations()
+    }
+
+    /// Only the page in view, at rest, with Tasks in front, holds its
+    /// conversation in front; every other one lets go of the model.
+    private func syncConversations() {
+        let front = inFront && !push.isAnimating && push.value >= 1 && !pager.isTracking && !pager.isDecelerating ? openItem : nil
+        let wanted = front.flatMap { conversations[$0] != nil ? $0 : nil }
+        guard wanted != frontConversation else { return }
+        if let old = frontConversation.flatMap({ conversations[$0] }) { old.park() }
+        frontConversation = wanted
+        conversation?.resume()
     }
 
     func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
@@ -361,6 +442,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         case .began:
             dragStart = push.value
             push.set(push.value)
+            view.endEditing(true)
         case .changed:
             push.set(min(1, max(0, (dragStart ?? 1) - gesture.translation(in: view).x / width)))
         default:
@@ -401,13 +483,17 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             near = Array((Int(position.rounded(.down)) - 1)...(Int(position.rounded(.up)) + 1)).filter(order.indices.contains)
         }
         let ids = Set(near.map { order[$0] })
-        for (id, page) in pages where !ids.contains(id) { page.removeFromSuperview(); pages[id] = nil }
+        for (id, page) in pages where !ids.contains(id) {
+            dropConversation(id)
+            page.removeFromSuperview()
+            pages[id] = nil
+        }
         for index in near {
             let id = order[index]
             let page: WorkItemPage
             if let mounted = pages[id] { page = mounted } else {
                 page = makePage(id)
-                task(id).map { page.configure(content(of: $0)) }
+                configure(page, id)
             }
             let frame = CGRect(x: CGFloat(index) * size.width, y: 0, width: size.width, height: size.height)
             if page.frame != frame { page.frame = frame }
@@ -418,22 +504,32 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         guard scrollView === pager, pager.bounds.width > 0, !order.isEmpty, openItem != nil else { return }
         mountPages()
         let index = min(max(Int((pager.contentOffset.x / pager.bounds.width).rounded()), 0), order.count - 1)
-        guard order[index] != openItem else { return }
-        route = .item(order[index])
+        if order[index] != openItem {
+            outlined.remove(openItem ?? "")
+            route = .item(order[index])
+            view.endEditing(true)
+        }
         renderChrome()
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { if scrollView === pager { syncConversations() } }
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if scrollView === pager, !decelerate { syncConversations() }
     }
 
     private func makePage(_ id: String) -> WorkItemPage {
         let page = WorkItemPage()
         page.answers = answers
+        page.feeds = host?.simulatorFeeds
+        page.top = contentTop
         page.scroll.contentInsetAdjustmentBehavior = .never
-        let top = header.frame.maxY + Theme.Space.tight
-        page.scroll.contentInset = UIEdgeInsets(top: top, left: 0, bottom: view.safeAreaInsets.bottom + Theme.Space.section, right: 0)
-        page.scroll.verticalScrollIndicatorInsets.top = top
-        page.scroll.contentOffset.y = -top
+        page.scroll.contentInset = UIEdgeInsets(top: contentTop, left: 0, bottom: view.safeAreaInsets.bottom + Theme.Space.section, right: 0)
+        page.scroll.verticalScrollIndicatorInsets.top = contentTop
+        page.scroll.contentOffset.y = -contentTop
         if #available(iOS 26.0, *) { page.scroll.topEdgeEffect.style = .soft }
-        page.onThread = { [weak self] thread in self?.onOpen?(thread) }
-        page.onSubtask = { [weak self] sub in self?.task(sub)?.mainThread.map { self?.onOpen?($0) } }
+        page.onThread = { [weak self] thread in self?.openThread(thread) }
+        page.onPrepare = { [weak self] thread in self?.onPrepare?(thread) }
+        page.onSubtask = { [weak self] sub in self?.task(sub)?.mainThread.map { self?.openThread($0) } }
         page.onTick = { [weak self] sub in
             guard let self, let task = task(sub) else { return }
             Theme.checkHaptic()
@@ -442,6 +538,13 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         page.onStatus = { [weak self] status in self?.task(id).map { self?.set($0, status) } }
         page.onTop = { [weak self] in self?.task(id).map { self?.set($0, toTop: true) } }
         page.onInstall = { [weak self] in self?.task(id).map { self?.install($0) } }
+        page.onOutline = { [weak self] in
+            guard let self else { return }
+            Theme.selectionHaptic()
+            outlined.insert(id)
+            dropConversation(id)
+            if let page = pages[id] { configure(page, id) }
+        }
         page.onMedia = { [weak self] picture, button in self?.openMedia(picture.media, of: picture.task, from: button) }
         page.loadThumbnail = { [weak self] picture in await self?.thumbnail(picture.media, of: picture.task, height: 220) }
         page.documents = model.documents
@@ -452,6 +555,39 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         pages[id] = page
         pager.addSubview(page)
         return page
+    }
+
+    /// Draws a page, and gives a one-thread page its conversation (made
+    /// here, off screen as the page mounts, in front once it is in view).
+    private func configure(_ page: WorkItemPage, _ id: String) {
+        guard let task = task(id) else { return }
+        let content = content(of: task)
+        page.configure(content)
+        guard let thread = content.conversation?.thread.id else { dropConversation(id); return }
+        if let shown = conversations[id], shown.currentSessionID == thread { return }
+        dropConversation(id)
+        let controller = ThreadViewController(model: model, project: project, sessionID: thread, ahead: true)
+        controller.embedded = true
+        controller.host = host
+        controller.onOpenThread = { [weak self] id in id.map { self?.openThread($0) } }
+        addChild(controller)
+        controller.view.backgroundColor = Theme.paper
+        page.slot.addSubview(controller.view)
+        controller.view.frame = page.slot.bounds
+        controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        controller.didMove(toParent: self)
+        conversations[id] = controller
+        syncConversations()
+    }
+
+    private func dropConversation(_ id: String) {
+        guard let controller = conversations.removeValue(forKey: id) else { return }
+        if frontConversation == id { frontConversation = nil }
+        controller.park()
+        controller.tearDown()
+        controller.willMove(toParent: nil)
+        controller.view.removeFromSuperview()
+        controller.removeFromParent()
     }
 
     // MARK: Content
@@ -473,30 +609,111 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         return (build, build == nil ? linked.map { "In \($0.title) \($0.version)" } : nil)
     }
 
-    private func row(_ task: AppTask) -> TaskRow {
+    /// Live threads first by what they need: you, then working, stopped, finished.
+    private static func rank(_ thread: AppTask.Thread) -> Int {
+        switch thread.state {
+        case "needs-you": 0
+        case "working": 1
+        case "error": 2
+        default: 3
+        }
+    }
+
+    /// A thread's line: its Sprout, title, what it is doing, and its preview
+    /// (its simulator live, else the newest picture of the task it is for).
+    private func line(_ thread: AppTask.Thread, for owner: AppTask, previews: [String: SimulatorTarget]) -> ThreadLine.Content {
+        let (mood, doing): (JellyLook.Mood, String) = switch thread.state {
+        case "needs-you": (.needsYou, asking[thread.id] ?? "Needs you")
+        case "working": (.working, thread.step ?? "Working")
+        case "error": (.failed, "Stopped with an error")
+        default: (.done, thread.said ?? "Finished")
+        }
+        var preview: ThreadLine.Preview?
+        if let target = previews[thread.id] {
+            preview = .live(target)
+        } else if let media = owner.media.last(where: { $0.kind == "image" || $0.kind == "video" }) {
+            preview = picture(media, of: owner.id).map(ThreadLine.Preview.picture)
+        }
+        let title = thread.title.map { $0.hasPrefix(project.name + " · ") ? String($0.dropFirst(project.name.count + 3)) : $0 } ?? "Worker"
+        return .init(id: thread.id, title: title, doing: doing, mood: mood, preview: preview)
+    }
+
+    /// A task's live threads as lines, each under the task it was spawned for.
+    private func lines(of task: AppTask, previews: [String: SimulatorTarget]) -> [ThreadLine.Content] {
+        let owned = task.threads.filter { $0.state != "missing" }.map { ($0, task) }
+        let subs = task.subtasks.flatMap { sub in sub.threads.filter { $0.state != "missing" }.map { ($0, sub) } }
+        var seen = Set<String>()
+        return (owned + subs).filter { seen.insert($0.0.id).inserted }
+            .sorted { Self.rank($0.0) < Self.rank($1.0) }
+            .map { line($0.0, for: $0.1, previews: previews) }
+    }
+
+    /// A picture for previews, from memory; loads it once, then draws again.
+    private func picture(_ media: AppTask.Media, of task: String) -> UIImage? {
+        if let image = pictures[media.id] { return image }
+        guard loadingPictures.insert(media.id).inserted else { return nil }
+        Task { [weak self] in
+            guard let image = await self?.thumbnail(media, of: task, height: Theme.Thumb.page.height) else { return }
+            self?.pictures[media.id] = image
+            self?.render()
+        }
+        return nil
+    }
+
+    private func row(_ task: AppTask, previews: [String: SimulatorTarget]) -> TaskRow {
         let ticked = checking.contains { $0.id == task.id }
-        let threads = task.allThreads
-        let worker = threads.first { $0.state == "needs-you" } ?? threads.first { $0.state == "working" } ?? threads.first { $0.state == "error" }
-        return TaskRow(ask: task.ask, status: task.status, joined: asked[task.id] != nil && task.status.open, checked: !task.status.open || ticked, faded: task.archivedAt != nil,
-                       note: task.note, steps: task.subtasks.isEmpty ? nil : "\(task.subtasks.filter { !$0.status.open }.count)/\(task.subtasks.count)",
-                       worker: worker.flatMap { thread in TaskParts.mood(thread).map { .worker(thread.id, $0) } },
+        let detail = [task.subtasks.isEmpty ? nil : "\(task.subtasks.filter { !$0.status.open }.count)/\(task.subtasks.count)",
+                      task.note.isEmpty ? nil : task.note].compactMap { $0 }.joined(separator: " · ")
+        let threads = task.archivedAt == nil && task.status.open ? lines(of: task, previews: previews) : []
+        return TaskRow(ask: task.ask, status: task.status, joined: asked[task.id] != nil && task.status.open,
+                       checked: !task.status.open || ticked, faded: task.archivedAt != nil, detail: detail,
+                       threads: Array(threads.prefix(Self.nested)), more: max(0, threads.count - Self.nested),
                        install: installable(task).build.map { _ in installing == task.id ? "Opening…" : "Install" })
     }
 
     private func content(of task: AppTask) -> WorkItemPage.Content {
         let (build, shipped) = installable(task)
         let index = order.firstIndex(of: task.id)
+        let previews = previewTargets()
+        let sub = { (sub: AppTask) in
+            WorkItemPage.Sub(id: sub.id, ask: sub.ask, note: sub.note, status: sub.status, opens: sub.mainThread != nil,
+                             threads: sub.threads.filter { $0.state != "missing" }.sorted { Self.rank($0) < Self.rank($1) }
+                                .map { self.line($0, for: sub, previews: previews) })
+        }
+        // A thread linked to a sub-task shows under it, not again on its own.
+        let underSubs = Set(task.subtasks.flatMap(\.threads).map(\.id))
+        let own = task.threads.filter { $0.state != "missing" && !underSubs.contains($0.id) }.sorted { Self.rank($0) < Self.rank($1) }
+            .map { line($0, for: task, previews: previews) }
+        let asks = (asked[task.id] ?? []).map { item in
+            var about = false
+            if case .question(let question) = item { about = question.taskID != task.id }
+            return TasksViewController.AskRow(item: item, busy: model.answering.contains(item.id), last: false, about: about)
+        }
+        let live = lines(of: task, previews: previews)
+        var conversation: WorkItemPage.Header?
+        if embedsConversations, live.count == 1, asks.isEmpty, task.status.open, !outlined.contains(task.id) {
+            let closed = task.subtasks.filter { !$0.status.open }.count
+            conversation = .init(thread: live[0], more: task.subtasks.isEmpty ? "Details" : "\(closed)/\(task.subtasks.count) sub-tasks")
+        }
+        let archived = { (owner: AppTask) in owner.threads.filter { $0.state == "missing" } }
+        var seen = Set<String>()
         return .init(ask: task.ask, status: task.status, note: task.note, shipped: shipped,
                      install: build.map { _ in installing == task.id ? "Opening…" : "Install" },
                      position: index.map { "\($0 + 1) of \(order.count)" } ?? "",
-                     subtasks: task.subtasks.map { .init(id: $0.id, ask: $0.ask, note: $0.note, status: $0.status, opens: $0.mainThread != nil) },
-                     threads: task.allThreads.filter { $0.state != "missing" },
+                     threads: own,
+                     earlier: (archived(task) + task.subtasks.flatMap(archived)).filter { seen.insert($0.id).inserted }.map { $0.title ?? "Thread" },
+                     subtasks: task.subtasks.filter(\.status.open).map(sub),
+                     closed: task.subtasks.filter { !$0.status.open }.map(sub),
                      media: ([task] + task.subtasks).flatMap { owner in owner.media.map { WorkItemPage.Picture(task: owner.id, media: $0) } },
-                     asks: (asked[task.id] ?? []).map { item in
-                         var about = false
-                         if case .question(let question) = item { about = question.taskID != task.id }
-                         return .init(item: item, busy: model.answering.contains(item.id), last: false, about: about)
-                     })
+                     asks: asks, conversation: conversation)
+    }
+
+    /// The live simulator each thread of the app holds, by thread.
+    private func previewTargets() -> [String: SimulatorTarget] {
+        guard host?.simulatorFeeds != nil else { return [:] }
+        var targets: [String: SimulatorTarget] = [:]
+        for use in model.activeSimulators(for: project) { if let target = use.target { targets[use.threadID] = target } }
+        return targets
     }
 
     /// `now` is for the swipe actions themselves, which move their row
@@ -506,14 +723,21 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         behind = false
         if let current = model.projects.first(where: { $0.id == project.id }) { project = current }
         list = model.tasks(for: project)
+        let previews = previewTargets()
         // The threads open tasks link to, ready before one is tapped.
-        model.prefetch(threads: list.tasks.filter { $0.status.open }.flatMap(\.allThreads).map(\.id))
+        model.prefetch(threads: list.tasks.filter { $0.status.open }.flatMap(\.allThreads).filter { $0.state != "missing" }.map(\.id))
         // What waits on you here, by the work item it's about; a question
         // nothing claims leads Needs you.
         let waiting = model.waiting.apps.first { $0.projectID == project.id }?.items ?? []
         var loose: [WaitingList.Item] = []
         asked = [:]
+        asking = [:]
         for item in waiting {
+            switch item {
+            case .question(let question): if let thread = question.threadID { asking[thread] = question.text }
+            case .request(let request): asking[request.threadID] = request.pending.isQuestion
+                ? request.pending.questions.first?["question"].string ?? request.pending.title : request.pending.title
+            }
             let owner: AppTask? = switch item {
             case .question(let question): list.tasks.first { $0.id == question.taskID || $0.subtasks.contains { $0.id == question.taskID } }
             case .request(let request): list.tasks.first { task in task.status.open && task.allThreads.contains { $0.id == request.threadID } }
@@ -550,18 +774,47 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             snapshot.appendSections([group])
             snapshot.appendItems(ids, toSection: group)
         }
-        if !list.history.isEmpty {
-            snapshot.appendSections([.history])
-            // A search looks through History too.
-            if showsHistory || !words.isEmpty {
-                snapshot.appendItems(list.history.filter(found).map(\.id), toSection: .history)
+        // Threads on no task: working ones show, idle ones fold.
+        let linked = Set((list.tasks + list.history).flatMap(\.allThreads).map(\.id))
+        let unlinked = model.sessions(for: project).filter { session in
+            !linked.contains(session.id) && (words.isEmpty || words.allSatisfy { session.title.lowercased().contains($0) })
+        }
+        let busy = unlinked.filter { $0.phase != .idle }, idle = unlinked.filter { $0.phase == .idle }
+        var nextLines: [String: ThreadLine.Content] = [:]
+        for session in unlinked {
+            let (mood, doing): (JellyLook.Mood, String) = switch session.phase {
+            case .needsYou: (.needsYou, asking[session.id] ?? "Needs you")
+            case .working: (.working, "Working")
+            case .idle: (.done, Theme.relativeDate.localizedString(for: session.updatedAt, relativeTo: .now))
             }
+            nextLines[Self.loosePrefix + session.id] = .init(id: session.id, title: session.displayTitle(in: project), doing: doing, mood: mood,
+                                                            preview: previews[session.id].map(ThreadLine.Preview.live))
+        }
+        var nextFolds: [String: FoldCell.Content] = [:]
+        if !busy.isEmpty || !idle.isEmpty {
+            var ids = busy.map { Self.loosePrefix + $0.id }
+            if !idle.isEmpty {
+                nextFolds[Self.looseFold] = .init(symbol: "tray", text: "Not on a task", count: idle.count, open: showsLoose || !words.isEmpty)
+                ids.append(Self.looseFold)
+                if showsLoose || !words.isEmpty { ids += idle.map { Self.loosePrefix + $0.id } }
+            }
+            snapshot.appendSections([.loose])
+            snapshot.appendItems(ids, toSection: .loose)
+        }
+        if !list.history.isEmpty {
+            // A search looks through History too.
+            let open = showsHistory || !words.isEmpty
+            nextFolds[Self.historyFold] = .init(symbol: "clock.arrow.circlepath", text: "History", count: list.history.count, open: open)
+            snapshot.appendSections([.history])
+            snapshot.appendItems([Self.historyFold] + (open ? list.history.filter(found).map(\.id) : []), toSection: .history)
         }
         // Rows whose look changed are drawn again; the rest keep their place.
         // The model changes every few seconds for unrelated reasons, and
         // applying an unchanged list anyway resets an open swipe.
-        let previous = rows, previousAsks = asks
-        rows = Dictionary((list.tasks + list.history).map { ($0.id, row($0)) }, uniquingKeysWith: { first, _ in first })
+        let previous = rows, previousAsks = asks, previousLines = lines, previousFolds = folds
+        rows = Dictionary((list.tasks + list.history).map { ($0.id, row($0, previews: previews)) }, uniquingKeysWith: { first, _ in first })
+        lines = nextLines
+        folds = nextFolds
         asks = [:]
         let items = Dictionary(waiting.map { (Self.askPrefix + $0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let shownIDs = snapshot.itemIdentifiers
@@ -574,6 +827,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         }
         let changed = snapshot.itemIdentifiers.filter {
             (previous[$0] != nil && previous[$0] != rows[$0]) || (previousAsks[$0] != nil && previousAsks[$0] != asks[$0])
+                || (previousLines[$0] != nil && previousLines[$0] != lines[$0]) || (previousFolds[$0] != nil && previousFolds[$0] != folds[$0])
         }
         let current = dataSource.snapshot()
         let moved = current.sectionIdentifiers != snapshot.sectionIdentifiers || snapshot.sectionIdentifiers.contains {
@@ -591,12 +845,12 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
         // The pages run through the same rows. An open item that left the
         // list (it aged into History, folded) goes back to the overview.
-        order = snapshot.itemIdentifiers.filter { $0 != Self.searchRow && !$0.hasPrefix(Self.askPrefix) }
+        order = snapshot.itemIdentifiers.filter { rows[$0] != nil }
         if let id = openItem, !order.contains(id) {
             route = .overview
             push.redirect(to: 0)
         }
-        for (id, page) in pages { task(id).map { page.configure(content(of: $0)) } }
+        for (id, page) in pages { configure(page, id) }
         layoutPages()
         notice.text = model.error == nil ? "No tasks yet" : model.error
         renderChrome()
@@ -612,8 +866,20 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         table.layoutIfNeeded()
         table.scrollToRow(at: path, at: .top, animated: false)
         #if DEBUG
-        if ProcessInfo.processInfo.environment["SQUIRCLE_TASK_PAGE"] == "1" { showItem(id) }
+        let environment = ProcessInfo.processInfo.environment
+        if environment["SQUIRCLE_TASK_PAGE"] == "1" { showItem(id) }
+        // `SQUIRCLE_TASKS_THREAD=1`: the item's first live thread, pushed over Tasks.
+        if environment["SQUIRCLE_TASKS_THREAD"] == "1", let thread = task(id)?.allThreads.first(where: { $0.state != "missing" }) {
+            Task { [weak self] in try? await Task.sleep(for: .seconds(2)); self?.openThread(thread.id) }
+        }
         #endif
+    }
+
+    /// The thread whose line is under `point`, in a row of the overview.
+    private func threadLine(at point: CGPoint, in table: UITableView) -> String? {
+        guard let path = table.indexPathForRow(at: point), let cell = table.cellForRow(at: path) else { return nil }
+        if let cell = cell as? ThreadCell { return cell.line.threadID }
+        return (cell as? TaskCell)?.thread(at: table.convert(point, to: cell))
     }
 
     // MARK: Actions
@@ -632,9 +898,9 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         guard let task = task(id), task.status.open else { return }
         Theme.checkHaptic()
         if let index = checking.firstIndex(where: { $0.id == id }) { checking.remove(at: index) } else { checking.append(task) }
-        let row = row(task)
+        let row = row(task, previews: previewTargets())
         rows[id] = row
-        if let path = dataSource.indexPath(for: id), let cell = table.cellForRow(at: path) as? TaskCell { cell.configure(row) }
+        if let path = dataSource.indexPath(for: id), let cell = table.cellForRow(at: path) as? TaskCell { cell.configure(row, feeds: host?.simulatorFeeds) }
         settle?.cancel()
         settle = nil
         if checking.isEmpty {
@@ -682,6 +948,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     }
 
     private func renderUndo(animated: Bool) {
+        undo.onUndo = { [weak self] in self?.undoLast() }
         undo.configure(count: undoable.count)
         let shown = !undoable.isEmpty
         undo.isUserInteractionEnabled = shown
@@ -744,24 +1011,14 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     }
 
     private func configure(_ header: TaskGroupHeader, _ group: Group) {
-        let folds = group == .history && query.isEmpty
-        let count = folds ? list.history.count
-            : dataSource.snapshot().itemIdentifiers(inSection: group).filter { !$0.hasPrefix(Self.askPrefix) }.count
-        header.configure(group.title, count: count,
-                         chevron: folds ? (showsHistory ? "chevron.up" : "chevron.down") : nil)
-        header.onTap = folds ? { [weak self] in self?.toggleHistory() } : nil
+        let count = dataSource.snapshot().itemIdentifiers(inSection: group).filter { rows[$0] != nil }.count
+        header.configure(group.title, count: count)
     }
 
-    private func toggleHistory() {
+    private func toggle(fold id: String) {
         Theme.selectionHaptic()
-        showsHistory.toggle()
+        if id == Self.historyFold { showsHistory.toggle() } else { showsLoose.toggle() }
         render()
-        var snapshot = dataSource.snapshot()
-        snapshot.reloadSections([.history])
-        dataSource.apply(snapshot, animatingDifferences: false)
-        if showsHistory, let section = snapshot.indexOfSection(.history), snapshot.numberOfItems(inSection: .history) > 0 {
-            table.scrollToRow(at: IndexPath(row: 0, section: section), at: .top, animated: true)
-        }
     }
 
     /// History arrives a page at a time, the next as its last row shows.
@@ -776,14 +1033,27 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         }
     }
 
-    func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
-        dataSource.sectionIdentifier(for: section) == .search ? CGFloat.leastNonzeroMagnitude : UITableView.automaticDimension
+    func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        // A preview off screen stops showing its simulator.
+        (cell as? TaskCell)?.hidePreviews(feeds: host?.simulatorFeeds)
+        (cell as? ThreadCell)?.line.hidePreview(feeds: host?.simulatorFeeds)
     }
-    func tableView(_ tableView: UITableView, estimatedHeightForHeaderInSection section: Int) -> CGFloat { 44 }
+
+    func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        switch dataSource.sectionIdentifier(for: section) {
+        case .search?: CGFloat.leastNonzeroMagnitude
+        // Folded lines say what they are; a section's gap is all they need.
+        case .loose?, .history?: Theme.Space.section - Theme.Space.row
+        default: UITableView.automaticDimension
+        }
+    }
+    func tableView(_ tableView: UITableView, estimatedHeightForHeaderInSection section: Int) -> CGFloat { Theme.Space.tap }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard let id = dataSource.itemIdentifier(for: indexPath), id != Self.searchRow else { return }
+        if folds[id] != nil { toggle(fold: id); return }
+        if let line = lines[id] { openThread(line.id); return }
         if let item = asks[id]?.item, item.threadID != nil {
             onJump?(item)
             return
@@ -828,22 +1098,81 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             return UIMenu(children: (task.status.open ? [top] : []) + [WorkItemPage.statusMenu(current: task.status) { self?.set(task, $0) }])
         })
     }
+
+    #if DEBUG
+    /// Verification only: Tasks' own taps, for the host's stress run.
+    func debugActions() -> [() -> Void] {
+        var actions: [() -> Void] = []
+        if route == .overview {
+            for id in order.shuffled().prefix(2) { actions.append { [weak self] in self?.showItem(id) } }
+        } else {
+            actions.append { [weak self] in self?.showOverview() }
+            if let id = openItem, let index = order.firstIndex(of: id), order.indices.contains(index + 1) {
+                actions.append { [weak self] in
+                    guard let self else { return }
+                    // Where a swipe to the next page lands.
+                    pager.setContentOffset(CGPoint(x: CGFloat(index + 1) * pager.bounds.width, y: 0), animated: false)
+                }
+            }
+        }
+        return actions
+    }
+
+    /// Threads a stress run may open over Tasks.
+    var debugThreads: [String] { list.tasks.flatMap(\.allThreads).filter { $0.state != "missing" }.map(\.id) }
+
+    /// At rest, exactly the routed level shows and takes touches.
+    func debugViolation() -> String? {
+        guard !push.isAnimating, dragStart == nil, !pager.isTracking, !pager.isDecelerating else { return nil }
+        switch route {
+        case .overview:
+            if push.value != 0 || table.isHidden || !table.isUserInteractionEnabled { return "tasks overview not showing at rest" }
+            if conversation != nil { return "a task's conversation in front on the overview" }
+        case .item(let id):
+            if push.value != 1 || pager.isHidden || pages[id] == nil { return "task page not showing at rest" }
+            if pages[id].map({ abs($0.frame.minX - pager.contentOffset.x) > 0.5 }) == true { return "task page out of place" }
+        }
+        return nil
+    }
+    #endif
+}
+
+/// The overview's heading: the app's name over "Tasks", scrolling with the list.
+private final class TasksHeading: UIView {
+    private let app = Theme.label("", Theme.Text.caption, color: .secondaryLabel)
+    private let title = Theme.label("Tasks", Theme.Text.title)
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        title.accessibilityTraits = .header
+        let stack = UIStackView(arrangedSubviews: [app, title])
+        stack.axis = .vertical
+        stack.spacing = Theme.Space.tight
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: Theme.Space.row),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.margin),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.margin)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(app name: String) { app.text = name }
 }
 
 /// A status group's name and count: a Caption label over its rows.
 private final class TaskGroupHeader: UITableViewHeaderFooterView {
-    var onTap: (() -> Void)?
     private let name = Theme.label("", Theme.Text.caption, color: .secondaryLabel)
     private let count = Theme.label("", Theme.Text.caption, color: .tertiaryLabel)
-    private let chevron = UIImageView()
 
     override init(reuseIdentifier: String?) {
         super.init(reuseIdentifier: reuseIdentifier)
         backgroundConfiguration = .clear()
-        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
-        chevron.tintColor = .tertiaryLabel
-        chevron.preferredSymbolConfiguration = Theme.symbol(Theme.Text.caption)
-        let line = UIStackView(arrangedSubviews: [name, count, chevron, UIView()])
+        let line = UIStackView(arrangedSubviews: [name, count, UIView()])
         line.spacing = Theme.Space.tight
         line.alignment = .firstBaseline
         line.translatesAutoresizingMaskIntoConstraints = false
@@ -856,18 +1185,14 @@ private final class TaskGroupHeader: UITableViewHeaderFooterView {
         ])
     }
 
-    @objc private func tapped() { onTap?() }
-
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ title: String, count value: Int, chevron symbol: String?) {
+    func configure(_ title: String, count value: Int) {
         name.text = title
-        count.text = "\(value)"
-        chevron.image = symbol.flatMap { UIImage(systemName: $0) }
-        chevron.isHidden = symbol == nil
-        isAccessibilityElement = true
-        accessibilityTraits = symbol == nil ? .header : [.header, .button]
+        count.text = value > 0 ? "\(value)" : nil
+        isAccessibilityElement = !title.isEmpty
+        accessibilityTraits = .header
         accessibilityLabel = "\(title), \(value)"
     }
 }
@@ -886,7 +1211,7 @@ private final class TaskSearchCell: UITableViewCell {
         field.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(field)
         NSLayoutConstraint.activate([
-            field.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.row),
+            field.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.group),
             field.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
             field.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
             field.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
@@ -897,7 +1222,6 @@ private final class TaskSearchCell: UITableViewCell {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-
 /// What a task's overview row shows.
 private struct TaskRow: Equatable {
     let ask: String
@@ -907,27 +1231,29 @@ private struct TaskRow: Equatable {
     /// Shows a tick: done, or ticked here and about to move.
     let checked: Bool
     let faded: Bool
-    let note: String
-    /// Sub-tasks closed of all, "2/5"; nil without sub-tasks.
-    let steps: String?
-    /// The worker on it while one is alive (working, needing you, stopped).
-    let worker: JellyLook?
+    /// Sub-tasks closed of all, "2/5", and the note.
+    let detail: String
+    /// Its live threads, nested under it, and how many more its page has.
+    let threads: [ThreadLine.Content]
+    let more: Int
     let install: String?
 }
 
-/// One work item in the overview, compact enough to scan two dozen: a
-/// round tick in its status colour, the ask's first lines, sub-task progress
-/// and the note on one line, and the worker on it or Install at the end.
-/// Tapping the row opens its page.
+/// One work item in the overview: its status in the glyph slot (tap to
+/// tick it off), the ask, its progress and note on one line, and its live
+/// threads nested under it, one slot in. Tapping a thread opens it; the
+/// rest of the row opens the item's page.
 private final class TaskCell: UITableViewCell {
     var onInstall: (() -> Void)?
     var onCheck: (() -> Void)?
+    var onThread: ((String) -> Void)?
     private let ask = Theme.label("", Theme.Text.body, lines: 2)
-    private let note = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 1)
-    private let jelly = JellyView(.worker("", .working), canvas: .roomy(Theme.Glyph.line))
+    private let detail = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 1)
+    private let more = Theme.label("", Theme.Text.line, color: .tertiaryLabel, lines: 1)
+    private let threads = UIStackView()
     private let install = UIButton(configuration: .filled())
     private let rule = UIView()
-    /// The round tick at the leading edge; one tap marks the task done.
+    /// The status at the leading edge; one tap marks the task done.
     private let check = UIButton(type: .custom)
     private let mark = UIImageView()
     private var shownSymbol: String?
@@ -960,22 +1286,23 @@ private final class TaskCell: UITableViewCell {
         mark.translatesAutoresizingMaskIntoConstraints = false
         check.addSubview(mark)
         check.addAction(UIAction { [weak self] _ in self?.onCheck?() }, for: .touchUpInside)
-        jelly.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line), jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line)])
 
-        let text = UIStackView(arrangedSubviews: [ask, note])
+        let top = UIStackView(arrangedSubviews: [ask, install])
+        top.alignment = .firstBaseline
+        top.spacing = Theme.Space.rowPad
+        threads.axis = .vertical
+        threads.spacing = Theme.Space.tight
+        let text = UIStackView(arrangedSubviews: [top, detail, threads, more])
         text.axis = .vertical
         text.spacing = Theme.Space.tight
-        let line = UIStackView(arrangedSubviews: [text, jelly, install])
-        line.alignment = .center
-        line.spacing = Theme.Space.rowPad
+        text.setCustomSpacing(Theme.Space.row, after: detail)
         rule.backgroundColor = .separator
-        [line, rule, check].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
+        [text, rule, check].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         NSLayoutConstraint.activate([
-            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.rowPad),
-            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.rowPad),
-            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.text),
-            line.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
+            text.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.rowPad),
+            text.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.rowPad),
+            text.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.text),
+            text.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
             // A generous target, its mark centred in the glyph slot on the ask's first line.
             check.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin + Theme.Space.glyph / 2),
             check.widthAnchor.constraint(equalToConstant: Theme.Space.tap),
@@ -983,7 +1310,7 @@ private final class TaskCell: UITableViewCell {
             check.centerYAnchor.constraint(equalTo: ask.topAnchor, constant: (ask.font.lineHeight / 2).rounded()),
             mark.centerXAnchor.constraint(equalTo: check.centerXAnchor),
             mark.centerYAnchor.constraint(equalTo: check.centerYAnchor),
-            rule.leadingAnchor.constraint(equalTo: line.leadingAnchor),
+            rule.leadingAnchor.constraint(equalTo: text.leadingAnchor),
             rule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             rule.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
             rule.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale)
@@ -998,7 +1325,7 @@ private final class TaskCell: UITableViewCell {
         shown = nil
     }
 
-    func configure(_ row: TaskRow) {
+    func configure(_ row: TaskRow, feeds: SimulatorFeeds?) {
         ask.text = row.ask
         ask.textColor = row.faded || row.checked ? .secondaryLabel : .label
         let symbol = row.checked ? "checkmark" : WorkItemPage.symbol(row.status)
@@ -1017,18 +1344,37 @@ private final class TaskCell: UITableViewCell {
         check.isEnabled = row.status.open
         check.accessibilityLabel = row.checked ? "Done" : "Mark done"
         check.accessibilityTraits = row.checked ? [.button, .selected] : .button
-        let detail = [row.faded ? Self.statusName(row.status) : nil, row.steps,
-                      row.note.isEmpty ? nil : row.note].compactMap { $0 }
-        note.text = detail.joined(separator: " · ")
-        note.isHidden = detail.isEmpty
-        if let look = row.worker { jelly.look = look }
-        jelly.isHidden = row.worker == nil
+        let words = [row.faded ? Self.statusName(row.status) : nil, row.detail.isEmpty ? nil : row.detail].compactMap { $0 }
+        detail.text = words.joined(separator: " · ")
+        detail.isHidden = words.isEmpty
+        if row.threads.map(\.id) != shown?.threads.map(\.id) || threads.arrangedSubviews.count != row.threads.count {
+            hidePreviews(feeds: feeds)
+            threads.arrangedSubviews.forEach { $0.removeFromSuperview() }
+            for _ in row.threads {
+                let line = ThreadLine(size: .row)
+                line.addAction(UIAction { [weak self, weak line] _ in line?.threadID.map { self?.onThread?($0) } }, for: .touchUpInside)
+                threads.addArrangedSubview(line)
+            }
+        }
+        for (line, content) in zip(threads.arrangedSubviews.compactMap { $0 as? ThreadLine }, row.threads) { line.configure(content, feeds: feeds) }
+        threads.isHidden = row.threads.isEmpty
+        more.text = row.more == 1 ? "1 more thread" : "\(row.more) more threads"
+        more.isHidden = row.more == 0
         install.isHidden = row.install == nil
         install.configuration?.title = row.install
         rule.isHidden = row.joined
         shown = row
-        accessibilityLabel = [row.faded ? nil : WorkItemPage.name(row.status), row.ask, note.text].compactMap { $0 }.joined(separator: ", ")
+        accessibilityLabel = [row.faded ? nil : WorkItemPage.name(row.status), row.ask, detail.text].compactMap { $0 }.joined(separator: ", ")
         accessibilityTraits = .button
+    }
+
+    /// The thread whose line is at `point`, in the cell's coordinates.
+    func thread(at point: CGPoint) -> String? {
+        threads.arrangedSubviews.compactMap { $0 as? ThreadLine }.first { $0.bounds.contains($0.convert(point, from: self)) }?.threadID
+    }
+
+    func hidePreviews(feeds: SimulatorFeeds?) {
+        threads.arrangedSubviews.compactMap { $0 as? ThreadLine }.forEach { $0.hidePreview(feeds: feeds) }
     }
 
     private static func statusName(_ status: AppTask.Status) -> String {
@@ -1043,7 +1389,219 @@ private final class TaskCell: UITableViewCell {
     }
 }
 
-/// Undo for the last ticks: a small glass capsule at the sheet's foot.
+/// A thread on no task, at the overview's foot, its Sprout in the slot.
+private final class ThreadCell: UITableViewCell {
+    let line = ThreadLine(size: .row)
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        backgroundColor = .clear
+        let selected = UIView()
+        selected.backgroundColor = Theme.pressedFill
+        selectedBackgroundView = selected
+        line.isUserInteractionEnabled = false
+        line.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(line)
+        NSLayoutConstraint.activate([
+            line.topAnchor.constraint(equalTo: contentView.topAnchor, constant: Theme.Space.row),
+            line.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -Theme.Space.row),
+            line.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            line.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+/// A folded line in the overview ("Not on a task 5", "History 20").
+private final class FoldCell: UITableViewCell {
+    struct Content: Equatable { let symbol: String; let text: String; let count: Int; let open: Bool }
+    private let fold = FoldRow()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        backgroundColor = .clear
+        let selected = UIView()
+        selected.backgroundColor = Theme.pressedFill
+        selectedBackgroundView = selected
+        fold.isUserInteractionEnabled = false
+        fold.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(fold)
+        NSLayoutConstraint.activate([
+            fold.topAnchor.constraint(equalTo: contentView.topAnchor),
+            fold.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            fold.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            fold.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(_ content: Content) {
+        fold.configure(symbol: content.symbol, text: content.text, count: content.count, open: content.open)
+        accessibilityLabel = fold.accessibilityLabel
+        accessibilityTraits = .button
+        accessibilityValue = content.open ? "Open" : "Folded"
+    }
+}
+
+/// The deck's folded line: a symbol in the slot, what it holds in Line with
+/// its count, a chevron at the right margin, 44 tall. Tapping it opens the
+/// list in place (the chevron turns down).
+final class FoldRow: UIControl {
+    private let symbol = UIImageView()
+    private let text = Theme.label("", Theme.Text.line, color: .secondaryLabel)
+    private let count = Theme.label("", Theme.Text.line, color: .tertiaryLabel)
+    private let chevron = UIImageView(image: UIImage(systemName: "chevron.right"))
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        symbol.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
+        symbol.tintColor = .secondaryLabel
+        symbol.contentMode = .center
+        chevron.preferredSymbolConfiguration = Theme.symbol(Theme.Text.line)
+        chevron.tintColor = .tertiaryLabel
+        let words = UIStackView(arrangedSubviews: [text, count])
+        words.spacing = Theme.Space.tight
+        words.alignment = .firstBaseline
+        [symbol, words, chevron].forEach { $0.isUserInteractionEnabled = false; $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: Theme.Space.tap),
+            symbol.leadingAnchor.constraint(equalTo: leadingAnchor),
+            symbol.widthAnchor.constraint(equalToConstant: Theme.Space.glyph),
+            symbol.centerYAnchor.constraint(equalTo: centerYAnchor),
+            words.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.indent),
+            words.centerYAnchor.constraint(equalTo: centerYAnchor),
+            words.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -Theme.Space.row),
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(symbol name: String, text words: String, count value: Int, open: Bool) {
+        symbol.image = UIImage(systemName: name)
+        text.text = words
+        count.text = "\(value)"
+        chevron.transform = open ? CGAffineTransform(rotationAngle: .pi / 2) : .identity
+        accessibilityLabel = "\(words), \(value)"
+        accessibilityValue = open ? "Open" : "Folded"
+    }
+
+    override var isHighlighted: Bool {
+        didSet { backgroundColor = isHighlighted ? Theme.pressedFill : .clear }
+    }
+}
+
+/// One thread as a line: its Sprout in the glyph slot (the face says its
+/// state), its title in Line strong, what it is doing in Line, and a small
+/// preview at the right (its simulator live, or its task's newest picture).
+final class ThreadLine: UIControl {
+    enum Size { case row, page }
+    enum Preview: Equatable { case live(SimulatorTarget), picture(UIImage) }
+    struct Content: Equatable {
+        let id: String
+        let title: String
+        let doing: String
+        let mood: JellyLook.Mood
+        let preview: Preview?
+    }
+    private(set) var threadID: String?
+    private let size: Size
+    private let jelly = JellyView(.worker("", .working), canvas: .roomy(Theme.Glyph.line))
+    private let title = Theme.label("", Theme.Text.lineStrong, lines: 1)
+    private let doing = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 1)
+    private let thumb = UIView()
+    private let picture = UIImageView()
+    private let screen = SimulatorScreen()
+    private var thumbWidth: NSLayoutConstraint!
+    private var thumbHeight: NSLayoutConstraint!
+    private var shown: Content?
+
+    init(size: Size) {
+        self.size = size
+        super.init(frame: .zero)
+        let dimensions = size == .row ? Theme.Thumb.row : Theme.Thumb.page
+        doing.numberOfLines = size == .row ? 1 : 3
+        thumb.layer.cornerRadius = size == .row ? Theme.Thumb.rowRadius : Theme.Radius.small
+        thumb.layer.cornerCurve = .continuous
+        thumb.clipsToBounds = true
+        thumb.backgroundColor = Theme.codeFill
+        picture.contentMode = .scaleAspectFill
+        [picture, screen].forEach { $0.frame = CGRect(origin: .zero, size: dimensions); $0.autoresizingMask = [.flexibleWidth, .flexibleHeight]; thumb.addSubview($0) }
+        let text = UIStackView(arrangedSubviews: [title, doing])
+        text.axis = .vertical
+        text.spacing = 0
+        [jelly, text, thumb].forEach { $0.isUserInteractionEnabled = false; $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
+        thumbWidth = thumb.widthAnchor.constraint(equalToConstant: dimensions.width)
+        thumbHeight = thumb.heightAnchor.constraint(equalToConstant: dimensions.height)
+        let tall = heightAnchor.constraint(greaterThanOrEqualTo: thumb.heightAnchor)
+        NSLayoutConstraint.activate([
+            jelly.leadingAnchor.constraint(equalTo: leadingAnchor),
+            jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
+            jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
+            jelly.centerYAnchor.constraint(equalTo: title.centerYAnchor),
+            text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.indent),
+            text.topAnchor.constraint(equalTo: topAnchor),
+            text.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor),
+            text.trailingAnchor.constraint(equalTo: thumb.leadingAnchor, constant: -Theme.Space.row),
+            thumb.trailingAnchor.constraint(equalTo: trailingAnchor),
+            thumb.topAnchor.constraint(equalTo: topAnchor),
+            thumbWidth, thumbHeight, tall
+        ])
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func configure(_ content: Content, feeds: SimulatorFeeds?) {
+        threadID = content.id
+        guard content != shown else { return }
+        shown = content
+        jelly.look = .worker(content.id, content.mood)
+        title.text = content.title
+        doing.text = content.doing
+        doing.textColor = content.mood == .failed ? Theme.failure : .secondaryLabel
+        let dimensions = size == .row ? Theme.Thumb.row : Theme.Thumb.page
+        thumbWidth.constant = content.preview == nil ? 0 : dimensions.width
+        thumbHeight.constant = content.preview == nil ? 0 : dimensions.height
+        thumb.isHidden = content.preview == nil
+        switch content.preview {
+        case .live(let target)?:
+            screen.isHidden = false
+            picture.image = nil
+            feeds?.attach(screen, to: target)
+        case .picture(let image)?:
+            screen.isHidden = true
+            feeds?.attach(screen, to: nil)
+            picture.image = image
+        case nil:
+            feeds?.attach(screen, to: nil)
+            picture.image = nil
+        }
+        accessibilityLabel = "\(content.title), \(content.doing)"
+    }
+
+    /// Off screen: its simulator stops showing here.
+    func hidePreview(feeds: SimulatorFeeds?) {
+        feeds?.attach(screen, to: nil)
+        if case .live? = shown?.preview { shown = nil }
+    }
+
+    override var isHighlighted: Bool {
+        didSet { alpha = isHighlighted ? 0.6 : 1 }
+    }
+}
+
+/// Undo for the last ticks: a small glass capsule at the foot.
 private final class UndoToast: UIView {
     var onUndo: (() -> Void)?
     private let surface = Theme.glassSurface(cornerRadius: Theme.Space.tap / 2, interactive: true)
@@ -1082,19 +1640,24 @@ private final class UndoToast: UIView {
         guard count > 0 else { return }
         text.text = count == 1 ? "Marked done" : "\(count) marked done"
     }
-
-    #if DEBUG
-    func debugPress() { button.sendActions(for: .touchUpInside) }
-    #endif
 }
 
-/// One work item, a page of the Tasks sheet: where it stands (tap
-/// for any status), your ask, its note, Install when a build is ready, its
-/// sub-tasks as a checklist, its threads, its pictures and clips, and its
-/// documents.
+/// One work item, a page of Tasks: where it stands (tap for any status),
+/// your ask, its note, what waits on you, Install when a build is ready,
+/// its threads (each under the sub-task it serves, earlier ones folded),
+/// its open sub-tasks (closed ones folded), its pictures and clips, and its
+/// documents. With one live thread (`conversation`), a short header over
+/// that thread's conversation instead.
 final class WorkItemPage: UIView {
-    struct Sub: Equatable { let id, ask, note: String; let status: AppTask.Status; let opens: Bool }
+    struct Sub: Equatable {
+        let id, ask, note: String
+        let status: AppTask.Status
+        let opens: Bool
+        let threads: [ThreadLine.Content]
+    }
     struct Picture: Equatable { let task: String; let media: AppTask.Media }
+    /// A one-thread item's header: its thread, and the way to its outline.
+    struct Header: Equatable { let thread: ThreadLine.Content; let more: String }
     struct Content: Equatable {
         let ask: String
         let status: AppTask.Status
@@ -1103,39 +1666,53 @@ final class WorkItemPage: UIView {
         let install: String?
         /// Where it is among the pages, "3 of 24".
         let position: String
+        /// Its own live threads; sub-tasks carry theirs.
+        let threads: [ThreadLine.Content]
+        /// Archived threads' titles, folded.
+        let earlier: [String]
         let subtasks: [Sub]
-        let threads: [AppTask.Thread]
+        let closed: [Sub]
         let media: [Picture]
         /// What waits on you about it, answered here.
         let asks: [TasksViewController.AskRow]
+        let conversation: Header?
     }
     /// Draws and answers `asks`.
     var answers: WaitingAnswers?
+    var feeds: SimulatorFeeds?
     var onThread: ((String) -> Void)?
+    var onPrepare: ((String) -> Void)?
     var onSubtask: ((String) -> Void)?
     var onTick: ((String) -> Void)?
     var onStatus: ((AppTask.Status) -> Void)?
     var onTop: (() -> Void)?
     var onInstall: (() -> Void)?
+    var onOutline: (() -> Void)?
     var onMedia: ((Picture, UIButton) -> Void)?
     var loadThumbnail: ((Picture) async -> UIImage?)?
     var documents: DocumentFiles?
     var onDocument: ((FileRowView) -> Void)?
+    /// Where content starts: below Tasks' back button.
+    var top: CGFloat = 0 { didSet { if top != oldValue { setNeedsLayout() } } }
     let scroll = UIScrollView()
+    /// Holds a one-thread item's conversation, under its header.
+    let slot = UIView()
+    private let header = UIStackView()
     private let stack = UIStackView()
     private let status = UIButton(configuration: .plain())
+    private let position = Theme.label("", Theme.Text.caption, color: .tertiaryLabel)
     private let ask = Theme.label("", Theme.Text.title, lines: 0)
     private let note = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 0)
     private let install = UIButton(configuration: .filled())
     private let shipped = Theme.label("", Theme.Text.line, color: .secondaryLabel)
-    private let position = Theme.label("", Theme.Text.caption, color: .tertiaryLabel)
-    private let steps = UIStackView()
     private let questions = UIStackView()
     private let crew = UIStackView()
-    private let chips = UIStackView()
+    private let steps = UIStackView()
     private let pictures = UIStackView()
     private let pictureScroll = UIScrollView()
     private let files = UIStackView()
+    private var showsEarlier = false
+    private var showsClosed = false
     private var loads: [Task<Void, Never>] = []
     private var shown: Content?
     private static let pictureHeight: CGFloat = 220
@@ -1175,56 +1752,50 @@ final class WorkItemPage: UIView {
         installRow.spacing = Theme.Space.rowPad
         installRow.alignment = .center
 
+        crew.axis = .vertical
+        crew.spacing = 0
         steps.axis = .vertical
         steps.spacing = 0
-        crew.axis = .vertical
-        crew.spacing = Theme.Space.row
-        crew.alignment = .leading
-        chips.spacing = Theme.Space.row
-        chips.alignment = .leading
-        let chipScroll = UIScrollView()
-        chipScroll.showsHorizontalScrollIndicator = false
-        chipScroll.clipsToBounds = false
         pictures.spacing = Theme.Space.row
         pictures.alignment = .center
         pictureScroll.showsHorizontalScrollIndicator = false
         pictureScroll.clipsToBounds = false
-        for (inner, outer, height) in [(chips, chipScroll, 30.0), (pictures, pictureScroll, Self.pictureHeight)] {
-            inner.translatesAutoresizingMaskIntoConstraints = false
-            outer.addSubview(inner)
-            NSLayoutConstraint.activate([
-                inner.topAnchor.constraint(equalTo: outer.contentLayoutGuide.topAnchor),
-                inner.bottomAnchor.constraint(equalTo: outer.contentLayoutGuide.bottomAnchor),
-                inner.leadingAnchor.constraint(equalTo: outer.contentLayoutGuide.leadingAnchor),
-                inner.trailingAnchor.constraint(equalTo: outer.contentLayoutGuide.trailingAnchor),
-                inner.heightAnchor.constraint(equalTo: outer.frameLayoutGuide.heightAnchor),
-                outer.heightAnchor.constraint(equalToConstant: height)
-            ])
-        }
+        pictures.translatesAutoresizingMaskIntoConstraints = false
+        pictureScroll.addSubview(pictures)
+        NSLayoutConstraint.activate([
+            pictures.topAnchor.constraint(equalTo: pictureScroll.contentLayoutGuide.topAnchor),
+            pictures.bottomAnchor.constraint(equalTo: pictureScroll.contentLayoutGuide.bottomAnchor),
+            pictures.leadingAnchor.constraint(equalTo: pictureScroll.contentLayoutGuide.leadingAnchor),
+            pictures.trailingAnchor.constraint(equalTo: pictureScroll.contentLayoutGuide.trailingAnchor),
+            pictures.heightAnchor.constraint(equalTo: pictureScroll.frameLayoutGuide.heightAnchor),
+            pictureScroll.heightAnchor.constraint(equalToConstant: Self.pictureHeight)
+        ])
         position.setContentHuggingPriority(.required, for: .horizontal)
-        let statusRow = UIStackView(arrangedSubviews: [status, UIView(), position])
-        statusRow.alignment = .firstBaseline
+        status.setContentCompressionResistancePriority(.required, for: .horizontal)
         questions.axis = .vertical
         questions.spacing = Theme.Space.group
         files.axis = .vertical
         files.spacing = Theme.Space.row
-        [statusRow, ask, note, questions, installRow, steps, crew, chipScroll, pictureScroll, files].forEach(stack.addArrangedSubview)
-        stack.setCustomSpacing(Theme.Space.row, after: statusRow)
-        stack.setCustomSpacing(Theme.Space.row, after: ask)
+        header.axis = .vertical
+        header.spacing = Theme.Space.row
+        header.addArrangedSubview({
+            let row = UIStackView(arrangedSubviews: [status, UIView(), position])
+            row.alignment = .firstBaseline
+            return row
+        }())
+        header.addArrangedSubview(ask)
+        [header, note, questions, installRow, crew, steps, pictureScroll, files].forEach(stack.addArrangedSubview)
+        stack.setCustomSpacing(Theme.Space.row, after: header)
         stack.setCustomSpacing(Theme.Space.section, after: note)
         stack.setCustomSpacing(Theme.Space.section, after: questions)
         stack.setCustomSpacing(Theme.Space.section, after: installRow)
+        stack.setCustomSpacing(Theme.Space.section, after: crew)
         stack.setCustomSpacing(Theme.Space.section, after: steps)
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scroll)
         scroll.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        [scroll, slot].forEach(addSubview)
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
-            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: Theme.Space.group),
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: Theme.Space.row),
             stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -Theme.Space.rowPad),
             stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: Theme.Space.margin),
             stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -Theme.Space.margin)
@@ -1233,6 +1804,20 @@ final class WorkItemPage: UIView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    /// The outline scrolls the full height; a conversation sits under its
+    /// header, which stays put above it.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scroll.frame = bounds
+        guard shown?.conversation != nil else { slot.frame = .zero; return }
+        let width = bounds.width - 2 * Theme.Space.margin
+        let height = header.systemLayoutSizeFitting(CGSize(width: width, height: 0), withHorizontalFittingPriority: .required,
+                                                    verticalFittingPriority: .fittingSizeLevel).height
+        header.frame = CGRect(x: Theme.Space.margin, y: top + Theme.Space.row, width: width, height: height)
+        let below = header.frame.maxY + Theme.Space.row
+        slot.frame = CGRect(x: 0, y: below, width: bounds.width, height: max(0, bounds.height - below))
+    }
 
     /// Every status, ticked at `current`, for a page's status and a Done row's menu.
     static func statusMenu(current: AppTask.Status, set: @escaping (AppTask.Status) -> Void) -> UIMenu {
@@ -1245,7 +1830,7 @@ final class WorkItemPage: UIView {
         })
     }
 
-    static func name(_ status: AppTask.Status) -> String {
+    nonisolated static func name(_ status: AppTask.Status) -> String {
         switch status {
         case .needsYou: "Needs you"
         case .inProgress: "In progress"
@@ -1298,6 +1883,12 @@ final class WorkItemPage: UIView {
         status.accessibilityLabel = "Status, \(Self.name(content.status))"
         position.text = content.position
         ask.text = content.ask
+        if (content.conversation != nil) != (was?.conversation != nil) || was == nil { arrange(conversation: content.conversation != nil) }
+        if let conversation = content.conversation {
+            renderHeader(conversation)
+            setNeedsLayout()
+            return
+        }
         note.text = content.note
         note.isHidden = content.note.isEmpty
         install.configuration?.title = content.install
@@ -1315,44 +1906,150 @@ final class WorkItemPage: UIView {
             }
             questions.isHidden = content.asks.isEmpty
         }
-        if content.subtasks != was?.subtasks {
-            steps.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            for sub in content.subtasks {
-                let row = SubtaskRow(sub)
-                row.onTick = { [weak self] in self?.onTick?(sub.id) }
-                row.addAction(UIAction { [weak self] _ in self?.onSubtask?(sub.id) }, for: .touchUpInside)
-                steps.addArrangedSubview(row)
-            }
-            steps.isHidden = content.subtasks.isEmpty
+        if content.threads != was?.threads || content.earlier != was?.earlier || was?.conversation != nil { renderThreads(content) }
+        if content.subtasks != was?.subtasks || content.closed != was?.closed || was?.conversation != nil { renderSteps(content) }
+        if content.media != was?.media { renderMedia(content) }
+    }
+
+    /// The outline in the scroll view, or the header over the conversation.
+    private func arrange(conversation: Bool) {
+        if conversation {
+            header.removeFromSuperview()
+            addSubview(header)
+            header.translatesAutoresizingMaskIntoConstraints = true
+        } else {
+            header.removeFromSuperview()
+            header.translatesAutoresizingMaskIntoConstraints = false
+            stack.insertArrangedSubview(header, at: 0)
+            header.arrangedSubviews.dropFirst(2).forEach { $0.removeFromSuperview() }
         }
-        if content.threads != was?.threads {
-            crew.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            chips.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            let alive = content.threads.filter { TaskParts.mood($0) != nil }, rest = content.threads.filter { TaskParts.mood($0) == nil }
-            for thread in alive { crew.addArrangedSubview(TaskParts.member(thread) { [weak self] in self?.onThread?(thread.id) }) }
-            for thread in rest { chips.addArrangedSubview(TaskParts.chip(thread) { [weak self] in self?.onThread?(thread.id) }) }
-            crew.isHidden = alive.isEmpty
-            chips.superview?.isHidden = rest.isEmpty
+        ask.numberOfLines = conversation ? 3 : 0
+        scroll.isHidden = conversation
+        slot.isHidden = !conversation
+    }
+
+    /// A one-thread item: under its status and ask, the way to its outline
+    /// and its thread's line, which opens the thread on its own.
+    private func renderHeader(_ conversation: WorkItemPage.Header) {
+        header.arrangedSubviews.dropFirst(2).forEach { $0.removeFromSuperview() }
+        var config = UIButton.Configuration.plain()
+        config.contentInsets = .zero
+        config.imagePlacement = .trailing
+        config.imagePadding = Theme.Space.tight
+        config.preferredSymbolConfigurationForImage = Theme.symbol(Theme.Text.line)
+        config.image = UIImage(systemName: "chevron.right")
+        config.attributedTitle = AttributedString(conversation.more, attributes: AttributeContainer([
+            .font: Theme.Text.line, .foregroundColor: UIColor.secondaryLabel]))
+        let more = UIButton(configuration: config)
+        more.tintColor = .tertiaryLabel
+        more.contentHorizontalAlignment = .leading
+        more.addAction(UIAction { [weak self] _ in self?.onOutline?() }, for: .touchUpInside)
+        header.addArrangedSubview(more)
+        header.addArrangedSubview(threadLine(conversation.thread, size: .row))
+    }
+
+    private func threadLine(_ content: ThreadLine.Content, size: ThreadLine.Size) -> ThreadLine {
+        let line = ThreadLine(size: size)
+        line.configure(content, feeds: feeds)
+        line.addAction(UIAction { [weak self] _ in self?.onThread?(content.id) }, for: .touchUpInside)
+        line.addAction(UIAction { [weak self] _ in self?.onPrepare?(content.id) }, for: .touchDown)
+        return line
+    }
+
+    /// A Caption label over a part of the page, its count beside it.
+    private func label(_ text: String, count: String) -> UIView {
+        let line = UIStackView(arrangedSubviews: [Theme.label(text, Theme.Text.caption, color: .secondaryLabel),
+                                                  Theme.label(count, Theme.Text.caption, color: .tertiaryLabel), UIView()])
+        line.spacing = Theme.Space.tight
+        line.alignment = .firstBaseline
+        line.accessibilityTraits = .header
+        return line
+    }
+
+    /// `view` one nesting level in from where it would sit.
+    private func nested(_ view: UIView, levels: CGFloat = 1, top: CGFloat = 0) -> UIView {
+        let holder = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.topAnchor.constraint(equalTo: holder.topAnchor, constant: top),
+            view.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
+            view.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: levels * Theme.Space.indent),
+            view.trailingAnchor.constraint(equalTo: holder.trailingAnchor)
+        ])
+        return holder
+    }
+
+    /// Its own live threads, one slot in under the ask; earlier ones folded.
+    private func renderThreads(_ content: Content) {
+        crew.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let threads = content.threads, earlier = content.earlier
+        crew.isHidden = threads.isEmpty && earlier.isEmpty
+        guard !crew.isHidden else { return }
+        crew.addArrangedSubview(label("Threads", count: threads.isEmpty ? "" : "\(threads.count)"))
+        for thread in threads { crew.addArrangedSubview(nested(threadLine(thread, size: .page), top: Theme.Space.row)) }
+        guard !earlier.isEmpty else { return }
+        let fold = FoldRow()
+        fold.configure(symbol: "archivebox", text: "Earlier threads", count: earlier.count, open: showsEarlier)
+        fold.addAction(UIAction { [weak self] _ in
+            guard let self, let shown else { return }
+            Theme.selectionHaptic()
+            showsEarlier.toggle()
+            renderThreads(shown)
+        }, for: .touchUpInside)
+        crew.addArrangedSubview(nested(fold, top: threads.isEmpty ? 0 : Theme.Space.row))
+        guard showsEarlier else { return }
+        // Archived: named, no longer opened.
+        for title in earlier { crew.addArrangedSubview(nested(Theme.label(title, Theme.Text.line, color: .tertiaryLabel), levels: 2, top: Theme.Space.tight)) }
+    }
+
+    /// The open sub-tasks, one slot in, each with its threads one further;
+    /// closed ones folded.
+    private func renderSteps(_ content: Content) {
+        steps.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let all = content.subtasks.count + content.closed.count
+        steps.isHidden = all == 0
+        guard all > 0 else { return }
+        steps.addArrangedSubview(label("Sub-tasks", count: "\(content.closed.count)/\(all)"))
+        func add(_ sub: Sub) {
+            let row = SubtaskRow(sub)
+            row.onTick = { [weak self] in self?.onTick?(sub.id) }
+            row.addAction(UIAction { [weak self] _ in self?.onSubtask?(sub.id) }, for: .touchUpInside)
+            steps.addArrangedSubview(nested(row))
+            for thread in sub.threads { steps.addArrangedSubview(nested(threadLine(thread, size: .row), levels: 2, top: Theme.Space.tight)) }
         }
-        if content.media != was?.media {
-            loads.forEach { $0.cancel() }
-            loads = []
-            pictures.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            files.arrangedSubviews.forEach { $0.removeFromSuperview() }
-            let shown = content.media.filter { $0.media.kind != "file" }
-            shown.forEach { pictures.addArrangedSubview(picture($0)) }
-            pictureScroll.isHidden = shown.isEmpty
-            for item in content.media where item.media.kind == "file" {
-                guard let documents else { continue }
-                let row = FileRowView()
-                let media = item.media
-                row.show(.attached(task: item.task, media: media.id, name: media.name ?? "Document", bytes: media.bytes.map { Int($0) }),
-                         documents: documents)
-                row.onOpen = { [weak self] row in self?.onDocument?(row) }
-                files.addArrangedSubview(row)
-            }
-            files.isHidden = files.arrangedSubviews.isEmpty
+        content.subtasks.forEach(add)
+        guard !content.closed.isEmpty else { return }
+        let fold = FoldRow()
+        fold.configure(symbol: "checkmark", text: "Closed", count: content.closed.count, open: showsClosed)
+        fold.addAction(UIAction { [weak self] _ in
+            guard let self, let shown else { return }
+            Theme.selectionHaptic()
+            showsClosed.toggle()
+            renderSteps(shown)
+        }, for: .touchUpInside)
+        steps.addArrangedSubview(nested(fold, top: Theme.Space.tight))
+        if showsClosed { content.closed.forEach(add) }
+    }
+
+    private func renderMedia(_ content: Content) {
+        loads.forEach { $0.cancel() }
+        loads = []
+        pictures.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        files.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let shown = content.media.filter { $0.media.kind != "file" }
+        shown.forEach { pictures.addArrangedSubview(picture($0)) }
+        pictureScroll.isHidden = shown.isEmpty
+        for item in content.media where item.media.kind == "file" {
+            guard let documents else { continue }
+            let row = FileRowView()
+            let media = item.media
+            row.show(.attached(task: item.task, media: media.id, name: media.name ?? "Document", bytes: media.bytes.map { Int($0) }),
+                     documents: documents)
+            row.onOpen = { [weak self] row in self?.onDocument?(row) }
+            files.addArrangedSubview(row)
         }
+        files.isHidden = files.arrangedSubviews.isEmpty
     }
 
     /// A screenshot or clip at a readable size; it takes its own shape once loaded.
@@ -1392,9 +2089,9 @@ final class WorkItemPage: UIView {
     }
 }
 
-/// A sub-task in a work item's checklist: a round tick (tap to mark it
-/// done, again to reopen it), what it is, and how it stands when that's
-/// worth saying. Tapping the rest opens its thread.
+/// A sub-task on a work item's page: its status in the glyph slot (tap to
+/// mark it done, again to reopen it), what it is, and how it stands when
+/// that's worth saying. Tapping the rest opens its thread.
 private final class SubtaskRow: UIControl {
     var onTick: (() -> Void)?
     private let check = UIButton(type: .custom)
@@ -1434,7 +2131,7 @@ private final class SubtaskRow: UIControl {
             text.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.indent),
             text.trailingAnchor.constraint(equalTo: trailingAnchor),
             text.topAnchor.constraint(equalTo: topAnchor, constant: Theme.Space.row),
-            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.row)
+            text.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.tight)
         ])
         isAccessibilityElement = false
         accessibilityElements = [check, text]
@@ -1449,90 +2146,6 @@ private final class SubtaskRow: UIControl {
     override var isHighlighted: Bool {
         didSet { backgroundColor = isHighlighted && opens ? Theme.pressedFill : .clear }
     }
-}
-
-/// Pieces a Done row and a work item's page share.
-@MainActor
-enum TaskParts {
-    /// A linked worker's jelly mood while it is alive; nil once it finished.
-    static func mood(_ thread: AppTask.Thread) -> JellyLook.Mood? {
-        switch thread.state {
-        case "working": .working
-        case "needs-you": .needsYou
-        case "error": .failed
-        default: nil
-        }
-    }
-
-    /// A live worker: the worker itself (its jelly), its title and how it is
-    /// doing. Tapping it opens it.
-    static func member(_ thread: AppTask.Thread, open: @escaping () -> Void) -> UIView {
-        let mood = mood(thread) ?? .working
-        let button = UIControl()
-        let jelly = JellyView(.worker(thread.id, mood), canvas: .roomy(Theme.Glyph.line))
-        let title = Theme.label(thread.title ?? "Worker", Theme.Text.lineStrong, lines: 1)
-        let (word, color): (String, UIColor) = switch mood {
-        case .needsYou: ("Needs you", Theme.warning)
-        case .failed: ("Stopped with an error", Theme.failure)
-        default: ("Working", Theme.working)
-        }
-        let state = Theme.label(word, Theme.Text.line, color: color, lines: 1)
-        let text = UIStackView(arrangedSubviews: [title, state])
-        text.axis = .vertical
-        text.spacing = 0
-        text.isUserInteractionEnabled = false
-        [jelly, text].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; button.addSubview($0) }
-        NSLayoutConstraint.activate([
-            jelly.leadingAnchor.constraint(equalTo: button.leadingAnchor),
-            jelly.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-            jelly.widthAnchor.constraint(equalToConstant: Theme.Glyph.line),
-            jelly.heightAnchor.constraint(equalToConstant: Theme.Glyph.line),
-            text.leadingAnchor.constraint(equalTo: jelly.trailingAnchor, constant: Theme.Space.glyphGap),
-            text.trailingAnchor.constraint(lessThanOrEqualTo: button.trailingAnchor),
-            text.topAnchor.constraint(equalTo: button.topAnchor),
-            text.bottomAnchor.constraint(equalTo: button.bottomAnchor)
-        ])
-        button.addAction(UIAction { _ in Theme.selectionHaptic(); open() }, for: .touchUpInside)
-        button.isAccessibilityElement = true
-        button.accessibilityTraits = .button
-        button.accessibilityLabel = "Open thread \(thread.title ?? ""), \(word)"
-        return button
-    }
-
-    /// A linked thread: a dot for what it is doing and its title.
-    static func chip(_ thread: AppTask.Thread, open: @escaping () -> Void) -> UIView {
-        var config = UIButton.Configuration.plain()
-        config.title = thread.title ?? "Thread"
-        config.baseForegroundColor = .label
-        config.background.backgroundColor = Theme.codeFill
-        config.cornerStyle = .capsule
-        config.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.tight, leading: Theme.Space.rowPad,
-                                                       bottom: Theme.Space.tight, trailing: Theme.Space.rowPad)
-        config.imagePadding = Theme.Space.tight
-        // A small dot in the chip's own font.
-        config.image = UIImage(systemName: "circle.fill")?
-            .withConfiguration(Theme.symbol(Theme.Text.caption).applying(UIImage.SymbolConfiguration(scale: .small)))
-        config.imageColorTransformer = UIConfigurationColorTransformer { _ in
-            switch thread.state {
-            case "needs-you": Theme.warning
-            case "working": Theme.working
-            case "error": Theme.failure
-            default: .tertiaryLabel
-            }
-        }
-        config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes
-            attributes.font = Theme.Text.caption
-            return attributes
-        }
-        config.titleLineBreakMode = .byTruncatingTail
-        let button = UIButton(configuration: config)
-        button.widthAnchor.constraint(lessThanOrEqualToConstant: 240).isActive = true
-        button.addAction(UIAction { _ in Theme.selectionHaptic(); open() }, for: .touchUpInside)
-        button.accessibilityLabel = "Open thread \(thread.title ?? "")"
-        return button
-    }
-
 }
 
 /// Open tasks at a glance: a small glass capsule of counts above the field,

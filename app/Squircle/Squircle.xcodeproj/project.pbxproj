@@ -33,14 +33,12 @@
 		2FBB59AD4C1AE916730CEA4C /* SpringDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */; };
 		309BDA72A02ADD832BB40056 /* ThreadTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */; };
 		34D5DA8BF8B35978B9BD486C /* ThreadCells.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA04F2B838066131F83E73E4 /* ThreadCells.swift */; };
-		3814E7D8EC5D2C43775913BD /* ThreadsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A9104B7F53D24F7A87D8327 /* ThreadsViewController.swift */; };
 		38D8895AA4961B328CE4BE2A /* SquircleModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF5A1E6356120AFAA2279ED6 /* SquircleModel.swift */; };
 		398A5CE176B0173261406D64 /* SpringDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */; };
 		3A3E16EA445BF69E2C979A4F /* ScreenRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A692004605868DC5DD94E0A /* ScreenRecorder.swift */; };
 		3AACA4A899F4037669BA54E1 /* Conversation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5C36A3AB6BFF28944AFD17D /* Conversation.swift */; };
 		3B375023CFEB927A141C090E /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DF796323376B17E9A5610B5 /* Markdown.swift */; };
 		3B9BE6F5A38660FAB6765472 /* T3Gateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5CDCD74003804E62F20E5E8 /* T3Gateway.swift */; };
-		3C7DE78ED76461B8ADDDA8AE /* ThreadsViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A9104B7F53D24F7A87D8327 /* ThreadsViewController.swift */; };
 		418A84EAC572BD0535B5A81B /* T3DeviceStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBBB9AD3116E474D981E5480 /* T3DeviceStream.swift */; };
 		41B1C50BF1A995CD85DD2FFC /* UpdateCurtain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48515B2F67C8356DC4149D30 /* UpdateCurtain.swift */; };
 		444388714CC5582B2E850BCD /* MediaQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C145C181C585068CB76395D /* MediaQueue.swift */; };
@@ -191,7 +189,6 @@
 		1D09985092A609178762E275 /* MediaLoadsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaLoadsTests.swift; sourceTree = "<group>"; };
 		22F53B246FA70BCF76E5C6A1 /* WaitingItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WaitingItemView.swift; sourceTree = "<group>"; };
 		27992D447FE8BBC2D7FE45BD /* OverlayLoader.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = OverlayLoader.c; sourceTree = "<group>"; };
-		2A9104B7F53D24F7A87D8327 /* ThreadsViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadsViewController.swift; sourceTree = "<group>"; };
 		2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadViewController.swift; sourceTree = "<group>"; };
 		2F4797DF0B0EB11336F36A02 /* StudioViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StudioViewController.swift; sourceTree = "<group>"; };
 		33B18F36F8D12DF9C7F496A8 /* SpringDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpringDriver.swift; sourceTree = "<group>"; };
@@ -389,7 +386,6 @@
 				9AA8EBB035561F94C3724C6D /* Theme.swift */,
 				CA04F2B838066131F83E73E4 /* ThreadCells.swift */,
 				44E28DB67256F89E3E0B6AE2 /* ThreadDetail.swift */,
-				2A9104B7F53D24F7A87D8327 /* ThreadsViewController.swift */,
 				A9A2E5834C99C448A69DE4E0 /* ThreadTimeline.swift */,
 				2D179B7D495878CA3CDD0E17 /* ThreadViewController.swift */,
 				4BCBC64A9F07A77D83D8A6B2 /* ThreadViews.swift */,
@@ -720,7 +716,6 @@
 				A3E8C16A2A67B25E7C0C3B83 /* ThreadTimeline.swift in Sources */,
 				FB50C83A30EAE897BB826DF7 /* ThreadViewController.swift in Sources */,
 				A48E1FCA693DC85CC567D780 /* ThreadViews.swift in Sources */,
-				3814E7D8EC5D2C43775913BD /* ThreadsViewController.swift in Sources */,
 				1EC7617E1A70663D0CDE0026 /* TouchDown.swift in Sources */,
 				97C1E54012EDF05F226B3682 /* UpdateCurtain.swift in Sources */,
 				46C464FC93A2B91157EDC2CD /* Waiting.swift in Sources */,
@@ -821,7 +816,6 @@
 				309BDA72A02ADD832BB40056 /* ThreadTimeline.swift in Sources */,
 				4D5A0C54F52464D0DC7E6B0B /* ThreadViewController.swift in Sources */,
 				8561E88460F96DCD4AB29DB4 /* ThreadViews.swift in Sources */,
-				3C7DE78ED76461B8ADDDA8AE /* ThreadsViewController.swift in Sources */,
 				CD46EA542DFBCC043591FFEF /* TouchDown.swift in Sources */,
 				41B1C50BF1A995CD85DD2FFC /* UpdateCurtain.swift in Sources */,
 				6D876F8C0A1778BAB4A26826 /* Waiting.swift in Sources */,
