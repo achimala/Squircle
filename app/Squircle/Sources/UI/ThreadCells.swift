@@ -247,9 +247,10 @@ final class MessageCell: TimelineCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let (fitted, pad) = textFrame(width: contentView.bounds.width)
-        var frame = fitted
-        frame.size.height = max(0, contentView.bounds.height - frame.minY - pad - gap.bottom)
+        // The text's own measured size, never what is left of the row: a
+        // row taking new room around it (a neighbour arriving) resizes on
+        // the table's animation, and its bubble must not squash meanwhile.
+        let (frame, pad) = textFrame(width: contentView.bounds.width)
         text.frame = frame
         let around = frame.insetBy(dx: -Theme.Space.bubble.left, dy: -pad)
         if hasBubble { bubble.frame = around }

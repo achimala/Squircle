@@ -150,7 +150,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     private lazy var requestCard = RequestCard(answers: answers)
     private var request: UIVisualEffectView { requestCard.view }
 
+    /// Your message rising out of the field: its row stays unseen while
+    /// `flyer`, drawn above the field, rides it (`placeFlyer`).
     private var flyingID: String?
+    private var flyer: (view: UIView, fill: UIView, from: CGPoint)?
     /// Your message on its way to the Mac, until T3's thread has it.
     private var pendingSend: PendingSend? { model.pendingSend(for: conversation) }
     private var showsConversation: Bool { conversation.threadID != nil || pendingSend != nil }
@@ -650,7 +653,10 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
-            if pinned { scrollToBottom() }
+            // Your message rising: the end it follows moved (the field
+            // folding up), so the one spring takes it there; outside a
+            // flight, it moves with whatever moved the field (the keyboard).
+            if pinned, flyingID != nil { UIView.performWithoutAnimation { scrollToBottom(animated: true) } } else if pinned { scrollToBottom() }
         }
     }
 
@@ -747,6 +753,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// brings it back into sight.
     func park() {
         Self.heightCache.set(heights, for: conversation)
+        land()
         hide()
         inSight = false
     }
@@ -1096,7 +1103,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             }
             snapshot.reconfigureItems(reflowed.filter { !away.contains($0) })
             dataSource.apply(snapshot, animatingDifferences: true) { [weak self] in
-                guard let self, pinToBottom, flyingID == nil else { return }
+                guard let self, pinToBottom else { return }
                 scrollToBottom(animated: true)
             }
         } else if covered, !active {
@@ -1117,9 +1124,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 table.layoutIfNeeded()
             }
         }
-        // A message in flight scrolls the conversation on its own spring.
         // Pinned, the conversation follows new content on one spring.
-        if pinToBottom, flyingID == nil { scrollToBottom(animated: !first && view.window != nil) }
+        if pinToBottom { scrollToBottom(animated: !first && view.window != nil) }
         if !folding, !inserted.isEmpty, inserted.count <= 8 { animateEntrance(of: inserted.filter { !arrived.contains($0) }) }
         if !arrived.isEmpty {
             // Under Reduce Motion they are simply there, with one tap.
@@ -1389,7 +1395,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// past its end (blank) or show older rows until something scrolled it.
     /// One at its end before that pass stays at its end.
     private func keepEnd(_ wasAtEnd: Bool) {
-        guard wasAtEnd, pinToBottom, flyingID == nil, !scrollSpring.isAnimating, !table.isTracking, !table.isDecelerating else { return }
+        guard wasAtEnd, pinToBottom, !scrollSpring.isAnimating, !table.isTracking, !table.isDecelerating else { return }
         let bottom = max(-table.contentInset.top, table.contentSize.height + table.contentInset.bottom - table.bounds.height)
         if abs(table.contentOffset.y - bottom) > 0.5 { table.contentOffset.y = bottom }
     }
@@ -1412,6 +1418,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        placeFlyer()
         updateSticky()
         setNeedsMediaPass()
         guard scrollView.isTracking || scrollView.isDecelerating else { return }
@@ -2046,11 +2053,15 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             // the field; reading further up, you stay where you are and it
             // lands below.
             let following = pinToBottom
-            flyingID = following && !Motion.reduced ? messageID : nil
             if !following { sentBelow = messageID }
+            land()
+            flyingID = following && !Motion.reduced ? messageID : nil
             composer.text = ""
             render()
             if following { flySend(id: messageID, from: source) } else { renderJump() }
+            // A long message's field folds back to one line on the same spring.
+            UIView.animate(withDuration: 0.5, delay: 0, usingSpringWithDamping: 0.84, initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState]) { self.view.layoutIfNeeded() }
             follow(outcome, text: text)
         }
     }
@@ -2068,54 +2079,91 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     /// As in Messages: your words become their bubble right where you typed
     /// them and the bubble rises out of the field into place while the
     /// conversation makes room. The text sits inside the bubble throughout.
+    /// The bubble is placed every frame where its row is now, plus what is
+    /// left (`rise`, 1 to 0) of the way from where you typed: the
+    /// conversation can scroll, grow or follow a new end meanwhile and the
+    /// bubble still lands exactly on its row.
     private func flySend(id: String, from source: CGPoint) {
-        view.layoutIfNeeded()
         let start = table.contentOffset.y
+        // Laid out at the end once, so the row is measured and drawn.
         scrollToBottom()
-        let end = table.contentOffset.y
-        guard !Motion.reduced, let index = dataSource.indexPath(for: id),
-              let cell = table.cellForRow(at: index) as? MessageCell else { flyingID = nil; return }
-        cell.contentView.alpha = 1
+        guard let index = dataSource.indexPath(for: id), let cell = table.cellForRow(at: index) as? MessageCell else { flyingID = nil; return }
         cell.layoutIfNeeded()
-        let bubble = cell.bubble.convert(cell.bubble.bounds, to: view)
-        let textFrame = cell.text.convert(cell.text.bounds, to: view)
-        let inset = cell.text.textContainerInset
-        guard let words = cell.text.snapshotView(afterScreenUpdates: true) else { flyingID = nil; return }
-        cell.contentView.alpha = 0
+        // The row's own text, set the same way: drawn with the bubble, so
+        // nothing has to reach the screen first (a snapshot would show the
+        // end for a frame).
+        let words = UITextView()
+        words.isEditable = false
+        words.isScrollEnabled = false
+        words.isUserInteractionEnabled = false
+        words.backgroundColor = .clear
+        words.clipsToBounds = false
+        words.textContainer.lineFragmentPadding = cell.text.textContainer.lineFragmentPadding
+        words.textContainerInset = cell.text.textContainerInset
+        words.attributedText = cell.text.attributedText
         table.contentOffset.y = start
+        table.layoutIfNeeded()
+        guard let bubble = bubbleFrame(of: cell) else { flyingID = nil; return }
 
-        let flyer = UIView(frame: bubble)
-        flyer.isUserInteractionEnabled = false
+        let view = UIView(frame: bubble)
+        view.isUserInteractionEnabled = false
         let fill = Theme.glassSurface(cornerRadius: Theme.Radius.large, tint: Theme.userGlass)
-        fill.frame = flyer.bounds
-        flyer.addSubview(fill)
-        words.frame = CGRect(x: textFrame.minX - bubble.minX, y: textFrame.minY - bubble.minY,
-                             width: textFrame.width, height: textFrame.height)
-        flyer.addSubview(words)
-        view.insertSubview(flyer, aboveSubview: composer)
+        fill.frame = view.bounds
+        view.addSubview(fill)
+        words.frame = cell.text.convert(cell.text.bounds, to: cell.bubble)
+        view.addSubview(words)
+        self.view.insertSubview(view, aboveSubview: composer)
         #if DEBUG
-        debugFlyer = flyer
+        debugFlyer = view
         #endif
-        // Start with the first line of text exactly where it was typed.
-        let offset = CGPoint(x: words.frame.minX + inset.left, y: words.frame.minY + inset.top)
-        flyer.frame.origin = CGPoint(x: source.x - offset.x, y: source.y - offset.y)
-        fill.transform = CGAffineTransform(scaleX: 0.94, y: 0.9)
+        // It starts with the first line of text exactly where it was typed.
+        let inset = cell.text.textContainerInset
+        let typed = CGPoint(x: bubble.minX + words.frame.minX + inset.left, y: bubble.minY + words.frame.minY + inset.top)
+        flyer = (view, fill, CGPoint(x: source.x - typed.x, y: source.y - typed.y))
         composer.holdsPlaceholder = true
+        rise.set(1)
+        rise.animate(to: 0)
+        scrollToBottom(animated: true)
+    }
 
-        let rise = UIViewPropertyAnimator(duration: 0.5, dampingRatio: 0.84) {
-            flyer.frame.origin = bubble.origin
-            fill.transform = .identity
-            self.table.contentOffset.y = end
-        }
-        rise.addCompletion { [weak self] _ in
-            flyer.removeFromSuperview()
-            guard let self else { return }
-            composer.revealPlaceholder()
-            if flyingID == id { flyingID = nil }
-            if let index = dataSource.indexPath(for: id) { table.cellForRow(at: index)?.contentView.alpha = 1 }
-            if pinToBottom { scrollToBottom(animated: true) }
-        }
-        rise.startAnimation()
+    /// The flight's one spring: 1 where you typed, 0 on its row.
+    private lazy var rise: SpringDriver = {
+        let spring = SpringDriver(value: 0)
+        spring.parameters = SpringDriver.Parameters(response: 0.5, damping: 0.84)
+        spring.onChange = { [weak self] _ in self?.placeFlyer() }
+        spring.onRest = { [weak self] _ in self?.land() }
+        return spring
+    }()
+
+    /// The bubble of `cell` on screen, as the table shows it this frame.
+    private func bubbleFrame(of cell: MessageCell) -> CGRect? {
+        // A row the table is moving shows where its animation has it.
+        let row = cell.layer.animationKeys()?.isEmpty == false ? cell.layer.presentation()?.frame ?? cell.frame : cell.frame
+        let bubble = cell.bubble.frame
+        return CGRect(x: table.frame.minX + row.minX + bubble.minX - table.contentOffset.x,
+                      y: table.frame.minY + row.minY + bubble.minY - table.contentOffset.y, width: bubble.width, height: bubble.height)
+    }
+
+    /// Puts the flying bubble where its row is plus what is left of its way.
+    private func placeFlyer() {
+        guard let flyer, let id = flyingID, let index = dataSource.indexPath(for: id),
+              let cell = table.cellForRow(at: index) as? MessageCell, let bubble = bubbleFrame(of: cell) else { return }
+        let left = rise.value
+        flyer.view.frame = CGRect(x: bubble.minX + flyer.from.x * left, y: bubble.minY + flyer.from.y * left,
+                                  width: bubble.width, height: bubble.height)
+        flyer.fill.transform = CGAffineTransform(scaleX: 1 - 0.06 * left, y: 1 - 0.1 * left)
+    }
+
+    /// The bubble is on its row (or another send or a reload took over):
+    /// the row shows it from here.
+    private func land() {
+        guard let id = flyingID else { return }
+        flyingID = nil
+        rise.stop()
+        flyer?.view.removeFromSuperview()
+        flyer = nil
+        composer.revealPlaceholder()
+        if let index = dataSource.indexPath(for: id) { table.cellForRow(at: index)?.contentView.alpha = 1 }
     }
 
     private var debugRequest: PendingRequest?
@@ -2281,6 +2329,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             debugRunning = false
             render()
             if c.keyboard { composer.input.becomeFirstResponder() } else { view.endEditing(true) }
+            // Typed first, so a long message's field has grown before it is sent.
+            composer.text = c.text
             try? await Task.sleep(for: .seconds(1.2))
             sentBelow = nil
             scrollToBottom()
@@ -2291,7 +2341,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             renderJump()
             try? await Task.sleep(for: .seconds(0.8))
             guard let recorder = ScreenRecorder(below: recorderWindow, rate: 60) else { NSLog("SENDFILM no recorder"); return }
-            var trace = "t,offset,offsetModel,flyX,flyY,flyW,flyH,bubX,bubY,bubW,bubH,bubAlpha,prevY,composerY,composerH,insetBottom,contentH,jumpAlpha,pinned\n"
+            var trace = "t,offset,offsetModel,flyX,flyY,flyW,flyH,bubX,bubY,bubW,bubH,bubAlpha,prevY,composerY,composerH,insetBottom,contentH,jumpAlpha,pinned,bubModelY,rise\n"
             let started = CACurrentMediaTime()
             let link = CADisplayLink(target: DisplayLinkProxy { [weak self] _ in
                 guard let self else { return }
@@ -2314,7 +2364,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
                 try? await Task.sleep(for: .seconds(0.3))
             }
             NSLog("SENDFILM send %@ at %.3f", c.name, CACurrentMediaTime() - started)
-            debugSend(c.text)
+            send()
             try? await Task.sleep(for: .seconds(c.landing ? 2.4 : 1.6))
             link.invalidate()
             let output = await recorder.finish()
@@ -2337,10 +2387,11 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
         let offset = table.layer.presentation()?.bounds.minY ?? table.contentOffset.y
         let fly = onScreen(debugFlyer)
-        var bubble: CGRect?, alpha: CGFloat = -1, previous: CGFloat?
+        var bubble: CGRect?, alpha: CGFloat = -1, previous: CGFloat?, model: CGFloat?
         if let id = debugSent.last(where: { $0.role == "user" })?.id, let path = dataSource.indexPath(for: id) {
             if let cell = table.cellForRow(at: path) as? MessageCell {
                 bubble = onScreen(cell.bubble)
+                model = bubbleFrame(of: cell)?.minY
                 alpha = CGFloat(cell.contentView.layer.presentation()?.opacity ?? -1)
             }
             if path.row > 0, let cell = table.cellForRow(at: IndexPath(row: path.row - 1, section: 0)) { previous = onScreen(cell)?.minY }
@@ -2350,7 +2401,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let cells = [f(offset), f(table.contentOffset.y), f(fly?.minX), f(fly?.minY), f(fly?.width), f(fly?.height),
                      f(bubble?.minX), f(bubble?.minY), f(bubble?.width), f(bubble?.height), f(alpha), f(previous),
                      f(composerRect.minY), f(composerRect.height), f(table.contentInset.bottom), f(table.contentSize.height),
-                     f(CGFloat(jump.layer.presentation()?.opacity ?? 0)), pinToBottom ? "1" : "0"]
+                     f(CGFloat(jump.layer.presentation()?.opacity ?? 0)), pinToBottom ? "1" : "0", f(model), f(rise.value)]
         return String(format: "%.4f,", time) + cells.joined(separator: ",") + "\n"
     }
     /// Verification only: hands the live line to a new task and back.
