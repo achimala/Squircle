@@ -425,6 +425,42 @@ struct AppTask: Decodable, Equatable, Identifiable {
         case id, title, ask, status, note, threads, builds, media, revision
         case updatedAt = "updated_at", archivedAt = "archived_at", subtaskList = "subtasks"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        ask = try container.decode(String.self, forKey: .ask)
+        status = try container.decode(Status.self, forKey: .status)
+        note = try container.decode(String.self, forKey: .note)
+        updatedAt = try container.decode(Double.self, forKey: .updatedAt)
+        archivedAt = try container.decodeIfPresent(Double.self, forKey: .archivedAt)
+        revision = try container.decode(UInt64.self, forKey: .revision)
+        threads = try container.decode([Thread].self, forKey: .threads)
+        builds = try container.decode([Build].self, forKey: .builds)
+        media = try container.decode([Media].self, forKey: .media)
+        subtaskList = try container.decodeIfPresent(Tolerant.self, forKey: .subtaskList)?.tasks
+    }
+
+    /// A list of tasks that keeps every one that decodes: one the client
+    /// can't read is left out (and logged in DEBUG), never the whole list.
+    struct Tolerant: Decodable {
+        let tasks: [AppTask]
+        init(from decoder: Decoder) throws {
+            var container = try decoder.unkeyedContainer()
+            var tasks: [AppTask] = []
+            while !container.isAtEnd {
+                do { tasks.append(try container.decode(AppTask.self)) } catch {
+                    #if DEBUG
+                    NSLog("SQUIRCLE-TASKS skipped a task that doesn't decode: %@", String(describing: error))
+                    #endif
+                    // Step past it so the next one is read.
+                    _ = try? container.decode(JSONValue.self)
+                }
+            }
+            self.tasks = tasks
+        }
+    }
 }
 
 /// An app's tasks: the active list and History, newest first. The service
@@ -438,4 +474,12 @@ struct AppTasks: Decodable, Equatable {
     /// Every work item and sub-task, active and History.
     var everyTask: [AppTask] { (tasks + history).flatMap { [$0] + $0.subtasks } }
     enum CodingKeys: String, CodingKey { case tasks, history, historyNext = "history_next" }
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tasks = try container.decodeIfPresent(AppTask.Tolerant.self, forKey: .tasks)?.tasks ?? []
+        history = try container.decodeIfPresent(AppTask.Tolerant.self, forKey: .history)?.tasks ?? []
+        historyNext = try container.decodeIfPresent(String.self, forKey: .historyNext)
+    }
 }

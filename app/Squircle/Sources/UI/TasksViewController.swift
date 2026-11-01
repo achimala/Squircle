@@ -419,7 +419,9 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         pager.accessibilityElementsHidden = !item
         back.accessibilityLabel = item ? "All tasks" : "Back"
         edgePan.isEnabled = item
-        notice.isHidden = item || !list.tasks.isEmpty || !list.history.isEmpty
+        // The notice stands in for an empty overview: anything it shows
+        // (a task, a question, a thread, History) hides it.
+        notice.isHidden = item || dataSource.snapshot().itemIdentifiers.contains { $0 != Self.searchRow }
         if #available(iOS 26.0, *), let edge = edge as? UIScrollEdgeElementContainerInteraction {
             edge.scrollView = openItem.flatMap { pages[$0]?.scroll } ?? table
         }
