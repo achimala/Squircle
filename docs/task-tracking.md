@@ -344,7 +344,7 @@ current, and the latest asks lost. So:
 ## Model
 
 Kept per app (T3 project) in `<data>/tasks.json`; attachments in
-`<data>/tasks/<id>/media` (screenshots, clips, and documents: pdf, md, txt, json, csv, which the phone opens in Quick Look). A task has a title (the agent's few words; empty on older ones), the ask (the user's words), a status (`queued`,
+`<data>/tasks/<id>/media` (screenshots, clips, and documents: pdf, md, txt, json, csv, which the phone opens in Quick Look, Markdown in its own reader). A task has a title (the agent's few words; empty on older ones), the ask (the user's words), a status (`queued`,
 `in_progress` and `needs_you` shown only, `ready_to_try`, `done`, `dropped`), a few-word
 note, the chat message it came from (the agent's latest user message when it
 adds the task), linked worker threads and builds, when it was last active

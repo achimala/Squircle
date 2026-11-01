@@ -228,7 +228,7 @@ private final class TypeTile: UIView {
 }
 
 /// Quick Look over one document: PDFs page and zoom; text reads as text;
-/// share saves it to Files or sends it on.
+/// share saves it to Files or sends it on. Markdown opens in the reader.
 final class DocumentViewer: QLPreviewController, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
     private final class Item: NSObject, QLPreviewItem {
         let previewItemURL: URL?
@@ -260,7 +260,11 @@ final class DocumentViewer: QLPreviewController, QLPreviewControllerDataSource, 
             row.opening = false
             row.render(documents.info[source])
             guard let url, let presenter, presenter.presentedViewController == nil, presenter.view.window != nil else { return }
-            presenter.present(DocumentViewer(url, title: source.name, origin: row), animated: true)
+            if source.kind == "Markdown" {
+                presenter.present(MarkdownReader.open(url, source: source, documents: documents), animated: true)
+            } else {
+                presenter.present(DocumentViewer(url, title: source.name, origin: row), animated: true)
+            }
         }
     }
 
@@ -268,4 +272,214 @@ final class DocumentViewer: QLPreviewController, QLPreviewControllerDataSource, 
     func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> any QLPreviewItem { item }
     func previewController(_ controller: QLPreviewController, transitionViewFor item: any QLPreviewItem) -> UIView? { origin }
     func previewController(_ controller: QLPreviewController, editingModeFor previewItem: any QLPreviewItem) -> QLPreviewItemEditingMode { .disabled }
+}
+
+/// A Markdown document as a page in the app's type: headings, lists and
+/// quotes as text you can select and whose web links open; code blocks and
+/// tables apart, each scrolling sideways rather than wrapping; pictures the
+/// Mac will serve, in place. Done or pulling down past the top closes it;
+/// share sends the file on.
+final class MarkdownReader: UIViewController, UIScrollViewDelegate {
+    private let url: URL
+    private let source: DocumentSource
+    private let documents: DocumentFiles
+    private let blocks: [Markdown.Block]
+    private let scroll = UIScrollView()
+    private let column = UIStackView()
+    /// The width and text size the blocks were laid out for.
+    private var built: (width: CGFloat, size: UIContentSizeCategory)?
+    private var images: [Task<Void, Never>] = []
+
+    private init(_ url: URL, source: DocumentSource, documents: DocumentFiles) {
+        self.url = url
+        self.source = source
+        self.documents = documents
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        var base: URL?
+        if case .linked(_, let path) = source { base = URL(fileURLWithPath: path).deletingLastPathComponent() }
+        blocks = Markdown.blocks(text, base: base)
+        super.init(nibName: nil, bundle: nil)
+        title = source.name
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    static func open(_ url: URL, source: DocumentSource, documents: DocumentFiles) -> UIViewController {
+        let navigation = UINavigationController(rootViewController: MarkdownReader(url, source: source, documents: documents))
+        navigation.modalPresentationStyle = .fullScreen
+        return navigation
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = Theme.paper
+        navigationItem.leftBarButtonItem = UIBarButtonItem(systemItem: .done, primaryAction: UIAction { [weak self] _ in
+            self?.dismiss(animated: true)
+        })
+        navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), primaryAction: UIAction { [weak self] _ in
+            guard let self else { return }
+            let share = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            share.popoverPresentationController?.barButtonItem = navigationItem.rightBarButtonItem
+            present(share, animated: true)
+        })
+        navigationItem.rightBarButtonItem?.accessibilityLabel = "Share"
+        scroll.alwaysBounceVertical = true
+        scroll.delegate = self
+        scroll.accessibilityIdentifier = "document.reader"
+        column.axis = .vertical
+        [scroll, column].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        view.addSubview(scroll)
+        scroll.addSubview(column)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: view.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            column.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: Theme.Space.row),
+            column.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -Theme.Space.section),
+            column.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor)
+        ])
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let width = view.bounds.width - Theme.Space.margin * 2
+        let size = traitCollection.preferredContentSizeCategory
+        guard width > 0, built?.width != width || built?.size != size else { return }
+        built = (width, size)
+        build(width: width)
+    }
+
+    /// Lays every block out for `width`: only when the width or text size
+    /// changes.
+    private func build(width: CGFloat) {
+        images.forEach { $0.cancel() }
+        images = []
+        column.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        let body = Theme.Text.body
+        let heading: (Int) -> UIFont = { $0 == 1 ? Theme.Text.title : Theme.Text.bodyStrong }
+        for block in blocks {
+            let view: UIView
+            switch block {
+            case .text(let markdown):
+                view = inset(text(Markdown.render(markdown, font: body, color: .label, heading: heading)))
+            case .code(let code, let depth):
+                view = inset(self.code(code), extra: CGFloat(depth) * Theme.Space.rowPad)
+            case .table(let table):
+                let layout = MarkdownTableLayout(table, font: Theme.Text.line, color: .label, width: width)
+                let strip = MarkdownTableStrip()
+                strip.show(layout, id: "")
+                strip.heightAnchor.constraint(equalToConstant: layout.size.height).isActive = true
+                view = strip
+            case .image(let path, let alt):
+                view = inset(image(path, alt: alt, width: width))
+            case .rule:
+                let rule = UIView()
+                rule.backgroundColor = .separator
+                rule.heightAnchor.constraint(equalToConstant: 1 / max(1, traitCollection.displayScale)).isActive = true
+                view = inset(rule)
+            }
+            if let last = column.arrangedSubviews.last { column.setCustomSpacing(Theme.Space.group, after: last) }
+            column.addArrangedSubview(view)
+        }
+    }
+
+    /// `content` between the margins, `extra` further in.
+    private func inset(_ content: UIView, extra: CGFloat = 0) -> UIView {
+        let holder = UIView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: holder.topAnchor),
+            content.bottomAnchor.constraint(equalTo: holder.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: Theme.Space.margin + extra),
+            content.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -Theme.Space.margin)
+        ])
+        return holder
+    }
+
+    /// Selectable text; only web links stay links (a path on the Mac
+    /// opens nothing here).
+    private func text(_ rendered: NSAttributedString) -> UITextView {
+        let text = NSMutableAttributedString(attributedString: rendered)
+        text.enumerateAttribute(.link, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            guard let link = value as? URL ?? (value as? String).flatMap(URL.init(string:)) else { return }
+            if !["http", "https", "mailto"].contains(link.scheme?.lowercased() ?? "") { text.removeAttribute(.link, range: range) }
+        }
+        let view = UITextView()
+        view.attributedText = text
+        view.isEditable = false
+        view.isScrollEnabled = false
+        view.backgroundColor = .clear
+        view.textContainerInset = .zero
+        view.textContainer.lineFragmentPadding = 0
+        view.linkTextAttributes = [.foregroundColor: Theme.accent, .underlineStyle: NSUnderlineStyle.single.rawValue]
+        return view
+    }
+
+    /// A code block: a plain fill at the small radius, its lines unwrapped,
+    /// scrolling sideways inside it.
+    private func code(_ code: String) -> UIView {
+        let box = UIScrollView()
+        box.backgroundColor = Theme.codeFill
+        box.layer.cornerRadius = Theme.Radius.small
+        box.layer.cornerCurve = .continuous
+        box.showsHorizontalScrollIndicator = false
+        box.alwaysBounceVertical = false
+        let label = Theme.label(code, Theme.Text.mono, color: .label, lines: 0)
+        label.lineBreakMode = .byClipping
+        label.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(label)
+        let pad = Theme.Space.rowPad
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: box.contentLayoutGuide.topAnchor, constant: pad),
+            label.bottomAnchor.constraint(equalTo: box.contentLayoutGuide.bottomAnchor, constant: -pad),
+            label.leadingAnchor.constraint(equalTo: box.contentLayoutGuide.leadingAnchor, constant: pad),
+            label.trailingAnchor.constraint(equalTo: box.contentLayoutGuide.trailingAnchor, constant: -pad),
+            box.heightAnchor.constraint(equalTo: label.heightAnchor, constant: pad * 2)
+        ])
+        box.isAccessibilityElement = true
+        box.accessibilityLabel = code
+        return box
+    }
+
+    /// A picture at the column's width: a 16:10 placeholder until it
+    /// arrives, then its own shape; its alt text if the Mac won't serve it.
+    private func image(_ path: String, alt: String, width: CGFloat) -> UIView {
+        let picture = UIImageView()
+        picture.backgroundColor = Theme.codeFill
+        picture.contentMode = .scaleAspectFit
+        picture.layer.cornerRadius = Theme.Radius.small
+        picture.layer.cornerCurve = .continuous
+        picture.clipsToBounds = true
+        picture.isAccessibilityElement = true
+        picture.accessibilityLabel = alt
+        let height = picture.heightAnchor.constraint(equalToConstant: floor(width * 10 / 16))
+        height.isActive = true
+        let caption = Theme.label(alt, Theme.Text.line, color: .secondaryLabel, lines: 0)
+        caption.isHidden = true
+        let stack = UIStackView(arrangedSubviews: [picture, caption])
+        stack.axis = .vertical
+        images.append(Task { [weak self, documents, source] in
+            let loaded = await documents.image(path, in: source)
+            guard let self, !Task.isCancelled else { return }
+            if let loaded, loaded.size.width > 0 {
+                picture.image = loaded
+                picture.backgroundColor = .clear
+                height.constant = floor(width * min(2, loaded.size.height / loaded.size.width))
+            } else {
+                picture.isHidden = true
+                caption.isHidden = alt.isEmpty
+            }
+            view.setNeedsLayout()
+        })
+        return stack
+    }
+
+    /// Pulling well down past the top closes it, as Quick Look does.
+    func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        if scrollView.contentOffset.y < -scrollView.adjustedContentInset.top - 96 { dismiss(animated: true) }
+    }
 }

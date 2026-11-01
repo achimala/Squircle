@@ -218,7 +218,7 @@ final class SquircleModel {
         client: client, gateway: gateway, base: configuration?.t3URL,
         published: { [weak self] thread in self?.publishedMedia(of: thread) ?? [] })
     /// PDFs and text files agents link or attach, for the document viewer.
-    private(set) lazy var documents = DocumentFiles(client: client) { [weak self] in self?.conversationMedia.metered ?? false }
+    private(set) lazy var documents = DocumentFiles(client: client, media: conversationMedia)
     private func publishedMedia(of thread: String) -> [JSONValue] {
         thread == selectedSessionID ? media : threadCache.peek(thread)?.state.media ?? []
     }

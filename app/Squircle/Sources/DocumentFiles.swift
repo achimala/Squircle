@@ -55,12 +55,22 @@ final class DocumentFiles {
         var failed = false
     }
     private let client: SquircleClient?
-    private let metered: () -> Bool
+    private let media: ConversationMedia
+    private func metered() -> Bool { media.metered }
     private(set) var info: [DocumentSource: Info] = [:]
 
-    init(client: SquircleClient?, metered: @escaping () -> Bool) {
+    init(client: SquircleClient?, media: ConversationMedia) {
         self.client = client
-        self.metered = metered
+        self.media = media
+    }
+
+    /// A picture a linked Markdown document shows, by its path on the Mac,
+    /// if T3 will sign it for the thread. A task's attachment has no thread
+    /// to ask through, so its pictures stay their alt text.
+    func image(_ path: String, in source: DocumentSource) async -> UIImage? {
+        guard case .linked(let thread, _) = source,
+              let data = await media.loadStepImage("file:" + path, index: 0, in: thread) else { return nil }
+        return UIImage(data: data)
     }
 
     /// Its size and, when it may download now, its pages.

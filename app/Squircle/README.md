@@ -109,7 +109,9 @@ goes home to its own spot.
 PDFs and text files (md, txt, json, csv) an agent links in its reply or
 attaches to a task show as file rows (`FileRowView`: name, size, a PDF's
 pages) and open in Quick Look (`DocumentViewer`: paging, zoom, share and Save
-to Files). A linked file comes from the service's
+to Files); Markdown opens in `MarkdownReader` instead, drawn in the deck's type
+(`Markdown.blocks`: text, code blocks and tables apart, each scrolling sideways;
+pictures T3 will sign for the thread; only web links tap). A linked file comes from the service's
 `/v1/t3/threads/{thread}/document`, which serves only a document path an
 assistant message of that thread names, as written, with no symlink on the way.
 `ThreadViewController` is also the overlay's conversation; each host states

@@ -5,10 +5,11 @@ import UIKit
 /// line: a single newline inside a paragraph breaks it, as it does on GitHub
 /// comments, because agents rely on that.
 enum Markdown {
-    static func parse(_ text: String) -> AttributedString {
+    /// `base` resolves relative links and pictures (a document's folder).
+    static func parse(_ text: String, base: URL? = nil) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(allowsExtendedAttributes: false, interpretedSyntax: .full,
                                                               failurePolicy: .returnPartiallyParsedIfPossible)
-        return (try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)
+        return (try? AttributedString(markdown: text, options: options, baseURL: base)) ?? AttributedString(text)
     }
 
     static func render(_ text: String, font: UIFont, color: UIColor) -> NSAttributedString {
@@ -17,7 +18,10 @@ enum Markdown {
 
     /// Blocks one after another; a blank line's worth of room between them,
     /// except before a list, between a table's rows and after a heading.
-    static func render(_ markdown: AttributedString, font: UIFont, color: UIColor) -> NSAttributedString {
+    /// Headings stay in the text's size, bold, unless `heading` gives each
+    /// level its own (a document), with room above.
+    static func render(_ markdown: AttributedString, font: UIFont, color: UIColor,
+                       heading: ((Int) -> UIFont)? = nil) -> NSAttributedString {
         let output = NSMutableAttributedString()
         let mono = Theme.Text.mono
         var previous: [PresentationIntent.IntentType] = []
@@ -37,7 +41,7 @@ enum Markdown {
                     }
                 }
             }
-            output.append(block(markdown[range], blocks, marked: &marked, font: font, mono: mono, color: color))
+            output.append(block(markdown[range], blocks, marked: &marked, font: font, mono: mono, color: color, heading: heading))
             previous = blocks
         }
         // Agents end messages with newlines, and a piece cut at a picture
@@ -49,7 +53,7 @@ enum Markdown {
 
     /// One paragraph, heading, code block, quote or table cell.
     private static func block(_ text: AttributedSubstring, _ blocks: [PresentationIntent.IntentType], marked: inout Set<Int>,
-                              font: UIFont, mono: UIFont, color: UIColor) -> NSAttributedString {
+                              font: UIFont, mono: UIFont, color: UIColor, heading: ((Int) -> UIFont)?) -> NSAttributedString {
         var indent: CGFloat = 0, hanging: CGFloat = 0, prefix = "", color = color
         // Each list it nests in indents it a little; its own item shows the
         // marker on its first block, and later blocks line up with the text.
@@ -83,7 +87,10 @@ enum Markdown {
         }
         var base = font
         // Headings stay in the text's own size (one size per message).
-        if case .header? = blocks.first?.kind { base = bold(font) }
+        if case .header(let level)? = blocks.first?.kind {
+            base = heading?(level) ?? bold(font)
+            if heading != nil { style.paragraphSpacingBefore = level <= 2 ? Theme.Space.group : Theme.Space.row }
+        }
         if blocks.first?.kind == .thematicBreak { color = .tertiaryLabel }
         style.firstLineHeadIndent = indent
         style.headIndent = indent + hanging
@@ -206,6 +213,91 @@ extension Markdown {
         finish()
         flush(to: parsed.endIndex)
         return segments
+    }
+
+    /// A document's blocks, for the reader: runs of text (paragraphs,
+    /// headings, lists, quotes, drawn with `render`), and apart from them
+    /// what can't wrap with the text: code blocks, tables, pictures and
+    /// rules. Relative pictures resolve against `base`.
+    enum Block: Equatable {
+        case text(AttributedString)
+        /// A fenced or indented code block, its lines as written, and how
+        /// many lists it sits in.
+        case code(String, depth: Int)
+        case table(MarkdownTable)
+        /// A picture on the Mac, by absolute path, and its alt text.
+        case image(path: String, alt: String)
+        case rule
+    }
+
+    static func blocks(_ text: String, base: URL? = nil) -> [Block] {
+        let parsed = parse(text, base: base)
+        var blocks: [Block] = []
+        var start = parsed.startIndex
+        func flush(to end: AttributedString.Index) {
+            let piece = AttributedString(parsed[start..<end])
+            start = end
+            if !String(piece.characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { blocks.append(.text(piece)) }
+        }
+        var table: TableCells?
+        var code: (id: Int, depth: Int, text: String)?
+        func finish() {
+            if let table { blocks.append(.table(table.table)) }
+            if let code {
+                var text = code.text
+                while text.last?.isNewline == true { text.removeLast() }
+                blocks.append(.code(text, depth: code.depth))
+            }
+            table = nil
+            code = nil
+        }
+        var image: (url: URL, alt: String)?
+        func picture() {
+            if let image { blocks.append(.image(path: image.url.path, alt: image.alt)) }
+            image = nil
+        }
+        for run in parsed.runs {
+            let components = run.presentationIntent?.components ?? []
+            // Several runs make one picture's alt text (emphasis inside).
+            if let url = run.imageURL, url.isFileURL, reference(url)?.video == false {
+                if image?.url != url { picture(); finish(); flush(to: run.range.lowerBound) }
+                image = (url, (image?.alt ?? "") + String(parsed[run.range].characters))
+                start = run.range.upperBound
+                continue
+            }
+            picture()
+            if let cell = TableCells.Cell(run.presentationIntent) {
+                if table?.id != cell.table {
+                    finish()
+                    flush(to: run.range.lowerBound)
+                    table = TableCells(id: cell.table, columns: cell.columns)
+                }
+                table?.cells[cell.row, default: [:]][cell.column, default: AttributedString()].append(parsed[run.range])
+                start = run.range.upperBound
+                continue
+            }
+            if let block = components.first(where: { if case .codeBlock = $0.kind { true } else { false } }) {
+                if code?.id != block.identity {
+                    finish()
+                    flush(to: run.range.lowerBound)
+                    let depth = components.filter { if case .listItem = $0.kind { true } else { false } }.count
+                    code = (block.identity, depth, "")
+                }
+                code?.text += String(parsed[run.range].characters)
+                start = run.range.upperBound
+                continue
+            }
+            finish()
+            if components.first?.kind == .thematicBreak {
+                flush(to: run.range.lowerBound)
+                blocks.append(.rule)
+                start = run.range.upperBound
+            }
+        }
+        picture()
+        finish()
+        flush(to: parsed.endIndex)
+        return blocks
     }
 
     /// Top-level blocks, one per bubble: a paragraph, a whole list, a code
