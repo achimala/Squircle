@@ -1628,26 +1628,18 @@ final class LiveCapsule: UIView {
 /// A table the agent wrote, in the message's own type with hairlines
 /// between rows. One too wide for the screen scrolls sideways.
 final class MarkdownTableCell: TimelineCell {
-    private let scroll = UIScrollView()
-    private let grid = MarkdownTableView()
+    private let strip = MarkdownTableStrip()
     private var height: NSLayoutConstraint!
-    private var shown: String?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
-        scroll.showsHorizontalScrollIndicator = false
-        scroll.showsVerticalScrollIndicator = false
-        scroll.alwaysBounceVertical = false
-        scroll.contentInsetAdjustmentBehavior = .never
-        scroll.contentInset = UIEdgeInsets(top: 0, left: Theme.Space.margin, bottom: 0, right: Theme.Space.margin)
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.addSubview(grid)
-        contentView.addSubview(scroll)
-        height = scroll.heightAnchor.constraint(equalToConstant: 0)
+        strip.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(strip)
+        height = strip.heightAnchor.constraint(equalToConstant: 0)
         height.priority = .defaultHigh + 1
-        NSLayoutConstraint.activate(pinGap(scroll) + [
-            scroll.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+        NSLayoutConstraint.activate(pinGap(strip) + [
+            strip.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            strip.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             height
         ])
         isAccessibilityElement = true
@@ -1657,18 +1649,43 @@ final class MarkdownTableCell: TimelineCell {
     static func height(_ layout: MarkdownTableLayout) -> CGFloat { layout.size.height + Theme.Space.tight + Theme.Space.row }
 
     func configure(_ layout: MarkdownTableLayout, id: String) {
-        grid.layout = layout
-        grid.frame = CGRect(origin: .zero, size: layout.size)
-        scroll.contentSize = layout.size
-        scroll.isScrollEnabled = layout.overflows
+        strip.show(layout, id: id)
         height.constant = layout.size.height
-        // A different table starts at its first column.
-        if shown != id { scroll.contentOffset = CGPoint(x: -scroll.contentInset.left, y: 0) }
-        shown = id
-        accessibilityLabel = layout.cells.map { $0.map(\.string).joined(separator: ", ") }.joined(separator: ". ")
+        accessibilityLabel = strip.accessibilityLabel
     }
 
     override func setPressed(_ pressed: Bool) {}
+}
+
+/// A table laid out for the screen's width between the margins, edge to
+/// edge: one too wide scrolls sideways, starting at the margin.
+final class MarkdownTableStrip: UIScrollView {
+    private let grid = MarkdownTableView()
+    private var shown: String?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        showsHorizontalScrollIndicator = false
+        showsVerticalScrollIndicator = false
+        alwaysBounceVertical = false
+        contentInsetAdjustmentBehavior = .never
+        contentInset = UIEdgeInsets(top: 0, left: Theme.Space.margin, bottom: 0, right: Theme.Space.margin)
+        addSubview(grid)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ layout: MarkdownTableLayout, id: String) {
+        grid.layout = layout
+        grid.frame = CGRect(origin: .zero, size: layout.size)
+        contentSize = layout.size
+        isScrollEnabled = layout.overflows
+        // A different table starts at its first column.
+        if shown != id { contentOffset = CGPoint(x: -contentInset.left, y: 0) }
+        shown = id
+        accessibilityLabel = layout.cells.map { $0.map(\.string).joined(separator: ", ") }.joined(separator: ". ")
+    }
 }
 
 /// Draws a `MarkdownTableLayout`; nothing is measured here.

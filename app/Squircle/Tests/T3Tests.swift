@@ -193,6 +193,48 @@ final class T3Tests: XCTestCase {
         XCTAssertEqual(pieces[4], "Last one: with a colon inside.")
     }
 
+    /// A document's blocks: code (in a list too) and tables come out whole
+    /// and apart from the text around them; a relative picture resolves
+    /// against the document's folder; a rule stands alone.
+    func testDocumentBlocksSplitCodeTablesPicturesAndRules() {
+        let text = """
+        # Title
+        Intro with `code`.
+
+        - one
+          ```swift
+          let a = 1
+
+          let b = 2
+          ```
+        - two
+
+        | A | B |
+        |---|---|
+        | 1 |   |
+
+        ![A *chart*](img/chart.png) after.
+
+        ---
+
+        End.
+        """
+        let blocks = Markdown.blocks(text, base: URL(fileURLWithPath: "/Users/x/docs/"))
+        let plain = blocks.map { block -> String in
+            switch block {
+            case .text(let text): "text:" + String(text.characters)
+            case .code(let code, let depth): "code\(depth):" + code
+            case .table(let table): "table:" + ([table.header] + table.rows).map { $0.map { String($0.characters) }.joined(separator: ",") }.joined(separator: "/")
+            case .image(let path, let alt): "image:" + path + ":" + alt
+            case .rule: "rule"
+            }
+        }
+        XCTAssertEqual(plain, [
+            "text:TitleIntro with code.one", "code1:let a = 1\n\nlet b = 2", "text:two", "table:A,B/1,",
+            "image:/Users/x/docs/img/chart.png:A chart", "text: after.", "rule", "text:End."
+        ])
+    }
+
     /// A reply's quote goes out as a blockquote and is read back off the
     /// sent text: long quotes cut at a word, and still find their original.
     func testReplyQuoteRoundTrips() {

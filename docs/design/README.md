@@ -612,7 +612,11 @@ it has).
   Line, secondary. A text, Markdown, JSON, CSV or log file leads with a
   40 × 48 tile naming its type ("MD", "JSON") in mono, at the small radius.
   The height is set by the kind alone, so the row never grows as the file
-  arrives. Inside a question card the fill is the page's.
+  arrives. Inside a question card the fill is the page's. Markdown opens
+  as a page of the app's own (2026-11-01): headings in Title and Body
+  strong, text in Body, code in Mono on the code fill at the small radius,
+  tables in Line; code blocks and tables never wrap a line, they scroll
+  sideways. Done or pulling down past the top closes it.
 - **Build card and Builds rows** (user: "Tiny icon on left here is super
   ugly"): the built app's own icon as iOS shows it, a 36-point tile with
   iOS's corner, read from the build (or, for a build without a product yet,
