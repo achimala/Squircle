@@ -107,9 +107,13 @@ class TimelineCell: UITableViewCell {
     var gap = RowGap.line { didSet { if gap != oldValue { paddingChanged() } } }
     /// How far its jelly reaches past its content (`JellyBody.room`).
     var room = RowGap(top: 0, bottom: 0) { didSet { if room != oldValue { paddingChanged() } } }
-    /// The room above and below its content: its gap, or more where its
-    /// jelly needs it, so a sprout or hop stays in this row.
-    var padding: RowGap { RowGap(top: max(gap.top, room.top), bottom: max(gap.bottom, room.bottom)) }
+    /// The room above and below its content: its half of the gap. A jelly's
+    /// sprout or hop may fill the whole gap (the neighbour's half too, never
+    /// its content), so rows keep one rhythm; only a figure reaching further
+    /// than the gap widens it.
+    var padding: RowGap {
+        RowGap(top: max(gap.top, room.top - gap.top), bottom: max(gap.bottom, room.bottom - gap.bottom))
+    }
 
     func paddingChanged() {
         gapConstraints?.top.constant = padding.top
@@ -203,6 +207,16 @@ final class MessageCell: TimelineCell {
     /// What an agent sent hangs off a thin rule, like a quotation.
     private let rule = UIView()
     let text = UITextView()
+    /// A line's jelly, drawn over its stand-in in the text: centred in the
+    /// glyph slot on the first line's cap height. Made only for its rows.
+    private lazy var figure: UIImageView = {
+        let view = UIImageView()
+        contentView.addSubview(view)
+        hasFigure = true
+        return view
+    }()
+    private var hasFigure = false
+    private var figureBody = CGPoint.zero
     private var style = Style.answer
     private var bubbled: Bool { style == .user || style == .received }
     /// The text's frame for the last width it was laid out at, how far
@@ -300,6 +314,10 @@ final class MessageCell: TimelineCell {
         if hasBubble { bubble.frame = around }
         if hasReceived { received.frame = around }
         rule.frame = CGRect(x: Theme.Space.margin, y: frame.minY + 2, width: 2, height: max(0, frame.height - 4))
+        if hasFigure, let size = figure.image?.size {
+            let centre = CGPoint(x: Theme.Space.glyphCentre, y: frame.minY + Theme.Text.line.capCentre)
+            figure.frame = CGRect(x: centre.x - figureBody.x, y: centre.y - figureBody.y, width: size.width, height: size.height)
+        }
         if hasQuote, let quoted = measured?.quote {
             quoteLabel.frame = quoted
             quoteRule.frame = CGRect(x: quoted.minX - Theme.Space.row - 2, y: quoted.minY + 2, width: 2, height: max(0, quoted.height - 4))
@@ -373,8 +391,13 @@ final class MessageCell: TimelineCell {
             quoteRule.isHidden = quote == nil
         }
         measured = nil
-        let jelly = rendered.jellyRoom
-        room = RowGap(top: jelly.top, bottom: jelly.bottom)
+        let jelly = rendered.leadingJelly
+        room = RowGap(top: jelly?.room.top ?? 0, bottom: jelly?.room.bottom ?? 0)
+        if let drawn = jelly?.figure {
+            figure.image = drawn.image
+            figureBody = drawn.body
+        }
+        if hasFigure { figure.isHidden = jelly?.figure == nil }
         // The text last, so it is laid out once, in its final container.
         let padding = Theme.Space.bubble
         text.update(\.textContainerInset, to: bubbled ? UIEdgeInsets(top: padding.top, left: 0, bottom: padding.bottom, right: 0) : .zero)
@@ -401,6 +424,8 @@ final class StepCell: TimelineCell {
     let title = ShimmerLabel()
     private let stats = UILabel()
     private let pulse = CAShapeLayer()
+    /// The glyph on the title's first line's cap centre.
+    private var wellCentre: NSLayoutConstraint!
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -417,10 +442,13 @@ final class StepCell: TimelineCell {
         [well, title, stats].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; contentView.addSubview($0) }
         icon.translatesAutoresizingMaskIntoConstraints = false
         well.addSubview(icon)
+        wellCentre = well.centerYAnchor.constraint(equalTo: title.label.firstBaselineAnchor, constant: -Theme.Text.line.capHeight / 2)
         NSLayoutConstraint.activate(pinGap(title) + [
+            // One Line tall at least, whatever its font: a mono step keeps the lines' rhythm.
+            title.heightAnchor.constraint(greaterThanOrEqualToConstant: Theme.Text.line.lineBox),
+            wellCentre,
             well.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
             well.widthAnchor.constraint(equalToConstant: Theme.Space.glyph), well.heightAnchor.constraint(equalToConstant: Theme.Space.glyph),
-            well.centerYAnchor.constraint(equalTo: title.label.firstBaselineAnchor, constant: -5),
             icon.centerXAnchor.constraint(equalTo: well.centerXAnchor), icon.centerYAnchor.constraint(equalTo: well.centerYAnchor),
             title.leadingAnchor.constraint(equalTo: well.trailingAnchor, constant: Theme.Space.glyphGap),
             stats.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: Theme.Space.row),
@@ -436,6 +464,7 @@ final class StepCell: TimelineCell {
         let literal = step.step?.literal == true
         title.text = step.content
         title.font = literal ? Theme.Text.mono : Theme.Text.line
+        wellCentre.constant = -title.font.capHeight / 2
         title.numberOfLines = literal ? 1 : 2
         title.textColor = .secondaryLabel
         title.isShimmering = step.isStreaming
@@ -453,6 +482,7 @@ final class StepCell: TimelineCell {
     func configureEarlier(count: Int, expanded: Bool) {
         title.text = expanded ? "Show fewer steps" : "\(count) earlier step\(count == 1 ? "" : "s")"
         title.font = Theme.Text.line
+        wellCentre.constant = -title.font.capHeight / 2
         title.numberOfLines = 1
         title.textColor = .secondaryLabel
         title.isShimmering = false
@@ -977,6 +1007,9 @@ final class ChangesCell: TimelineCell {
         contentView.addSubview(row)
         NSLayoutConstraint.activate(pinGap(row) + [
             icon.widthAnchor.constraint(equalToConstant: Theme.Space.glyph),
+            // The row is one Line tall: its glyphs don't add height.
+            icon.heightAnchor.constraint(equalToConstant: Theme.Text.line.lineBox),
+            chevron.heightAnchor.constraint(equalToConstant: Theme.Text.line.lineBox),
             row.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
             row.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
         ])
@@ -1144,7 +1177,10 @@ final class SummaryCell: TimelineCell {
             line.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -(Theme.Space.margin - Theme.Space.row)),
             row.leadingAnchor.constraint(equalTo: line.leadingAnchor, constant: Theme.Space.row),
             row.trailingAnchor.constraint(equalTo: line.trailingAnchor, constant: -Theme.Space.row),
-            icon.widthAnchor.constraint(equalToConstant: Theme.Space.glyph)
+            icon.widthAnchor.constraint(equalToConstant: Theme.Space.glyph),
+            // The row is one Line tall: its glyphs don't add height.
+            icon.heightAnchor.constraint(equalToConstant: Theme.Text.line.lineBox),
+            chevron.heightAnchor.constraint(equalToConstant: Theme.Text.line.lineBox)
         ])
         isAccessibilityElement = true
         accessibilityTraits = .button
@@ -1217,18 +1253,14 @@ final class LiveCell: TimelineCell {
     private let capsule = LiveCapsule()
     private var hero: JellyHero?
     private var heroLead: NSLayoutConstraint!
-    /// The line's height: the app agent's jelly fills it.
-    private static let height = Theme.Glyph.live
+    /// One line tall, like every other line; a jelly reaching past it takes
+    /// the gap (`room`).
+    private static var height: CGFloat { Theme.Text.line.lineBox }
     /// The conversation is in sight: its jelly draws only then.
     var inSight = true { didSet { renderHero() } }
-    /// Where the capsule starts: its mark in the glyph slot (the capsule
-    /// leads it by 12) or, with a jelly there instead, its text the glyph
-    /// gap past the agent's jelly's edge (wider than the slot, centred on
-    /// it; an empty mark slot puts the text 18 in), whoever's jelly it is.
-    private static let markLead = Theme.Space.margin - 12
-    private static let jellyLead = Theme.Space.margin + Theme.Space.glyph / 2 + height / 2 + Theme.Space.glyphGap - 18
 
-    /// The app's agent fills the line; a worker is the size of the text.
+    /// The app's agent is a little larger than the slot's glyphs, still
+    /// inside its column; a worker is the size of the text.
     private static func size(_ jelly: JellyLook) -> CGFloat { jelly.role == .agent ? Theme.Glyph.live : Theme.Glyph.line }
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -1236,7 +1268,7 @@ final class LiveCell: TimelineCell {
         capsule.isUserInteractionEnabled = false
         capsule.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(capsule)
-        heroLead = capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Self.markLead)
+        heroLead = capsule.leadingAnchor.constraint(equalTo: contentView.leadingAnchor)
         NSLayoutConstraint.activate(pinGap(capsule) + [
             heroLead,
             capsule.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
@@ -1257,8 +1289,8 @@ final class LiveCell: TimelineCell {
                 hero.translatesAutoresizingMaskIntoConstraints = false
                 contentView.addSubview(hero)
                 NSLayoutConstraint.activate([
-                    // Its body centred on the glyph slot and the line (the agent's rounds over the slot).
-                    hero.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin + Theme.Space.glyph / 2),
+                    // Its body centred on the glyph slot and the line.
+                    hero.centerXAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.glyphCentre),
                     hero.centerYAnchor.constraint(equalTo: capsule.centerYAnchor)
                 ])
                 self.hero = hero
@@ -1270,7 +1302,9 @@ final class LiveCell: TimelineCell {
         hero?.isHidden = jelly == nil
         renderHero()
         capsule.markSlot = jelly == nil ? nil : 0
-        heroLead.constant = jelly == nil ? Self.markLead : Self.jellyLead
+        // The text where every line's text starts, with or without the
+        // mark (which then sits centred in the slot).
+        heroLead.constant = Theme.Space.text - capsule.textLead(Self.height)
         capsule.configure(headline: status.headline, started: status.started)
         accessibilityLabel = status.headline
     }
@@ -1371,6 +1405,8 @@ final class LiveCapsule: UIView {
     }
     private func trail(_ height: CGFloat) -> CGFloat { markSlot == nil ? lead(height) - 2 : 18 }
     private var inset: CGFloat { lead(bounds.height) }
+    /// Where the text starts in a capsule `height` tall.
+    func textLead(_ height: CGFloat) -> CGFloat { lead(height) + markSide + 11 }
 
     /// The width that shows the whole headline, within `limit`.
     func preferredWidth(limit: CGFloat, height: CGFloat) -> CGFloat {
@@ -1402,7 +1438,7 @@ final class LiveCapsule: UIView {
     /// Where a line rests: after the mark, as wide as its text, short of the
     /// timer (or of where it would be at `widthLimit`).
     private func restingFrame(_ label: ShimmerLabel) -> CGRect {
-        let x = mark.frame.maxX + 11
+        let x = textLead(bounds.height)
         let end = elapsed.isHidden ? track.bounds.width - trail(bounds.height) : elapsed.frame.minX - 8
         var room = end - x
         if let widthLimit { room = widthLimit - (track.bounds.width - room) }

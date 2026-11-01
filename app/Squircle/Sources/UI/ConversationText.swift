@@ -24,12 +24,11 @@ final class ConversationText {
         case .update:
             let font = Theme.Text.line
             let line = NSMutableAttributedString()
+            line.append(NSAttributedString(string: message.content))
             if let symbol = UIImage(systemName: message.symbol.isEmpty ? "arrow.triangle.merge" : message.symbol, withConfiguration: Theme.symbol(font))?
                 .withTintColor(.secondaryLabel, renderingMode: .alwaysOriginal) {
-                line.append(NSAttributedString(attachment: NSTextAttachment(image: symbol)))
-                line.append(NSAttributedString(string: "\t"))
+                Self.slot(Self.symbol(symbol, font), in: line, font: font)
             }
-            line.append(NSAttributedString(string: message.content))
             line.addAttributes([.font: font, .foregroundColor: UIColor.secondaryLabel, .paragraphStyle: Self.slotted(font)],
                                range: NSRange(location: 0, length: line.length))
             text = line
@@ -112,17 +111,34 @@ final class ConversationText {
         return text
     }
 
-    /// A line's glyph in the slot, its text at the slot's end, and wrapped
-    /// lines hanging under the text, not the glyph.
+    /// A line's glyph centred in the slot (a centre tab), its text at the
+    /// slot's end, and wrapped lines hanging under the text, not the glyph.
+    /// Lines start "\t", glyph, "\t" (`slot`).
     private static func slotted(_ font: UIFont) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        style.tabStops = [NSTextTab(textAlignment: .natural, location: Theme.Space.indent)]
+        style.tabStops = [NSTextTab(textAlignment: .center, location: Theme.Space.glyph / 2),
+                          NSTextTab(textAlignment: .natural, location: Theme.Space.indent)]
         style.headIndent = Theme.Space.indent
         style.paragraphSpacing = Theme.Space.tight
         // Every line keeps the font's height: a jelly never pushes the lines apart (its row reserves its room).
         style.minimumLineHeight = ceil(font.lineHeight)
         style.maximumLineHeight = ceil(font.lineHeight)
         return style
+    }
+
+    /// Puts `glyph` in the slot at the start of `text`: "\t", glyph, "\t".
+    private static func slot(_ glyph: NSTextAttachment, in text: NSMutableAttributedString, font: UIFont) {
+        let lead = NSMutableAttributedString(string: "\t", attributes: [.font: font])
+        lead.append(NSAttributedString(attachment: glyph))
+        lead.append(NSAttributedString(string: "\t", attributes: [.font: font]))
+        text.insert(lead, at: 0)
+    }
+
+    /// A symbol centred on the text's cap height, as a jelly is.
+    private static func symbol(_ image: UIImage, _ font: UIFont) -> NSTextAttachment {
+        let attachment = NSTextAttachment(image: image)
+        attachment.bounds = CGRect(x: 0, y: (font.capHeight - image.size.height) / 2, width: image.size.width, height: image.size.height)
+        return attachment
     }
 
     /// The state a worker line shows its jelly in: what the news said, or
@@ -205,14 +221,12 @@ final class ConversationText {
         // A line about a worker leads with the worker itself: its jelly, in
         // the state it is in now (a still; the Tasks row is where it moves).
         if let worker = line.thread?.raw, let mood = workerMood(line),
-           let attachment = JellyAttachment.make(.worker(worker, mood), size: Theme.Glyph.line, font: font, traits: traits) {
-            text.insert(NSAttributedString(string: "\t", attributes: [.font: font]), at: 0)
-            text.insert(NSAttributedString(attachment: attachment), at: 0)
+           let attachment = JellyAttachment.make(.worker(worker, mood), size: Theme.Glyph.line, font: font, traits: traits, standIn: true) {
+            slot(attachment, in: text, font: font)
         } else if let symbol = UIImage(systemName: line.failed ? "exclamationmark" : symbol, withConfiguration: Theme.symbol(font))?
             .withTintColor(line.failed ? Theme.failure : line.running ? Theme.working : .secondaryLabel,
                            renderingMode: .alwaysOriginal) {
-            text.insert(NSAttributedString(string: "\t", attributes: [.font: font]), at: 0)
-            text.insert(NSAttributedString(attachment: NSTextAttachment(image: symbol)), at: 0)
+            slot(Self.symbol(symbol, font), in: text, font: font)
         }
         text.addAttribute(.paragraphStyle, value: Self.slotted(font), range: NSRange(location: 0, length: text.length))
         if expanded, let message = line.text?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty {

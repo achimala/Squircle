@@ -179,27 +179,39 @@ struct JellyCanvas: Hashable {
 
 /// A jelly's still leading a line of `font`: its body centred on the text's
 /// cap height, and the room its figure needs past the line (`JellyBody.room`).
+/// `standIn`: the text keeps only the jelly's width (`figure` is drawn over
+/// it by the row), so a figure taller than the line never moves the text.
 final class JellyAttachment: NSTextAttachment {
     private(set) var room = (top: CGFloat(0), bottom: CGFloat(0))
+    /// The still and its body's centre in it, for a stand-in.
+    private(set) var figure: (image: UIImage, body: CGPoint)?
 
     @MainActor
-    static func make(_ look: JellyLook, size: CGFloat, font: UIFont, traits: UITraitCollection) -> JellyAttachment? {
+    static func make(_ look: JellyLook, size: CGFloat, font: UIFont, traits: UITraitCollection, standIn: Bool = false) -> JellyAttachment? {
         let canvas = JellyCanvas.tight(size)
         guard let image = JellySprites.shared.image(look, canvas, traits: traits) else { return nil }
         let attachment = JellyAttachment(data: nil, ofType: nil)
-        attachment.image = image
         let body = canvas.fitting(look).body, bounds = image.size
-        attachment.bounds = CGRect(x: 0, y: font.capHeight / 2 - (bounds.height - body.midY), width: bounds.width, height: bounds.height)
+        if standIn {
+            let gap = CGSize(width: bounds.width, height: font.capHeight)
+            attachment.image = UIGraphicsImageRenderer(size: gap).image { _ in }
+            attachment.bounds = CGRect(origin: .zero, size: gap)
+            attachment.figure = (image, CGPoint(x: body.midX, y: body.midY))
+        } else {
+            attachment.image = image
+            attachment.bounds = CGRect(x: 0, y: font.capHeight / 2 - (bounds.height - body.midY), width: bounds.width, height: bounds.height)
+        }
         attachment.room = JellyBody.room(look, size: size, moving: false, centre: font.capCentre, height: ceil(font.lineHeight))
         return attachment
     }
 }
 
 extension NSAttributedString {
-    /// The room the jelly leading it needs past its first line, if one does.
-    var jellyRoom: (top: CGFloat, bottom: CGFloat) {
-        guard length > 0, let jelly = attribute(.attachment, at: 0, effectiveRange: nil) as? JellyAttachment else { return (0, 0) }
-        return jelly.room
+    /// The room the jelly leading it needs past its first line, if one does
+    /// (in the glyph slot, after its lead tab).
+    var leadingJelly: JellyAttachment? {
+        guard length > 1 else { return nil }
+        return attribute(.attachment, at: 1, effectiveRange: nil) as? JellyAttachment
     }
 }
 

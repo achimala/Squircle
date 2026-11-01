@@ -93,6 +93,16 @@ enum Theme {
         static let text: CGFloat = margin + glyph + glyphGap
         /// One nesting level: a slot and its gap.
         static let indent: CGFloat = glyph + glyphGap
+        /// The slot's middle: every glyph and jelly leading a line centres
+        /// here, whatever its width (the app agent's live jelly included).
+        static let glyphCentre: CGFloat = margin + glyph / 2
+        /// The conversation's rhythm, from row to row (the deck's chat
+        /// spacing): one sender's bubbles; two lines (worker lines, steps,
+        /// Worked for…, changes, the live line); a bubble, card or media and
+        /// anything else; before your message; the last row and the field.
+        enum Chat {
+            static let sameSender = tight, line = row, block = group, sent = section, field = group
+        }
         /// A built app's icon on a build card or Builds row: as tall as the
         /// row's two lines, the size iOS shows an app at in a list.
         static let appIcon: CGFloat = 36
@@ -112,7 +122,9 @@ enum Theme {
     /// sprout and hop stand out of the body; the row reserves their room
     /// (`JellyBody.room`).
     enum Glyph {
-        static let line: CGFloat = 16, caption: CGFloat = 11, live: CGFloat = 28, home: CGFloat = 26
+        /// `live` is the largest that stays inside the slot's column (it
+        /// draws about 1.1 times its size wide) and inside a line's gap.
+        static let line: CGFloat = 16, caption: CGFloat = 11, live: CGFloat = 18, home: CGFloat = 26
     }
 
     /// A thread's preview, portrait at the device's ratio: at the right of a
@@ -335,6 +347,8 @@ extension UIFont {
     /// From a line's top to the middle of its capitals: where a glyph or
     /// jelly beside it centres.
     var capCentre: CGFloat { ascender - capHeight / 2 }
+    /// One line of it, rounded up: the height of a line row.
+    var lineBox: CGFloat { ceil(lineHeight) }
 }
 
 extension UILabel {
