@@ -40,8 +40,8 @@ change to one touches its work item.
 prompts say: put every user ask in the tracker, in their words, before any
 work on it: a sub-task of the work item it clearly belongs to, otherwise a
 new work item; never under an unrelated one; track your own breakdown as
-sub-tasks. The note lists open work items with their open sub-tasks (`·`
-lines). (Fresh agents' handoffs, which listed every open item, went with
+sub-tasks. The note doesn't list the tracker (2026-11-01, below); the agent
+reads it with `task list` when it needs it. (Fresh agents' handoffs, which listed every open item, went with
 fresh starts on 2026-10-30: the agent keeps one thread.)
 
 ## Titles (2026-10-31, user decision)
@@ -58,9 +58,10 @@ thing…"). So:
   "Title: ask") and never paraphrased away.
 - **CLI.** `task add` and `task sub add` require `--title` (the service
   refuses a task without one); `task update ID --title` renames. The
-  per-turn note lists tasks by title; one without a title shows as
-  `untitled, asked "…"`, and the note asks the agent to name those when it
-  next touches them. The plugin prompt says the same.
+  per-turn note names tasks by title; one without a title shows as
+  `untitled, asked "…"` (`task list` shows its ask), and the note asks the
+  agent to name those when it next touches them. The plugin prompt says the
+  same.
 - **No migration, no generated titles.** The service runs no model. Stored
   records without `title` load with an empty one (and are saved without the
   key), so older `tasks.json` files read unchanged.
@@ -166,8 +167,7 @@ put one above). So:
 - **The service orders, everyone follows.** `Book::list` returns work items
   and their sub-tasks in that order; `GET /v1/tasks` keeps it, the phone
   groups by status without re-sorting (rows, and the pages' swipe order,
-  follow), and the per-turn note lists open items by status rank, then the
-  same order. History still pages by when tasks moved there, newest first.
+  follow), and `task list` keeps it. History still pages by when tasks moved there, newest first.
 - **`order` is gone**, with Move to Top / Move to Front on the phone and
   `task update --top`. Migrated once: records without `active_at` take
   their last status change (else when they were added), work items the
@@ -213,7 +213,7 @@ task tracking … Not just plain text. I need to see everything waiting on me."
   Waiting on you even after its task ages into History.
 - **Agents use it, not chat.** The plugin prompt and the per-turn note say to
   ask only with `task ask` and end the turn; the note lists open questions
-  as `?` lines under their task. The app agent's guard refuses Claude's
+  as `?` lines with their task. The app agent's guard refuses Claude's
   `AskUserQuestion` and points to `task ask`. Workers ask with their own
   question tool (or `task ask`).
 - **Worker questions without proxying.** A worker's own T3 question or
@@ -407,11 +407,30 @@ is not fetched.
 
 `squircle task add|sub add|update|link|attach|list|show|heard` (`--help`,
 `--json`); `thread spawn --task` (required) and `build start --task` link as
-they start. The
-per-turn `[squircle]` note lists the open tasks (also after compaction) and
-asks the agent to add one per new ask, link workers and builds, attach
-pictures worth seeing and keep status and note current. The plugin's
-instructions say the same.
+they start. The per-turn `[squircle]` note (also after compaction) asks the
+agent to add one per new ask, link workers and builds, attach pictures worth
+seeing and keep status and note current, and to read the tracker with `task
+list` when it needs it. The plugin's instructions say the same.
+
+**The note carries only what needs action now (2026-11-01, user decision).**
+User: "What? We give it the entire task list every turn? What??? Why?",
+then: "Only what needs action now: unrecorded messages, open questions,
+running work. The agent looks up the rest with task list". LanguageApp's note
+had grown to 51 KB, 42 KB of it the full open list (25 items, 144 sub-tasks
+with verbatim asks). Besides the role, reply and tracker rules and the app's
+notes, it now holds only: the user's messages not yet in the tracker, the
+agent's open questions to the user (`?` lines, with the task they are on,
+History included), and running work: workers that are working, starting or
+waiting on their own question, and builds queued or running that are linked
+to one of the app's tasks or started by the agent or its workers, each with
+the task it serves (title and ID; a sub-task before its work item).
+Finished workers are left to `thread status`. `task list` answers in brief:
+per task its ID, title, status, note and open questions, the ask only when
+untitled (`--asks` for all), sub-tasks the same; `--full` gives the whole
+records (`GET /v1/tasks`), as the phone's demo list wants. Rendered from
+the Mac's data: LanguageApp's note went from 51 KB to about 8 KB and
+Squircle's from 16 KB to 8 KB; LanguageApp's `task list --json` from 417 KB
+to 46 KB.
 
 ## Phone
 
@@ -436,7 +455,7 @@ right that starts at the left edge (a plain pan limited to the edge band:
 a screen-edge recogniser never fires inside the sheet). Only the shown page
 and its neighbours exist. The page itself is as below (status menu, ask,
 note, Install, sub-task checklist, threads, pictures). DEBUG:
-`SQUIRCLE_DEMO_TASKS=PATH` loads a real list (`squircle task list --json`)
+`SQUIRCLE_DEMO_TASKS=PATH` loads a real list (`squircle task list --full --json`)
 kept on the phone; validated on a simulator with the LanguageApp snapshot
 (24 open, 2 done, 20 History): find by search, open, page, back, swipe Done,
 tick and Undo.
