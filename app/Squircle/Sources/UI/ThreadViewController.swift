@@ -217,15 +217,18 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     /// Half the deck's gap between two neighbouring rows (each row keeps its
-    /// half): 4 between one sender's bubbles, 8 between lines and between
-    /// pictures, 24 before your message, 16 between anything else.
+    /// half; a jelly's room may take the whole gap, `TimelineCell.padding`):
+    /// `Theme.Space.Chat`. The last row keeps half the gap to the field (the
+    /// table's bottom inset is the other half).
     private static func halfGap(_ above: RowKind?, _ below: RowKind?) -> CGFloat {
-        guard let above, let below else { return Theme.Space.tight }
+        let gap = Theme.Space.Chat.self
+        guard let below else { return gap.field / 2 }
+        guard let above else { return Theme.Space.tight }
         switch (above, below) {
-        case (.sent, .sent), (.received, .received): return Theme.Space.tight / 2
-        case (_, .sent): return Theme.Space.section / 2
-        case (.line, .line), (.media, .media): return Theme.Space.row / 2
-        default: return Theme.Space.group / 2
+        case (.sent, .sent), (.received, .received): return gap.sameSender / 2
+        case (_, .sent): return gap.sent / 2
+        case (.line, .line), (.media, .media): return gap.line / 2
+        default: return gap.block / 2
         }
     }
 
@@ -680,7 +683,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let field = strip.isHidden ? composer.frame.minY : strip.frame.minY
         let floor = request.isHidden ? (notice.isHidden ? field : notice.frame.minY) : request.frame.minY
         draftScroll.frame = CGRect(x: 0, y: 0, width: width, height: max(0, floor - 8))
-        let insets = UIEdgeInsets(top: controlsBottom + Theme.Space.row, left: 0, bottom: height - floor + Theme.Space.rowPad, right: 0)
+        let insets = UIEdgeInsets(top: controlsBottom + Theme.Space.row, left: 0, bottom: height - floor + Theme.Space.Chat.field / 2, right: 0)
         if table.contentInset != insets {
             let pinned = pinToBottom
             table.contentInset = insets
@@ -1121,7 +1124,20 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
     }
 
     private func renderItems(animated: Bool = false) {
-        guard let (next, messages) = currentItems(), next != items else { return }
+        guard var (next, messages) = currentItems() else { return }
+        #if DEBUG
+        // Verification only: `SQUIRCLE_DEMO_LIVE=HEADLINE` shows a live line under the conversation, as while its agent works;
+        // `SQUIRCLE_DEMO_OPEN_TURNS=1` opens every finished turn's Worked for…, to see its lines.
+        let environment = ProcessInfo.processInfo.environment
+        if environment["SQUIRCLE_DEMO_OPEN_TURNS"] == "1" {
+            let closed = next.compactMap { if case .summary(let summary) = $0, !expanded.contains(summary.turn) { summary.turn } else { nil } }
+            if !closed.isEmpty, let opened = { expanded.formUnion(closed); return currentItems() }() { (next, messages) = opened }
+        }
+        if let headline = environment["SQUIRCLE_DEMO_LIVE"], !next.contains(where: { $0.id == "live" }) {
+            next.append(.live(LiveStatus(headline: headline, started: .now.addingTimeInterval(-48))))
+        }
+        #endif
+        guard next != items else { return }
         let previous = itemsByID
         // The conversation's rows arriving where only its title showed (a
         // thread not seen yet this session) are its first, not news: they

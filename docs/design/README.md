@@ -87,7 +87,10 @@ Everything sits on a 4-point grid.
   and right, 12 top, 8 bottom.
 
 Vertical space in the conversation depends on the neighbouring rows, and is
-set in one place (`ThreadViewController.halfGap`):
+set in one place (`Theme.Space.Chat`, applied by `ThreadViewController.halfGap`).
+Gaps are measured between rows' line boxes: every line row is one Line tall
+per line of text (`UIFont.lineBox`), whatever its glyph or font (a Mono step
+included), so equal gaps look equal:
 
 | Between | Gap |
 | --- | --- |
@@ -96,6 +99,17 @@ set in one place (`ThreadViewController.halfGap`):
 | Two rows in a list (tasks, builds); a section label and its first row | 8 inside each row's 12-point padding; 24 above a section label |
 | A bubble and a line, a card or media; a line and a card | 16 |
 | Anything, then your message | 24 |
+| The last row, then the field (or the counts capsule above it) | 16 |
+
+**One column for every line** (user, 2026-11-01: "This spacing is so
+cursed. Just make it consistent everywhere"). Every row that leads with a
+glyph (worker lines, Squircle lines, steps, Worked for…, changes, build and
+file lines, the live line) centres its glyph or jelly on the slot's middle,
+x = 30 (`Theme.Space.glyphCentre`), and starts its text at x = 48
+(`Theme.Space.text`), wrapped lines included. Nothing about a glyph moves
+the text: not its width, not its height, not the font of the text beside it.
+A jelly taller than the line (a sprout, a hop) draws over the row, into the
+gap, and only widens the gap if the gap is too small for it.
 
 Per element:
 
@@ -107,7 +121,7 @@ Per element:
 | Worker line, Squircle line, step | Glyph at 20, text at 48 | Line |
 | Worked for… | Check glyph at 20, text at 48, chevron after | Line; detail in tertiary |
 | Changes ("4 files +64 −9") | Glyph at 20, text at 48 | Line, digits in the same size |
-| Live line | Its jelly's body centred on the glyph slot (the app's agent 28 points, a worker 16), text at 52, the 8-point gap past the agent's edge (user, 2026-10-31: 48 was "too close to blob") | Line, elapsed time in the same size at the right margin |
+| Live line | Its jelly centred on the glyph slot like every other line's glyph (the app's agent 18 points, filling the slot's 20 without hanging past the margin; a worker 16), text at 48 like every line (2026-11-01, superseding 28 points with text at 52) | Line, elapsed time in the same size at the right margin |
 | Media (screenshots, clips, figures, simulator recordings) | From 20; a sideways row scrolls past the edge | 8 points between pictures, 18-point radius like the bubbles |
 | Build card | From 20 to 20 | Card padding; the app's own icon (36), Install is the one filled button |
 | Document | From 20, at most 300 wide | Received fill, 18-point radius; a PDF's first page on top ([documents](#media-and-sending)) |
@@ -138,16 +152,18 @@ One family of shapes, two meanings:
   beside it: 16 beside Line and Body text (worker lines, Tasks rows, a
   worker's live line, the overlay's crew); 11 beside Caption text (the
   counts capsule, a question's asker, a simulator's caption). The app's
-  agent is larger only as itself: 28 in its own live line, 26 peeking over
-  its device on Home. Nothing in between.
+  agent is larger only as itself: 18 in its own live line (as wide as the
+  slot, so it stays in the column), 26 peeking over its device on Home.
 - **Its row holds the whole figure** (user, 2026-10-31: "they should fit
   and layout properly"): the body is centred on the text's cap height and
   never shrunk to fit; the sprout (up to half the body above it) and a
-  needs-you hop rise into the row's own top padding, never into a
-  neighbouring row or line. Where that padding is too small, the row gets
-  more, on the 4-point grid (`JellyBody.room`): a worker line or Tasks
-  thread line 8 above, 16 while a Tasks Sprout hops; the counts capsule is
-  32 tall so a hopping Sprout stays inside it.
+  needs-you hop rise into the gap above the row, never into a neighbouring
+  line's text. In the conversation the whole gap is theirs (a worker line
+  needs 8 above, exactly the gap between lines, so the rhythm holds); only
+  a figure reaching further widens it, on the 4-point grid
+  (`JellyBody.room`). A Tasks thread line takes 8 above, 16 while its
+  Sprout hops; the counts capsule is 32 tall so a hopping Sprout stays
+  inside it.
 - **Answer marks** are SF Symbols in Body: an empty circle (pick one), an
   empty or filled square (pick several), and a pencil (write your own).
 
@@ -618,10 +634,12 @@ font size, colour or radius.
 | Title, Body, Body strong, Line, Line strong, Caption, Mono | `Theme.Text.title`, `.body`, `.bodyStrong`, `.line`, `.lineStrong`, `.caption`, `.mono` (`.monoStrong` for a leading figure in a mono line) |
 | A symbol in a line's size and weight | `Theme.symbol(font)` |
 | 4, 8, 12, 16, 20, 24 | `Theme.Space.tight`, `.row`, `.rowPad`, `.group`, `.margin`, `.section` |
-| Glyph slot, its gap, text at 48, one nesting level | `Theme.Space.glyph`, `.glyphGap`, `.text`, `.indent` |
+| Glyph slot, its gap, text at 48, one nesting level, the slot's middle (30) | `Theme.Space.glyph`, `.glyphGap`, `.text`, `.indent`, `.glyphCentre` |
+| The conversation's gaps: one sender, lines, blocks, before your message, before the field | `Theme.Space.Chat.sameSender`, `.line`, `.block`, `.sent`, `.field` |
+| One Line tall (a line row's height per line) | `UIFont.lineBox` |
 | A built app's icon | `Theme.Space.appIcon` |
 | Bubble and card padding, a bubble's free side, 44 | `Theme.Space.bubble`, `.card`, `.bubbleFree`, `.tap` |
-| Jellies at 16, 11, 28, 26 (the room each needs past its row: `JellyBody.room`) | `Theme.Glyph.line`, `.caption`, `.live`, `.home` |
+| Jellies at 16, 11, 18, 26 (the room each needs past its row: `JellyBody.room`) | `Theme.Glyph.line`, `.caption`, `.live`, `.home` |
 | Radii 8, 18, capsule | `Theme.Radius.small`, `.large`, `cornerStyle = .capsule` |
 | Colour roles | `Theme.accent`, `.onAccent`, `.paper`, `.working`, `.warning`, `.success`, `.failure`, `.idle`, `.receivedFill`, `.userGlass`, `.codeFill`, `.pressedFill` |
 
@@ -638,7 +656,8 @@ Each of these supersedes an entry in [AGENTS.md](../../AGENTS.md):
    plain chat.
 2. **Clay (2026-10-14)**: terracotta on cream is replaced by Pearl.
 3. **Jelly crew (2026-10-15)**: "the app's agent is the plain full jelly".
-   It gets the soap film. In its live line it is 28 points, not 34–40.
+   It gets the soap film. In its live line it is 18 points (2026-11-01; 28
+   until then), not 34–40.
    Workers become Sprouts (approved).
 4. **Waiting on you (2026-10-26)**: "everything waiting on the user shows …
    everything across apps in a plain list". Only blocking questions and
