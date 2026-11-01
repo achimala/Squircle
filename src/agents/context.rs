@@ -296,80 +296,114 @@ pub(super) fn owner<'a>(
     })
 }
 
+/// A build in flight (queued or running), as the per-turn note names it.
+pub struct LiveBuild {
+    pub id: String,
+    pub scheme: String,
+    /// The thread that started it.
+    pub thread: Option<String>,
+    pub running: bool,
+}
+
+/// What to call a task in the note: its title, or the start of its ask
+/// until an agent names it.
+fn named(task: &crate::tasks::Task) -> String {
+    if !task.title.is_empty() {
+        return format!("“{}”", task.title);
+    }
+    let ask = task.ask.replace('\n', " ");
+    let short: String = ask.chars().take(80).collect();
+    let more = if short.len() < ask.len() { "…" } else { "" };
+    format!("untitled, asked “{short}{more}”")
+}
+
 impl Agents {
-    /// The app's open work items, most urgent first, then most recently
-    /// active, each with its open sub-tasks, one line each.
-    pub(super) fn open_tasks(&self, project: &str) -> String {
-        let mut open: Vec<_> = self
-            .tasks
-            .list(project)
-            .into_iter()
-            .filter(|t| t.archived_at.is_none() && t.status.open())
-            .collect();
-        let rank = |s: Status| {
-            [
-                Status::NeedsYou,
-                Status::InProgress,
-                Status::ReadyToTry,
-                Status::Queued,
-            ]
+    /// What needs the agent now from the tracker and its work: workers
+    /// that are running or waiting on their own question, builds in
+    /// flight, each with the task it serves, and questions open to the
+    /// user. The rest of the tracker it reads with `task list`.
+    pub(super) fn now(
+        &self,
+        agent: &Agent,
+        workers: &[Value],
+        builds: &[LiveBuild],
+    ) -> (String, String) {
+        let items = self.tasks.list(&agent.project_id);
+        // Sub-tasks first: the most specific task a piece of work serves.
+        let tasks: Vec<&crate::tasks::Task> = items
             .iter()
-            .position(|x| *x == s)
-        };
-        open.sort_by_key(|t| rank(t.status));
-        if open.is_empty() {
-            return " none".to_string();
-        }
-        // Untitled ones (from before titles) show their ask until named.
-        let line = |t: &crate::tasks::Task| {
-            format!(
-                "[{}] {}{} ({})",
-                t.status.label(),
-                if t.title.is_empty() {
-                    format!("untitled, asked “{}”", t.ask.replace('\n', " "))
-                } else {
-                    t.title.clone()
-                },
-                if t.note.is_empty() {
-                    String::new()
-                } else {
-                    format!(" — {}", t.note)
-                },
-                t.id
-            )
-        };
-        // Open questions to the user under the task they are about.
-        let asked = |t: &crate::tasks::Task, indent: &str| -> String {
-            t.questions
+            .flat_map(|t| &t.subtasks)
+            .chain(&items)
+            .collect();
+        let serves = |linked: &dyn Fn(&crate::tasks::Task) -> bool| {
+            tasks
                 .iter()
-                .filter(|q| q.open())
-                .map(|q| {
-                    format!(
-                        "\n{indent}? asked the user: “{}” ({})",
-                        q.text.replace('\n', " "),
-                        q.id
-                    )
-                })
-                .collect()
+                .filter(|t| linked(t))
+                .min_by_key(|t| !t.status.open())
+                .map(|t| format!(", for {} ({})", named(t), t.id))
+                .unwrap_or_default()
         };
-        open.iter()
-            .take(40)
-            .map(|t| {
-                let subtasks: String = t
-                    .subtasks
-                    .iter()
-                    .filter(|s| s.status.open())
-                    .map(|s| format!("\n  · {}{}", line(s), asked(s, "    ")))
-                    .collect();
-                format!("\n- {}{}{subtasks}", line(t), asked(t, "  "))
+        let mut running: String = workers
+            .iter()
+            .filter(|w| {
+                matches!(
+                    w["state"].as_str(),
+                    Some("working" | "needs-you" | "starting")
+                )
             })
-            .collect()
+            .map(|w| {
+                let id = w["id"].as_str().unwrap_or("");
+                format!(
+                    "\n- worker “{}” ({id}) [{}] {}{}",
+                    w["title"].as_str().unwrap_or(""),
+                    w["branch"].as_str().unwrap_or(""),
+                    w["state"].as_str().unwrap_or(""),
+                    serves(&|t| t.threads.iter().any(|x| x == id)),
+                )
+            })
+            .collect();
+        let ours = |thread: &Option<String>| {
+            thread
+                .as_deref()
+                .is_some_and(|t| t == agent.thread_id || workers.iter().any(|w| w["id"] == t))
+        };
+        running.extend(
+            builds
+                .iter()
+                .map(|b| (b, serves(&|t| t.builds.contains(&b.id))))
+                .filter(|(b, serving)| !serving.is_empty() || ours(&b.thread))
+                .map(|(b, serving)| {
+                    format!(
+                        "\n- build {} ({}) {}{serving}",
+                        b.scheme,
+                        b.id,
+                        if b.running { "running" } else { "queued" }
+                    )
+                }),
+        );
+        let asked: String = tasks
+            .iter()
+            .flat_map(|t| t.questions.iter().filter(|q| q.open()).map(move |q| (t, q)))
+            .map(|(t, q)| {
+                format!(
+                    "\n? “{}” ({}) on {} ({})",
+                    q.text.replace('\n', " "),
+                    q.id,
+                    named(t),
+                    t.id
+                )
+            })
+            .collect();
+        (running, asked)
     }
 
     /// The note at the start of each agent turn and after compaction: its
     /// role and reply style in brief (the system prompt has the rest), its
-    /// thread ID (needed to spawn workers) and its workers right now.
-    pub async fn context(&self, cwd: &Path) -> String {
+    /// thread ID (needed to spawn workers), the app's notes and only what
+    /// needs it now: the user's messages not yet in the tracker, its
+    /// questions waiting on the user, and its running workers and `builds`
+    /// with the task each serves. The tracker itself is a `task list` away.
+    pub async fn context(&self, cwd: &Path, builds: &[LiveBuild]) -> String {
         let candidates: Vec<(Agent, String, PathBuf)> = {
             let View {
                 registry, shell, ..
@@ -431,23 +465,17 @@ impl Agents {
             String::new()
         };
         let workers = self.workers(Some(&agent.thread_id));
-        let board = if workers.is_empty() {
-            "none".to_string()
+        let (running, asked) = self.now(&agent, &workers, builds);
+        let running = if running.is_empty() {
+            " nothing".to_string()
         } else {
-            workers
-                .iter()
-                .map(|w| {
-                    format!(
-                        "\n- {} [{}] {} ({})",
-                        w["title"].as_str().unwrap_or(""),
-                        w["branch"].as_str().unwrap_or(""),
-                        w["state"].as_str().unwrap_or(""),
-                        w["id"].as_str().unwrap_or("")
-                    )
-                })
-                .collect()
+            running
         };
-        let tasks = self.open_tasks(&agent.project_id);
+        let asked = if asked.is_empty() {
+            String::new()
+        } else {
+            format!("\nYour questions waiting on the user:{asked}")
+        };
         let unheard = match self.unheard(&agent.thread_id).await {
             Ok(unheard) => super::demands::listed(&unheard).map(|list| format!(
                 "\nThe user's messages not in the tracker yet; record each demand in them (`task sub add ITEM --thread {id} --title ... --ask` in their words, \
@@ -482,20 +510,21 @@ impl Agents {
              runs as a T3 worker via `thread spawn` (`--provider codex --model <slug> --effort <level>` for Codex), never by running the codex \
              or claude CLIs yourself or through subagents or workflows, so the user can see it; the one subagent is `squircle:history`, \
              cheap and read-only: ask it, in the foreground, before answering anything about past work or decisions. Archive a worker once its work is merged or abandoned, \
-             so no branches or worktrees are left behind. Your thread id: {id}. Your workers: {board}\n\
-             Your work items and their open sub-tasks, the user's open asks (`{cli} task --help`):{tasks}{unheard}\n\
+             so no branches or worktrees are left behind. Your thread id: {id}. Running now (`thread status` lists all your workers):{running}{asked}{unheard}\n\
              Your notes (`{cli} notes --help`; keep them current):{notes}\n\
+             The tracker (`{cli} task --help`) isn't in this note: run `task list --thread {id}` whenever you need it, such as to file an ask under the right work item, \
+             to pick up open work or before briefing a worker (`task show ID` for one in full). \
              Before any work on something the user asks, put it in the tracker in their words: a sub-task (`task sub add ITEM`) of the work item it clearly belongs to, \
              otherwise a new work item (`task add`); never under an unrelated one. Give each a title (`--title`): a few words in sentence case naming it, \
              as the phone lists it (\"App agents reply briefly\", not their sentence); the ask stays their words verbatim, never paraphrased. \
-             Name untitled ones above with `task update ID --title` when you next touch them. Track your own breakdown as sub-tasks; link workers (`thread spawn --task`) \
+             Name an untitled one with `task update ID --title` when you next touch it. Track your own breakdown as sub-tasks; link workers (`thread spawn --task`) \
              and builds (`build start --task`) to the sub-task or item they serve, attach screenshots or clips worth seeing, and set status and note when that changes \
              (in progress shows only while a linked worker or build runs and can't be set; an item follows its sub-tasks). A worker's brief (`thread spawn --task`, `thread send`) ends with the user's current asks for its work item \
              from the tracker, so a correction you don't record never reaches it. When the user corrects or adds to work in progress, mark the asks it \
              replaces (`task update ID --replaced-by NEW`) and send the worker the whole current spec, not just the new piece; after many revisions, \
              prefer a fresh worker briefed from the clean spec. \
              Ask the user anything (a choice, a review, a go-ahead) only with `task ask ITEM --thread {id} --question \"...\" [--option \"...\"] [--file PATH]` (the screenshot or clip it is about rides on the card; never describe one instead), \
-             never as a question in your reply: it waits on their phone with everything else waiting on them (`?` lines above), and the answer \
+             never as a question in your reply: it waits on their phone with everything else waiting on them (the `?` lines in this note), and the answer \
              arrives as an [answer] message; end your turn after asking unless other work needs no answer. Workers' own questions and approvals \
              reach the user directly in the same place; you are told when one is answered; never relay or repeat them. Never tell the user something works or is done until you or a worker \
              has looked at it (screenshots or a recording) against every one of its asks; say what is still wrong. Don't promise check-ins at times: \

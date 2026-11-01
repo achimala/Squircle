@@ -131,8 +131,23 @@ pub(super) async fn agent_context(
     query: std::result::Result<Query<ContextQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let query = parse_query(query)?;
+    let builds: Vec<crate::agents::LiveBuild> = state
+        .jobs
+        .list()
+        .into_iter()
+        .filter(|view| !view.job.state().terminal())
+        .filter_map(|view| {
+            let request = view.job.request()?;
+            Some(crate::agents::LiveBuild {
+                id: view.job.id.clone(),
+                scheme: request.scheme.clone(),
+                thread: request.thread.clone(),
+                running: view.job.state() == crate::model::BuildState::Running,
+            })
+        })
+        .collect();
     Ok(Json(success(
-        json!({"context": agents(&state)?.context(&query.cwd).await}),
+        json!({"context": agents(&state)?.context(&query.cwd, &builds).await}),
     )))
 }
 

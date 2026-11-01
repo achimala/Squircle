@@ -80,7 +80,7 @@ pub(super) enum TaskCommand {
         #[arg(long, help = "One line saying what it shows")]
         caption: Option<String>,
     },
-    /// The app's work items with their sub-tasks, open ones only; --all adds closed ones and History, newest first, a page at a time.
+    /// The app's work items with their sub-tasks, open ones only, in brief: ID, title, status, note, open questions, and the ask for untitled ones (task show or --full has the rest); --all adds closed ones and History, newest first, a page at a time.
     List {
         #[arg(long, help = "Your thread ID (the app is taken from it)")]
         thread: Option<String>,
@@ -94,6 +94,13 @@ pub(super) enum TaskCommand {
             help = "With --all: the next History page, from a reply's history_next"
         )]
         history_before: Option<String>,
+        #[arg(long, help = "Include every task's ask in the user's words")]
+        asks: bool,
+        #[arg(
+            long,
+            help = "Whole records as the phone gets them (linked work, media, questions, history)"
+        )]
+        full: bool,
     },
     /// Ask the user a question about a work item or sub-task, instead of asking in chat: it waits on their phone with everything else waiting on them (and notifies them), the task shows needs you until it is answered or withdrawn (the only way a task needs the user), and the answer comes back to you as an [answer] message. Attach the screenshot or clip it is about with --file rather than describing it or pointing at the task's media: the user sees only what the question carries. End your turn after asking unless other work needs no answer.
     Ask {
@@ -284,6 +291,8 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
             project,
             all,
             history_before,
+            asks,
+            full,
         } => {
             let query = url::form_urlencoded::Serializer::new(String::new())
                 .extend_pairs(thread.as_ref().map(|t| ("thread", t.as_str())))
@@ -314,8 +323,41 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
                     object.remove("history_next");
                 }
             }
+            if value["ok"] == true && !*full {
+                for list in ["tasks", "history"] {
+                    if let Some(tasks) = value["data"].get_mut(list).and_then(Value::as_array_mut) {
+                        tasks.iter_mut().for_each(|t| *t = brief(t, *asks));
+                    }
+                }
+            }
             value
         }
     };
     Ok(Some(data))
+}
+
+/// A task as `task list` shows it: enough to find and file work, with the
+/// ask only when it has no title or `--asks` wants it.
+fn brief(task: &Value, asks: bool) -> Value {
+    let mut out = json!({"id": task["id"], "title": task["title"], "status": task["status"]});
+    if task["title"].as_str().is_none_or(str::is_empty) || asks {
+        out["ask"] = task["ask"].clone();
+    }
+    if task["note"].as_str().is_some_and(|n| !n.is_empty()) {
+        out["note"] = task["note"].clone();
+    }
+    let questions: Vec<Value> = task["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|q| q["state"]["kind"] == "open")
+        .map(|q| json!({"id": q["id"], "question": q["text"]}))
+        .collect();
+    if !questions.is_empty() {
+        out["open_questions"] = json!(questions);
+    }
+    if let Some(subtasks) = task["subtasks"].as_array().filter(|s| !s.is_empty()) {
+        out["subtasks"] = subtasks.iter().map(|s| brief(s, asks)).collect();
+    }
+    out
 }
