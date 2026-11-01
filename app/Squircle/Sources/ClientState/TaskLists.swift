@@ -3,7 +3,7 @@ import Foundation
 /// Each app's tasks as the Mac last sent them (History's newest page), plus
 /// the older History pages loaded on request.
 struct TaskLists: Equatable {
-    typealias Edit = (id: String, status: AppTask.Status?, toTop: Bool)
+    typealias Edit = (id: String, status: AppTask.Status)
     private struct Older: Equatable { var tasks: [AppTask] = []; var next: String? }
     private(set) var observed: [String: AppTasks] = [:]
     private var older: [String: Older] = [:]
@@ -45,14 +45,13 @@ struct TaskLists: Equatable {
     static func apply(_ edit: Edit, in list: AppTasks) -> AppTasks {
         var list = list
         if let index = list.tasks.firstIndex(where: { $0.id == edit.id }) {
-            if let status = edit.status { list.tasks[index].status = status }
-            if edit.toTop { list.tasks.insert(list.tasks.remove(at: index), at: 0) }
+            list.tasks[index].status = edit.status
             return list
         }
         // A sub-task: ticked in place, under its work item.
         for (item, task) in list.tasks.enumerated() {
             guard let index = task.subtasks.firstIndex(where: { $0.id == edit.id }) else { continue }
-            if let status = edit.status { list.tasks[item].subtasks[index].status = status }
+            list.tasks[item].subtasks[index].status = edit.status
             return list
         }
         return list

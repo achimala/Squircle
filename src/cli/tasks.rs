@@ -44,8 +44,6 @@ pub(super) enum TaskCommand {
         note: Option<String>,
         #[arg(long, help = "The user's words, if they were recorded wrong")]
         ask: Option<String>,
-        #[arg(long, help = "Put it first in its group")]
-        top: bool,
         #[arg(
             long,
             value_name = "ITEM_ID|none",
@@ -195,7 +193,6 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
             status,
             note,
             ask,
-            top,
             under,
             replaced_by,
         } => {
@@ -208,7 +205,7 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
                 cli,
                 reqwest::Method::PATCH,
                 &format!("/v1/tasks/{}", task_id(id)?),
-                Some(json!({"title":title,"status":status,"note":note,"ask":ask,"to_top":top,"parent":parent,
+                Some(json!({"title":title,"status":status,"note":note,"ask":ask,"parent":parent,
                     "replaced_by":replaced_by.as_deref().map(task_id).transpose()?})),
                 false,
             )

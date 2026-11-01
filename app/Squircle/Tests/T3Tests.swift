@@ -766,11 +766,11 @@ final class CommandMachineTests: XCTestCase {
     func testLostTaskEditIsReconciledAgainstTheList() {
         var s = Commands.State()
         func reduce(_ e: Commands.Event) -> Commands.Result { let r = Commands.reduce(s, e); s = r.state; return r }
-        let edit = intent(.task(id: "k", status: .done, toTop: false))
-        XCTAssertEqual(reduce(.propose(edit)).effects, [.editTask(id: edit.id, task: "k", status: .done, toTop: false)])
+        let edit = intent(.task(id: "k", status: .done))
+        XCTAssertEqual(reduce(.propose(edit)).effects, [.editTask(id: edit.id, task: "k", status: .done)])
         XCTAssertEqual(reduce(.answered(id: edit.id, attempt: 0, .unknown("lost"))).effects, [.readTasks(task: "k")])
         XCTAssertEqual(reduce(.tasksObserved([.init(id: "k", status: .queued, revision: 3)])).effects,
-                       [.editTask(id: edit.id, task: "k", status: .done, toTop: false)])
+                       [.editTask(id: edit.id, task: "k", status: .done)])
         _ = reduce(.answered(id: edit.id, attempt: 0, .accepted(.from(["revision": 5]))))
         XCTAssertEqual(s.taskEdits.count, 1, "held until the list has revision 5")
         _ = reduce(.tasksObserved([.init(id: "k", status: .done, revision: 4)]))

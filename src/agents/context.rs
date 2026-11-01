@@ -297,8 +297,8 @@ pub(super) fn owner<'a>(
 }
 
 impl Agents {
-    /// The app's open work items, most urgent first, each with its open
-    /// sub-tasks, one line each.
+    /// The app's open work items, most urgent first, then most recently
+    /// active, each with its open sub-tasks, one line each.
     pub(super) fn open_tasks(&self, project: &str) -> String {
         let mut open: Vec<_> = self
             .tasks
@@ -316,11 +316,7 @@ impl Agents {
             .iter()
             .position(|x| *x == s)
         };
-        open.sort_by(|a, b| {
-            rank(a.status)
-                .cmp(&rank(b.status))
-                .then(a.order.total_cmp(&b.order))
-        });
+        open.sort_by_key(|t| rank(t.status));
         if open.is_empty() {
             return " none".to_string();
         }

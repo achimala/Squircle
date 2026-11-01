@@ -16,7 +16,7 @@ enum Commands {
         /// Stops `turn`, the one running when you asked.
         case interrupt(thread: String, turn: String?)
         case mode(thread: String, T3RuntimeMode)
-        case task(id: String, status: AppTask.Status?, toTop: Bool)
+        case task(id: String, status: AppTask.Status)
         case project(id: String, root: String)
         /// Home's order: every Mac catalog record, as the user arranged them.
         case appOrder([String])
@@ -35,7 +35,7 @@ enum Commands {
         var slot: Slot? {
             switch self {
             case .mode(let thread, _): .mode(thread)
-            case .task(let id, _, _): .task(id)
+            case .task(let id, _): .task(id)
             case .appOrder: .appOrder
             default: nil
             }
@@ -81,9 +81,9 @@ enum Commands {
             return order(queued[.appOrder]) ?? order(entries.last { $0.intent.kind.slot == .appOrder }?.intent)
         }
         /// Your task edits the Mac doesn't show yet, newest last.
-        var taskEdits: [(id: String, status: AppTask.Status?, toTop: Bool)] {
+        var taskEdits: [(id: String, status: AppTask.Status)] {
             (entries.map(\.intent) + queued.values).compactMap {
-                if case .task(let id, let status, let toTop) = $0.kind { return (id, status, toTop) }; return nil
+                if case .task(let id, let status) = $0.kind { return (id, status) }; return nil
             }
         }
     }
@@ -121,7 +121,7 @@ enum Commands {
     }
     enum Effect: Equatable {
         case dispatch(id: String, command: JSONValue, attempt: Int)
-        case editTask(id: String, task: String, status: AppTask.Status?, toTop: Bool)
+        case editTask(id: String, task: String, status: AppTask.Status)
         /// Its reply is the catalog in the new order, adopted before it is answered.
         case orderApps(id: String, ids: [String])
         /// Read the Mac's tasks again to settle a lost edit of `task`.
@@ -138,9 +138,9 @@ enum Commands {
         func done(_ disposition: Disposition = .applied) -> Result { Result(state: s, effects: effects, disposition: disposition) }
 
         func send(_ e: inout Entry) {
-            if case .task(let task, let status, let toTop) = e.intent.kind {
+            if case .task(let task, let status) = e.intent.kind {
                 e.phase = .dispatching(attempt: 0)
-                effects.append(.editTask(id: e.intent.id, task: task, status: status, toTop: toTop))
+                effects.append(.editTask(id: e.intent.id, task: task, status: status))
             } else if case .appOrder(let ids) = e.intent.kind {
                 e.phase = .dispatching(attempt: 0)
                 effects.append(.orderApps(id: e.intent.id, ids: ids))
@@ -205,7 +205,7 @@ enum Commands {
                 guard s.entries[i].phase == .dispatching(attempt: attempt) else { return done(.stale) }
                 if case .notSent = outcome { s.entries[i].phase = .waiting } else { s.entries[i].phase = .unknown }
                 switch s.entries[i].intent.kind {
-                case .task(let task, _, _): effects.append(.readTasks(task: task))
+                case .task(let task, _): effects.append(.readTasks(task: task))
                 // Settled, or sent again, by the Mac's next catalog.
                 case .appOrder: break
                 // Settled by looking at the thread: a resend could stop a newer turn.
@@ -248,13 +248,13 @@ enum Commands {
             let byID = Dictionary(sights.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             var applied = false
             for i in s.entries.indices.reversed() {
-                guard case .task(let id, let status, _) = s.entries[i].intent.kind, let sight = byID[id] else { continue }
+                guard case .task(let id, let status) = s.entries[i].intent.kind, let sight = byID[id] else { continue }
                 switch s.entries[i].phase {
                 case .acknowledged(let receipt):
                     if sight.revision >= (receipt ?? 0) { resolved(i); applied = true }
                 case .unknown:
                     // An edit sets a value, so sending it again is the same edit.
-                    if let status, sight.status == status { resolved(i) } else { send(at: i) }
+                    if sight.status == status { resolved(i) } else { send(at: i) }
                     applied = true
                 case .waiting, .dispatching: break
                 }

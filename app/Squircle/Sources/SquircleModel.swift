@@ -1367,12 +1367,12 @@ final class SquircleModel {
                 guard let outcome = await self?.t3Dispatch(body) else { return }
                 self?.command(.answered(id: id, attempt: attempt, outcome))
             }
-        case .editTask(let id, let task, let status, let toTop):
+        case .editTask(let id, let task, let status):
             Task { [weak self] in
                 guard let self else { return }
                 guard let client else { command(.answered(id: id, attempt: 0, .refused(ClientError.configuration.localizedDescription))); return }
                 do {
-                    let revision = try await client.updateTask(id: task, status: status, toTop: toTop)
+                    let revision = try await client.updateTask(id: task, status: status)
                     command(.answered(id: id, attempt: 0, .accepted(.object(["revision": .number(Double(revision))]))))
                 } catch { command(.answered(id: id, attempt: 0, .service(error))) }
                 await readTasks(containing: task)
@@ -1867,25 +1867,25 @@ final class SquircleModel {
         let app = taskLists.app(containing: task) ?? selectedProjectID
         if let app, let list = try? await client.tasks(projectID: app) { adoptTasks(list, for: app) }
     }
-    /// A status or Top change made here: shown at once, sent once (M04),
+    /// A status change made here: shown at once, sent once (M04),
     /// and laid over the Mac's tasks until the Mac shows it.
-    func markTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) {
+    func markTask(_ task: AppTask, status: AppTask.Status) {
         #if DEBUG
-        if let demo = demoTasks { demoTasks = TaskLists.apply((task.id, status, toTop), in: demo); return }
+        if let demo = demoTasks { demoTasks = TaskLists.apply((task.id, status), in: demo); return }
         #endif
         guard client != nil else { return }
-        taskEditIDs[task.id] = startCommand(.task(id: task.id, status: status, toTop: toTop), command: nil)
+        taskEditIDs[task.id] = startCommand(.task(id: task.id, status: status), command: nil)
     }
     /// Sends the edit `markTask` showed (or makes it now) and waits until the Mac took it.
-    func updateTask(_ task: AppTask, status: AppTask.Status? = nil, toTop: Bool = false) async {
+    func updateTask(_ task: AppTask, status: AppTask.Status) async {
         #if DEBUG
         if demoTasks != nil { return }
         #endif
         guard client != nil else { return }
         let pending = taskEditIDs[task.id].flatMap { id in
-            (commands.entries.map(\.intent) + commands.queued.values).first { $0.id == id && $0.kind == .task(id: task.id, status: status, toTop: toTop) }
+            (commands.entries.map(\.intent) + commands.queued.values).first { $0.id == id && $0.kind == .task(id: task.id, status: status) }
         }
-        let id = pending?.id ?? startCommand(.task(id: task.id, status: status, toTop: toTop), command: nil)
+        let id = pending?.id ?? startCommand(.task(id: task.id, status: status), command: nil)
         taskEditIDs[task.id] = id
         _ = await settlement(of: id)
         if taskEditIDs[task.id] == id { taskEditIDs[task.id] = nil }
@@ -1968,11 +1968,11 @@ final class SquircleModel {
         let tasks = asks.enumerated().map { index, item in
             let threads = item.3.enumerated().map { ["id": "demo-worker-\(index)-\($0.offset)", "title": $0.element.0, "state": $0.element.1] }
             let subtasks = item.4.enumerated().map { offset, sub in
-                ["id": "demo-\(index)-\(offset)", "ask": sub.0, "status": sub.1, "note": sub.2, "order": Double(offset), "updated_at": 0, "revision": 1,
+                ["id": "demo-\(index)-\(offset)", "ask": sub.0, "status": sub.1, "note": sub.2, "updated_at": 0, "revision": 1,
                  "threads": [] as [Any], "builds": [] as [Any], "media": [] as [Any], "parent_id": "demo-\(index)"] as [String: Any]
             }
             let media = (0..<item.5).map { ["id": "demo-media-\(index)-\($0)", "kind": "image", "caption": ""] }
-            return ["id": "demo-\(index)", "ask": item.0, "status": item.1, "note": item.2, "order": Double(index),
+            return ["id": "demo-\(index)", "ask": item.0, "status": item.1, "note": item.2,
                     "updated_at": 0, "revision": 1, "threads": threads, "builds": [], "media": media, "subtasks": subtasks] as [String: Any]
         }
         let data = try? JSONSerialization.data(withJSONObject: ["tasks": tasks, "history": []])

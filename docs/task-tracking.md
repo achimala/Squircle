@@ -149,6 +149,39 @@ were kept at in progress.
   each with its live threads nested under it; then Ready to try, Queued,
   Done and History as before.
 
+## Newest first (2026-11-01, user decision)
+
+User: "Can we sort recent tasks to top not bottom it's confusing. Or what is
+the order? I'm confused." Within a group rows went by a stored `order`, each
+new task after the last, so new ones landed at the bottom (and Move to Top
+put one above). So:
+
+- **One order: most recent activity first.** A task keeps `active_at`, its
+  latest activity the user can see: added, its status changing, a question
+  asked, answered or withdrawn, a thread or build linked, or linked work
+  having news (a worker starting, finishing, asking; a build ending). A
+  sub-task's activity is its work item's too. Notes, titles, asks and
+  pictures don't move it (they still move `updated_at`, which ages tasks into
+  History), so rows don't shuffle for edits. Ties go to the newest added.
+- **The service orders, everyone follows.** `Book::list` returns work items
+  and their sub-tasks in that order; `GET /v1/tasks` keeps it, the phone
+  groups by status without re-sorting (rows, and the pages' swipe order,
+  follow), and the per-turn note lists open items by status rank, then the
+  same order. History still pages by when tasks moved there, newest first.
+- **`order` is gone**, with Move to Top / Move to Front on the phone and
+  `task update --top`. Migrated once: records without `active_at` take
+  their last status change (else when they were added), work items the
+  latest of theirs and their sub-tasks', saved at startup (`Event::Migrate`).
+  Checked on a copy of the Mac's `tasks.json`: Squircle's 38 open items came
+  out newest first with no violations, and a second read had nothing left to
+  migrate. About 17 items share one minute from the 2026-10-31 in-progress
+  migration's status changes, so among those the newest added leads until
+  they see new activity.
+
+Checked 2026-11-01 on a simulator (iOS 27.0, DEBUG) with
+`SQUIRCLE_DEMO_TASKS` set to Squircle's live list in the new order: In
+progress, then Ready to try led by the most recently active items.
+
 ## Questions and what waits on you (2026-10-26, user decision)
 
 User: "It's real annoying when the main agent or the inner ones ask
@@ -314,8 +347,9 @@ Kept per app (T3 project) in `<data>/tasks.json`; attachments in
 `<data>/tasks/<id>/media` (screenshots, clips, and documents: pdf, md, txt, json, csv, which the phone opens in Quick Look). A task has a title (the agent's few words; empty on older ones), the ask (the user's words), a status (`queued`,
 `in_progress` and `needs_you` shown only, `ready_to_try`, `done`, `dropped`), a few-word
 note, the chat message it came from (the agent's latest user message when it
-adds the task), linked worker threads and builds, an order within its group,
-attached screenshots and clips, and a history of status changes (by agent,
+adds the task), linked worker threads and builds, when it was last active
+(`active_at`, [above](#newest-first-2026-11-01-user-decision)), attached
+screenshots and clips, and a history of status changes (by agent,
 user or auto).
 
 **Status follows linked work** (since 2026-10-31 shown, above: a worker
@@ -392,7 +426,8 @@ compact: the round tick in the status colour (one tap marks it done; the
 batch, 0.65 s settle and the 4 s Undo capsule are back), the ask's first two
 lines, then sub-task progress ("2/5") and the note on one line, and the
 worker's jelly while one is alive or Install. Swipe left: Done / Drop;
-swipe right: Top; long press: any status. Tapping a row pushes that item's
+long press: any status (since 2026-11-01 rows run newest first and Top is
+gone). Tapping a row pushes that item's
 page (route `.overview | .item(id)` and one spring; the overview and the
 pages slide side by side, the destination takes touches at once). Pages
 swipe sideways through the overview's rows in its order ("3 of 24" at the

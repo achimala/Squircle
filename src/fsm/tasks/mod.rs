@@ -197,7 +197,7 @@ pub struct Task {
     /// The work item this is a sub-task of.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
-    /// A work item's sub-tasks, in order; always empty on a sub-task.
+    /// A work item's sub-tasks, most recently active first; always empty on a sub-task.
     pub subtasks: Vec<Task>,
     /// A short name the agent gave it; empty on tasks from before titles
     /// (2026-10-31) until an agent names them.
@@ -214,8 +214,6 @@ pub struct Task {
     pub replaced_by: Option<String>,
     pub threads: Vec<String>,
     pub builds: Vec<String>,
-    /// Position within its status group; lower first.
-    pub order: f64,
     pub created_at: u64,
     pub updated_at: u64,
     /// When it moved out of the active list into History.
@@ -518,9 +516,13 @@ struct Record {
     replaced_by: Option<String>,
     threads: Vec<String>,
     builds: Vec<String>,
-    order: f64,
     created_at: u64,
     updated_at: u64,
+    /// Its latest activity the user can see: added, its status changing, a
+    /// question asked or closed, its linked work having news, or the same
+    /// on a sub-task. Lists put the most recent first. (`updated_at` also
+    /// moves for notes, titles and pictures, which shouldn't reorder rows.)
+    active_at: u64,
     placement: Placement,
     revision: u64,
     observed: Observation,
@@ -531,11 +533,15 @@ struct Record {
     /// and not saved since.
     #[serde(skip)]
     migrated: bool,
+    /// Read from a file from before `active_at` (2026-11-01), and not saved since.
+    #[serde(skip)]
+    undated: bool,
 }
 
 /// A record as read from disk, including files from before revisions
 /// (2026-10-15), which kept `archived_at` and a `seen` signature instead,
-/// and from before needs you was derived (2026-10-31), which could keep it.
+/// from before needs you was derived (2026-10-31), which could keep it, and
+/// from before `active_at` (2026-11-01), which kept an `order` instead.
 #[derive(Deserialize)]
 struct StoredRecord {
     id: String,
@@ -556,9 +562,10 @@ struct StoredRecord {
     threads: Vec<String>,
     #[serde(default)]
     builds: Vec<String>,
-    order: f64,
     created_at: u64,
     updated_at: u64,
+    #[serde(default)]
+    active_at: Option<u64>,
     #[serde(default)]
     placement: Option<Placement>,
     #[serde(default)]
@@ -603,6 +610,11 @@ impl From<StoredRecord> for Record {
                 (stage, true)
             }
         };
+        // From before `active_at`: when its status last changed (the
+        // migration takes its sub-tasks' too).
+        let active_at = s
+            .active_at
+            .unwrap_or_else(|| history.iter().map(|c| c.at).fold(s.created_at, u64::max));
         Record {
             id: s.id,
             project_id: s.project_id,
@@ -615,15 +627,16 @@ impl From<StoredRecord> for Record {
             replaced_by: s.replaced_by,
             threads: s.threads,
             builds: s.builds,
-            order: s.order,
             created_at: s.created_at,
             updated_at: s.updated_at,
+            active_at,
             placement,
             revision: s.revision,
             observed,
             history,
             questions: s.questions,
             migrated,
+            undated: s.active_at.is_none(),
         }
     }
 }
@@ -670,7 +683,6 @@ impl Record {
             replaced_by: self.replaced_by.clone(),
             threads: self.threads.clone(),
             builds: self.builds.clone(),
-            order: self.order,
             created_at: self.created_at,
             updated_at: self.updated_at,
             archived_at: match self.placement {
@@ -718,6 +730,11 @@ impl Record {
         self.revision += 1;
     }
 
+    /// Something the user sees happened to it (`active_at`).
+    fn stir(&mut self, now: u64) {
+        self.active_at = self.active_at.max(now);
+    }
+
     /// Closing it withdraws its open questions.
     fn set(&mut self, status: Stage, by: By, note: Option<&str>, now: u64) {
         let note = note.map(str::trim);
@@ -731,6 +748,9 @@ impl Record {
         }
         if let Some(note) = note {
             self.note = note.chars().take(300).collect();
+        }
+        if status != self.status {
+            self.stir(now);
         }
         self.status = status;
         self.touch(now);
@@ -769,6 +789,7 @@ impl Record {
         {
             return true;
         }
+        self.stir(now);
         if news == News::NewWork {
             self.touch(now);
         }
@@ -849,7 +870,7 @@ impl Book {
     fn publish(&self, record: &Record) -> Task {
         let mut task = self.flat(record);
         let mut subtasks: Vec<&Record> = self.children(&record.id).collect();
-        subtasks.sort_by(|a, b| a.order.total_cmp(&b.order));
+        Self::recent_first(&mut subtasks);
         task.subtasks = subtasks.into_iter().map(|t| self.flat(t)).collect();
         task
     }
@@ -873,10 +894,17 @@ impl Book {
         }
     }
 
-    /// Whether it was read with needs you or in progress kept as its status
-    /// and not saved since.
+    /// Most recently active first; the newest added first among equals.
+    fn recent_first(records: &mut [&Record]) {
+        records.sort_by(|a, b| {
+            (b.active_at, b.created_at, &b.id).cmp(&(a.active_at, a.created_at, &a.id))
+        });
+    }
+
+    /// Whether it was read with needs you or in progress kept as its status,
+    /// or without `active_at`, and not saved since.
     pub fn migrated(&self) -> bool {
-        self.tasks.values().any(|t| t.migrated)
+        self.tasks.values().any(|t| t.migrated || t.undated)
     }
 
     fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Record> + 'a {
@@ -889,13 +917,16 @@ impl Book {
         self.children(id).map(|t| t.status).collect()
     }
 
-    /// The app's work items (tasks without a parent), each with its sub-tasks.
+    /// The app's work items (tasks without a parent), each with its
+    /// sub-tasks, most recently active first.
     pub fn list(&self, project: &str) -> Vec<Task> {
-        self.tasks
+        let mut items: Vec<&Record> = self
+            .tasks
             .values()
             .filter(|t| t.project_id == project && t.parent.is_none())
-            .map(|t| self.publish(t))
-            .collect()
+            .collect();
+        Self::recent_first(&mut items);
+        items.into_iter().map(|t| self.publish(t)).collect()
     }
 
     /// The task holding question `id`, and the question.
@@ -959,24 +990,20 @@ impl Book {
             .collect()
     }
 
-    /// Order after the last of the task's siblings (same app, same parent).
-    fn next_order(&self, project: &str, parent: Option<&str>) -> f64 {
-        self.tasks
-            .values()
-            .filter(|t| t.project_id == project && t.parent.as_deref() == parent)
-            .map(|t| t.order)
-            .fold(0.0, f64::max)
-            + 1.0
-    }
-
     /// A change to a sub-task counts as touching its work item (it leaves
-    /// History); a status change re-derives the work item's status.
+    /// History), and its activity as the work item's; a status change
+    /// re-derives the work item's status.
     fn bubble(&mut self, id: &str, status_changed: bool, by: By, now: u64) {
-        let Some(parent) = self.tasks.get(id).and_then(|t| t.parent.clone()) else {
+        let Some((parent, active)) = self
+            .tasks
+            .get(id)
+            .and_then(|t| Some((t.parent.clone()?, t.active_at)))
+        else {
             return;
         };
         if let Some(item) = self.tasks.get_mut(&parent) {
             item.touch(now);
+            item.stir(active);
         }
         if status_changed {
             self.rederive(&parent, by, now);
@@ -1047,9 +1074,6 @@ pub struct Update {
     pub ask: Option<String>,
     pub status: Option<Status>,
     pub note: Option<String>,
-    /// Put it first in its group (among its siblings for a sub-task).
-    #[serde(default)]
-    pub to_top: bool,
     /// Move it under this work item; empty makes a sub-task a work item of its own.
     pub parent: Option<String>,
     /// A later ask of the same app replaces this one: it is dropped and
@@ -1166,6 +1190,7 @@ fn link(
         }
     }
     task.touch(now);
+    task.stir(now);
     book.bubble(id, false, By::Auto, now);
     changed(book)
 }
@@ -1217,6 +1242,7 @@ fn close_question(
     entry.state = state;
     let id = task.id.clone();
     task.touch(now);
+    task.stir(now);
     book.bubble(&id, false, by, now);
     changed(book)
 }
@@ -1285,7 +1311,6 @@ impl Machine for M17 {
                     }
                     Some(Some((project, None))) => project,
                 };
-                let order = book.next_order(&project, parent.as_deref());
                 let status = match status.map(Status::stage) {
                     None => Stage::Queued,
                     Some(Ok(stage)) => stage,
@@ -1307,9 +1332,9 @@ impl Machine for M17 {
                     replaced_by: None,
                     threads,
                     builds: vec![],
-                    order,
                     created_at: now,
                     updated_at: now,
+                    active_at: now,
                     placement: Placement::Active,
                     revision: 1,
                     observed: Observation::default(),
@@ -1321,6 +1346,7 @@ impl Machine for M17 {
                     }],
                     questions: vec![],
                     migrated: false,
+                    undated: false,
                 };
                 let id = task.id.clone();
                 book.tasks.insert(id.clone(), task);
@@ -1354,10 +1380,8 @@ impl Machine for M17 {
                         return Reduction::same(book, Disposition::Rejected(reason));
                     }
                     if target != old_parent {
-                        let order = book.next_order(&project, target.as_deref());
                         let task = book.tasks.get_mut(&id).expect("checked above");
                         task.parent = target.clone();
-                        task.order = order;
                         task.touch(now);
                         if let Some(old) = &old_parent {
                             book.rederive(old, by, now);
@@ -1384,13 +1408,6 @@ impl Machine for M17 {
                         return Reduction::same(book, Disposition::Rejected(reason));
                     }
                 }
-                let parent = book.tasks[&id].parent.clone();
-                let lowest = book
-                    .tasks
-                    .values()
-                    .filter(|t| t.project_id == project && t.parent == parent)
-                    .map(|t| t.order)
-                    .fold(f64::INFINITY, f64::min);
                 let task = book.tasks.get_mut(&id).expect("checked above");
                 if let Some(title) = update
                     .title
@@ -1433,10 +1450,6 @@ impl Machine for M17 {
                     && let Some(observed) = observed
                 {
                     task.hold(&observed);
-                }
-                if update.to_top {
-                    task.order = lowest - 1.0;
-                    task.touch(now);
                 }
                 let after = task.status;
                 if status.is_some_and(|s| !s.open()) {
@@ -1481,12 +1494,17 @@ impl Machine for M17 {
                     }
                     let subtasks = book.statuses(id);
                     let task = book.tasks.get_mut(id).expect("checked above");
-                    let (before, turns, ran) = (task.status, task.updated_at, task.live());
+                    let (before, turns, active, ran) =
+                        (task.status, task.updated_at, task.active_at, task.live());
                     any |= task.follow(signals, &subtasks, now);
                     // A sub-task's work starting counts like a status change:
                     // it can reopen its closed work item.
                     let started = task.live() && !ran;
-                    if task.status != before || task.updated_at != turns || started {
+                    if task.status != before
+                        || task.updated_at != turns
+                        || task.active_at != active
+                        || started
+                    {
                         moved.push((id.clone(), task.status != before || started));
                     }
                 }
@@ -1534,6 +1552,7 @@ impl Machine for M17 {
                     state: QuestionState::Open,
                 });
                 task.touch(now);
+                task.stir(now);
                 if !task.status.open() {
                     task.replaced_by = None;
                     let rest = task.rest();
@@ -1589,6 +1608,23 @@ impl Machine for M17 {
                 }
             }
             Event::Migrate { now } => {
+                // From before `active_at`: a work item was last active when
+                // it or one of its sub-tasks was.
+                let undated: Vec<String> = book
+                    .tasks
+                    .values_mut()
+                    .filter(|t| t.undated)
+                    .map(|t| {
+                        t.undated = false;
+                        t.revision += 1;
+                        t.id.clone()
+                    })
+                    .collect();
+                for id in &undated {
+                    if let Some(active) = book.children(id).map(|t| t.active_at).max() {
+                        book.tasks.get_mut(id).expect("listed above").stir(active);
+                    }
+                }
                 let migrated: Vec<String> = book
                     .tasks
                     .values_mut()
@@ -1599,7 +1635,7 @@ impl Machine for M17 {
                         t.parent.clone().unwrap_or_else(|| t.id.clone())
                     })
                     .collect();
-                if migrated.is_empty() {
+                if migrated.is_empty() && undated.is_empty() {
                     return Reduction::same(book, Disposition::Unchanged);
                 }
                 // The work items among them or above them roll up again.
