@@ -237,11 +237,9 @@ final class SquircleClient {
         return try await get(["v1", "tasks"], query: query, revalidate: historyBefore == nil)
     }
 
-    /// The user's own change: a status, or first in its group. Returns the
-    /// task's revision that holds it.
-    func updateTask(id: String, status: AppTask.Status?, toTop: Bool) async throws -> UInt64 {
-        var body: [String: Any] = ["by_user": true, "to_top": toTop]
-        if let status { body["status"] = status.rawValue }
+    /// The user's own status change. Returns the task's revision that holds it.
+    func updateTask(id: String, status: AppTask.Status) async throws -> UInt64 {
+        let body: [String: Any] = ["by_user": true, "status": status.rawValue]
         struct Reply: Decodable { struct Task: Decodable { let revision: UInt64 }; let task: Task }
         let reply: Reply = try await call(request(["v1", "tasks", id], method: "PATCH",
                                                   body: JSONSerialization.data(withJSONObject: body)), exposeAPIError: true)

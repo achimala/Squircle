@@ -184,8 +184,7 @@ pub(super) async fn list_tasks(
     let project = task_project(&state, query.project, query.thread.as_deref())?;
     let tasks = tasks_of(&state)?;
     let view = tokio::task::spawn_blocking(move || {
-        let mut all = tasks.list(&project);
-        all.sort_by(|a, b| a.order.total_cmp(&b.order));
+        let all = tasks.list(&project);
         let (history, active): (Vec<_>, Vec<_>) =
             all.into_iter().partition(|t| t.archived_at.is_some());
         let (page, next) = history_page(history, HistoryCursor::of, before.as_ref(), limit);

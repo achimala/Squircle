@@ -518,11 +518,16 @@ are clearly visible and part of the task list."
   progress is derived from that, never set (see
   [tasks](../task-tracking.md#in-progress-is-derived-never-set-2026-10-31-user-decision)).
   Then Ready to try, Queued, Done, History.
+- **Newest first in every group** (2026-11-01, user: "Can we sort recent
+  tasks to top not bottom it's confusing"): rows, sub-tasks and the pages'
+  swipe order go by each task's latest activity, most recent on top (see
+  [tasks](../task-tracking.md#newest-first-2026-11-01-user-decision)).
 - **Row swipe actions** (2026-10-31, user: "lol what is this illegible",
   a white Top pill with white text): swipe left for Drop and Done, each its
   glyph in Body over its label in Caption, in `onAccent` on `failure` and
-  `success`, so both read in light and dark. No leading swipe: Move to Top
-  is in the long-press menu only.
+  `success`, so both read in light and dark. No leading swipe; the
+  long-press menu sets a status (Move to Top went with newest first,
+  2026-11-01).
 
 ![Tasks A](img/tasks-a.jpg)
 

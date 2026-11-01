@@ -556,7 +556,6 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             set(task, task.status.open ? .done : .queued, haptic: false)
         }
         page.onStatus = { [weak self] status in self?.task(id).map { self?.set($0, status) } }
-        page.onTop = { [weak self] in self?.task(id).map { self?.set($0, toTop: true) } }
         page.onInstall = { [weak self] in self?.task(id).map { self?.install($0) } }
         page.onOutline = { [weak self] in
             guard let self else { return }
@@ -909,11 +908,11 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
     // MARK: Actions
 
-    private func set(_ task: AppTask, _ status: AppTask.Status? = nil, toTop: Bool = false, haptic: Bool = true) {
+    private func set(_ task: AppTask, _ status: AppTask.Status, haptic: Bool = true) {
         if haptic { Theme.selectionHaptic() }
-        model.markTask(task, status: status, toTop: toTop)
+        model.markTask(task, status: status)
         render(now: true)
-        Task { await model.updateTask(task, status: status, toTop: toTop) }
+        Task { await model.updateTask(task, status: status) }
     }
 
     /// One tap ticks an open task off (or back on before it moves). Rapid
@@ -1089,12 +1088,11 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         return UISwipeActionsConfiguration(actions: [drop, done])
     }
 
-    /// Long press: any status, to bring one back, or Move to Top.
+    /// Long press: any status, to bring one back.
     func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         guard let id = dataSource.itemIdentifier(for: indexPath), let task = task(id) else { return nil }
         return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
-            let top = UIAction(title: "Move to Top", image: UIImage(systemName: "arrow.up.to.line")) { _ in self?.set(task, toTop: true) }
-            return UIMenu(children: (task.status.open ? [top] : []) + [WorkItemPage.statusMenu(current: task.status) { self?.set(task, $0) }])
+            WorkItemPage.statusMenu(current: task.status) { self?.set(task, $0) }
         })
     }
 
@@ -1691,7 +1689,6 @@ final class WorkItemPage: UIView {
     var onSubtask: ((String) -> Void)?
     var onTick: ((String) -> Void)?
     var onStatus: ((AppTask.Status) -> Void)?
-    var onTop: (() -> Void)?
     var onInstall: (() -> Void)?
     var onOutline: (() -> Void)?
     var onMedia: ((Picture, UIButton) -> Void)?
@@ -1897,9 +1894,7 @@ final class WorkItemPage: UIView {
         status.configuration?.title = Self.name(content.status)
         status.configuration?.baseForegroundColor = Self.color(content.status)
         status.tintColor = Self.color(content.status)
-        status.menu = UIMenu(children: [
-            UIAction(title: "Move to Front", image: UIImage(systemName: "arrow.left.to.line")) { [weak self] _ in self?.onTop?() },
-            Self.statusMenu(current: content.status) { [weak self] in self?.onStatus?($0) }])
+        status.menu = Self.statusMenu(current: content.status) { [weak self] in self?.onStatus?($0) }
         status.accessibilityLabel = "Status, \(Self.name(content.status))"
         position.text = content.position
         ask.text = content.title

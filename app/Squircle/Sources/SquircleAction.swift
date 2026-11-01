@@ -65,8 +65,6 @@ struct SquircleAction: Equatable {
     var replaces: [String] = []
     /// What a task waits on or what happened, from `--note`.
     var note: String?
-    /// `update --top`.
-    var toTop = false
     /// How many times a loop runs it; 0 when it can't be told.
     var repeats: Int?
     var outcome = Outcome.pending
@@ -186,7 +184,7 @@ struct SquircleAction: Equatable {
         case .taskStatus(let status): return [.verb("Marked"), .subject(subject), Piece(text: Self.statusWords[status] ?? status, role: .status(status))] + note
         case .taskRename: return [.verb("Named a task")] + (Self.clip(text).map { [.subject("“" + $0 + "”")] } ?? [])
         case .taskReword: return [.verb("Reworded"), .subject(subject)] + (Self.clip(text).map { [.plain("as"), .subject("“" + $0 + "”")] } ?? [])
-        case .taskMove: return [.verb("Moved"), .subject(subject)] + (toTop ? [.plain("to the top")] : [])
+        case .taskMove: return [.verb("Moved"), .subject(subject)]
         case .taskNote: return [.verb("Noted on"), .subject(subject)] + note
         case .taskAsk: return [.verb("Asked you:"), .subject(Self.clip(text, limit: 90) ?? "a question")]
         case .taskWithdraw: return [.verb("Took back a question")]
@@ -464,9 +462,8 @@ struct SquircleAction: Equatable {
                 action = SquircleAction(kind: .taskRename, text: title)
             } else if let ask = options["--ask"] {
                 action = SquircleAction(kind: .taskReword, text: ask)
-            } else if options["--under"] != nil || options["--top"] != nil {
+            } else if options["--under"] != nil {
                 action = SquircleAction(kind: .taskMove)
-                action.toTop = options["--under"] == nil
             } else {
                 action = SquircleAction(kind: .taskNote)
             }

@@ -93,7 +93,8 @@ impl Tasks {
         let (book, snapshot) = Saved::new(Gate::restore(book, revision, file));
         let mut state = State { book };
         // Needs you kept as a status, from before it was derived: saved
-        // once as the stage underneath (2026-10-31).
+        // once as the stage underneath (2026-10-31). Records from before
+        // `active_at` (2026-11-01) are saved once with it.
         if migrated {
             state.apply(vec![Event::Migrate {
                 now: crate::model::now(),

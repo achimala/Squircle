@@ -395,7 +395,6 @@ struct AppTask: Decodable, Equatable, Identifiable {
     var named: Bool { name != ask }
     var status: Status
     let note: String
-    let order: Double
     let updatedAt: Double
     let archivedAt: Double?
     /// The service's revision of this task; an edit's receipt names the
@@ -405,7 +404,7 @@ struct AppTask: Decodable, Equatable, Identifiable {
     let builds: [Build]
     let media: [Media]
     private var subtaskList: [AppTask]?
-    /// A work item's sub-tasks, in order; none on a sub-task.
+    /// A work item's sub-tasks, most recently active first; none on a sub-task.
     var subtasks: [AppTask] {
         get { subtaskList ?? [] }
         set { subtaskList = newValue }
@@ -423,7 +422,7 @@ struct AppTask: Decodable, Equatable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, ask, status, note, order, threads, builds, media, revision
+        case id, title, ask, status, note, threads, builds, media, revision
         case updatedAt = "updated_at", archivedAt = "archived_at", subtaskList = "subtasks"
     }
 }
