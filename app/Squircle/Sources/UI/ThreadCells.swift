@@ -1040,14 +1040,39 @@ final class DocumentCell: TimelineCell {
     }
 }
 
-/// A build in the conversation: the app's own icon, what it is, where it
-/// stands, and Install. Ready is the Install button, building a quiet
-/// shimmer on its status, failed the reason in the failure colour.
+/// A build in the conversation: the build card.
 final class BuildCell: TimelineCell {
+    var onInstall: ((AppBuild) -> Void)? {
+        get { card.onInstall }
+        set { card.onInstall = newValue }
+    }
+    private let card = BuildCard()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        card.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(card)
+        NSLayoutConstraint.activate(pinGap(card) + [
+            card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
+            card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin)
+        ])
+        accessibilityIdentifier = "thread.build"
+    }
+
+    func configure(_ build: AppBuild, installing: Bool, icons: BuildIcons?) {
+        card.configure(build, installing: installing, icons: icons)
+        isAccessibilityElement = false
+    }
+}
+
+/// A build as a card, wherever one shows (the chat, a task's page): the
+/// app's own icon, what it is, where it stands, and Install. Ready is the
+/// Install button, building a quiet shimmer on its status, failed the
+/// reason in the failure colour. Install keeps its one line; the words
+/// beside it give way.
+final class BuildCard: UIView {
     var onInstall: ((AppBuild) -> Void)?
     private var build: AppBuild?
-    /// A plain card: the row's one control is Install.
-    private let card = UIView()
     private let icon = AppIconTile()
     private let titleLabel = Theme.label("", Theme.Text.body)
     private let detailLabel = ShimmerLabel()
@@ -1057,14 +1082,16 @@ final class BuildCell: TimelineCell {
         config.cornerStyle = .capsule
         config.baseBackgroundColor = Theme.accent
         config.baseForegroundColor = Theme.onAccent
+        config.titleLineBreakMode = .byClipping
         let button = UIButton(configuration: config)
         button.accessibilityIdentifier = "thread.build.install"
         return button
     }()
 
-    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
-        super.init(style: style, reuseIdentifier: reuseIdentifier)
+    override init(frame: CGRect) {
+        super.init(frame: frame)
         detailLabel.font = Theme.Text.line
+        titleLabel.lineBreakMode = .byTruncatingTail
         let padding = Theme.Space.bubble
         install.configuration?.contentInsets = NSDirectionalEdgeInsets(top: padding.top, leading: padding.left, bottom: padding.bottom, trailing: padding.right)
         install.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
@@ -1080,27 +1107,26 @@ final class BuildCell: TimelineCell {
         let text = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
         text.axis = .vertical
         text.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let row = UIStackView(arrangedSubviews: [icon, text, install])
         row.spacing = Theme.Space.glyphGap
         row.alignment = .center
-        card.translatesAutoresizingMaskIntoConstraints = false
         row.translatesAutoresizingMaskIntoConstraints = false
-        card.backgroundColor = Theme.receivedFill
-        card.layer.cornerRadius = Theme.Radius.large
-        card.layer.cornerCurve = .continuous
-        contentView.addSubview(card)
-        card.addSubview(row)
-        NSLayoutConstraint.activate(pinGap(card) + [
-            card.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: Theme.Space.margin),
-            card.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -Theme.Space.margin),
-            row.topAnchor.constraint(equalTo: card.topAnchor, constant: Theme.Space.card.top),
-            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -Theme.Space.card.bottom),
-            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Theme.Space.card.left),
-            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Theme.Space.card.right),
+        backgroundColor = Theme.receivedFill
+        layer.cornerRadius = Theme.Radius.large
+        layer.cornerCurve = .continuous
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: topAnchor, constant: Theme.Space.card.top),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Space.card.bottom),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Space.card.left),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Space.card.right),
             icon.widthAnchor.constraint(equalToConstant: Theme.Space.appIcon), icon.heightAnchor.constraint(equalToConstant: Theme.Space.appIcon)
         ])
-        accessibilityIdentifier = "thread.build"
     }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
 
     func configure(_ build: AppBuild, installing: Bool, icons: BuildIcons?) {
         self.build = build
@@ -1117,7 +1143,6 @@ final class BuildCell: TimelineCell {
         install.isHidden = !build.canInstall
         install.isEnabled = !installing
         install.configuration?.showsActivityIndicator = installing
-        isAccessibilityElement = false
     }
 }
 

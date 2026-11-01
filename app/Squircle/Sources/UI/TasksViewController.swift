@@ -559,6 +559,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         }
         page.onStatus = { [weak self] status in self?.task(id).map { self?.set($0, status) } }
         page.onInstall = { [weak self] in self?.task(id).map { self?.install($0) } }
+        page.icons = model.buildIcons
         page.onOutline = { [weak self] in
             guard let self else { return }
             Theme.selectionHaptic()
@@ -721,7 +722,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         let archived = { (owner: AppTask) in owner.threads.filter { $0.state == "missing" } }
         var seen = Set<String>()
         return .init(title: task.name, said: task.named ? task.ask : nil, status: task.status, note: task.note, shipped: shipped,
-                     install: build.map { _ in installing == task.id ? "Opening…" : "Install" },
+                     build: build, installing: installing == task.id,
                      position: index.map { "\($0 + 1) of \(order.count)" } ?? "",
                      threads: own,
                      earlier: (archived(task) + task.subtasks.flatMap(archived)).filter { seen.insert($0.id).inserted }.map { $0.title ?? "Thread" },
@@ -1269,6 +1270,7 @@ private final class TaskCell: UITableViewCell {
         config.cornerStyle = .capsule
         config.baseBackgroundColor = Theme.accent
         config.baseForegroundColor = Theme.onAccent
+        config.titleLineBreakMode = .byClipping
         config.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.tight, leading: Theme.Space.rowPad,
                                                        bottom: Theme.Space.tight, trailing: Theme.Space.rowPad)
         config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
@@ -1669,7 +1671,9 @@ final class WorkItemPage: UIView {
         let status: AppTask.Status
         let note: String
         let shipped: String?
-        let install: String?
+        /// Its newest linked build, as the chat's build card.
+        let build: AppBuild?
+        let installing: Bool
         /// Where it is among the pages, "3 of 24".
         let position: String
         /// Its own live threads; sub-tasks carry theirs.
@@ -1692,6 +1696,7 @@ final class WorkItemPage: UIView {
     var onTick: ((String) -> Void)?
     var onStatus: ((AppTask.Status) -> Void)?
     var onInstall: (() -> Void)?
+    var icons: BuildIcons?
     var onOutline: (() -> Void)?
     var onMedia: ((Picture, UIButton) -> Void)?
     var loadThumbnail: ((Picture) async -> UIImage?)?
@@ -1709,7 +1714,7 @@ final class WorkItemPage: UIView {
     private let ask = Theme.label("", Theme.Text.title, lines: 0)
     private let said = Theme.label("", Theme.Text.body, color: .secondaryLabel, lines: 0)
     private let note = Theme.label("", Theme.Text.line, color: .secondaryLabel, lines: 0)
-    private let install = UIButton(configuration: .filled())
+    private let card = BuildCard()
     private let shipped = Theme.label("", Theme.Text.line, color: .secondaryLabel)
     private let questions = UIStackView()
     private let crew = UIStackView()
@@ -1750,22 +1755,10 @@ final class WorkItemPage: UIView {
         status.contentHorizontalAlignment = .leading
         status.accessibilityIdentifier = "task.status"
 
-        var fill = UIButton.Configuration.filled()
-        fill.cornerStyle = .capsule
-        fill.baseBackgroundColor = Theme.accent
-        fill.baseForegroundColor = Theme.onAccent
-        fill.contentInsets = NSDirectionalEdgeInsets(top: Theme.Space.row, leading: Theme.Space.group,
-                                                     bottom: Theme.Space.row, trailing: Theme.Space.group)
-        fill.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var attributes = attributes
-            attributes.font = Theme.Text.lineStrong
-            return attributes
-        }
-        install.configuration = fill
-        install.addAction(UIAction { [weak self] _ in self?.onInstall?() }, for: .touchUpInside)
-        let installRow = UIStackView(arrangedSubviews: [install, shipped, UIView()])
-        installRow.spacing = Theme.Space.rowPad
-        installRow.alignment = .center
+        card.onInstall = { [weak self] _ in self?.onInstall?() }
+        let installRow = UIStackView(arrangedSubviews: [card, shipped])
+        installRow.axis = .vertical
+        installRow.spacing = Theme.Space.row
 
         crew.axis = .vertical
         crew.spacing = 0
@@ -1913,11 +1906,11 @@ final class WorkItemPage: UIView {
         outline = content
         note.text = content.note
         note.isHidden = content.note.isEmpty
-        install.configuration?.title = content.install
-        install.isHidden = content.install == nil
+        if let build = content.build { card.configure(build, installing: content.installing, icons: icons) }
+        card.isHidden = content.build == nil
         shipped.text = content.shipped
         shipped.isHidden = content.shipped == nil
-        install.superview?.isHidden = install.isHidden && shipped.isHidden
+        card.superview?.isHidden = card.isHidden && shipped.isHidden
 
         if content.asks != drawn?.asks {
             questions.arrangedSubviews.forEach { $0.removeFromSuperview() }
