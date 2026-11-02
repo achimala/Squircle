@@ -350,9 +350,11 @@ sheet (under its task) and on Home (`WaitingItemView`, shared):
 - **Who asks**, on one Caption line led by their jelly in the glyph slot:
   "LanguageApp · Once this all gets merged…" on Home and in Tasks, "Your
   agent asks" or the worker's name in the chat.
-- **The question** in Body, regular weight, in full in the chat and on a
-  task's page, and three lines in Tasks' Needs you (the compact card, with
-  its write-in row) and on Home (tap it to open it where it was asked).
+- **The question** in Body, regular weight, always in full: in the chat, on
+  a task's page, in Tasks' Needs you (the compact card, with its write-in
+  row) and on Home, whose deck grows to the tallest card (tap it to open it
+  where it was asked). User, 2026-11-02: a truncated question "makes it
+  useless".
 - **The answers** are a list, not a cloud of capsules. Each answer is a row:
   its mark in the glyph slot and its label in Body, wrapping as long as it
   needs to. A second line holds the option's description in Line.
@@ -374,6 +376,16 @@ sheet (under its task) and on Home (`WaitingItemView`, shared):
   then rows (Allow, Allow for this session, Decline).
 - The thread's own request card over the field (`RequestCard`) uses the same
   layout.
+- A Codex worker's async question (`responseMode: "message"`) ends its run as
+  it asks and is answered by the next one; it shows in the worker's chat
+  while T3 holds it pending, run going or not (fixed 2026-11-02: before, the
+  chat showed nothing and Home's tap landed on an empty bottom).
+
+  ![Before: the tap lands on nothing](img/async-question-before.png)
+  ![Home](img/async-question-home.png)
+  ![The worker's chat](img/async-question-chat.png)
+  ![Tasks' Needs you](img/async-question-tasks.png)
+  ![The task's page](img/async-question-page.png)
 
 ## Home and Waiting on you
 
