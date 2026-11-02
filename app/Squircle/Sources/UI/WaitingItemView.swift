@@ -153,7 +153,7 @@ final class WaitingAnswers {
 /// else. Several picks go with Send. What the question is about (pictures
 /// and clips, documents) sits between the question and the answers: a row
 /// of thumbnails, then a line per document. `compact` (Tasks' Needs you)
-/// and `deck` (Home): the question in three lines, a short strip of
+/// and `deck` (Home): the question still in full, a short strip of
 /// thumbnails, no documents and the command in three lines; the deck has no
 /// write-in row and its strip only clips.
 final class WaitingItemView: UIView {
@@ -203,7 +203,8 @@ final class WaitingItemView: UIView {
         self.size = size
         self.filled = filled
         super.init(frame: .zero)
-        title.numberOfLines = compact ? 3 : 0
+        // A question is useless cut short: in full everywhere (user, 2026-11-02).
+        title.numberOfLines = 0
         detail.numberOfLines = compact ? 3 : 6
         if filled {
             backgroundColor = Theme.receivedFill

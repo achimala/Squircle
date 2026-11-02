@@ -215,13 +215,16 @@ struct T3ThreadState: Codable {
     /// Whether T3 has the user message with this ID.
     func hasMessage(_ id: String) -> Bool { projection["messages"].array.contains { $0["id"].string == id } }
 
-    /// Requests T3 has open that the user can answer now: pending, answered
-    /// on the live provider session, in the run going now. A question or
-    /// approval blocks its run, so one from another run can never be
-    /// answered and never shows.
+    /// Requests T3 has open that the user can answer now. One answered on
+    /// the live provider session blocks its run, so it shows only in the
+    /// run going now; one from another run can never be answered. One
+    /// answered by message (Codex's async questions) outlives its run, which
+    /// ends as it asks: the answer starts the next run.
     var pendingRequests: [PendingRequest] {
-        guard let run = activeRunID else { return [] }
-        return openRequests.filter { $0.runID.map { $0 == run } ?? true }
+        let run = activeRunID
+        return openRequests.filter { request in
+            request.answeredByMessage || run.map { run in request.runID.map { $0 == run } ?? true } ?? false
+        }
     }
     /// Pending runtime requests with the turn item that says what they ask.
     private var openRequests: [PendingRequest] {
@@ -243,6 +246,8 @@ struct PendingRequest: Equatable {
     let item: JSONValue
     var isQuestion: Bool { item["type"].string == "user_input_request" }
     var runID: String? { item["runId"].string }
+    /// Answered with a message that starts a new run, not on the asking one.
+    var answeredByMessage: Bool { item["responseMode"].string == "message" }
     var questions: [JSONValue] { item["questions"].array }
     /// What an approval asks.
     var title: String { item["title"].string ?? "The agent needs your response" }

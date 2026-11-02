@@ -148,6 +148,13 @@ final class T3Tests: XCTestCase {
         XCTAssertEqual(state.pendingRequests.map(\.id), ["r3"])
         state.consume(event(2004, "runtime-request.updated", request("r3", "resolved")))
         XCTAssertTrue(state.pendingRequests.isEmpty)
+        // Codex's async question is answered by message: its run ends as it asks.
+        state.consume(event(2005, "runtime-request.updated", request("r4", "pending")))
+        var async = item("i4", request: "r4", run: "new")
+        async["responseMode"] = "message"
+        state.consume(event(2006, "turn-item.updated", async))
+        state.consume(event(2007, "run.updated", ["id": "new", "status": "completed"]))
+        XCTAssertEqual(state.pendingRequests.map(\.id), ["r4"])
     }
     /// Segments with their text as plain characters, for comparing.
     private func plain(_ text: String) -> [String] {
