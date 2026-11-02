@@ -1615,7 +1615,8 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
             let style: MessageCell.Style = isAgent ? .received : .answer
             (cell as? MessageCell)?.configure(message, style: style, rendered: rowText.message(message, style: style), expanded: true)
         case .note(let message):
-            (cell as? MessageCell)?.configure(message, style: .note, rendered: rowText.message(message, style: .note), expanded: expanded.contains(message.id))
+            // The agent's words to you, mid-turn or after: always in full.
+            (cell as? MessageCell)?.configure(message, style: .note, rendered: rowText.message(message, style: .note), expanded: true)
         case .thought(let message):
             (cell as? MessageCell)?.configure(message, style: .thought, rendered: rowText.message(message, style: .thought), expanded: expanded.contains(message.id))
         case .step(let message):
@@ -1841,7 +1842,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .agentMessage: return true
         case .action(let line): return opens(item) != nil || line.text?.isEmpty == false || line.step != nil
         case .step(let message): return !message.detail.isEmpty || message.step?.diff != nil
-        case .earlier, .summary, .note, .changes: return true
+        case .earlier, .summary, .changes: return true
         case .update: return opens(item) != nil
         default: return false
         }
@@ -1886,7 +1887,7 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .agentMessage(let message): return min(9, lines(message.content, per: 7.6)) * 20 + 40
         case .action: return 34
         case .answer(let message): return lines(message.content, per: 8.6) * 23 + 20
-        case .note(let message): return min(4, lines(message.content, per: 7.6)) * 20 + 12
+        case .note(let message): return lines(message.content, per: 7.6) * 20 + 12
         case .thought: return 52
         case .step, .earlier: return 36
         case .gallery: return GalleryCell.height + 20
@@ -1920,7 +1921,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         case .earlier(let turn, _): toggle(turn)
         case .summary(let summary): toggle(summary.turn)
         case .changes(let changes, _): showChanges(changes)
-        case .note(let message): toggle(message.id)
         case .update: if let id = opens(item) { onOpenThread?(id) }
         case .agentMessage(let message):
             // "From Dark mode" opens Dark mode; the message under it unfolds.
@@ -1941,12 +1941,6 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         let keepBottom = pinToBottom
         pinToBottom = false
         renderItems(animated: true)
-        // A note's fold isn't part of its item, so its row refreshes itself.
-        if case .note = itemsByID[id] {
-            var snapshot = dataSource.snapshot()
-            snapshot.reconfigureItems([id])
-            dataSource.apply(snapshot, animatingDifferences: true)
-        }
         pinToBottom = keepBottom
     }
 

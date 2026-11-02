@@ -401,9 +401,9 @@ final class MessageCell: TimelineCell {
         // The text last, so it is laid out once, in its final container.
         let padding = Theme.Space.bubble
         text.update(\.textContainerInset, to: bubbled ? UIEdgeInsets(top: padding.top, left: 0, bottom: padding.bottom, right: 0) : .zero)
-        // Reasoning reads in full; long notes and agents' messages fold until tapped.
-        let folded = [.note, .action, .agent].contains(style) && !expanded
-        text.textContainer.update(\.maximumNumberOfLines, to: folded ? [.action: 2, .agent: 9][style] ?? 4 : 0)
+        // What the agent wrote reads in full; actions and other agents' messages fold until tapped.
+        let folded = [.action, .agent].contains(style) && !expanded
+        text.textContainer.update(\.maximumNumberOfLines, to: folded ? style == .action ? 2 : 9 : 0)
         text.textContainer.update(\.lineBreakMode, to: folded ? .byTruncatingTail : .byWordWrapping)
         text.attributedText = rendered
         // Selecting text matters for answers; quieter rows are tapped to unfold.
