@@ -242,14 +242,21 @@ impl Agents {
         )
     }
 
-    /// The command that asks Claude to compact the agent's context, keeping
-    /// what the agent needs, with its identity; `line` is what the
-    /// conversation shows for it.
+    /// The command that asks the agent's provider to compact its context,
+    /// with its identity; `line` is what the conversation shows for it.
+    /// Claude's `/compact` takes what to keep; T3 hands Codex its own
+    /// compaction only for a bare `/compact` (anything more is an ordinary
+    /// message).
     pub(super) fn compact_command(&self, thread: &str, line: &str, tokens: u64) -> Result<Command> {
-        self.thread(thread)
+        let row = self
+            .thread(thread)
             .context("The app agent's thread is gone")?;
-        let text = "/compact Keep: the user's open tasks and where each stands, decisions and preferences they stated, \
-            workers still running or waiting and their branches, and the last few exchanges. Drop tool output and finished detail.";
+        let text = if Provider::of(&row["modelSelection"]) == Some(Provider::Codex) {
+            "/compact"
+        } else {
+            "/compact Keep: the user's open tasks and where each stands, decisions and preferences they stated, \
+            workers still running or waiting and their branches, and the last few exchanges. Drop tool output and finished detail."
+        };
         let record = Note::Upkeep.labeled(line, json!({"action": "compact", "tokens": tokens}));
         Ok(Command::new(
             &identity(),

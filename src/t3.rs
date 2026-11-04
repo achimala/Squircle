@@ -48,6 +48,25 @@ fn http_client() -> Result<reqwest::Client> {
 /// Exchanges a one-time T3 pairing token for a session scoped to orchestration
 /// read/operate, and saves it privately.
 pub async fn pair(root: &Path, url: &str, pairing_token: &str) -> Result<T3Config> {
+    let config = exchange(
+        url,
+        pairing_token,
+        "orchestration:read orchestration:operate",
+        "Squircle service",
+    )
+    .await?;
+    atomic_json(&root.join("t3.json"), &config)?;
+    Ok(config)
+}
+
+/// Exchanges a one-time T3 pairing token for a session with `scope`, kept
+/// by the caller only as long as it needs it.
+pub async fn exchange(
+    url: &str,
+    pairing_token: &str,
+    scope: &str,
+    label: &str,
+) -> Result<T3Config> {
     let url = crate::origin::credential_origin(url, "T3 URL")?;
     let response = http_client()?
         .post(format!("{url}/oauth/token"))
@@ -65,8 +84,8 @@ pub async fn pair(root: &Path, url: &str, pairing_token: &str) -> Result<T3Confi
                 "requested_token_type",
                 "urn:ietf:params:oauth:token-type:access_token",
             ),
-            ("scope", "orchestration:read orchestration:operate"),
-            ("client_label", "Squircle service"),
+            ("scope", scope),
+            ("client_label", label),
             ("client_device_type", "desktop"),
         ])
         .send()
@@ -88,7 +107,6 @@ pub async fn pair(root: &Path, url: &str, pairing_token: &str) -> Result<T3Confi
         token: token.to_string(),
         expires_at: body["expires_in"].as_u64().map(|s| crate::model::now() + s),
     };
-    atomic_json(&root.join("t3.json"), &config)?;
     Ok(config)
 }
 

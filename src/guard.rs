@@ -3,9 +3,11 @@
 //! (`codex exec`, `claude -p`, subagents, workflows). The one exception is
 //! the plugin's history subagent, a cheap read-only lookup of the app's
 //! past: the agent may start it freely, and inside it only reading tools
-//! and read-only commands run. Only the app agent's Claude instance carries
-//! this hook; workers are unaffected. Its questions to the user go through
-//! the tracker (`task ask`), never Claude's own question tool.
+//! and read-only commands run. Only the app agent's instances carry this
+//! hook (Claude's plugin, Codex's launch arguments); workers are unaffected.
+//! Its questions to the user go through the tracker (`task ask`), never the
+//! provider's own question tool. Codex sends the same hook event, with its
+//! own tool names (`request_user_input`, `spawn_agent`); its shell is `Bash`.
 
 use serde_json::Value;
 
@@ -21,7 +23,7 @@ pub fn check(event: &Value, cli: &str) -> Option<String> {
     if event["agent_id"].is_string() && event["agent_type"] == HISTORY_AGENT {
         return history_tool(tool, input, cli);
     }
-    if tool == "AskUserQuestion" {
+    if matches!(tool, "AskUserQuestion" | "request_user_input") {
         return Some(format!(
             "Questions to the user go in the tracker, where they wait on the phone with everything else waiting on the user: \
              `{cli} task ask ITEM --thread <your thread id> --question \"...\" [--option \"...\"]... [--file PATH]...` (attach the screenshot or clip it is about), then end your turn; \
@@ -36,7 +38,7 @@ pub fn check(event: &Value, cli: &str) -> Option<String> {
         {
             return None;
         }
-        "Agent" | "Task" => "Subagents",
+        "Agent" | "Task" | "spawn_agent" | "spawn_agents_on_csv" => "Subagents",
         "Workflow" => "Workflows",
         _ => {
             let runs = runs_model(input["command"].as_str()?)?;

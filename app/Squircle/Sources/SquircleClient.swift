@@ -141,10 +141,12 @@ final class SquircleClient {
         try await required("/v1/agents") { try AgentDirectory.decode(try await perform(request(["v1", "agents"]), revalidate: true)) }
     }
 
-    /// Restarts an app agent's session on its thread.
-    func restartAgent(projectID: String) async throws {
-        var request = try request(["v1", "agents", "restart"], method: "POST",
-                                  body: JSONEncoder().encode(["project_id": projectID]))
+    /// Restarts an app agent's session on its thread, on `provider` (`claude` or `codex`) and `model` if given.
+    func restartAgent(projectID: String, provider: String? = nil, model: String? = nil) async throws {
+        var body = ["project_id": projectID]
+        body["provider"] = provider
+        body["model"] = model
+        var request = try request(["v1", "agents", "restart"], method: "POST", body: JSONEncoder().encode(body))
         request.timeoutInterval = 60
         try await send(request)
     }

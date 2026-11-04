@@ -16,10 +16,18 @@ pub(super) enum T3Command {
 
 #[derive(Subcommand)]
 pub(super) enum AgentCommand {
-    /// Install the app-agent plugin and add T3's "Squircle agent" Claude instance (uses your existing Claude login).
+    /// Install the app-agent plugin and add T3's Squircle agent instances: Claude with the plugin, Codex with Squircle's hooks (your existing Claude and Codex logins).
+    #[command(
+        after_help = "Changing T3's providers needs a one-time T3 pairing token on stdin (the service's own session only operates threads): t3 pair --scope orchestration:read --scope providers:manage --ttl 5m, copy its token, then pbpaste | squircle agent setup. The Codex instance's hooks (the per-turn note and the guard) load only for it. Codex runs no hook until it is approved, so setup records the approval of exactly these hooks in your Codex settings through Codex itself; --remove takes it out again. Run setup again after a Codex update if a Codex agent stops getting its note."
+    )]
     Setup {
-        #[arg(long, help = "Remove the T3 instance instead")]
+        #[arg(
+            long,
+            help = "Remove the T3 instances (and the Codex hooks' approval) instead"
+        )]
         remove: bool,
+        #[arg(long, value_parser = ["claude", "codex"], help = "Only this provider's instance; default: both")]
+        provider: Option<String>,
     },
     /// Start (or find) the app agent for a T3 project, optionally with a first message.
     Start {
@@ -27,9 +35,11 @@ pub(super) enum AgentCommand {
         project: String,
         #[arg(long)]
         message: Option<String>,
+        #[arg(long, value_parser = ["claude", "codex"], help = "Provider a new agent runs on; default: claude")]
+        provider: Option<String>,
         #[arg(
             long,
-            help = "Claude model slug; default: the project's default or claude-opus-5-5"
+            help = "Model slug; default: the project's default on that provider, else claude-opus-5-5 (Claude) or Codex's default"
         )]
         model: Option<String>,
         #[arg(long, value_parser = ["approval-required", "auto-accept-edits", "auto", "full-access"],
@@ -38,15 +48,22 @@ pub(super) enum AgentCommand {
     },
     /// List app agents and the service's T3 connection.
     List,
-    /// Relaunch the agent's Claude session on the same thread: its next message starts with the current instructions and the same history.
+    /// Relaunch the agent's session on the same thread, optionally on another provider or model: its next message starts with the current instructions and the same conversation.
     #[command(
-        after_help = "Happens now if the agent is between turns, otherwise when its current turn ends (an agent asking to restart itself just ends its turn)."
+        after_help = "Happens now if the agent is between turns, otherwise when its current turn ends (an agent asking to restart itself just ends its turn). With --provider and/or --model, T3 moves the thread there (provider.switch): Claude to Codex hands Codex the recent conversation; switching back resumes Claude's own session. Example: squircle agent restart --thread ID --provider codex --model gpt-6.1-sol"
     )]
     Restart {
         #[command(flatten)]
         target: AgentTarget,
+        #[arg(long, value_parser = ["claude", "codex"], help = "Move the agent to this provider's Squircle instance")]
+        provider: Option<String>,
+        #[arg(
+            long,
+            help = "Model slug on that provider; default: the project's default there, else the provider's"
+        )]
+        model: Option<String>,
     },
-    /// Compact the agent's context now, on its one thread (Claude's /compact, keeping tasks, decisions, running work and recent exchanges).
+    /// Compact the agent's context now, on its one thread (the provider's /compact, keeping tasks, decisions, running work and recent exchanges).
     #[command(
         after_help = "Refused while the agent's turn runs. The agent keeps its thread for good; this is its only context management. The service also compacts an agent by itself when it sits idle with a large context; see docs/cli.md (agent upkeep)."
     )]
@@ -58,7 +75,7 @@ pub(super) enum AgentCommand {
     Context {
         #[arg(
             long,
-            help = "Read a Claude Code hook event on stdin and answer in hook JSON"
+            help = "Read a Claude Code or Codex hook event on stdin and answer in hook JSON"
         )]
         hook: bool,
         #[arg(long, help = "Worktree directory; default: current directory")]
@@ -175,13 +192,23 @@ pub(super) async fn t3(cli: &Cli, command: &T3Command) -> Result<Option<Value>> 
 
 pub(super) async fn agent(cli: &Cli, command: &AgentCommand) -> Result<Option<Value>> {
     let data = match command {
-            AgentCommand::Setup { remove } => success(squircle::agents::setup(&root(cli)?, &cli.server, *remove).await?),
-            AgentCommand::Start { project, message, model, runtime_mode } => {
-                post(cli, "/v1/agents", json!({"project_id":project,"message":message,"model":model,"runtime_mode":runtime_mode})).await?
+            AgentCommand::Setup { remove, provider } => {
+                let mut token = String::new();
+                if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut token)?;
+                }
+                if token.trim().is_empty() {
+                    bail!("Pipe a one-time T3 pairing token on stdin, with the scopes setup needs: \
+                           t3 pair --scope orchestration:read --scope providers:manage --ttl 5m, then paste its token: pbpaste | squircle agent setup");
+                }
+                success(squircle::agents::setup(&root(cli)?, &cli.server, *remove, provider.as_deref(), &token).await?)
+            }
+            AgentCommand::Start { project, message, provider, model, runtime_mode } => {
+                post(cli, "/v1/agents", json!({"project_id":project,"message":message,"provider":provider,"model":model,"runtime_mode":runtime_mode})).await?
             }
             AgentCommand::List => get(cli, "/v1/agents").await?,
-            AgentCommand::Restart { target } => {
-                post(cli, "/v1/agents/restart", json!({"project_id":target.project,"thread_id":target.thread})).await?
+            AgentCommand::Restart { target, provider, model } => {
+                post(cli, "/v1/agents/restart", json!({"project_id":target.project,"thread_id":target.thread,"provider":provider,"model":model})).await?
             }
             AgentCommand::Compact { target } => {
                 post(cli, "/v1/agents/compact", json!({"project_id":target.project,"thread_id":target.thread})).await?
@@ -196,7 +223,10 @@ pub(super) async fn agent(cli: &Cli, command: &AgentCommand) -> Result<Option<Va
                 let cwd = cwd.clone()
                     .or_else(|| event["cwd"].as_str().map(PathBuf::from))
                     .map_or_else(std::env::current_dir, Ok)?;
-                let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("cwd", &cwd.display().to_string()).finish();
+                let name = event["hook_event_name"].as_str().unwrap_or("UserPromptSubmit");
+                let session = (name == "SessionStart").then(|| event["source"].as_str()).flatten();
+                let query = url::form_urlencoded::Serializer::new(String::new()).append_pair("cwd", &cwd.display().to_string())
+                    .extend_pairs(session.map(|s| ("session", s))).finish();
                 // A hook must never fail the agent's turn.
                 let context = match get(cli, &format!("/v1/agents/context?{query}")).await {
                     Ok(value) if value["ok"] == true => value["data"]["context"].as_str().unwrap_or("").to_string(),
@@ -205,7 +235,6 @@ pub(super) async fn agent(cli: &Cli, command: &AgentCommand) -> Result<Option<Va
                 if !*hook {
                     success(json!({"context":context}))
                 } else {
-                    let name = event["hook_event_name"].as_str().unwrap_or("UserPromptSubmit");
                     println!("{}", json!({"hookSpecificOutput":{"hookEventName":name,"additionalContext":context}}));
                     return Ok(None);
                 }

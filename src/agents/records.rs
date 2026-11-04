@@ -21,7 +21,9 @@ impl Lifecycle {
     /// Records a restart attempt's outcome; returns the backoff before the
     /// next attempt after a failure.
     pub(super) fn attempted(&mut self, failure: Option<String>) -> Option<Duration> {
-        let (Lifecycle::RestartQueued { error, failures }
+        let (Lifecycle::RestartQueued {
+            error, failures, ..
+        }
         | Lifecycle::Restarting {
             error, failures, ..
         }) = self

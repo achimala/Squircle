@@ -230,7 +230,12 @@ final class SquircleModel {
     /// What screens currently need refreshed.
     private var leases: [UUID: RefreshNeed] = [:]
     private static let preferredModelKey = "squircle.t3.preferredModel"
+    /// Squircle's own T3 instances an app agent runs on: Claude (new agents) and Codex.
     static let agentInstance = "squircle"
+    static let codexAgentInstance = "squircle-codex"
+    static func isAgentInstance(_ instance: String?) -> Bool {
+        instance == agentInstance || instance == codexAgentInstance
+    }
 
     /// Once a thread has an agent session, T3 cannot migrate it to another provider.
     var availableModelProviders: [JSONValue] {
@@ -240,7 +245,7 @@ final class SquircleModel {
             // threads never do.
             let agentProviders = providers.filter { $0["instanceId"].string == Self.agentInstance }
             if open.isAgentDraft { return agentProviders.isEmpty ? providers : agentProviders }
-            return providers.filter { $0["instanceId"].string != Self.agentInstance }
+            return providers.filter { !Self.isAgentInstance($0["instanceId"].string) }
         }
         let instance = state.thread["providerInstanceId"].string
             ?? state.thread["modelSelection"]["instanceId"].string
@@ -683,6 +688,25 @@ final class SquircleModel {
             await refreshMetadata(fresh: true)
         } catch { self.error = error.localizedDescription }
     }
+    /// The open agent thread's provider (Claude or Codex), if it runs on one of Squircle's instances.
+    var agentProvider: AgentProvider? {
+        AgentProvider(instance: state.thread["modelSelection"]["instanceId"].string)
+    }
+    /// The other provider's Squircle instance, if T3 has it ready, for Switch to….
+    func switchTarget(from current: AgentProvider) -> (provider: AgentProvider, menu: [(title: String, choices: [(selection: JSONValue, name: String)])])? {
+        let other = current.other
+        let ready = providers.filter { $0["instanceId"].string == other.instance }
+        guard !ready.isEmpty else { return nil }
+        return (other, ModelNames.menu(ready))
+    }
+    /// Restarts the app's agent on `provider` with `model`, on the same thread; the Mac does it once the agent's turn ends.
+    func switchAgent(_ project: AppProject, to provider: AgentProvider, model: String) async {
+        guard let client else { return }
+        do {
+            try await client.restartAgent(projectID: project.id, provider: provider.rawValue, model: model)
+            await refreshMetadata(fresh: true)
+        } catch { self.error = error.localizedDescription }
+    }
     func builds(for project: AppProject) -> [AppBuild] { T3AppCatalog.builds(builds, of: project.id, agent: agents[project.id], shell: shell) }
     func metadata(for project: AppProject) -> AppMetadata? { appMetadata.first { $0.id == project.metadataID } }
 
@@ -826,7 +850,7 @@ final class SquircleModel {
     func chooseModel(_ selection: JSONValue) {
         guard let open, !isRunning, delivery.entry(for: open) == nil, isValidModel(selection) else { return }
         choices[open, default: LocalChoice()].model = selection
-        if selection["instanceId"].string != Self.agentInstance, let data = try? JSONEncoder().encode(selection) {
+        if !Self.isAgentInstance(selection["instanceId"].string), let data = try? JSONEncoder().encode(selection) {
             preferences.set(data, forKey: Self.preferredModelKey); preferredModel = selection
         }
     }
@@ -1168,7 +1192,7 @@ final class SquircleModel {
         // The app's agent gets its instructions from the Mac; other threads get Squircle's once.
         let messages = id.threadID == nil ? [] : state.projection["messages"].array
         let agentThread = id.isAgentDraft || id.threadID.map { agents[project.id] == $0 } == true
-            || (id.threadID != nil && state.thread["modelSelection"]["instanceId"].string == Self.agentInstance)
+            || (id.threadID != nil && Self.isAgentInstance(state.thread["modelSelection"]["instanceId"].string))
         var context = ""
         let instructionsThread: String? = switch destination { case .thread(let t), .newThread(let t, _): t; case .agent: nil }
         if !agentThread, let thread = instructionsThread {

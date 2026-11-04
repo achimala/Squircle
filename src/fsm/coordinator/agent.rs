@@ -1,6 +1,8 @@
 //! M14, an app agent's creation and restart (docs/fsm-architecture.md). The
 //! agent keeps one T3 thread for good; a restart relaunches its session on
-//! that thread. Every step that changes T3 is saved, with the exact identity
+//! that thread, optionally on another provider or model (T3's
+//! `provider.switch` or `thread.model-selection.set`, which end the old
+//! session themselves). Every step that changes T3 is saved, with the exact identity
 //! of the command it sends, before that command goes out; a step whose
 //! answer is lost is sent again under the same identity (T3 answers a known
 //! ID from its receipt), and a new identity is made only after T3 refused
@@ -23,6 +25,11 @@ use serde::{Deserialize, Serialize};
 fn is_zero(n: &u32) -> bool {
     *n == 0
 }
+
+/// A restart's switch: the T3 command body (`provider.switch` or
+/// `thread.model-selection.set`, with its thread and model selection) sent
+/// instead of a stop, decided when the restart was asked for.
+pub type Switch = serde_json::Value;
 
 /// Where an app agent is between creation, ordinary use and a restart.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -51,14 +58,19 @@ pub enum Lifecycle {
         error: Option<String>,
         #[serde(default, skip_serializing_if = "is_zero")]
         failures: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        switch: Option<Switch>,
     },
-    /// A restart whose stop is saved and sent, or about to be.
+    /// A restart whose stop (or switch, under the same identity) is saved
+    /// and sent, or about to be.
     Restarting {
         stop: Identity,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         #[serde(default, skip_serializing_if = "is_zero")]
         failures: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        switch: Option<Switch>,
     },
 }
 
@@ -70,8 +82,9 @@ pub enum Event {
         exists: Observed<bool>,
         create: Command,
     },
-    /// `agent restart`.
-    Restart,
+    /// `agent restart`, with the switch to another provider or model if
+    /// one was asked for.
+    Restart { switch: Option<Switch> },
     /// What T3 shows of the agent's thread now.
     Look {
         agent: Observed<Option<ThreadObservation>>,
@@ -89,6 +102,8 @@ pub enum Effect {
     SendCreate(Command),
     /// Stop the agent thread's session under this identity.
     Stop(Identity),
+    /// Send this switch under this identity.
+    Switch(Identity, Switch),
     /// A turn may be running: the restart waits for it to end.
     Deferred,
     /// The operation is finished.
@@ -202,24 +217,41 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
         ),
 
         // A request. One already queued stays as it is.
-        (Ready { .. }, Event::Restart) => effects(
+        (Ready { .. }, Event::Restart { switch }) => effects(
             RestartQueued {
                 error: None,
                 failures: 0,
+                switch,
             },
             vec![Effect::Commit],
         ),
-        (state @ RestartQueued { .. }, Event::Restart) => {
+        // A queued restart takes the newest switch asked for.
+        (
+            RestartQueued {
+                error, failures, ..
+            },
+            Event::Restart {
+                switch: Some(switch),
+            },
+        ) => effects(
+            RestartQueued {
+                error,
+                failures,
+                switch: Some(switch),
+            },
+            vec![Effect::Commit],
+        ),
+        (state @ RestartQueued { .. }, Event::Restart { switch: None }) => {
             Reduction::same(state, Disposition::Duplicate)
         }
-        (state @ Creating { .. }, Event::Restart) => Reduction {
+        (state @ Creating { .. }, Event::Restart { .. }) => Reduction {
             state,
             effects: vec![Effect::Failed(
                 "The app's agent is still being created".into(),
             )],
             disposition: Disposition::NotApplicable,
         },
-        (state @ Restarting { .. }, Event::Restart) => Reduction {
+        (state @ Restarting { .. }, Event::Restart { .. }) => Reduction {
             state,
             effects: vec![Effect::Failed(
                 "A restart of this agent is already under way".into(),
@@ -236,20 +268,40 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
         (state @ RestartQueued { .. }, Event::Look { agent, next }) => match now(&agent) {
             Err(why) => fail(state, why),
             Ok(o) if o.busy() => report(state, Effect::Deferred),
-            Ok(o) if o.stopped() => {
+            // A switch is sent whether or not a session is attached.
+            Ok(o)
+                if o.stopped()
+                    && !matches!(
+                        state,
+                        RestartQueued {
+                            switch: Some(_),
+                            ..
+                        }
+                    ) =>
+            {
                 effects(Ready { refresh: true }, vec![Effect::Commit, Effect::Done])
             }
             Ok(_) => {
-                let RestartQueued { error, failures } = state else {
+                let RestartQueued {
+                    error,
+                    failures,
+                    switch,
+                } = state
+                else {
                     unreachable!()
+                };
+                let send = match &switch {
+                    Some(body) => Effect::Switch(next.clone(), body.clone()),
+                    None => Effect::Stop(next.clone()),
                 };
                 effects(
                     Restarting {
-                        stop: next.clone(),
+                        stop: next,
                         error,
                         failures,
+                        switch,
                     },
-                    vec![Effect::Commit, Effect::Stop(next)],
+                    vec![Effect::Commit, send],
                 )
             }
         },
@@ -257,6 +309,28 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
             Err(why) => fail(state, why),
             // The stop may never have arrived; a newer turn is never stopped.
             Ok(o) if o.busy() => report(state, Effect::Deferred),
+            // A switch is sent again under its identity: T3 answers one it
+            // already took from its receipt.
+            Ok(_)
+                if matches!(
+                    state,
+                    Restarting {
+                        switch: Some(_),
+                        ..
+                    }
+                ) =>
+            {
+                let Restarting {
+                    stop,
+                    switch: Some(body),
+                    ..
+                } = &state
+                else {
+                    unreachable!()
+                };
+                let send = Effect::Switch(stop.clone(), body.clone());
+                report(state, send)
+            }
             Ok(o) if o.stopped() => {
                 effects(Ready { refresh: true }, vec![Effect::Commit, Effect::Done])
             }
@@ -275,6 +349,19 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
                 ..
             },
         ) => effects(Ready { refresh: true }, vec![Effect::Commit, Effect::Done]),
+        // A refused switch is dropped, not retried: the agent stays where it is.
+        (
+            Restarting {
+                switch: Some(_), ..
+            },
+            Event::Sent {
+                outcome: Dispatched::Refused(detail),
+                ..
+            },
+        ) => effects(
+            Ready { refresh: false },
+            vec![Effect::Commit, Effect::Failed(detail)],
+        ),
         (
             Restarting {
                 error, failures, ..
@@ -284,7 +371,11 @@ pub fn reduce(state: Lifecycle, event: Event) -> Reduction<Lifecycle, Effect> {
                 ..
             },
         ) => effects(
-            RestartQueued { error, failures },
+            RestartQueued {
+                error,
+                failures,
+                switch: None,
+            },
             vec![Effect::Commit, Effect::Failed(detail)],
         ),
         (

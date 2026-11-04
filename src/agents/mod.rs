@@ -1,5 +1,6 @@
-//! One agent per app. The app agent is an ordinary T3 thread on Squircle's
-//! own Claude instance (see `setup`), in the project's folder. It can run
+//! One agent per app. The app agent is an ordinary T3 thread on one of
+//! Squircle's own instances (Claude or Codex, see `setup`), in the project's
+//! folder; `agent restart --provider` moves it between them on its thread. It can run
 //! ordinary T3 worker threads, each in its own worktree. Squircle adds only
 //! what T3 lacks: who owns which worker, the agent's thread ID and workers at
 //! the start of each turn, and a wake-up when a worker finishes or needs
@@ -45,6 +46,7 @@ use state::*;
 mod worktrees;
 use worktrees::*;
 mod builds;
+mod codex;
 mod demands;
 mod lifecycle;
 mod messages;
@@ -57,8 +59,15 @@ pub use waiting::*;
 mod workers;
 pub use plugin::*;
 
-/// The T3 provider instance `squircle agent setup` creates.
+/// The T3 provider instances `squircle agent setup` creates: Claude with
+/// the app-agent plugin, and Codex with Squircle's hooks.
 pub const INSTANCE: &str = "squircle";
+pub const CODEX_INSTANCE: &str = "squircle-codex";
+
+/// Whether a T3 provider instance is one of Squircle's app-agent instances.
+pub fn agent_instance(instance: &str) -> bool {
+    instance == INSTANCE || instance == CODEX_INSTANCE
+}
 
 const DEFAULT_MODEL: &str = "claude-opus-5-5";
 

@@ -236,6 +236,7 @@ impl Peer for Fake {
             match tag {
                 "server.getConfig" => Ok(
                     json!({"providers": [{"instanceId": INSTANCE, "status": "ready"},
+                {"instanceId": CODEX_INSTANCE, "driver": "codex", "status": "ready", "models": [{"slug": "sol", "isDefault": true}]},
                 {"instanceId": "claudeAgent", "driver": "claudeAgent", "status": "ready", "models": [{"slug": "m"}]}]}),
                 ),
                 "orchestration.getThreadProjection" => {
@@ -392,8 +393,8 @@ async fn first_use_creates_one_agent_in_the_chosen_mode() {
     // and the thread was created.
     *fake.held.lock().unwrap() = Some(vec![]);
     let both = futures_util::future::join(
-        agents.ensure("p", None, None, Some("approval-required")),
-        agents.ensure("p", None, None, Some("approval-required")),
+        agents.ensure("p", None, None, None, Some("approval-required")),
+        agents.ensure("p", None, None, None, Some("approval-required")),
     );
     tokio::pin!(both);
     tokio::select! {
@@ -406,7 +407,12 @@ async fn first_use_creates_one_agent_in_the_chosen_mode() {
     let created = fake.sent("thread.create");
     assert_eq!(created.len(), 1);
     assert_eq!(created[0]["runtimeMode"], "approval-required");
-    assert!(agents.ensure("p", None, None, Some("ask")).await.is_err());
+    assert!(
+        agents
+            .ensure("p", None, None, None, Some("ask"))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -588,6 +594,7 @@ async fn a_restart_never_stops_a_newer_turn() {
     let queued = Lifecycle::RestartQueued {
         error: Some("earlier failure".into()),
         failures: 1,
+        switch: None,
     };
     registered(&agents, move |r| {
         r.agents.insert(
@@ -616,6 +623,42 @@ async fn a_restart_never_stops_a_newer_turn() {
     assert_eq!(agents.perform("p").await.unwrap()["when"], "now");
     // Idle with a live session: the restart detaches it.
     assert_eq!(fake.sent("provider-session.detach").len(), 1);
+    assert_eq!(
+        agents.list()[0].lifecycle,
+        Lifecycle::Ready { refresh: true }
+    );
+}
+
+#[tokio::test]
+async fn a_switch_waits_for_the_turn_and_replaces_the_stop() {
+    let temp = tempfile::tempdir().unwrap();
+    let idle = row("agent", "p", "full-access", "t1", "completed", false);
+    let busy = row("agent", "p", "full-access", "t1", "running", false);
+    let (agents, fake) = fake_agents(temp.path(), temp.path(), vec![busy]).await;
+    registered(&agents, |r| {
+        r.agents.insert("p".into(), agent("agent"));
+    })
+    .await;
+    let asked = agents
+        .restart(Some("p"), None, Some("codex"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (&asked["action"], &asked["when"]),
+        (&json!("switch"), &json!("after-turn"))
+    );
+    assert!(fake.sent("provider.switch").is_empty());
+    let item = json!({"kind": "thread.updated", "location": "active", "thread": idle});
+    agents.consume_shell(&item).await;
+    assert_eq!(agents.perform("p").await.unwrap()["when"], "now");
+    let sent = fake.sent("provider.switch");
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0]["modelSelection"],
+        json!({"instanceId": CODEX_INSTANCE, "model": "sol"})
+    );
+    // T3's switch ends the old session itself.
+    assert!(fake.sent("provider-session.detach").is_empty());
     assert_eq!(
         agents.list()[0].lifecycle,
         Lifecycle::Ready { refresh: true }

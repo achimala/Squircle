@@ -403,7 +403,10 @@ impl Agents {
     /// needs it now: the user's messages not yet in the tracker, its
     /// questions waiting on the user, and its running workers and `builds`
     /// with the task each serves. The tracker itself is a `task list` away.
-    pub async fn context(&self, cwd: &Path, builds: &[LiveBuild]) -> String {
+    /// `session` is a SessionStart hook's source: a Codex agent gets its
+    /// full instructions at the start of a new or compacted session, since
+    /// Codex has no agent definition to carry them.
+    pub async fn context(&self, cwd: &Path, builds: &[LiveBuild], session: Option<&str>) -> String {
         let candidates: Vec<(Agent, String, PathBuf)> = {
             let View {
                 registry, shell, ..
@@ -439,9 +442,16 @@ impl Agents {
                 );
             }
         };
+        let codex = self
+            .thread(&agent.thread_id)
+            .and_then(|row| Provider::of(&row["modelSelection"]))
+            == Some(Provider::Codex);
+        let refresh = agent.lifecycle == (Lifecycle::Ready { refresh: true });
+        let starting = codex && matches!(session, Some("startup" | "clear" | "compact"));
         // Claude keeps a resumed session's first system prompt; a restarted
-        // agent gets the current one here, once.
-        let refreshed = if agent.lifecycle == (Lifecycle::Ready { refresh: true }) {
+        // agent gets the current one here, once. Codex gets it here at the
+        // start of every new or compacted session.
+        let refreshed = if refresh || starting {
             let project = agent.project_id.clone();
             let cleared = self
                 .change_if(move |registry| {
@@ -457,9 +467,27 @@ impl Agents {
             if let Err(error) = cleared {
                 eprintln!("Agent state not saved: {error:#}");
             }
-            std::fs::read_to_string(self.root.join("plugin/squircle/agents/app-agent.md")).ok()
-                .and_then(|t| t.splitn(3, "---\n").nth(2).map(|body| format!(
-                    "\n[squircle] You were restarted. Your instructions are now the following; they replace any earlier version:\n{}", body.trim())))
+            let opening = if refresh {
+                "You were restarted. Your instructions are now the following; they replace any earlier version"
+            } else {
+                "Your instructions as this app's agent; they replace any earlier version"
+            };
+            let codex_note = if codex {
+                format!(
+                    "\n\nYou run on Codex, with no subagents: wherever these instructions mention the `squircle:history` subagent, \
+                     look the past up yourself with `{cli} history search WORDS` and `{cli} history show REF`.",
+                    cli = self.cli()
+                )
+            } else {
+                String::new()
+            };
+            std::fs::read_to_string(self.root.join("plugin/squircle/agents/app-agent.md"))
+                .ok()
+                .and_then(|t| {
+                    t.splitn(3, "---\n")
+                        .nth(2)
+                        .map(|body| format!("\n[squircle] {opening}:\n{}{codex_note}", body.trim()))
+                })
                 .unwrap_or_default()
         } else {
             String::new()
@@ -508,8 +536,7 @@ impl Agents {
              No bare paths, IDs, branch names, commit hashes or Squircle internals unless asked.\n\
              Every piece of delegated work, reviews and research included, \
              runs as a T3 worker via `thread spawn` (`--provider codex --model <slug> --effort <level>` for Codex), never by running the codex \
-             or claude CLIs yourself or through subagents or workflows, so the user can see it; the one subagent is `squircle:history`, \
-             cheap and read-only: ask it, in the foreground, before answering anything about past work or decisions. Archive a worker once its work is merged or abandoned, \
+             or claude CLIs yourself or through subagents or workflows, so the user can see it; {history} Archive a worker once its work is merged or abandoned, \
              so no branches or worktrees are left behind. Your thread id: {id}. Running now (`thread status` lists all your workers):{running}{asked}{unheard}\n\
              Your notes (`{cli} notes --help`; keep them current):{notes}\n\
              The tracker (`{cli} task --help`) isn't in this note: run `task list --thread {id}` whenever you need it, such as to file an ask under the right work item, \
@@ -531,6 +558,14 @@ impl Agents {
              you can't keep time, [worker update]s wake you.{refreshed}",
             cli = self.cli(),
             id = agent.thread_id,
+            history = if codex {
+                format!(
+                    "you have no subagents: before answering anything about past work or decisions, look it up with `{} history search WORDS` (`history show REF` for one result).",
+                    self.cli()
+                )
+            } else {
+                "the one subagent is `squircle:history`, cheap and read-only: ask it, in the foreground, before answering anything about past work or decisions.".into()
+            },
         )
     }
 }

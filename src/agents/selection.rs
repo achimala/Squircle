@@ -78,7 +78,8 @@ pub(super) fn worker_mode(
 /// A worker's T3 model selection, checked against the providers T3 reports
 /// ready. Claude by default, on the app agent's model; another provider
 /// defaults to its own default model. Squircle's own instance carries the
-/// app-agent plugin, so it is not offered to workers.
+/// app-agent plugin (and its Codex one Squircle's hooks), so they are not
+/// offered to workers.
 pub(super) fn worker_selection(
     config: &Value,
     provider: Option<&str>,
@@ -90,7 +91,11 @@ pub(super) fn worker_selection(
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|p| p["status"] == "ready" && p["enabled"] != false && p["instanceId"] != INSTANCE)
+        .filter(|p| {
+            p["status"] == "ready"
+                && p["enabled"] != false
+                && !p["instanceId"].as_str().is_some_and(agent_instance)
+        })
         .collect();
     let names = |items: Vec<&str>| items.join(", ");
     let instance = provider.unwrap_or("claudeAgent");
@@ -160,4 +165,118 @@ pub(super) fn worker_selection(
         selection["options"] = json!([{"id": option["id"], "value": effort}]);
     }
     Ok(selection)
+}
+
+/// Which of Squircle's instances an app agent runs on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Provider {
+    Claude,
+    Codex,
+}
+
+impl Provider {
+    /// `claude` or `codex` (T3's instance and driver names are taken too).
+    pub fn parse(name: &str) -> Result<Self> {
+        match name {
+            "claude" | "claudeAgent" | INSTANCE => Ok(Self::Claude),
+            "codex" | CODEX_INSTANCE => Ok(Self::Codex),
+            other => bail!("Unknown agent provider \"{other}\". Providers: claude, codex"),
+        }
+    }
+
+    /// The provider of a thread's model selection, if it is an agent instance.
+    pub fn of(selection: &Value) -> Option<Self> {
+        match selection["instanceId"].as_str()? {
+            INSTANCE => Some(Self::Claude),
+            CODEX_INSTANCE => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub fn instance(self) -> &'static str {
+        match self {
+            Self::Claude => INSTANCE,
+            Self::Codex => CODEX_INSTANCE,
+        }
+    }
+
+    /// T3's built-in instance of the same driver, whose models a project's
+    /// default selection names.
+    fn builtin(self) -> &'static str {
+        match self {
+            Self::Claude => "claudeAgent",
+            Self::Codex => "codex",
+        }
+    }
+
+    /// Refuses `mode` for an agent on this provider. T3 gives Codex its
+    /// sandbox with every turn, and only full access lets it reach the
+    /// Squircle service the agent's `squircle` commands talk to.
+    pub fn check_mode(self, mode: Option<&str>) -> Result<()> {
+        ensure!(
+            self != Self::Codex || mode == Some("full-access"),
+            "A Codex app agent needs full access (its approvals are {}): in any other mode Codex's sandbox blocks the \
+             `squircle` commands it coordinates with. Set the agent's approvals to Full access first.",
+            mode.unwrap_or("unknown")
+        );
+        Ok(())
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+        }
+    }
+}
+
+/// An app agent's model selection on `provider`'s instance, checked against
+/// what T3 reports ready: `model` if given, else the project's default when
+/// it is on the same driver, else Claude's default (Claude) or the
+/// instance's default model.
+pub(super) fn agent_selection(
+    config: &Value,
+    provider: Provider,
+    model: Option<&str>,
+    project_default: &Value,
+) -> Result<Value> {
+    let instance = provider.instance();
+    let entry = config["providers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["instanceId"] == instance && p["status"] == "ready" && p["enabled"] != false)
+        .with_context(|| {
+            format!("T3 has no ready \"{instance}\" agent instance. Run: squircle agent setup")
+        })?;
+    let models: Vec<&str> = entry["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["slug"].as_str())
+        .collect();
+    let model = match model {
+        Some(model) => model.to_string(),
+        None => project_default["model"]
+            .as_str()
+            .filter(|_| project_default["instanceId"] == provider.builtin())
+            .map(str::to_string)
+            .or_else(|| (provider == Provider::Claude).then(|| DEFAULT_MODEL.to_string()))
+            .filter(|m| models.is_empty() || models.contains(&m.as_str()))
+            .or_else(|| {
+                let all = entry["models"].as_array()?;
+                let default = all
+                    .iter()
+                    .find(|m| m["isDefault"] == true)
+                    .or(all.first())?;
+                default["slug"].as_str().map(str::to_string)
+            })
+            .with_context(|| format!("T3 lists no models for \"{instance}\""))?,
+    };
+    ensure!(
+        models.is_empty() || models.contains(&model.as_str()),
+        "\"{instance}\" has no model \"{model}\". Models: {}",
+        models.join(", ")
+    );
+    Ok(json!({"instanceId": instance, "model": model}))
 }
