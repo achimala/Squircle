@@ -3071,3 +3071,80 @@ Checked: `cargo test` and clippy pass, the app and its tests build for the
 simulator, and on a copy of the live data directory all 255 job records load
 after the cleanup (249 would otherwise have been skipped). Not run against
 the live service or looked at on a phone.
+
+## 2026-11-04 switching an app agent's provider
+
+User request: "Is there a way to restart the main thread agent and swap it to
+a different provider? Can we add this?" The agent keeps its one thread
+(2026-10-30); T3 moves the thread between providers in place.
+
+- **T3 (0.1.0, read in its server code).** `provider.switch {threadId,
+  modelSelection}` across instances, `thread.model-selection.set` within one;
+  either ends the old provider session itself. Claude → Codex starts a new
+  Codex session whose first turn carries a "provider handoff": the newest
+  user and agent messages, command outputs and file-change names, about 16k
+  tokens (`T3CODE_CONTEXT_HANDOFF_TOKEN_CAP`), with how to read the rest with
+  `t3_thread_read`. Back to Claude resumes Claude's own session plus a delta.
+  T3 hands Codex its own compaction only for a bare `/compact`.
+- **Instances.** `agent setup` adds "squircle-codex" beside "squircle": driver
+  `codex`, the built-in Codex instance's binary and homes (same login), and
+  launch arguments `--disable multi_agent` plus Squircle's hooks as `-c
+  hooks.…` overrides (SessionStart and UserPromptSubmit run `agent context
+  --hook`, inline with `additionalContextLimit=0`; PreToolUse runs `agent
+  guard`), calling the data directory's wrapper so a rebuilt binary keeps
+  their hash. Only sessions on that instance load them; workers and the
+  user's own Codex never do (verified: a Codex worker ran the `codex exec`
+  the agent's guard refused).
+- **Hook approval (user decision, 2026-11-04).** Codex 0.160 runs no hook
+  until approved, and reads approvals (`hooks.state.<key>.trusted_hash`) only
+  from its home's own `config.toml`; `-c` approvals are ignored and the
+  bypass flag would run every unapproved hook. The user chose to let setup
+  record the approval of exactly Squircle's three hooks there, through Codex's
+  own app-server (`hooks/list` for keys and hashes, `config/batchWrite`);
+  `--remove` takes them out (leaving an empty `[hooks.state]` header). The
+  keys are generic (`/<session-flags>/config.toml:<event>:0:0`) and the hash
+  covers the command, so one data directory's hooks are approved at a time.
+  Rejected: a separate Codex home (a second login) and dropping hooks.
+- **Setup credential.** T3 0.1.0 needs `providers:manage` to change
+  instances, which the service's orchestration-only session lacks (so setup
+  had stopped working for Claude too). Setup now takes a one-time pairing
+  token on stdin (`t3 pair --scope orchestration:read --scope
+  providers:manage --ttl 5m`) and never saves the session.
+- **Switching.** `agent restart --thread ID --provider codex|claude [--model
+  SLUG]` (and the phone) queue M14's restart with a switch: the command body
+  is decided and saved when asked, sent under its saved identity once no turn
+  runs (instead of the stop), and resent under the same identity after a
+  crash; T3 refusing it drops the switch. The agent then gets its full
+  instructions in the next note (`refresh`), and a Codex agent at the start
+  of every new or compacted session too (SessionStart `startup`, `clear`,
+  `compact`), with a line that it has no subagents and looks the past up with
+  `history search`/`history show` itself. The per-turn note's history line
+  follows the provider. A Codex agent needs `full-access` approvals: T3 gives
+  Codex its sandbox with every turn, and `auto` (workspace-write, no network)
+  blocks its `squircle` calls ("Operation not permitted"), so switching to
+  Codex or creating a Codex agent is refused in other modes. Workers spawned
+  by a Codex agent default to Claude's default model, not the agent's.
+- **Guard.** Codex sends the same PreToolUse event: its shell is `Bash`; its
+  question and subagent tools (`request_user_input`, `spawn_agent`) are
+  refused like Claude's.
+- **Phone.** The agent's ⋯ menu has "Switch to Codex…" or "Switch to
+  Claude…" beside Restart Agent, listing the other instance's models; Model
+  stays within the current provider. Either agent instance marks a thread as
+  the agent's. Older builds keep working (the restart body only gained
+  optional fields).
+
+**Verified (2026-11-04)** with a second service on loopback against a scratch
+project (copy of the T3 session, no real agents; the phone build had the
+loopback HTTP patch, not committed): setup added the instance and Codex
+reported all three hooks trusted; a Claude turn, then `agent restart
+--provider codex --model gpt-6-luna`; the Codex turn knew its thread ID (from
+the note) and the Claude turn (from the handoff) and named `history search`;
+with full access it filed the ask with `task add`, its `codex exec` was
+"stopped before execution by a PreToolUse hook", it spawned a Codex worker
+and woke on its `[worker update]`; the phone's ⋯ showed "Switch to Claude…",
+and switching back to Sonnet from it answered with the Codex turns in
+context. In `auto` its `squircle` calls failed, hence the full-access rule.
+Afterwards `setup --remove --provider codex` removed the instance and the
+approvals. Rust tests, clippy and the simulator build pass. **Not checked:**
+the real service and agents, a physical phone, Codex compaction of an agent,
+switching while a turn runs (deferred by the same M14 path as a restart).

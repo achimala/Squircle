@@ -8,22 +8,26 @@ impl Agents {
     }
 
     /// The app agent for a T3 project, created on first use: a thread on
-    /// Squircle's instance in the project's folder, in `runtime_mode` (the
-    /// mode of an existing agent is the phone's to change on its thread).
+    /// Squircle's instance for `provider` (Claude unless given) in the
+    /// project's folder, in `runtime_mode` (the mode of an existing agent is
+    /// the phone's to change on its thread, its provider `restart`'s).
     pub async fn ensure(
         &self,
         project_id: &str,
         message: Option<&str>,
+        provider: Option<&str>,
         model: Option<&str>,
         runtime_mode: Option<&str>,
     ) -> Result<Agent> {
         let mode = self::runtime_mode(runtime_mode)?;
+        let provider = provider.map_or(Ok(Provider::Claude), Provider::parse)?;
+        provider.check_mode(Some(&mode))?;
         let client = self.ready().await?;
         let agent = self
             .ops
             .run(
                 project_id.to_string(),
-                self.existing_or_create(&*client, project_id, model, &mode),
+                self.existing_or_create(&*client, project_id, provider, model, &mode),
             )
             .await?;
         if let Some(text) = message.filter(|t| !t.trim().is_empty()) {
@@ -37,42 +41,46 @@ impl Agents {
         &self,
         client: &dyn Peer,
         project_id: &str,
+        provider: Provider,
         model: Option<&str>,
         mode: &str,
     ) -> Result<Agent> {
         let saved = self.registry().agents.get(project_id).cloned();
-        let agent = match saved {
+        let reserved = match saved {
             Some(
                 agent @ Agent {
                     lifecycle: Lifecycle::Creating { .. },
                     ..
                 },
-            ) => agent,
+            ) => Some(agent),
             Some(agent) => {
                 if self.wait_thread(&agent.thread_id).await?.is_some() {
                     return Ok(agent);
                 }
                 // Archived or deleted in T3: start a new agent.
-                self.reserve(client, project_id).await?
+                None
             }
-            None => self.reserve(client, project_id).await?,
+            None => None,
         };
-        self.create(client, &agent, model, mode).await
+        // Checked before anything is reserved: the instance must be ready.
+        let config = client.call("server.getConfig", json!({})).await?;
+        let project = self
+            .shell()
+            .project(project_id)
+            .cloned()
+            .unwrap_or_default();
+        let selection =
+            agent_selection(&config, provider, model, &project["defaultModelSelection"])?;
+        let agent = match reserved {
+            Some(agent) => agent,
+            None => self.reserve(project_id).await?,
+        };
+        self.create(client, &agent, &selection, mode).await
     }
 
     /// Reserves a new agent in the registry before T3 hears of it, so a
     /// retry or a restart finishes that thread instead of making another.
-    pub(super) async fn reserve(&self, client: &dyn Peer, project_id: &str) -> Result<Agent> {
-        let config = client.call("server.getConfig", json!({})).await?;
-        let ready = config["providers"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|p| p["instanceId"] == INSTANCE && p["status"] == "ready");
-        ensure!(
-            ready,
-            "T3 has no ready \"{INSTANCE}\" agent instance. Run: squircle agent setup"
-        );
+    pub(super) async fn reserve(&self, project_id: &str) -> Result<Agent> {
         let agent = Agent {
             project_id: project_id.into(),
             thread_id: uuid::Uuid::new_v4().to_string(),
@@ -96,11 +104,11 @@ impl Agents {
         &self,
         client: &dyn Peer,
         agent: &Agent,
-        model: Option<&str>,
+        selection: &Value,
         mode: &str,
     ) -> Result<Agent> {
         let (project, thread) = (agent.project_id.as_str(), agent.thread_id.as_str());
-        let create = self.create_command(project, thread, model, mode, &identity())?;
+        let create = self.create_command(project, thread, selection, mode, &identity())?;
         let mut event = m14::Event::Create {
             exists: self.seen(thread, |o| o.is_some()),
             create,
@@ -138,7 +146,7 @@ impl Agents {
         &self,
         project_id: &str,
         thread_id: &str,
-        model: Option<&str>,
+        selection: &Value,
         mode: &str,
         identity: &Identity,
     ) -> Result<Command> {
@@ -146,15 +154,6 @@ impl Agents {
         let project = shell
             .project(project_id)
             .with_context(|| format!("T3 has no project {project_id}"))?;
-        let model = model
-            .map(str::to_string)
-            .or_else(|| {
-                project["defaultModelSelection"]["model"]
-                    .as_str()
-                    .filter(|_| project["defaultModelSelection"]["instanceId"] == "claudeAgent")
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| DEFAULT_MODEL.into());
         let name = project["title"].as_str().unwrap_or("App");
         Ok(Command::new(
             identity,
@@ -162,7 +161,7 @@ impl Agents {
                 "type": "thread.create", "threadId": thread_id, "projectId": project_id,
                 "createdBy": "user", "creationSource": "server",
                 "title": format!("{name} agent"),
-                "modelSelection": {"instanceId": INSTANCE, "model": model},
+                "modelSelection": selection,
                 "runtimeMode": mode, "interactionMode": "default",
                 "branch": null, "worktreePath": null,
             }),
@@ -216,22 +215,46 @@ impl Agents {
     }
 
     /// Restarts an app's agent on its thread: now if it is between turns,
-    /// otherwise once no turn is running. The request is saved first and
-    /// cleared only once it succeeds; a failure is retried and shows as the
-    /// agent's restart `error`.
+    /// otherwise once no turn is running. With `provider` and/or `model`
+    /// the restart moves the thread to that provider's Squircle instance or
+    /// model (T3 carries the conversation over). The request is saved first
+    /// and cleared only once it succeeds; a failure is retried and shows as
+    /// the agent's restart `error`, except a switch T3 refuses, which is
+    /// dropped.
     pub async fn restart(
         self: &Arc<Self>,
         project_id: Option<&str>,
         thread_id: Option<&str>,
+        provider: Option<&str>,
+        model: Option<&str>,
     ) -> Result<Value> {
-        self.ready().await?;
+        let client = self.ready().await?;
         let project = self.find_agent(project_id, thread_id)?.project_id;
+        let provider = provider.map(Provider::parse).transpose()?;
         self.ops
             .run(project.clone(), async {
                 let agent = self.find_agent(Some(&project), None)?;
-                self.thread(&agent.thread_id)
+                let row = self
+                    .thread(&agent.thread_id)
                     .context("The app agent's thread is gone")?;
-                for effect in self.reduce_agent(&project, m14::Event::Restart).await? {
+                let switch = match (provider, model) {
+                    (None, None) => None,
+                    _ => {
+                        self.switch_command(
+                            &*client,
+                            &project,
+                            &agent.thread_id,
+                            &row,
+                            provider,
+                            model,
+                        )
+                        .await?
+                    }
+                };
+                for effect in self
+                    .reduce_agent(&project, m14::Event::Restart { switch })
+                    .await?
+                {
                     if let m14::Effect::Failed(detail) = effect {
                         bail!(detail)
                     }
@@ -247,6 +270,48 @@ impl Agents {
                 result
             })
             .await
+    }
+
+    /// The command that moves the agent's thread to `provider` (else its
+    /// current one) and `model` (else that provider's default), or `None`
+    /// if it is already there: `provider.switch` across instances, T3's
+    /// model change within one.
+    async fn switch_command(
+        &self,
+        client: &dyn Peer,
+        project: &str,
+        thread: &str,
+        row: &Value,
+        provider: Option<Provider>,
+        model: Option<&str>,
+    ) -> Result<Option<m14::Switch>> {
+        let current = &row["modelSelection"];
+        let provider = match provider.or_else(|| Provider::of(current)) {
+            Some(provider) => provider,
+            None => bail!(
+                "The app agent runs on T3's \"{}\", not one of Squircle's agent instances; name the provider (--provider claude or codex)",
+                current["instanceId"].as_str().unwrap_or("unknown")
+            ),
+        };
+        let config = client.call("server.getConfig", json!({})).await?;
+        let default = self
+            .shell()
+            .project(project)
+            .map(|p| p["defaultModelSelection"].clone())
+            .unwrap_or_default();
+        let target = agent_selection(&config, provider, model, &default)?;
+        provider.check_mode(row["runtimeMode"].as_str())?;
+        if current["instanceId"] == target["instanceId"] && current["model"] == target["model"] {
+            return Ok(None);
+        }
+        let kind = if current["instanceId"] == target["instanceId"] {
+            "thread.model-selection.set"
+        } else {
+            "provider.switch"
+        };
+        Ok(Some(
+            json!({"type": kind, "threadId": thread, "modelSelection": target}),
+        ))
     }
 
     /// Starts the queued restarts whose agent has no turn running.
@@ -427,6 +492,7 @@ impl Agents {
             );
         }
         let thread = start.thread_id.clone();
+        let mut switched: Option<Value> = None;
         let mut event = self.look(&*client, &start).await;
         loop {
             let mut next = None;
@@ -440,15 +506,41 @@ impl Agents {
                             next: self::identity(),
                         });
                     }
+                    m14::Effect::Switch(identity, body) => {
+                        switched = Some(body["modelSelection"].clone());
+                        let outcome = client.dispatch(&Command::new(&identity, body)).await;
+                        next = Some(m14::Event::Sent {
+                            outcome,
+                            next: self::identity(),
+                        });
+                    }
                     m14::Effect::Deferred => {
+                        let action = match &start.lifecycle {
+                            Lifecycle::RestartQueued {
+                                switch: Some(_), ..
+                            }
+                            | Lifecycle::Restarting {
+                                switch: Some(_), ..
+                            } => "switch",
+                            _ => "restart",
+                        };
                         return Ok(json!({
-                        "project_id": project, "thread_id": thread, "action": "restart", "when": "after-turn",
+                        "project_id": project, "thread_id": thread, "action": action, "when": "after-turn",
                         "next": "Happens when the agent's current turn ends. If that is you: end your turn now, telling the user in a sentence."}));
                     }
                     m14::Effect::Done => {
+                        let Some(selection) = switched else {
+                            return Ok(json!({
+                            "project_id": project, "thread_id": thread, "action": "restart", "when": "now",
+                            "next": "The agent's next message starts a new session with the same history and gets the current instructions."}));
+                        };
+                        let provider =
+                            Provider::of(&selection).map_or("its provider", Provider::name);
                         return Ok(json!({
-                        "project_id": project, "thread_id": thread, "action": "restart", "when": "now",
-                        "next": "The agent's next message starts a new session with the same history and gets the current instructions."}));
+                        "project_id": project, "thread_id": thread, "action": "switch", "when": "now",
+                        "model_selection": selection,
+                        "next": format!("The agent's next message runs on {provider} ({}) on the same thread: T3 hands it the recent conversation, and it gets the current instructions.",
+                                        selection["model"].as_str().unwrap_or("default model"))}));
                     }
                     m14::Effect::Failed(detail) => bail!(detail),
                     m14::Effect::SendCreate(_) => bail!("Unexpected creation during a restart"),

@@ -65,19 +65,30 @@ diagnostic event, not independent OS attestation.
 
 ## One agent per app
 
-The app agent is a T3 thread on T3's "squircle" Claude instance, in the
-project's folder; workers are T3 threads in their own worktrees. How it works
-is up to what you tell it. Once per
-Mac: `squircle t3 connect` (pipe a T3 pairing token on stdin; restart
+The app agent is a T3 thread on one of Squircle's T3 instances, "squircle"
+(Claude) or "squircle-codex" (Codex), in the project's folder; workers are T3
+threads in their own worktrees. How it works is up to what you tell it. Once
+per Mac: `squircle t3 connect` (pipe a T3 pairing token on stdin; restart
 `serve`), then `squircle agent setup` (installs `plugin/squircle` into the data
-directory and adds the T3 instance; `--remove` takes it out).
+directory and adds both T3 instances; `--provider claude|codex` for one,
+`--remove` takes them out). Setup changes T3's providers, which the service's
+own orchestration-only session may not do, so it takes a one-time pairing token
+on stdin with just that scope and never saves it: `t3 pair --scope
+orchestration:read --scope providers:manage --ttl 5m`, then `pbpaste |
+squircle agent setup`. For Codex it also records, through Codex's own
+app-server, the approval of exactly Squircle's three hooks in your Codex
+settings (`hooks.state` in `~/.codex/config.toml`; user-approved 2026-11-04),
+since Codex runs no unapproved hook; `--remove` takes the approvals out again
+(Codex leaves an empty `[hooks.state]` header). Run setup again after a Codex
+update if a Codex agent stops getting its note (a changed hook hash means
+"modified", which Codex does not run).
 
 | Command | Result |
 | --- | --- |
 | `t3 connect --url URL`, `t3 status` | Service's own T3 session; connection state |
-| `agent start --project T3_ID [--message TEXT] [--runtime-mode MODE]` | Create or find the app's agent and send it a message. `MODE` (`approval-required`, `auto-accept-edits`, `auto`, `full-access`) applies when the thread is created, before its first turn; default `full-access`. Concurrent first sends create one agent |
-| `agent restart --project ID\|--thread ID` | Relaunch the agent's Claude session on the same thread; its next turn gets the current instructions (once, in the turn note) with history kept. Runs when the agent's turn ends |
-| `agent compact --project ID\|--thread ID` | Claude's `/compact` now, on the agent's one thread, keeping tasks, decisions, running work and recent exchanges; refused while a turn runs. The agent keeps its thread for good: compaction is its only context management, and the service also compacts an idle agent with a large context by itself, again while it stays large (see [one thread](t3-native-migration.md#2026-10-30-one-permanent-agent-thread); `SQUIRCLE_COMPACT_TOKENS`, `SQUIRCLE_COMPACT_IDLE_MINUTES`) |
+| `agent start --project T3_ID [--message TEXT] [--provider claude\|codex] [--model SLUG] [--runtime-mode MODE]` | Create or find the app's agent and send it a message. `MODE` (`approval-required`, `auto-accept-edits`, `auto`, `full-access`) applies when the thread is created, before its first turn; default `full-access`. A new agent runs on Claude unless `--provider codex` (which needs `full-access`). Concurrent first sends create one agent |
+| `agent restart --project ID\|--thread ID [--provider claude\|codex] [--model SLUG]` | Relaunch the agent's session on the same thread; its next turn gets the current instructions (once, in the turn note) with history kept. Runs when the agent's turn ends. With `--provider`/`--model` the restart moves the thread there instead of stopping it (T3's `provider.switch`, or `thread.model-selection.set` within one instance): to Codex, T3 hands over the recent conversation (about 16k tokens, newest first, with how to read the rest); back to Claude resumes Claude's own session plus what happened since. A Codex agent needs `full-access` approvals (Codex's sandbox otherwise blocks its `squircle` calls); a switch T3 refuses is dropped, not retried |
+| `agent compact --project ID\|--thread ID` | The provider's `/compact` now (Codex's own compaction, which takes no instructions), on the agent's one thread, keeping tasks, decisions, running work and recent exchanges; refused while a turn runs. The agent keeps its thread for good: compaction is its only context management, and the service also compacts an idle agent with a large context by itself, again while it stays large (see [one thread](t3-native-migration.md#2026-10-30-one-permanent-agent-thread); `SQUIRCLE_COMPACT_TOKENS`, `SQUIRCLE_COMPACT_IDLE_MINUTES`) |
 | `history search WORDS [--in SOURCES] [--since 7d] [--limit N]`, `history show REF [--max-chars N]` | Read-only search of the app's past where it lives: T3 messages, thread titles and tool activity (`statev2.sqlite`, read-only), tasks, builds, git commits and Markdown docs, read on each search (no index or copy) and ranked; short snippets with references (`msg:`, `thread:`, `act:`, `task:`, `build:`, `commit:`, `doc:PATH#L12`) that `show` expands. The app is the project of `--thread`/`--project`, else of the current folder. Text, or `--json` |
 | `notes show\|add TEXT\|edit N TEXT\|remove N [--thread ID]` | The app agent's few durable notes (preferences, decisions, gotchas; 300 characters each, 4000 in all), listed in each turn's note |
 | `agent guard` | The app agent's PreToolUse hook: denies running models outside T3 (codex/claude CLIs, subagents other than `squircle:history`, workflows), pointing to `thread spawn` |

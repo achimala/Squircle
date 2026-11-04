@@ -115,6 +115,21 @@ struct BuildNews: Equatable {
     let reason: String?
 }
 
+/// Which of Squircle's T3 instances an app agent runs on; the raw value is what `agent restart --provider` takes.
+enum AgentProvider: String, Equatable {
+    case claude, codex
+    init?(instance: String?) {
+        switch instance {
+        case SquircleModel.agentInstance: self = .claude
+        case SquircleModel.codexAgentInstance: self = .codex
+        default: return nil
+        }
+    }
+    var instance: String { self == .claude ? SquircleModel.agentInstance : SquircleModel.codexAgentInstance }
+    var other: AgentProvider { self == .claude ? .codex : .claude }
+    var name: String { self == .claude ? "Claude" : "Codex" }
+}
+
 /// A worker's state as Squircle reports it.
 enum WorkerState: String, Equatable {
     case working, done, needsYou = "needs-you", error, archived

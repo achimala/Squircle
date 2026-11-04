@@ -31,6 +31,9 @@ pub(super) async fn list_agents(State(state): State<AppState>) -> ApiResult<Json
 pub(super) struct EnsureAgent {
     pub(super) project_id: String,
     pub(super) message: Option<String>,
+    /// `claude` (default) or `codex`, for a new agent.
+    #[serde(default)]
+    pub(super) provider: Option<String>,
     pub(super) model: Option<String>,
     /// T3's runtime mode for a new agent; None keeps the service default.
     pub(super) runtime_mode: Option<String>,
@@ -60,6 +63,7 @@ pub(super) async fn ensure_agent(
         .ensure(
             &request.project_id,
             request.message.as_deref(),
+            request.provider.as_deref(),
             request.model.as_deref(),
             request.runtime_mode.as_deref(),
         )
@@ -72,6 +76,11 @@ pub(super) async fn ensure_agent(
 pub(super) struct ResetAgent {
     pub(super) project_id: Option<String>,
     pub(super) thread_id: Option<String>,
+    /// A restart only: move the agent to `claude` or `codex`, and/or this model.
+    #[serde(default)]
+    pub(super) provider: Option<String>,
+    #[serde(default)]
+    pub(super) model: Option<String>,
 }
 
 pub(super) async fn restart_agent(
@@ -80,7 +89,12 @@ pub(super) async fn restart_agent(
 ) -> ApiResult<Json<Value>> {
     let request = body(payload)?;
     let result = agents(&state)?
-        .restart(request.project_id.as_deref(), request.thread_id.as_deref())
+        .restart(
+            request.project_id.as_deref(),
+            request.thread_id.as_deref(),
+            request.provider.as_deref(),
+            request.model.as_deref(),
+        )
         .await
         .map_err(agent_error)?;
     Ok(Json(success(result)))
@@ -101,6 +115,9 @@ pub(super) async fn compact_agent(
 #[derive(Deserialize)]
 pub(super) struct ContextQuery {
     pub(super) cwd: PathBuf,
+    /// The hook's SessionStart source (`startup`, `resume`, `clear`, `compact`), if it is one.
+    #[serde(default)]
+    pub(super) session: Option<String>,
 }
 
 pub(super) async fn t3_providers(State(state): State<AppState>) -> ApiResult<Json<Value>> {
@@ -147,7 +164,7 @@ pub(super) async fn agent_context(
         })
         .collect();
     Ok(Json(success(
-        json!({"context": agents(&state)?.context(&query.cwd, &builds).await}),
+        json!({"context": agents(&state)?.context(&query.cwd, &builds, query.session.as_deref()).await}),
     )))
 }
 

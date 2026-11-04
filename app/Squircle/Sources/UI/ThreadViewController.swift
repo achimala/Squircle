@@ -406,11 +406,25 @@ final class ThreadViewController: UIViewController, UITableViewDelegate {
         }
         if isAgent, model.agentThreadID(for: project) != nil {
             let project = project
-            items.append(UIMenu(options: .displayInline, children: [
+            var agentItems: [UIMenuElement] = [
                 UIAction(title: "Restart Agent", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                     Task { await self?.model.restartAgent(project) }
                 }
-            ]))
+            ]
+            if let current = model.agentProvider, let target = model.switchTarget(from: current) {
+                // The agent moves on its own thread once its turn ends, so a pick is never locked.
+                let choices: [UIMenuElement] = target.menu.flatMap { section in
+                    section.choices.compactMap { choice -> UIMenuElement? in
+                        guard let slug = choice.selection["model"].string else { return nil }
+                        return UIAction(title: choice.name) { [weak self] _ in
+                            Theme.selectionHaptic()
+                            Task { await self?.model.switchAgent(project, to: target.provider, model: slug) }
+                        }
+                    }
+                }
+                agentItems.append(UIMenu(title: "Switch to \(target.provider.name)…", image: UIImage(systemName: "arrow.left.arrow.right"), children: choices))
+            }
+            items.append(UIMenu(options: .displayInline, children: agentItems))
         }
         items.append(UIMenu(options: .displayInline, children: [
             UIMenu(title: "Model", subtitle: model.shortAgentName(for: model.modelSelection), image: UIImage(systemName: "cpu"), children: modelMenu()),

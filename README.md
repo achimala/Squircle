@@ -18,8 +18,9 @@ signed builds it makes, over cellular if your Mac is reachable.
 - **Home:** a grid of your apps as device portraits made from real simulator
   screenshots, in the order you drag them into. Tapping one opens that app's agent.
 - **One agent per app:** a T3 thread on a Claude instance with Squircle's
-  plugin. It answers you, runs ordinary T3 worker threads in their own
-  worktrees, and is woken when they finish. You tell it how to work.
+  plugin, or on Codex (switch it from its ⋯ menu; same thread). It answers
+  you, runs ordinary T3 worker threads in their own worktrees, and is woken
+  when they finish. You tell it how to work.
 - **Tasks:** the agent keeps a list of what you asked for and where each stands.
 - **Simulators:** while an agent uses one, it floats over the conversation as
   a live, touchable picture; the recording lands in the agent's turn.
@@ -62,8 +63,10 @@ squircle serve --public-url https://YOUR-MAC-HTTPS-ORIGIN   # keep running
 # 3. In another terminal (same SQUIRCLE_DATA_DIR): give the service its own
 #    T3 session. Create a pairing token in T3 (pair a new client), then:
 pbpaste | squircle t3 connect --url http://127.0.0.1:3773
-#    restart `squircle serve`, then install the app-agent plugin into T3:
-squircle agent setup
+#    restart `squircle serve`, then add Squircle's agent instances to T3
+#    (Claude and Codex) with a one-time token that may change providers:
+t3 pair --scope orchestration:read --scope providers:manage --ttl 5m
+pbpaste | squircle agent setup   # paste the Token line t3 pair printed
 
 # 4. Generate the Xcode project and check it compiles.
 xcodegen generate --spec app/Squircle/project.yml

@@ -85,8 +85,10 @@ impl Agents {
             let project = self.shell().project(&agent.project_id).cloned().context("The app's T3 project is gone")?;
             let coordinator_thread = self.thread(coordinator).context("The app agent's thread is gone")?;
             let config = client.call("server.getConfig", json!({})).await?;
-            let selection = worker_selection(&config, provider, model, effort,
-                                             coordinator_thread["modelSelection"]["model"].as_str())?;
+            // A Claude worker defaults to its agent's model only while the agent runs on Claude.
+            let agent_model = coordinator_thread["modelSelection"]["model"].as_str()
+                .filter(|_| Provider::of(&coordinator_thread["modelSelection"]) == Some(Provider::Claude));
+            let selection = worker_selection(&config, provider, model, effort, agent_model)?;
             let (instance, model) = (selection["instanceId"].clone(), selection["model"].clone());
             let driver = config["providers"].as_array().into_iter().flatten()
                 .find(|p| p["instanceId"] == instance).and_then(|p| p["driver"].as_str()).unwrap_or(instance.as_str().unwrap_or_default());
