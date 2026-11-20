@@ -230,7 +230,6 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         freshness = model.keepFresh(.tasks(appID: project.id))
         Task { await model.refreshTasks() }
         render()
-        if let task = initialTask { initialTask = nil; open(task: task) }
         #if DEBUG
         // `SQUIRCLE_TASKS_SCROLL=POINTS`: for stills, the shown list scrolled that far (at most to its end).
         if let points = ProcessInfo.processInfo.environment["SQUIRCLE_TASKS_SCROLL"].flatMap(Double.init) {
@@ -262,7 +261,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
 
     /// Shows a task: its row first (`focus`), or its work item's page (`task`).
     func show(focus: String?, task: String?) {
-        if let task { open(task: task.lowercased()); return }
+        if let task { initialTask = task.lowercased(); openInitial(); return }
         guard let focus else { return }
         if route != .overview { route = .overview; push.set(0); applyPush() }
         self.focus = focus
@@ -319,11 +318,13 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
         renderChrome()
     }
 
-    /// Already on its work item's page as Tasks comes up.
-    private func open(task id: String) {
-        let list = model.tasks(for: project)
-        guard let item = (list.tasks + list.history).first(where: { $0.id.lowercased() == id || $0.subtasks.contains { $0.id.lowercased() == id } }),
+    /// On the page of the task asked for (a card tapped on Home), once the
+    /// list has it.
+    private func openInitial() {
+        guard let id = initialTask,
+              let item = (list.tasks + list.history).first(where: { $0.id.lowercased() == id || $0.subtasks.contains { $0.id.lowercased() == id } }),
               order.contains(item.id) else { return }
+        initialTask = nil
         route = .item(item.id)
         layoutPages()
         push.set(1)
@@ -757,6 +758,7 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
             push.redirect(to: 0)
         }
         for (id, page) in pages { configure(page, id) }
+        openInitial()
         layoutPages()
         notice.text = model.error == nil ? "No tasks yet" : model.error
         more.menu = nil
@@ -845,12 +847,15 @@ final class TasksViewController: UIViewController, UIScrollViewDelegate, UITable
     /// A page's pictures full screen, from the one tapped; swipe through the rest.
     private func openPictures(_ pictures: [GatePicture], at index: Int, views: [GatePicture: UIView], of task: String) {
         guard let window = view.window else { return }
+        let poster = { (picture: GatePicture) -> UIImage? in
+            (views[picture] as? UIButton)?.image(for: .normal) ?? views[picture]?.subviews.compactMap { ($0 as? UIImageView)?.image }.first
+        }
         let items: [ViewerItem] = pictures.map { picture in
             let origin = MediaOrigin { [weak view = views[picture]] in view.map { MediaSpot($0) } }
             if case .media(let id) = picture, let media = self.task(task)?.media.first(where: { $0.id == id }) {
-                return .task(media, of: task, poster: (views[picture] as? UIButton)?.image(for: .normal), origin: origin, model: model)
+                return .task(media, of: task, poster: poster(picture), origin: origin, model: model)
             }
-            return ViewerItem(media: .image((views[picture] as? UIButton)?.image(for: .normal), size: nil, full: { [weak self] pixels in
+            return ViewerItem(media: .image(poster(picture), size: nil, full: { [weak self] pixels in
                 await self?.image(picture, of: task, height: pixels / 3)
             }), origin: origin)
         }
@@ -1264,12 +1269,12 @@ final class FoldRow: UIControl {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(symbol name: String, text words: String, count value: Int, open: Bool) {
+    func configure(symbol name: String, text words: String, count value: Int?, open: Bool) {
         symbol.image = UIImage(systemName: name)
         text.text = words
-        count.text = "\(value)"
+        count.text = value.map { "\($0)" }
         chevron.transform = open ? CGAffineTransform(rotationAngle: .pi / 2) : .identity
-        accessibilityLabel = "\(words), \(value)"
+        accessibilityLabel = value.map { "\(words), \($0)" } ?? words
         accessibilityValue = open ? "Open" : "Folded"
     }
 

@@ -898,6 +898,11 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// (straight from Home, it goes back to Home).
     func jump(to item: WaitingList.Item, project id: String) {
         guard presentedViewController == nil, let project = projects.first(where: { $0.id == id }) else { return }
+        // An approval: its work item's page, the whole plan or review.
+        if case .approval(let approval) = item {
+            showTasks(project: id, task: approval.taskID)
+            return
+        }
         guard let thread = item.threadID else { return }
         Theme.openHaptic()
         view.endEditing(true)

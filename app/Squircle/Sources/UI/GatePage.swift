@@ -151,6 +151,9 @@ final class GatePage: UIView {
     private let primary = UIButton(configuration: .filled())
     private let secondary = UIButton(configuration: .filled())
     private let spacer = UIView()
+    /// Paper under the foot's buttons, fading in above them.
+    private let backdrop = UIView()
+    private let fade = CAGradientLayer()
     private var spacerHeight: NSLayoutConstraint!
     private var shown: Content?
     private var loads: [Task<Void, Never>] = []
@@ -200,6 +203,9 @@ final class GatePage: UIView {
         footer.addArrangedSubview(reason)
         footer.addArrangedSubview(buttons)
         footer.translatesAutoresizingMaskIntoConstraints = false
+        backdrop.isUserInteractionEnabled = false
+        backdrop.layer.addSublayer(fade)
+        addSubview(backdrop)
         addSubview(footer)
         spacerHeight = spacer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
@@ -225,6 +231,13 @@ final class GatePage: UIView {
                                                                          withHorizontalFittingPriority: .required,
                                                                          verticalFittingPriority: .fittingSizeLevel).height + Theme.Space.group
         if spacerHeight.constant != height { spacerHeight.constant = height }
+        backdrop.isHidden = footer.isHidden
+        let top = footer.frame.minY - Theme.Space.section
+        backdrop.frame = CGRect(x: 0, y: top, width: bounds.width, height: bounds.height - top)
+        let paper = Theme.paper.resolvedColor(with: traitCollection)
+        fade.colors = [paper.withAlphaComponent(0).cgColor, paper.cgColor, paper.cgColor]
+        fade.locations = [0, NSNumber(value: Double(Theme.Space.section / max(1, backdrop.bounds.height))), 1]
+        fade.frame = backdrop.bounds
     }
 
     func configure(_ content: Content) {
@@ -293,6 +306,14 @@ final class GatePage: UIView {
         Theme.label("“" + text + "”", Theme.Text.body, color: .secondaryLabel, lines: lines)
     }
 
+    /// A quote as a row of a list, with a row's room above and below.
+    private func quoteRow(_ text: String, lines: Int = 0) -> UIView {
+        let row = UIStackView(arrangedSubviews: [quote(text, lines: lines)])
+        row.isLayoutMarginsRelativeArrangement = true
+        row.directionalLayoutMargins = NSDirectionalEdgeInsets(top: Theme.Space.rowPad, leading: 0, bottom: Theme.Space.rowPad, trailing: 0)
+        return row
+    }
+
     private func rule() -> UIView {
         let rule = UIView()
         rule.backgroundColor = .separator
@@ -332,6 +353,10 @@ final class GatePage: UIView {
     /// A pill and words after it on one line.
     private func headline(_ lead: UIView, _ text: String) -> UIView {
         let words = Theme.label(text, Theme.Text.line, color: .secondaryLabel, lines: 2)
+        lead.setContentHuggingPriority(.required, for: .horizontal)
+        lead.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let width = lead.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width
+        lead.widthAnchor.constraint(equalToConstant: width).isActive = true
         let row = UIStackView(arrangedSubviews: [lead, words])
         row.spacing = Theme.Space.row
         row.alignment = .center
@@ -374,25 +399,51 @@ final class GatePage: UIView {
     /// A picture shown whole at the page's width (a plan's first picture),
     /// its height following the picture once loaded, at most `cap`.
     private func wide(_ picture: GatePicture, group: [GatePicture], cap: CGFloat) -> UIView {
-        let view = self.picture(picture, group: group, height: 180, radius: 12)
-        let button = view as! UIButton
-        button.imageView?.contentMode = .scaleAspectFill
-        button.contentVerticalAlignment = .top
-        let height = button.constraints.first { $0.firstAttribute == .height }
-        let fit = { [weak self] (image: UIImage) in
-            guard let self, image.size.width > 0 else { return }
-            let width = max(1, (self.bounds.width > 0 ? self.bounds.width : UIScreen.main.bounds.width) - 2 * Theme.Space.margin)
-            height?.constant = min(cap, width * image.size.height / image.size.width)
-        }
-        if let image = images[picture] { fit(image) } else {
-            loads.append(Task { [weak self] in
-                guard let image = await self?.load?(picture, cap), !Task.isCancelled else { return }
-                fit(image)
-            })
-        }
+        let button = UIButton(type: .custom)
+        button.backgroundColor = Theme.codeFill
+        button.layer.cornerRadius = 12
+        button.layer.cornerCurve = .continuous
+        button.clipsToBounds = true
         button.layer.borderColor = UIColor.separator.cgColor
         button.layer.borderWidth = 1 / UIScreen.main.scale
-        return view
+        button.accessibilityLabel = "Picture"
+        // The whole picture at the page's width, its top showing; the viewer flies it up whole.
+        let whole = UIImageView()
+        whole.contentMode = .scaleAspectFill
+        whole.isUserInteractionEnabled = false
+        whole.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(whole)
+        let tall = whole.heightAnchor.constraint(equalToConstant: 180)
+        NSLayoutConstraint.activate([whole.topAnchor.constraint(equalTo: button.topAnchor),
+                                     whole.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+                                     whole.trailingAnchor.constraint(equalTo: button.trailingAnchor), tall])
+        let height = button.heightAnchor.constraint(equalToConstant: 180)
+        height.isActive = true
+        pictureViews[picture] = button
+        let index = group.firstIndex(of: picture) ?? 0
+        button.addAction(UIAction { [weak self] _ in
+            guard let self else { return }
+            Theme.selectionHaptic()
+            onPictures?(group, index, pictureViews)
+        }, for: .touchUpInside)
+        // Fitted to the page's width; a tall one shows its top, the rest a tap away.
+        let show = { [weak self] (image: UIImage) in
+            guard let self, image.size.width > 0 else { return }
+            let width = max(1, (bounds.width > 0 ? bounds.width : UIScreen.main.bounds.width) - 2 * Theme.Space.margin)
+            let full = width * image.size.height / image.size.width
+            height.constant = min(cap, full)
+            tall.constant = full
+            whole.image = image
+        }
+        if let image = images[picture] { show(image) } else {
+            loads.append(Task { [weak self] in
+                // Sharp at full width: a tall picture needs many rows.
+                guard let image = await self?.load?(picture, 1600), !Task.isCancelled else { return }
+                self?.images[picture] = image
+                show(image)
+            })
+        }
+        return button
     }
 
     private func threadLines(_ threads: [ThreadLine.Content]) {
@@ -618,6 +669,8 @@ final class GatePage: UIView {
                         column.arrangedSubviews[0].widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
                         pair.addArrangedSubview(column)
                     }
+                    // A lone film keeps its half: the other side is simply not filmed.
+                    if pair.arrangedSubviews.count == 1 { pair.addArrangedSubview(UIView()) }
                     films = pair
                 } else {
                     under.append(("not filmed yet", .tertiaryLabel))
@@ -649,7 +702,7 @@ final class GatePage: UIView {
     /// The plan folded under a line; tapping opens it in place.
     private func planFold(_ task: AppTask, _ plan: Gate.Plan, title: String) {
         let fold = FoldRow()
-        fold.configure(symbol: "photo.on.rectangle", text: title, count: plan.pictures.count, open: showsPlan)
+        fold.configure(symbol: "photo.on.rectangle", text: title, count: nil, open: showsPlan)
         fold.addAction(UIAction { [weak self] _ in
             guard let self, let shown else { return }
             Theme.selectionHaptic()
@@ -724,7 +777,11 @@ final class GatePage: UIView {
                 }
                 let title = gate.plan?.changes.first { $0.n == line.n }?.title ?? line.text
                 var under: [(String, UIColor)] = []
-                if line.mark != .built { under.append(("\(line.text)" + ((line.why ?? "").isEmpty ? "" : " — " + (line.why ?? "")), .secondaryLabel)) }
+                if line.mark != .built {
+                    let why = line.why ?? ""
+                    let built = line.text == title ? "" : line.text
+                    under.append(([built, why].filter { !$0.isEmpty }.joined(separator: " — "), .secondaryLabel))
+                }
                 return numbered(mark, color: color, title, under: under)
             })
         } else {
@@ -829,7 +886,7 @@ final class GatePage: UIView {
         let later = gate.asks.dropFirst().filter(\.open)
         if !later.isEmpty {
             stack.addArrangedSubview(caption("Asked more"))
-            list(later.map { quote($0.text) })
+            list(later.map { quoteRow($0.text) })
         }
         if let spawned = gate.spawned, !spawned.isEmpty {
             stack.addArrangedSubview(caption("Became work items"))
@@ -864,7 +921,7 @@ final class GatePage: UIView {
         let asks = content.task.subtasks.filter { $0.status.open }
         stack.addArrangedSubview(Theme.label("\(asks.count) asks wait here in your words. When the agent takes some on, it groups them into a work item with a plan you approve.",
                                              Theme.Text.line, color: .secondaryLabel, lines: 0))
-        list(asks.map { quote($0.ask, lines: 4) })
+        list(asks.map { quoteRow($0.ask, lines: 4) })
         setFooter(primary: nil, secondary: nil)
     }
 
@@ -877,7 +934,7 @@ final class GatePage: UIView {
         if task.named { stack.addArrangedSubview(quote(task.ask)) }
         if !task.note.isEmpty { stack.addArrangedSubview(Theme.label(task.note, Theme.Text.line, color: .secondaryLabel, lines: 0)) }
         threadLines(content.threads)
-        let words = task.subtasks.map { quote($0.ask, lines: 3) }
+        let words = task.subtasks.map { quoteRow($0.ask, lines: 3) }
         if !words.isEmpty {
             stack.addArrangedSubview(caption("Asks"))
             list(words)
