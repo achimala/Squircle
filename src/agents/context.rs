@@ -520,6 +520,7 @@ impl Agents {
             Err(_) => None,
         }
         .unwrap_or_default();
+        let gates = gate_lines(&self.tasks.list(&agent.project_id), &agent.thread_id);
         let notes = match crate::notes::load(&self.root, &agent.project_id) {
             Ok(notes) if notes.notes.is_empty() => {
                 " none yet; add the user's preferences, decisions and gotchas as you learn them"
@@ -543,16 +544,19 @@ impl Agents {
              Every piece of delegated work, reviews and research included, \
              runs as a T3 worker via `thread spawn` (`--provider codex --model <slug> --effort <level>` for Codex), never by running the codex \
              or claude CLIs yourself or through subagents or workflows, so the user can see it; {history} Archive a worker once its work is merged or abandoned, \
-             so no branches or worktrees are left behind. Your thread id: {id}. Running now (`thread status` lists all your workers):{running}{asked}{unheard}\n\
+             so no branches or worktrees are left behind. Your thread id: {id}. Running now (`thread status` lists all your workers):{running}{asked}{unheard}{gates}\n\
              Your notes (`{cli} notes --help`; keep them current):{notes}\n\
              The tracker (`{cli} task --help`) isn't in this note: run `task list --thread {id}` whenever you need it, such as to file an ask under the right work item, \
              to pick up open work or before briefing a worker (`task show ID` for one in full). \
              Before any work on something the user asks, put it in the tracker in their words: a sub-task (`task sub add ITEM`) of the work item it clearly belongs to, \
              otherwise a new work item (`task add`); never under an unrelated one. Give each a title (`--title`): a few words in sentence case naming it, \
              as the phone lists it (\"App agents reply briefly\", not their sentence); the ask stays their words verbatim, never paraphrased. \
-             Name an untitled one with `task update ID --title` when you next touch it. Track your own breakdown as sub-tasks; link workers (`thread spawn --task`) \
-             and builds (`build start --task`) to the sub-task or item they serve, attach screenshots or clips worth seeing, and set status and note when that changes \
-             (in progress shows only while a linked worker or build runs and can't be set; an item follows its sub-tasks). A worker's brief (`thread spawn --task`, `thread send`) ends with the user's current asks for its work item \
+             Name an untitled one with `task update ID --title` when you next touch it. A new work item takes its kind: `--kind code` for anything that changes code, \
+             `no-code` for a question or research (`task answer`; the user closes it), `not-planned` for a backlog. \
+             Gates (`{cli} help gates`): every code change gets a plan the user approves (`{cli} draw`, `{cli} plan ITEM --dir docs/plans/<slug>`, every ask of theirs tied to a change; a plan can be one picture) \
+             before any code, workers that film each change (`{cli} film`), an independent review (`{cli} review start ITEM --thread {id}`) and the user's approval of a passing review \
+             before `{cli} merge ITEM`, the only way onto the base branch. A short reply is never an approval, only their button; a new commit voids a review. \
+             Your breakdown is the plan's numbered changes, not sub-tasks; link workers (`thread spawn --task`) and builds (`build start --task`) to the item they serve. A worker's brief (`thread spawn --task`, `thread send`) ends with the user's current asks for its work item \
              from the tracker, so a correction you don't record never reaches it. When the user corrects or adds to work in progress, mark the asks it \
              replaces (`task update ID --replaced-by NEW`) and send the worker the whole current spec, not just the new piece; after many revisions, \
              prefer a fresh worker briefed from the clean spec. \
@@ -573,5 +577,81 @@ impl Agents {
                 "the one subagent is `squircle:history`, cheap and read-only: ask it, in the foreground, before answering anything about past work or decisions.".into()
             },
         )
+    }
+}
+
+/// The per-turn note's list of open work items in gate terms, with what
+/// each needs from the agent next.
+fn gate_lines(items: &[crate::tasks::Task], thread: &str) -> String {
+    use crate::tasks::{Gate, Track, Verdict};
+    let mut lines = String::new();
+    for item in items
+        .iter()
+        .filter(|t| t.archived_at.is_none() && t.status.open())
+    {
+        let name = item.name();
+        let line = match &item.track {
+            Some(Track::Code(code)) => match &code.gate {
+                Gate::Planning if code.plans.is_empty() => {
+                    "Plan: draw it and hand it in (`plan`)".to_string()
+                }
+                Gate::Planning => format!("Plan: draw round {}", code.plans.len() + 1),
+                Gate::PlanWaiting if !item.uncovered.is_empty() => format!(
+                    "Plan round {} waits, but the user's words {} aren't in it: draw round {}",
+                    code.plans.len(),
+                    item.uncovered.join(", "),
+                    code.plans.len() + 1
+                ),
+                Gate::PlanWaiting => {
+                    format!("plan round {} waiting on the user", code.plans.len())
+                }
+                Gate::Building => {
+                    let unfilmed = code.unfilmed();
+                    match code.review() {
+                        Some(r) if !r.lapsed && r.verdict != Verdict::Pass => format!(
+                            "review {} {}, {} findings: workers fix them, then `review start ITEM --thread {thread}`",
+                            r.round,
+                            r.verdict.label(),
+                            r.findings.len()
+                        ),
+                        _ if unfilmed.is_empty() => format!(
+                            "Build: every change filmed; `review start ITEM --thread {thread}` when the branch is ready"
+                        ),
+                        _ => format!("Build: changes {unfilmed:?} not filmed on the branch yet"),
+                    }
+                }
+                Gate::Reviewing { .. } => format!("review {} running", code.reviews.len() + 1),
+                Gate::Reviewed => match code.review() {
+                    Some(r) if r.verdict == Verdict::Pass && r.approved.is_some() => {
+                        "merge approved: run `merge ITEM` now".to_string()
+                    }
+                    Some(r) if r.verdict == Verdict::Pass => {
+                        format!(
+                            "review {} PASS, waiting on the user's merge approval",
+                            r.round
+                        )
+                    }
+                    Some(r) => format!(
+                        "review {} {}, {} findings: send them to the workers",
+                        r.round,
+                        r.verdict.label(),
+                        r.findings.len()
+                    ),
+                    None => continue,
+                },
+                Gate::Merged { .. } => continue,
+            },
+            Some(Track::NoCode { answers }) if answers.is_empty() => {
+                "no code: answer it (`task answer`)".to_string()
+            }
+            Some(Track::NoCode { .. }) => "no code: answered, the user closes it".to_string(),
+            _ => continue,
+        };
+        lines.push_str(&format!("\n- “{name}” ({}): {line}", item.id));
+    }
+    if lines.is_empty() {
+        lines
+    } else {
+        format!("\nYour open work items (ITEM is the ID in brackets):{lines}")
     }
 }
