@@ -1,0 +1,63 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+.crop { height: 300px; overflow: hidden; } .crop img { width: 100%; }
+.strip { display: flex; gap: 8px; margin-top: 8px; }
+.strip .pic { width: 74px; height: 120px; } .strip img { height: 100%; width: 100%; object-fit: cover; object-position: top; }
+.strip .more { width: 74px; height: 120px; border-radius: 18px; background: var(--received); display: grid; place-items: center; font-size: 15px; font-weight: 600; color: var(--secondary); }
+.viewer { background: #0E0F12; color: #fff; }
+.viewer .status { color: #fff; }
+.viewer .glassbtn { background: rgba(255,255,255,.14); color: #fff; box-shadow: none; }
+.pages { text-align: center; font-size: 13px; font-weight: 600; color: rgba(255,255,255,.6); }
+.big { margin: 8px 20px 0; border-radius: 18px; overflow: hidden; height: 560px; background: #fff; }
+.big img { width: 100%; }
+.dots { display: flex; justify-content: center; gap: 6px; margin-top: 12px; }
+.dots i { width: 7px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.3); } .dots i.on { background: #fff; }
+.viewer .dock { background: linear-gradient(to bottom, rgba(14,15,18,0), rgba(14,15,18,.96) 28%); }
+.viewer .dock .primary { background: #F2F2F5; color: #0E0F12; }
+.viewer .dock .ghost { background: rgba(255,255,255,.14); color: #fff; box-shadow: none; }
+</style>
+<div class="board">
+  <div class="title">Gate 1 · approve the plan</div>
+  <div class="line" style="margin-top:4px">The work item's page leads with its stage and the plan: one big picture first, the problem pictures under it, the changes as one line each. Approve sits at the foot, always in reach.</div>
+  <div class="phones">
+    <div class="phonecol">
+      <div class="phone"><div class="island"></div>
+        <div class="status"><span>9:41</span><span>●●●</span></div>
+        <div class="bar"><div class="glassbtn">‹</div><div class="glassbtn">⋯</div></div>
+        <div class="scr">
+          <div class="track">
+            <span class="st now"><i class="dot"></i>Plan</span><i class="seg"></i>
+            <span class="st"><i class="dot"></i>Build</span><i class="seg"></i>
+            <span class="st"><i class="dot"></i>Review</span><i class="seg"></i>
+            <span class="st"><i class="dot"></i>Merge</span>
+          </div>
+          <div class="title">Keep the deck on the phone</div>
+          <div class="quote">“There's a pretty long load on the flash card deck. Does it work offline?”</div>
+          <div class="caption sec">THE PLAN · ROUND 3</div>
+          <div class="pic crop"><img src="plan-14.png"></div>
+          <div class="strip">
+            <div class="pic"><img src="plan-01.png"></div>
+            <div class="pic"><img src="before.jpg"></div>
+            <div class="pic"><img src="plan-14.png" style="object-position: 0 70%"></div>
+            <div class="more">+13</div>
+          </div>
+          <div class="caption sec">5 CHANGES</div>
+          <div class="row"><span class="g" style="color:var(--working)">1</span><span class="body">Keep the whole deck on the phone</span></div>
+          <div class="row"><span class="g" style="color:var(--working)">2</span><span class="body">Server sends only changed cards</span></div>
+        </div>
+        <div class="dock"><div class="btn primary">Approve plan</div><div class="btn ghost">Change…</div></div>
+      </div>
+      <div class="callout"><b>Your asks are checked against it.</b> Every ask filed under the item shows which change answers it; an ask with none shows in red, so nothing is dropped quietly.</div>
+    </div>
+    <div class="phonecol">
+      <div class="phone viewer"><div class="island"></div>
+        <div class="status"><span>9:41</span><span>●●●</span></div>
+        <div class="bar"><div class="glassbtn">✕</div><div class="pages">2 of 17</div><div class="glassbtn">⋯</div></div>
+        <div class="big"><img src="plan-01.png"></div>
+        <div class="dots"><i></i><i class="on"></i><i></i><i></i><i></i></div>
+        <div class="dock"><div class="btn primary">Approve plan</div><div class="btn ghost">Change…</div></div>
+      </div>
+      <div class="callout"><b>Tap a picture: full screen, swipe through.</b> Each is one idea with a sentence or two; odd parts are drawn in red. Change… opens the field: your words go in the tracker and the agent draws round 4.</div>
+    </div>
+  </div>
+</div>

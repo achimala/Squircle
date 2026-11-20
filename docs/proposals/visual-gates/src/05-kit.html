@@ -1,0 +1,55 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+body { width: 430px; padding: 28px 20px; }
+.tool { display: grid; grid-template-columns: 28px 1fr; column-gap: 10px; padding: 12px 0; border-bottom: .5px solid var(--sep); }
+.n { width: 28px; height: 28px; border-radius: 14px; background: var(--working); color: #fff; font: 600 13px/28px -apple-system; text-align: center; }
+.n.ink { background: var(--accent); }
+.cmd { font: 600 15px/20px ui-monospace, "SF Mono", monospace; }
+.to { font-size: 13px; line-height: 18px; color: var(--secondary); margin-top: 3px; }
+.to b { color: var(--working); font-weight: 600; }
+.map { margin-top: 18px; display: grid; grid-template-columns: 1fr; gap: 0; }
+.box { border: 2px solid var(--sep); border-radius: 18px; padding: 10px 14px; background: #fff; }
+.box .caption { margin-bottom: 2px; }
+.arrow { text-align: center; color: var(--secondary); font-size: 13px; line-height: 16px; padding: 4px 0; }
+.arrow::before { content: "↓"; display: block; font-size: 18px; color: var(--label); }
+.tree { font: 13px/19px ui-monospace, "SF Mono", monospace; color: var(--label); }
+.tree span { color: var(--secondary); }
+.svc { border-color: var(--working); }
+.ph { border-color: var(--accent); }
+.redbox { margin-top: 14px; border: 2px solid var(--failure); background: #fdeeee; border-radius: 18px; padding: 10px 14px; }
+</style>
+<div class="title">The kit every agent gets</div>
+<div class="line" style="margin-top:4px">Five Squircle commands, the same for Claude and Codex, app agents and workers.</div>
+<div style="height:8px"></div>
+
+<div class="tool"><div class="n">1</div><div><div class="cmd">squircle draw</div>
+  <div class="line">Boxes-and-arrows pictures from a short spec: <b>now</b>, <b>proposed</b> (added · moved · removed · <span class="red">odd in red</span>), and <b>problem</b> (you did / app does / it should). Pearl, phone width.</div>
+  <div class="to">→ PNGs in <b>plans/&lt;item&gt;/</b></div></div></div>
+
+<div class="tool"><div class="n">2</div><div><div class="cmd">squircle plan ITEM</div>
+  <div class="line">Hands in the plan: a few sentences, the pictures, numbered changes, each of your asks tied to a change. Refuses an ask left uncovered.</div>
+  <div class="to">→ <b>round N</b> waits for Approve plan</div></div></div>
+
+<div class="tool"><div class="n">3</div><div><div class="cmd">squircle film ITEM --change 2</div>
+  <div class="line">Films one change on main and on the branch through the simulator lease, picks before/after frames, measures jumps. A recorder error fails the call loudly.</div>
+  <div class="to">→ films and frames tied to <b>change 2</b></div></div></div>
+
+<div class="tool"><div class="n">4</div><div><div class="cmd">squircle review ITEM</div>
+  <div class="line">Starts the independent reviewer as a T3 worker (Astra on Codex, per app). Squircle hands it the plan, diff, films and app rules; it answers PASS / REVISE / BLOCKED with one picture per finding and plan vs actual.</div>
+  <div class="to">→ <b>review round</b> for <b>commit X</b></div></div></div>
+
+<div class="tool" style="border:none"><div class="n ink">5</div><div><div class="cmd">squircle merge ITEM</div>
+  <div class="line">Merges exactly the approved commit, and the plan folder with it. The only way onto main.</div></div></div>
+
+<div class="map">
+  <div class="box"><div class="caption">THE APP'S REPO · COMMITTED WITH THE MERGE</div>
+    <div class="tree">docs/plans/deck-offline/<br>&nbsp;&nbsp;plan.md <span>sentences, changes, asks</span><br>&nbsp;&nbsp;pictures/*.json → *.png<br>&nbsp;&nbsp;review-1.md, review-2.md<br>&nbsp;&nbsp;frames/ <span>before/after stills</span></div></div>
+  <div class="arrow">read by the service (git, file events)</div>
+  <div class="box svc"><div class="caption">SQUIRCLE SERVICE · TASKS OWNER</div>
+    <div class="line">stage · plan rounds (digest) · review rounds (commit, verdict) · your approvals · films</div></div>
+  <div class="arrow">GET /v1/tasks, push</div>
+  <div class="box ph"><div class="caption">THE PHONE</div>
+    <div class="line">the work item's page · Waiting on you on Home · the chat's “Plan ready” and “Review ready” lines</div></div>
+</div>
+<div class="redbox"><div class="caption red">ENFORCED, NOT ASKED</div>
+  <div class="line" style="color:var(--label)">A git hook in the app's repo refuses any move of main that <b>squircle merge</b> didn't make. The guard also stops the app agent's own git merge with the reason.</div></div>
