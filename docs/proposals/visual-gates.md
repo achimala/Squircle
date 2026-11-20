@@ -35,6 +35,46 @@ them. Items that change no code (questions, research) have no gates.
 
 ![The kit every agent gets](visual-gates/05-kit.png)
 
+## How each task is tracked, and the new Tasks
+
+User: "I'm not following how each task is tracked independently, how do I
+see the state of each task, what does the tasks ui look like now". Drawn
+from LanguageApp's real open work (2026-11-20): titles, asks, branches and
+review rounds are from its tracker and notes; approvals are drawn where the
+gates would have asked. The "branch" screenshots and the "Make it subtler"
+ask are stand-ins.
+
+![Every work item is its own track](visual-gates/06-parallel.png)
+
+Each work item is one unit: one plan (its rounds), one branch and its
+worker(s), its own review rounds, your two approvals. Items never share a
+stage; ten can sit at ten different points.
+
+![The new Tasks 1: overview, planning, plan ready](visual-gates/07-tasks-walk-1.png)
+
+![The new Tasks 2: building, review blocked, review passed](visual-gates/08-tasks-walk-2.png)
+
+![The new Tasks 3: merged, your words, no code](visual-gates/09-tasks-walk-3.png)
+
+- **Overview**: Needs you (an approval or a question), then Working, each
+  row with its four-step bar and the one thing happening; then folded lines
+  for Not planned yet, No code and Merged.
+- **An item's page** is about its current step: the agent drawing; the plan
+  with Approve; the worker live with each change's films; the blocked
+  review's findings with merge greyed; the passed review with plan vs
+  actual and Approve merge; the merged story, every round in order.
+- **Your words** live on their item, oldest first, each marked with the
+  change that answers it; Change… on any page adds to them.
+
+![Where sub-tasks and everything else go](visual-gates/10-where-things-go.png)
+
+Sub-tasks as a general bucket go. Your asks become the item's words; the
+agent's breakdown becomes the plan's numbered changes; review sub-tasks
+become review rounds; an item with two merges becomes two items; a backlog
+becomes "Not planned yet"; questions and research are No code items
+(asked → answered → closed by you), and any fix they find becomes its own
+gated item. Questions to you are unchanged.
+
 ## 1. Gates as state, enforced
 
 One value per work item, in the tasks owner (`src/fsm/tasks/`), replacing
@@ -64,12 +104,11 @@ struct Review { round: u32, head: Commit, verdict: Verdict, digest: Digest }
   when the review at that commit is PASS and you approved it. It is the one
   way onto the base branch. This alone stops "19 merged while the review
   said BLOCKED".
-- **Enforced for every agent**: the app agent's guard (Claude and Codex
-  both load it) refuses its own `git merge`/`push`/`update-ref` of the base
-  branch with the reason; a `reference-transaction` git hook, installed by
-  `squircle gates enable APP`, refuses moves of the base branch from T3
-  worktrees (workers have no guard). Your own terminal is untouched. This
-  stops drift, not a determined agent deleting the hook.
+- **Enforced through the app agent** (user, 2026-11-20: "No hook; the app
+  agent's guard is enough"): the guard (Claude and Codex agents both load
+  it) refuses the app agent's own `git merge`/`push`/`update-ref` of the
+  base branch and points it at `squircle merge`. Workers never merge; their
+  briefs say so. No git hook in app repos.
 - **Change…** puts your words in the tracker as an ask under the item
   (tracker first, as now) and wakes the agent; the item goes back a stage.
 - **Short replies aren't approvals** (LA note #5): only the button
@@ -146,12 +185,11 @@ provider CLI, like every other piece of delegated work.
   last audit as a review round. Nothing is approved from history: you tap
   once.
 
-## Decisions for you
+## Decided (user, 2026-11-20)
 
-1. **Every code change gated, or a small-change lane?** Proposed: every
-   merge, with a plan allowed to be one picture.
-2. **This repo too?** Squircle commits on main today; gating it changes that.
-3. **The git hook** is a write to each app's repo; `gates enable` would ask.
+- "Every code change; a plan can be one picture."
+- "Yes, gate Squircle too": this repo's commit-on-main habit ends when gates ship.
+- "No hook; the app agent's guard is enough."
 
 ## Unknown, not tested
 
@@ -165,7 +203,7 @@ provider CLI, like every other piece of delegated work.
 
 ## Build order
 
-1. Gate state, bound approvals, `merge`, guard and hook (tests only for the
+1. Gate state, bound approvals, `merge`, the guard (tests only for the
    transitions and the plan/review parsers).
 2. The page's stage track, Approve/Change, Waiting on you, Tasks cuts.
 3. `draw`, then `plan`. 4. `film`. 5. `review`. 6. LA moves over.

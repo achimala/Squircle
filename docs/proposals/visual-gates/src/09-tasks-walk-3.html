@@ -1,0 +1,63 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css"><link rel="stylesheet" href="pages.css">
+<style>
+.tl { display: grid; grid-template-columns: 60px 1fr; column-gap: 8px; padding: 6px 0; font-size: 15px; line-height: 20px; color: var(--secondary); border-top: .5px solid var(--sep); }
+.tl b { color: var(--label); font-weight: 600; }
+.answer { background: var(--received); border-radius: 18px; padding: 10px 14px; font-size: 17px; line-height: 22px; margin-top: 6px; }
+.spun { display: flex; justify-content: space-between; padding: 8px 0; border-top: .5px solid var(--sep); font-size: 17px; }
+</style>
+<div class="board">
+  <div class="title">The new Tasks · 3 of 3</div>
+  <div class="line" style="margin-top:4px">A merged item keeps its whole story. Your words live on the item they belong to. Work with no code has no gates.</div>
+  <div class="phones">
+
+    <div class="phonecol"><div class="step">7 · Merged <span>the whole story, kept</span></div>
+      <div class="phone"><div class="island"></div><div class="status"><span>9:41</span><span>●●●</span></div>
+        <div class="bar"><div class="glassbtn">‹</div><div class="glassbtn">⋯</div></div>
+        <div class="scr">
+          <i data-track="d,d,d,d"></i>
+          <div class="ttl">Card deck works offline</div>
+          <div style="margin:8px 0"><span class="chip cpass">MERGED</span> <span class="line">in the next phone build</span></div>
+          <div class="hero" style="height:220px"><img src="x-deck.png"></div>
+          <div class="caption sec">HOW IT GOT HERE</div>
+          <div class="tl"><span><span class="chip crev">REVISE</span></span><span>Plan rounds 1, 2: reviewer asked for more</span></div>
+          <div class="tl"><span><span class="chip cyou">✓ you</span></span><span>Plan round 3 <b>approved</b></span></div>
+          <div class="tl"><span><span class="chip cblk">✕ ✕</span></span><span>Reviews 1, 2 blocked: missing paintings offline; prefetch stopped at 90%</span></div>
+          <div class="tl"><span><span class="chip cpass">PASS</span></span><span>Review 3</span></div>
+          <div class="tl"><span><span class="chip cyou">✓ you</span></span><span>Merge <b>approved</b> · merged</span></div>
+          <div class="fold"><b>Plan, reviews, films</b><span>›</span></div>
+        </div>
+      </div></div>
+
+    <div class="phonecol"><div class="step">8 · Your words <span>on the item they belong to</span></div>
+      <div class="phone"><div class="island"></div><div class="status"><span>9:41</span><span>●●●</span></div>
+        <div class="bar"><div class="glassbtn">‹</div><div class="glassbtn">⋯</div></div>
+        <div class="scr">
+          <i data-track="n,-,-,-"></i>
+          <div class="ttl">Show when a used word earned credit</div>
+          <div class="caption sec">YOUR WORDS · OLDEST FIRST</div>
+          <div class="yours"><div class="w">“When you use things and get credit I kinda think we should highlight it somehow… Can I see a design for this?”</div><div class="to" style="color:var(--success)">→ change 1 · the highlight</div></div>
+          <div class="yours"><div class="w">“Looks good to me let's try it”</div><div class="to" style="color:var(--working)">→ picked option A · plan round 2</div></div>
+          <div class="yours"><div class="w">“Make it subtler”</div><div class="to" style="color:var(--failure)">→ not in the plan yet <span style="color:var(--tertiary)">(made-up example)</span></div></div>
+          <div class="line" style="margin-top:12px">Change… on any page adds your words here. The plan must tie each one to a change before you can approve it.</div>
+        </div>
+        <div class="dock"><div class="btn off">Approve plan</div><div class="btn ghost">Change…</div></div>
+      </div></div>
+
+    <div class="phonecol"><div class="step">9 · No code <span>asked, answered, closed</span></div>
+      <div class="phone"><div class="island"></div><div class="status"><span>9:41</span><span>●●●</span></div>
+        <div class="bar"><div class="glassbtn">‹</div><div class="glassbtn">⋯</div></div>
+        <div class="scr">
+          <div class="caption" style="margin:4px 0 6px;color:var(--success)">ANSWERED</div>
+          <div class="ttl">Find work dropped without telling me</div>
+          <div class="q">“What else got dropped randomly without telling me?”</div>
+          <div class="answer">19 changes merged while their last review said BLOCKED; 7 matter. 3 pass now, 4 are still broken.</div>
+          
+          <div class="caption sec">BECAME WORK ITEMS</div>
+          <div class="spun"><span>Replace exposed Apple sign-in key</span><span style="display:flex;align-items:center"><i data-bar="-,-,-,-"></i></span></div>
+          <div class="spun"><span>Fix the 4 still broken</span><span style="display:flex;align-items:center"><i data-bar="w,-,-,-"></i></span></div>
+        </div>
+        <div class="dock"><div class="btn primary">Close</div><div class="btn ghost">Ask more…</div></div>
+      </div></div>
+  </div>
+</div>
+<script src="track.js"></script>

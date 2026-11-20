@@ -5,7 +5,7 @@ from PIL import Image
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 here = pathlib.Path(__file__).resolve().parent
-widths = {"01": 430, "02": 860, "03": 860, "04": 860, "05": 430}
+widths = {"01": 430, "02": 860, "03": 860, "04": 860, "05": 430, "06": 1080, "07": 1300, "08": 1300, "09": 1300, "10": 1080}
 for html in sorted(here.glob("[0-9][0-9]-*.html")):
     if len(sys.argv) > 1 and html.stem[:2] not in sys.argv[1:]:
         continue

@@ -52,4 +52,4 @@ body { width: 430px; padding: 28px 20px; }
     <div class="line">the work item's page · Waiting on you on Home · the chat's “Plan ready” and “Review ready” lines</div></div>
 </div>
 <div class="redbox"><div class="caption red">ENFORCED, NOT ASKED</div>
-  <div class="line" style="color:var(--label)">A git hook in the app's repo refuses any move of main that <b>squircle merge</b> didn't make. The guard also stops the app agent's own git merge with the reason.</div></div>
+  <div class="line" style="color:var(--label)">The app agent's guard refuses its own git merge or push to main and points it at <b>squircle merge</b>, which refuses without your approval of the current review. Workers never merge; the app agent does.</div></div>

@@ -1,0 +1,42 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+body { width: 1080px; padding: 28px 20px; }
+.grid { display: grid; grid-template-columns: 1fr 40px 1fr; margin-top: 18px; }
+.hd { font-size: 13px; font-weight: 600; color: var(--secondary); padding: 0 0 6px; }
+.l, .r { border-top: .5px solid var(--sep); padding: 12px 0; }
+.a { border-top: .5px solid var(--sep); display: grid; place-items: center; font-size: 22px; color: var(--secondary); }
+.what { font-size: 17px; line-height: 22px; font-weight: 600; }
+.eg { font-size: 15px; line-height: 20px; color: var(--secondary); margin-top: 3px; }
+.eg q { color: var(--label); }
+.r .what { font-weight: 600; }
+.pill { display: inline-block; font-size: 13px; font-weight: 600; border-radius: 9px; padding: 1px 8px; margin-right: 4px; }
+.p-y { background: var(--accent); color: #fff; } .p-w { color: var(--working); box-shadow: inset 0 0 0 1.5px var(--working); }
+.p-n { color: var(--warning); box-shadow: inset 0 0 0 1.5px var(--warning); } .p-g { background: var(--success); color: #fff; }
+.p-x { background: var(--failure); color: #fff; }
+</style>
+<div class="title">Where sub-tasks and everything else go</div>
+<div class="line" style="margin-top:4px">Today a work item holds anything as a sub-task. With gates, each kind of thing has one place. Examples are LanguageApp's real sub-tasks.</div>
+<div class="grid">
+  <div class="hd">TODAY: A SUB-TASK</div><div></div><div class="hd">WITH GATES</div>
+
+  <div class="l"><div class="what">Your ask or correction</div><div class="eg"><q>Approve, same kick for scrolling</q> under Rubber-band paging</div></div><div class="a">→</div>
+  <div class="r"><div class="what">Your words on that item</div><div class="eg">Quoted as you said them, each tied to a plan change. Untied ones are red and block Approve plan.</div></div>
+
+  <div class="l"><div class="what">The agent's breakdown</div><div class="eg"><q>Breakdown: horizontal Letters/Cards paging gets overscroll + rubber-band at both ends…</q></div></div><div class="a">→</div>
+  <div class="r"><div class="what">The plan's numbered changes</div><div class="eg">1 Rubber-band past both ends · 2 Ribbon sways · 3 Same kick for scrolling. Each one filmed, each one checked by the review.</div></div>
+
+  <div class="l"><div class="what">Review sub-tasks</div><div class="eg"><q>Independent shadow review round 4</q>, <q>round 3</q>, <q>cache review round 2</q>… six under Ribbon and cord jaggies</div></div><div class="a">→</div>
+  <div class="r"><div class="what">Review rounds on the item</div><div class="eg"><span class="pill p-x">r1 ✕</span><span class="pill p-x">r2 ✕</span><span class="pill p-x">r3 ✕</span><span class="pill p-x">r4 ✕</span> the newest one decides the merge button</div></div>
+
+  <div class="l"><div class="what">Several merges in one item</div><div class="eg"><q>Card deck loads slowly</q>: 12 sub-tasks, two separate changes (offline deck, never block on pictures)</div></div><div class="a">→</div>
+  <div class="r"><div class="what">One work item per merge</div><div class="eg"><b>Card deck works offline</b> and <b>Never block cards on pictures</b>, each with its own plan, branch, reviews and approvals.</div></div>
+
+  <div class="l"><div class="what">A backlog item</div><div class="eg"><q>Backlog: real-user testing bugs</q>: 64 sub-tasks</div></div><div class="a">→</div>
+  <div class="r"><div class="what">Not planned yet</div><div class="eg">Your asks wait there in your words. When the agent takes some on, it groups them into a work item with a plan; you approve it like any other.</div></div>
+
+  <div class="l"><div class="what">A question or research</div><div class="eg"><q>What else got dropped randomly without telling me?</q></div></div><div class="a">→</div>
+  <div class="r"><div class="what">No code: asked → answered → closed</div><div class="eg">The answer, with its pictures, sits on the item; you close it. Any fix it finds becomes its own gated work item.</div></div>
+
+  <div class="l"><div class="what">A question to you</div><div class="eg">a choice, a go-ahead</div></div><div class="a">→</div>
+  <div class="r"><div class="what">Unchanged: a card under its item</div><div class="eg"><span class="pill p-n">needs you</span> in Tasks and Waiting on you on Home, answerable there.</div></div>
+</div>
