@@ -237,6 +237,7 @@ mod tests {
                 source,
                 vec![],
                 parent,
+                None,
             );
             task.await.unwrap().id
         };

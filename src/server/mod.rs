@@ -72,6 +72,8 @@ mod push_routes;
 use push_routes::*;
 mod task_routes;
 use task_routes::*;
+mod gate_routes;
+use gate_routes::*;
 mod waiting_routes;
 use waiting_routes::*;
 mod event_routes;

@@ -38,15 +38,33 @@ struct WaitingList: Decodable, Equatable {
         let pending: PendingRequest
     }
 
+    /// One of your approvals on a work item: its plan round, or its passing
+    /// review, bound to what it names (a digest, or the reviewed commit).
+    struct Approval: Equatable {
+        enum Gate: String { case plan, merge }
+        let gate: Gate
+        let taskID: String
+        let task: String
+        let round: Int
+        /// The plan's digest, or the reviewed commit.
+        let bind: String
+        /// The plan's first picture, or the branch film's still (a path on the Mac).
+        let picture: String?
+        let detail: String
+        let summary: String?
+    }
+
     enum Item: Equatable {
         case question(Question)
         case request(Request)
+        case approval(Approval)
 
         /// The thread that asked: where it shows in a conversation.
         var threadID: String? {
             switch self {
             case .question(let q): q.threadID
             case .request(let r): r.threadID
+            case .approval: nil
             }
         }
 
@@ -55,6 +73,7 @@ struct WaitingList: Decodable, Equatable {
             switch self {
             case .question(let q): "q." + q.id
             case .request(let r): "r." + r.pending.id
+            case .approval(let a): "a.\(a.taskID).\(a.gate.rawValue).\(a.round)"
             }
         }
     }
@@ -86,6 +105,14 @@ struct WaitingList: Decodable, Equatable {
             guard let thread = value["thread_id"].string, let request = value["request_id"].string else { return nil }
             return .request(Request(threadID: thread, title: value["title"].string ?? "", worker: value["worker"].bool,
                                     task: value["task_title"].string ?? value["ask"].string, pending: PendingRequest(id: request, item: value["item"])))
+        case "approval":
+            guard let task = value["task_id"].string, let gate = value["gate"].string.flatMap(Approval.Gate.init),
+                  let round = value["round"].double else { return nil }
+            let bind = gate == .plan ? value["bind"]["digest"].string : value["bind"]["head"].string
+            guard let bind else { return nil }
+            return .approval(Approval(gate: gate, taskID: task, task: value["task_title"].string ?? "", round: Int(round), bind: bind,
+                                      picture: value["picture"].string, detail: value["detail"].string ?? "",
+                                      summary: value["summary"].string))
         default:
             return nil
         }

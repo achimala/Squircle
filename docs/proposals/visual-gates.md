@@ -1,6 +1,6 @@
 # Proposal: visual gates (plan approval, merge approval)
 
-**Status: proposal, 2026-11-20. Nothing here is built or approved.**
+**Status: approved by the user and built, 2026-11-20** (see [tasks](../task-tracking.md#gates-2026-11-20-user-decision) and [gates.md](../gates.md)). `squircle review` is `review start` / `review submit`.
 
 User: "I want the visual diagrams and visual review assets to be some tools
 or skills or something baked into the harness. I should be able to see the

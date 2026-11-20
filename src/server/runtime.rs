@@ -57,6 +57,7 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     state.pool = Some(pool.clone());
     state.push = Some(push.clone());
     state.tasks = Some(tasks.clone());
+    let heads_of = tasks.clone();
     // Service loops, stopped explicitly once requests have drained.
     let mut background = Vec::new();
     {
@@ -80,6 +81,9 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
                 if let Err(error) = agents.relay_answers().await {
                     eprintln!("Answer not delivered yet: {error:#}");
                 }
+                if let Err(error) = agents.relay_news().await {
+                    eprintln!("Gate news not delivered yet: {error:#}");
+                }
                 let aged = tasks.next_age().map(|at| at as f64);
                 tokio::select! {
                     changed = changes.next() => if changed.is_none() { return },
@@ -94,6 +98,11 @@ pub async fn serve(root: PathBuf, listen: SocketAddr, public_url: Option<String>
     );
     // After the announcement, which is the first line supervisors read.
     background.push(tokio::spawn(agents.clone().run()));
+    // A reviewed branch that moves voids its review and approval.
+    background.push(tokio::spawn(crate::gates::follow_heads(
+        heads_of.clone(),
+        agents.clone(),
+    )));
     background.push(tokio::spawn(agents.clone().upkeep()));
     background.push(tokio::spawn(push.clone().run(crate::t3db::changes())));
     background.push(tokio::spawn(sims.clone().run()));

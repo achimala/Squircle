@@ -12,6 +12,65 @@ these. Allow agent to formally track these details or sub tasks inside the
 task. No user asks should be acted on without being put in the tracker."
 A task is now a work item; small items are sub-tasks under it (below).
 
+## Gates (2026-11-20, user decision)
+
+User: "I should be able to see the visual plans for each task and approve;
+then see the review output and implementation details as visualizations and
+approve those for the agent to merge." Decided the same day: "Every code
+change; a plan can be one picture", "Yes, gate Squircle too", "No hook; the
+app agent's guard is enough". The approved proposal, with its pictures, is
+[proposals/visual-gates.md](proposals/visual-gates.md); the formats agents
+write are in [gates.md](gates.md) (`squircle help gates`).
+
+**This supersedes**, for work items: the six statuses as what the phone
+shows (Ready to try, Queued and In progress are cut: the stage says it),
+manual Done (done is merged; a No code item is closed by the user), the
+agent's breakdown sub-tasks (the plan's numbered changes replace them),
+sub-task rows on the overview and the counts strip above the agent's field.
+Kept: the user's asks in their words, Drop, questions to the user, History,
+search. The `status` field is still sent (derived as before, needs you while
+an approval waits) so installed phone builds keep decoding.
+
+- **Kinds.** Every work item has one (`task add --kind`): **code** (it
+  changes code), **no code** (a question or research: asked → answered with
+  `task answer` → closed by the user; any fix it finds is its own code item,
+  `--from`), **not planned yet** (a backlog of asks the agent hasn't taken
+  on). Sub-tasks have none: they are the user's words on an item.
+- **Code items move Plan → Build → Review → Merge** (`Gate` in
+  `src/fsm/tasks/gates.rs`): Planning (the agent draws round N) → PlanWaiting
+  (the round waits on the user's **Approve plan**) → Building (workers build
+  and film each change) → Reviewing (the independent reviewer, a T3 worker,
+  runs on the branch head) → Reviewed (PASS waits on the user's **Approve
+  merge**; REVISE or BLOCKED goes back to the workers) → Merged (`squircle
+  merge`, the only way onto the base branch).
+- **Approvals are bound.** Approve plan names the round and its digest (of
+  plan.md and its pictures as handed in, kept in the task's folder); Approve
+  merge names the review round and the commit it reviewed. Anything no longer
+  current is refused. Every open ask of the user's must be tied to a plan
+  change (`asks:` in plan.md) or `plan` refuses it; words added after a
+  round grey Approve plan out until the next round ties them.
+- **The branch moving voids the review** and any approval of it: the
+  service watches each reviewed branch's ref folder (kqueue, `follow_heads`
+  in `src/gates.rs`), and the item goes back to Build. No timers.
+- **Merge refuses** without the user's approval of the current review, if
+  the branch moved, if the review isn't PASS for that commit, or if a
+  planned change has no film on the branch. It merges exactly the approved
+  commit with the item's folder (`docs/plans/<slug>/`: plan, pictures, every
+  review, the films' stills) after the app's merge checks
+  (`.squircle/gates.toml`).
+- **Enforced through the app agent's guard** (Claude and Codex): it refuses
+  the agent's own git merge, push, commit, rebase, reset, update-ref and the
+  like, `gh pr merge`, and writes inside `.git`. Workers never merge (their
+  briefs say so). No git hook in app repos.
+- **The user's Change…** files their words as an ask under the item (as the
+  phone's own sub-task) and wakes the agent with a `[change]` message; at
+  Review the item goes back to Build. Approvals reach the agent as
+  `[approved]` messages (`Note::Gate`). A short reply is never an approval.
+- **Items from before gates** were filed once on load: open ones as code at
+  Plan (a backlog, titled "Backlog…", as Not planned yet). Nothing is
+  approved from history: the agent imports an existing plan as round 1, and
+  the user taps once.
+
 ## Work items and sub-tasks (2026-10-24)
 
 A sub-task is an ordinary task with a `parent` (one level only, same app):

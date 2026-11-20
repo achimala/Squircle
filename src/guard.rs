@@ -40,8 +40,19 @@ pub fn check(event: &Value, cli: &str) -> Option<String> {
         }
         "Agent" | "Task" | "spawn_agent" | "spawn_agents_on_csv" => "Subagents",
         "Workflow" => "Workflows",
+        "Edit" | "Write" | "NotebookEdit" | "MultiEdit" => {
+            let path = input["file_path"]
+                .as_str()
+                .or(input["notebook_path"].as_str())?;
+            return (path.contains("/.git/") || path.ends_with("/.git"))
+                .then(|| merge_hint(cli, "Writing inside .git"));
+        }
         _ => {
-            let runs = runs_model(input["command"].as_str()?)?;
+            let command = input["command"].as_str()?;
+            if let Some(git) = writes_refs(command) {
+                return Some(merge_hint(cli, &format!("`{git}`")));
+            }
+            let runs = runs_model(command)?;
             return Some(format!(
                 "`{runs}` runs a model outside T3, where the user can't see it. {}",
                 spawn_hint(cli)
@@ -189,6 +200,15 @@ fn plain_words(command: &str) -> Result<Vec<String>, char> {
     Ok(words)
 }
 
+/// Why the app agent can't write branches itself (visual gates, 2026-11-20).
+fn merge_hint(cli: &str, what: &str) -> String {
+    format!(
+        "{what} isn't yours to run: every code change reaches the base branch only through `{cli} merge ITEM`, \
+         after the user approved its plan and then its passing review (`{cli} help gates`). Workers commit on their own branches; \
+         you hand in plans (`{cli} plan`), start reviews (`{cli} review start`) and merge. To bring a worker's branch up to date, ask the worker."
+    )
+}
+
 fn spawn_hint(cli: &str) -> String {
     format!(
         "Run every piece of delegated work, reviews and research included, as a T3 worker, one per reviewer or job: \
@@ -200,17 +220,117 @@ fn spawn_hint(cli: &str) -> String {
 
 /// The `codex` or `claude` model run in a shell command, if any.
 pub fn runs_model(command: &str) -> Option<String> {
+    scan(command, &model_run)
+}
+
+/// The git (or `gh`) command that would write the repository's branches,
+/// if a shell command runs one: the app agent's way around `squircle merge`.
+pub fn writes_refs(command: &str) -> Option<String> {
+    scan(command, &ref_write)
+}
+
+/// What `matcher` finds in any simple command `command` runs, through
+/// wrappers, shells, `eval` and command substitutions.
+fn scan(command: &str, matcher: &Matcher) -> Option<String> {
     for script in substitutions(command)
         .iter()
         .chain(std::iter::once(&command.to_string()))
     {
         for words in simple_commands(script) {
-            if let Some(found) = program_run(&words, 0) {
+            if let Some(found) = program_run(&words, 0, matcher) {
                 return Some(found);
             }
         }
     }
     None
+}
+
+type Matcher = dyn Fn(&str, &[String]) -> Option<String>;
+
+fn model_run(name: &str, rest: &[String]) -> Option<String> {
+    let safe = match name {
+        "codex" => CODEX_SAFE,
+        "claude" => CLAUDE_SAFE,
+        _ => return None,
+    };
+    match rest.first() {
+        Some(first) if safe.contains(&first.as_str()) => None,
+        _ => Some(
+            std::iter::once(name.to_string())
+                .chain(rest.iter().take(2).cloned())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+    }
+}
+
+/// Git subcommands that make commits or move branches.
+const GIT_WRITES: &[&str] = &[
+    "merge",
+    "push",
+    "commit",
+    "rebase",
+    "cherry-pick",
+    "revert",
+    "reset",
+    "pull",
+    "am",
+    "update-ref",
+    "commit-tree",
+    "fast-import",
+    "replace",
+    "filter-branch",
+];
+
+fn ref_write(name: &str, rest: &[String]) -> Option<String> {
+    match name {
+        "git" => {
+            // Git's own options before the subcommand, some with a value.
+            let mut i = 0;
+            while let Some(word) = rest.get(i) {
+                if matches!(
+                    word.as_str(),
+                    "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--exec-path"
+                ) {
+                    i += 2;
+                } else if word.starts_with('-') {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let sub = rest.get(i)?;
+            let args = &rest[i + 1..];
+            let forced = |flags: &[&str]| args.iter().any(|a| flags.contains(&a.as_str()));
+            let writes = GIT_WRITES.contains(&sub.as_str())
+                || (sub == "branch"
+                    && forced(&[
+                        "-f", "--force", "-m", "-M", "-c", "-C", "-d", "-D", "--delete",
+                    ]))
+                || (matches!(sub.as_str(), "checkout" | "switch")
+                    && forced(&["-B", "-C", "--force-create"]));
+            writes.then(|| format!("git {sub}"))
+        }
+        "gh" => {
+            let words: Vec<&str> = rest
+                .iter()
+                .map(String::as_str)
+                .filter(|w| !w.starts_with('-'))
+                .collect();
+            let merges = matches!(words.as_slice(), ["pr", "merge", ..])
+                || (words.first() == Some(&"api")
+                    && words
+                        .iter()
+                        .any(|w| w.contains("/merge") || w.contains("/git/refs")));
+            merges.then(|| {
+                format!(
+                    "gh {}",
+                    words.iter().take(2).copied().collect::<Vec<_>>().join(" ")
+                )
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Commands that wrap another: skip them and their options to the real program.
@@ -233,6 +353,7 @@ const WRAPPERS: &[&str] = &[
     "watch",
     "unbuffer",
     "noglob",
+    "xcrun",
     "npx",
     "bunx",
     "pnpx",
@@ -272,7 +393,7 @@ const CLAUDE_SAFE: &[&str] = &[
     "update",
 ];
 
-fn program_run(words: &[String], depth: usize) -> Option<String> {
+fn program_run(words: &[String], depth: usize, matcher: &Matcher) -> Option<String> {
     if depth > 8 {
         return None;
     }
@@ -292,12 +413,12 @@ fn program_run(words: &[String], depth: usize) -> Option<String> {
                 1
             };
         }
-        return program_run(rest.get(next..)?, depth + 1);
+        return program_run(rest.get(next..)?, depth + 1, matcher);
     }
     if matches!(name.as_str(), "npm" | "pnpm" | "yarn" | "bun") {
         let sub = rest.iter().position(|w| !w.starts_with('-'))?;
         return if matches!(rest[sub].as_str(), "exec" | "dlx" | "x") {
-            program_run(&rest[sub + 1..], depth + 1)
+            program_run(&rest[sub + 1..], depth + 1, matcher)
         } else {
             None
         };
@@ -306,25 +427,12 @@ fn program_run(words: &[String], depth: usize) -> Option<String> {
         let flag = rest
             .iter()
             .position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'))?;
-        return runs_model(rest.get(flag + 1)?);
+        return scan(rest.get(flag + 1)?, matcher);
     }
     if name == "eval" {
-        return runs_model(&rest.join(" "));
+        return scan(&rest.join(" "), matcher);
     }
-    let safe = match name.as_str() {
-        "codex" => CODEX_SAFE,
-        "claude" => CLAUDE_SAFE,
-        _ => return None,
-    };
-    match rest.first() {
-        Some(first) if safe.contains(&first.as_str()) => None,
-        _ => Some(
-            std::iter::once(name)
-                .chain(rest.iter().take(2).cloned())
-                .collect::<Vec<_>>()
-                .join(" "),
-        ),
-    }
+    matcher(&name, rest)
 }
 
 /// The program a word names: its file name, with npm package names mapped to their binaries.
@@ -544,6 +652,43 @@ mod tests {
         ] {
             assert!(runs_model(command).is_some(), "missed: {command}");
         }
+    }
+
+    #[test]
+    fn the_app_agent_cannot_write_branches_however_it_is_written() {
+        for command in [
+            "git merge feature",
+            "git -C /Users/me/App merge --no-ff deck-offline",
+            "git -c user.name=x commit -am wip",
+            "cd ../App && git push origin main",
+            "/usr/bin/git update-ref refs/heads/main abc123",
+            "env GIT_DIR=.git git reset --hard origin/main",
+            "bash -lc 'git cherry-pick abc'",
+            "echo \"$(git rebase main)\"",
+            "git branch -f main deck",
+            "git checkout -B main deck",
+            "xcrun git pull",
+            "gh pr merge 12 --squash",
+            "nohup git am < patch &",
+        ] {
+            assert!(writes_refs(command).is_some(), "missed: {command}");
+        }
+        for command in [
+            "git log --oneline main..deck",
+            "git diff main...deck",
+            "git show abc:docs/plans/deck/plan.md",
+            "git status && git branch -a",
+            "git worktree list",
+            "git fetch origin",
+            "rg 'git merge' docs/",
+            "squircle merge 6c9fd013-d807-4825-b0c7-060659fb7ffc",
+            "gh pr view 12",
+        ] {
+            assert_eq!(writes_refs(command), None, "flagged: {command}");
+        }
+        let edit =
+            json!({"tool_name": "Write", "tool_input": {"file_path": "/App/.git/refs/heads/main"}});
+        assert!(check(&edit, "sq").is_some());
     }
 
     #[test]

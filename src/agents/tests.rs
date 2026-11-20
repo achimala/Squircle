@@ -867,6 +867,7 @@ async fn an_answer_saved_before_a_restart_is_delivered_once() {
             None,
             vec![],
             None,
+            None,
         )
         .await
         .unwrap();

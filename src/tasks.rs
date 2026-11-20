@@ -9,7 +9,7 @@
 //! each result through the commit gate before anyone can read it.
 
 use crate::actor::{Owner, Saved, Snapshot};
-use crate::fsm::core::commit::{Gate, JsonFile};
+use crate::fsm::core::commit::{Gate as SaveGate, JsonFile};
 use crate::fsm::core::{BuildID, Disposition, Machine, Revision, TaskID, ThreadID};
 use crate::fsm::tasks::{Book, Effect, Event, M17};
 use crate::media::{self, Media};
@@ -20,8 +20,10 @@ use std::{
 };
 
 pub use crate::fsm::tasks::{
-    BuildPhase, BuildSignal, By, Change, Question, QuestionState, Signals, Source, Status, Task,
-    Update, WorkerPhase, WorkerSignal,
+    AgentNews, Answer, BuildPhase, BuildSignal, By, Change, ChangeLine, Code, Film, Finding, Gate,
+    GateEvent, Kind, Mark, PlanChange, PlanDraft, PlanRound, Question, QuestionState, ReviewDraft,
+    ReviewRound, Side, Signals, Source, Status, Task, Track, Update, Verdict, WorkerPhase,
+    WorkerSignal, short,
 };
 
 /// The book as saved, for reading without the service (`squircle history`).
@@ -90,7 +92,7 @@ impl Tasks {
             .read()?
             .unwrap_or((Book::default(), Revision::default()));
         let migrated = book.migrated();
-        let (book, snapshot) = Saved::new(Gate::restore(book, revision, file));
+        let (book, snapshot) = Saved::new(SaveGate::restore(book, revision, file));
         let mut state = State { book };
         // Needs you kept as a status, from before it was derived: saved
         // once as the stage underneath (2026-10-31). Records from before
@@ -138,6 +140,7 @@ impl Tasks {
         source: Option<Source>,
         threads: Vec<String>,
         parent: Option<&str>,
+        kind: Option<Kind>,
     ) -> Result<Task> {
         let id = TaskID::fresh();
         let event = Event::Add {
@@ -151,6 +154,7 @@ impl Tasks {
             source,
             threads,
             parent: parent.map(str::to_string),
+            kind,
             now: crate::model::now(),
         };
         self.owner
@@ -275,6 +279,45 @@ impl Tasks {
             media.iter().for_each(media::remove);
         }
         asked
+    }
+
+    /// Moves a gate (plans, reviews, approvals, films, merges); returns the
+    /// item as saved.
+    pub async fn gate(&self, id: &str, event: GateEvent) -> Result<Task> {
+        let id = id.to_string();
+        self.owner
+            .ask(move |s| s.apply_get(vec![Event::Gate(event)], &id))
+            .await
+    }
+
+    /// Where each watched branch points now; items whose review it no
+    /// longer covers go back to Build.
+    pub async fn heads(&self, heads: Vec<(String, Option<String>)>) -> Result<()> {
+        let event = Event::Gate(GateEvent::Heads {
+            heads,
+            now: crate::model::now(),
+        });
+        self.owner.ask(move |s| s.apply(vec![event])).await
+    }
+
+    /// News the app agents still have to hear.
+    pub fn news(&self) -> Vec<(Task, AgentNews)> {
+        self.book.get().news()
+    }
+
+    /// Settles news once it is queued for the agent.
+    pub async fn told(&self, id: &str, news: &str) -> Result<()> {
+        let event = Event::Gate(GateEvent::Told {
+            id: id.into(),
+            news: news.into(),
+        });
+        self.owner.ask(move |s| s.apply(vec![event])).await
+    }
+
+    /// The task's own folder in the data directory (plan and review rounds).
+    pub fn dir(&self, id: &str) -> Result<PathBuf> {
+        TaskID::parse(id).context("Task ID must be a UUID")?;
+        Ok(self.root.join("tasks").join(id))
     }
 
     /// The user's answer, or with `None` the asker withdrawing it.
@@ -438,6 +481,7 @@ mod tests {
                 None,
                 vec!["w".into()],
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -476,6 +520,7 @@ mod tests {
                 By::Agent,
                 None,
                 vec!["w".into()],
+                None,
                 None,
             )
             .await
@@ -528,6 +573,7 @@ mod tests {
                 By::Agent,
                 None,
                 vec![],
+                None,
                 None,
             )
             .await

@@ -28,6 +28,8 @@ mod discovery;
 use discovery::*;
 mod poll;
 use poll::*;
+mod gates;
+use gates::*;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -143,6 +145,8 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
         Commands::Help { topic } => {
             if topic.as_deref() == Some("workflow") {
                 println!("{}", include_str!("../../docs/verification.md"));
+            } else if topic.as_deref() == Some("gates") {
+                println!("{}", include_str!("../../docs/gates.md"));
             } else if let Some(topic) = topic {
                 let mut command = Cli::command();
                 let sub = command
@@ -212,6 +216,30 @@ async fn run(cli: &Cli) -> Result<Option<Value>> {
         Commands::History { command } => return history::history(cli, command).await,
         Commands::Notes { command } => return history::notes(cli, command).await,
         Commands::Task { command } => return tasks::run(cli, command).await,
+        Commands::Draw { spec, out } => return gates::draw(spec, out.as_ref()).await,
+        Commands::Plan { item, dir } => return gates::plan(cli, item, dir).await,
+        Commands::Film {
+            item,
+            change,
+            side,
+            file,
+            thread,
+            caption,
+        } => {
+            return gates::film(
+                cli,
+                item,
+                *change,
+                *side,
+                file.as_ref(),
+                thread.as_deref(),
+                caption.as_deref(),
+            )
+            .await;
+        }
+        Commands::Review { command } => return gates::review(cli, command).await,
+        Commands::Merge { item } => return gates::merge(cli, item).await,
+        Commands::Gates { command } => return gates::gates(cli, command).await,
         Commands::Thread { command } => return agents::thread(cli, command).await,
         Commands::Diagnostics { command } => return local::diagnostics(cli, command).await,
     };

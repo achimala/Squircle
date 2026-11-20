@@ -2026,6 +2026,42 @@ final class SquircleModel {
         }
     }
     /// A task's picture or a clip's poster, with enough pixels for `height` points.
+    /// A gate action (approve, Change…, close): sent, then the list read
+    /// again; nil when it went through, else why not, in the Mac's words.
+    func gate(_ action: @escaping (SquircleClient) async throws -> Void) async -> String? {
+        guard let client else { return "Not connected to the Mac" }
+        do {
+            try await action(client)
+            await refreshTasks()
+            await refreshWaiting()
+            return nil
+        } catch {
+            await refreshTasks()
+            return error.localizedDescription
+        }
+    }
+    /// An approval card's picture, by its path on the Mac (`/v1/tasks/…`).
+    func approvalPicture(path: String, height: CGFloat) async -> UIImage? {
+        let parts = path.split(separator: "/").map(String.init)
+        // /v1/tasks/ID/rounds/KIND/ROUND/PATH…, or /v1/tasks/ID/media/MEDIA
+        guard parts.count >= 5, parts[0] == "v1", parts[1] == "tasks" else { return nil }
+        if parts[3] == "media" {
+            return await taskThumbnail(task: parts[2], media: AppTask.Media(id: parts[4], kind: "image", caption: "", name: nil, bytes: nil), height: height)
+        }
+        guard parts.count >= 7, let round = Int(parts[5]) else { return nil }
+        return await roundPicture(task: parts[2], kind: parts[4], round: round, path: parts[6...].joined(separator: "/"), height: height)
+    }
+    /// A picture of a plan or review round, at up to `height` points tall.
+    func roundPicture(task: String, kind: String, round: Int, path: String, height: CGFloat) async -> UIImage? {
+        let key = "\(task)/\(kind)/\(round)/\(path)"
+        let data: Data
+        if let cached = taskMedia.value(for: key) { data = cached } else {
+            guard let client, let fetched = try? await client.roundFile(taskID: task, kind: kind, round: round, path: path) else { return nil }
+            taskMedia.set(fetched, for: key)
+            data = fetched
+        }
+        return await Downsample.image(data) { height * 3 / max(1, $0.height) }
+    }
     func taskThumbnail(task: String, media: AppTask.Media, height: CGFloat) async -> UIImage? {
         let data: Data?
         if media.kind == "video" {

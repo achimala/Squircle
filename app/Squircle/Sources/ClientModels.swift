@@ -400,6 +400,9 @@ struct AppTask: Decodable, Equatable, Identifiable {
     }
 
     let id: String
+    /// A work item's kind and gates (2026-11-20); nil on sub-tasks and on
+    /// items closed before gates.
+    let gate: Gate?
     /// The agent's short name for it; nil or empty on tasks from before titles.
     private let title: String?
     /// The ask in the user's own words, kept verbatim.
@@ -437,7 +440,7 @@ struct AppTask: Decodable, Equatable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, ask, status, note, threads, builds, media, revision
+        case id, title, ask, status, note, threads, builds, media, revision, gate
         case updatedAt = "updated_at", archivedAt = "archived_at", subtaskList = "subtasks"
     }
 
@@ -455,6 +458,8 @@ struct AppTask: Decodable, Equatable, Identifiable {
         builds = try container.decode([Build].self, forKey: .builds)
         media = try container.decode([Media].self, forKey: .media)
         subtaskList = try container.decodeIfPresent(Tolerant.self, forKey: .subtaskList)?.tasks
+        // A gate this build can't read leaves the item as it was before gates.
+        gate = (try? container.decodeIfPresent(Gate.self, forKey: .gate)) ?? nil
     }
 
     /// A list of tasks that keeps every one that decodes: one the client
@@ -496,5 +501,74 @@ struct AppTasks: Decodable, Equatable {
         tasks = try container.decodeIfPresent(AppTask.Tolerant.self, forKey: .tasks)?.tasks ?? []
         history = try container.decodeIfPresent(AppTask.Tolerant.self, forKey: .history)?.tasks ?? []
         historyNext = try container.decodeIfPresent(String.self, forKey: .historyNext)
+    }
+}
+
+/// A work item's gates as the Mac derives them (docs/task-tracking.md#gates):
+/// its kind, the four-step bar, the one thing it waits on, the current plan
+/// and review rounds, its films and your words with the change answering each.
+struct Gate: Decodable, Equatable {
+    enum Kind: String, Decodable { case code, noCode = "no_code", notPlanned = "not_planned" }
+    /// One step of Plan, Build, Review, Merge.
+    enum Step: String, Decodable { case done, working, you, blocked, todo }
+    enum Group: String, Decodable { case needsYou = "needs_you", working, notPlanned = "not_planned", noCode = "no_code", merged, closed }
+    enum Verdict: String, Decodable { case pass, revise, blocked }
+    enum Mark: String, Decodable { case built, differs, dropped }
+    enum Side: String, Decodable { case main, branch }
+
+    struct Ask: Decodable, Equatable {
+        let id: String; let text: String; let at: Double; let open: Bool; let replaced: Bool
+        /// The plan change that answers it.
+        let change: Int?; let covered: Bool
+    }
+    struct Film: Decodable, Equatable { let side: Side; let media: String; let stills: [String]; let jumps: [Double]; let caption: String }
+    struct Change: Decodable, Equatable { let n: Int; let title: String; let asks: [String]; let films: [Film] }
+    struct Plan: Decodable, Equatable {
+        let round: Int; let digest: String; let title: String; let summary: String
+        let pictures: [String]; let changes: [Change]; let approvedAt: Double?
+        enum CodingKeys: String, CodingKey { case round, digest, title, summary, pictures, changes, approvedAt = "approved_at" }
+    }
+    struct Line: Decodable, Equatable { let n: Int; let mark: Mark; let text: String; let why: String? }
+    struct Finding: Decodable, Equatable { let title: String; let picture: String?; let planned: String; let branch: String; let fix: String }
+    struct Review: Decodable, Equatable {
+        let round: Int; let head: String; let verdict: Verdict; let summary: String
+        let lines: [Line]; let findings: [Finding]; let approvedAt: Double?; let lapsed: Bool?
+        enum CodingKeys: String, CodingKey { case round, head, verdict, summary, lines, findings, lapsed, approvedAt = "approved_at" }
+    }
+    struct Round: Decodable, Equatable {
+        let round: Int; let approvedAt: Double?; let at: Double
+        let verdict: Verdict?; let lapsed: Bool?; let findings: Int?; let summary: String?
+        enum CodingKeys: String, CodingKey { case round, at, verdict, lapsed, findings, summary, approvedAt = "approved_at" }
+    }
+    struct Answer: Decodable, Equatable { let text: String; let media: [String]?; let at: Double }
+    struct Spawned: Decodable, Equatable { let id: String; let title: String; let steps: [Step]?; let label: String? }
+    struct ApprovePlan: Decodable, Equatable { let round: Int; let digest: String }
+    struct ApproveMerge: Decodable, Equatable { let round: Int; let head: String }
+    struct Merged: Decodable, Equatable { let commit: String; let at: Double }
+
+    let kind: Kind
+    let asks: [Ask]
+    /// Code: Plan, Build, Review, Merge, each done, working, waiting on you, blocked or to do.
+    let steps: [Step]?
+    let tone: Step?
+    let label: String?
+    let detail: String?
+    let group: Group?
+    let plan: Plan?
+    let plans: [Round]?
+    let review: Review?
+    let reviews: [Round]?
+    let answers: [Answer]?
+    let spawned: [Spawned]?
+    /// What your Approve plan / Approve merge names; nil while it can't be pressed.
+    let approvePlan: ApprovePlan?
+    let planBlocked: String?
+    let approveMerge: ApproveMerge?
+    let mergeBlocked: String?
+    let merged: Merged?
+
+    enum CodingKeys: String, CodingKey {
+        case kind, asks, steps, tone, label, detail, group, plan, plans, review, reviews, answers, spawned, merged
+        case approvePlan = "approve_plan", planBlocked = "plan_blocked", approveMerge = "approve_merge", mergeBlocked = "merge_blocked"
     }
 }

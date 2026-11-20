@@ -2,8 +2,12 @@ use super::*;
 
 #[derive(Subcommand)]
 pub(super) enum TaskCommand {
-    /// Record a new work item: an ask in the user's words, before any work on it; it starts queued unless you say otherwise.
+    /// Record a new work item: an ask in the user's words, before any work on it, and its kind: code (every code change: plan, the user's approval, build, review, their approval, merge), no-code (a question or research), or not-planned (a backlog).
     Add {
+        #[arg(long, value_enum, help = "code, no-code or not-planned")]
+        kind: Option<squircle::tasks::Kind>,
+        #[arg(long, help = "The No code item whose answer found this work")]
+        from: Option<String>,
         #[arg(
             long,
             help = "Your thread ID (the app is taken from it, and the message it came from is recorded)"
@@ -21,7 +25,7 @@ pub(super) enum TaskCommand {
             help = "What the user asked for, verbatim in their words (kept as the record and shown under the title)"
         )]
         ask: String,
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, hide = true)]
         status: Option<squircle::tasks::Status>,
         #[arg(long, help = "What it waits on, in a few words")]
         note: Option<String>,
@@ -33,7 +37,25 @@ pub(super) enum TaskCommand {
         )]
         replaces: Vec<String>,
     },
-    /// Change a task's status, note, title or wording.
+    /// File a work item as another kind (code, no-code, not-planned); only before it has a plan round.
+    Kind {
+        id: String,
+        #[arg(value_enum)]
+        kind: squircle::tasks::Kind,
+    },
+    /// Answer a No code item (a question or research) with your findings and pictures; the user closes it or asks more.
+    Answer {
+        id: String,
+        #[arg(long, help = "The answer, a few sentences")]
+        text: String,
+        #[arg(
+            long = "file",
+            value_name = "PATH",
+            help = "A picture or clip it shows (repeat)"
+        )]
+        files: Vec<PathBuf>,
+    },
+    /// Change a task's note, title or wording, drop it, or close an ask (code items move by their gates; done is merged).
     Update {
         id: String,
         #[arg(long, help = "A new short name: a few words, sentence case")]
@@ -57,7 +79,7 @@ pub(super) enum TaskCommand {
         )]
         replaced_by: Option<String>,
     },
-    /// Sub-tasks: the small items under a work item (an ask that belongs to it, or your own breakdown).
+    /// The user's words on a work item: each ask or correction of theirs, filed under the item it belongs to. The plan ties each to a change. Your own breakdown goes in the plan's numbered changes, not here.
     Sub {
         #[command(subcommand)]
         command: SubCommand,
@@ -179,6 +201,8 @@ fn task_ids(ids: &[String]) -> Result<Vec<&str>> {
 pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value>> {
     let data = match command {
         TaskCommand::Add {
+            kind,
+            from,
             thread,
             project,
             title,
@@ -187,10 +211,27 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
             note,
             replaces,
         } => {
+            let from = from.as_deref().map(task_id).transpose()?;
             post(
                 cli,
                 "/v1/tasks",
-                json!({"thread":thread,"project":project,"title":title,"ask":ask,"status":status,"note":note,"replaces":task_ids(replaces)?}),
+                json!({"thread":thread,"project":project,"title":title,"ask":ask,"status":status,"note":note,"replaces":task_ids(replaces)?,
+                       "kind":kind,"from":from}),
+            )
+            .await?
+        }
+        TaskCommand::Kind { id, kind } => {
+            post(cli, &format!("/v1/tasks/{}/kind", task_id(id)?), json!({"kind": kind})).await?
+        }
+        TaskCommand::Answer { id, text, files } => {
+            let files = files
+                .iter()
+                .map(std::path::absolute)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            post(
+                cli,
+                &format!("/v1/tasks/{}/answer", task_id(id)?),
+                json!({"text": text, "files": files}),
             )
             .await?
         }
@@ -340,6 +381,27 @@ pub(super) async fn run(cli: &Cli, command: &TaskCommand) -> Result<Option<Value
 /// ask only when it has no title or `--asks` wants it.
 fn brief(task: &Value, asks: bool) -> Value {
     let mut out = json!({"id": task["id"], "title": task["title"], "status": task["status"]});
+    if task["gate"].is_object() {
+        let gate = &task["gate"];
+        out["kind"] = gate["kind"].clone();
+        let label = gate["label"].as_str().unwrap_or("");
+        let detail = gate["detail"].as_str().unwrap_or("");
+        out["stage"] = json!(if detail.is_empty() {
+            label.to_string()
+        } else {
+            format!("{label} · {detail}")
+        });
+        let open: Vec<&Value> = gate["asks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|a| a["open"] == true && a["covered"] == false)
+            .collect();
+        if !open.is_empty() && gate["kind"] == "code" {
+            out["asks_not_in_plan"] =
+                json!(open.iter().map(|a| a["id"].clone()).collect::<Vec<_>>());
+        }
+    }
     if task["title"].as_str().is_none_or(str::is_empty) || asks {
         out["ask"] = task["ask"].clone();
     }

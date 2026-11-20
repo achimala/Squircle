@@ -278,6 +278,27 @@ impl Agents {
         self.registry().workers.get(id).map(|w| w.title.clone())
     }
 
+    /// A worker's branch, even once T3 has archived its thread.
+    pub fn worker_branch(&self, id: &str) -> Option<String> {
+        self.registry().workers.get(id).map(|w| w.branch.clone())
+    }
+
+    /// The app's folder: its T3 project's workspace root.
+    pub fn project_root(&self, project: &str) -> Option<PathBuf> {
+        self.shell()
+            .project(project)
+            .and_then(|p| p["workspaceRoot"].as_str().map(PathBuf::from))
+    }
+
+    /// The app agent's thread of a T3 project.
+    pub fn agent_thread(&self, project: &str) -> Option<String> {
+        self.registry()
+            .agents
+            .values()
+            .find(|a| a.project_id == project)
+            .map(|a| a.thread_id.clone())
+    }
+
     /// The user's latest message to an app agent: where a task it adds now
     /// came from.
     pub async fn source_message(&self, thread: &str) -> Option<Source> {

@@ -180,7 +180,7 @@ final class ConversationText {
                 case .quiet: add(space + piece.text, font, .secondaryLabel)
                 case .status(let raw):
                     let status = AppTask.Status(rawValue: raw)
-                    add(space + piece.text, bold, status.map(WorkItemPage.color) ?? .secondaryLabel)
+                    add(space + piece.text, bold, status.map(TaskLook.color) ?? .secondaryLabel)
                 }
             }
         case .action(let action):

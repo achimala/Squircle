@@ -98,7 +98,7 @@ impl Agents {
             let base = base.unwrap_or(&current);
             let id = uuid::Uuid::new_v4().to_string();
             let text = format!(
-                "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. Remove anything else you create (scratch simulators, temp services or files) before you finish. \
+                "{prompt}\n\n---\nYou are a worker for this app's agent, on branch {branch} in your own worktree. When done, commit on this branch and reply with a short summary. Never merge into or push the base branch: the app agent merges with {cli} merge once the user has approved the review. Remove anything else you create (scratch simulators, temp services or files) before you finish. \
                  Run Squircle as {cli} … from any directory, the IDs and words written out (the user's phone reads each call back as what it did). \
                  If the user asks you for something directly, put it in the tracker before working on it ({cli} task --help): a sub-task of the work item it belongs to, otherwise a new work item. \
                  To ask the user something, use your question tool (or {cli} task ask ITEM --thread {id} --question ...): it reaches their phone directly, with everything else waiting on them; don't put questions in a reply and end your turn. When the question is about a screenshot or clip, use task ask with --file PATH (repeatable) so the card carries it; never describe it or point at media they can't see. \

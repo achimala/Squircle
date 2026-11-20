@@ -9,6 +9,11 @@ it says so in [Decisions this changes](#decisions-this-changes). The tokens
 live in one place in code, `Theme` (`app/Squircle/Sources/UI/Theme.swift`):
 see [In code](#in-code).
 
+**2026-11-20 (user-approved): Tasks is one stage per work item**, from the
+[visual gates](../proposals/visual-gates.md) proposal: see
+[Tasks with gates](#tasks-with-gates-2026-11-20). It supersedes the statuses,
+sub-task rows and counts strip below.
+
 Built in stages: 1, the foundation (tokens, Pearl, the soap-film agent,
 Sprouts); 2, the chat; 3, Home; 4, Tasks and threads.
 
@@ -29,7 +34,7 @@ compared.
 6. [Home and Waiting on you](#home-and-waiting-on-you): B · Deck
 7. [Pearl and the soap-film agent](#pearl-and-the-soap-film-agent)
 8. [Worker jellies: Sprouts](#worker-jellies-sprouts)
-9. [Tasks and threads](#tasks-and-threads): A · Outline
+9. [Tasks and threads](#tasks-and-threads): A · Outline, then [Tasks with gates](#tasks-with-gates-2026-11-20)
 10. [Media and sending](#media-and-sending)
 11. [In code](#in-code)
 12. [Decisions this changes](#decisions-this-changes)
@@ -588,6 +593,64 @@ colours and its own sizes):
 Not picked: **B · Tiles** (each thread a portrait tile; most threads have no
 picture) and **C · Checklist** (one line per item, hiding how many threads
 it has).
+
+## Tasks with gates (2026-11-20)
+
+User: "I should be able to see the visual plans for each task and approve;
+then see the review output and implementation details as visualizations and
+approve those for the agent to merge." Approved with the
+[visual gates proposal](../proposals/visual-gates.md); its pictures are the
+spec. Supersedes, in [Tasks and threads](#tasks-and-threads): the status
+groups (Ready to try, Queued, In progress, Done), the tick and Done swipe,
+sub-task rows, a one-thread item showing its conversation, and the counts
+strip above the agent's field.
+
+![Tasks with one stage per item](../proposals/visual-gates/04-tasks-simpler.png)
+
+- **The overview**: Needs you (an approval or a question), then Working;
+  then folded lines for Not planned yet (its count of asks), No code, Merged
+  this week, Not on a task and History. A row is its title in Body, then its
+  **four-step bar** (four 20 × 4 capsules, 6 apart: Plan, Build, Review,
+  Merge; `success` done, `working` an agent at it, `warning` waiting on
+  you, `failure` blocked, `codeFill` to do) and the one thing it waits on in
+  Line, its word in its step's colour ("Approve merge · review 4 passed"),
+  then its working thread's line. Swipe left to Drop. Search stays.
+- **An item's page** leads with its **stage track** (a dot and the step's
+  name in its colour, rules between, in Line) and its title in Title, and
+  is about the step it is on:
+
+![Walk 1](../proposals/visual-gates/07-tasks-walk-1.png)
+![Walk 2](../proposals/visual-gates/08-tasks-walk-2.png)
+![Walk 3](../proposals/visual-gates/09-tasks-walk-3.png)
+
+  - *Planning*: the user's words quoted, the agent's live line, "Your
+    words" with the change answering each ("→ change 1 · …" in `success`,
+    "going into the plan" in `working`, "→ not in the plan yet" in
+    `failure`).
+  - *Plan ready*: "The plan · round N · K pictures", the first picture at
+    full width (tap: full screen, swipe), the others in a strip with "+N",
+    the summary in Line, the numbered changes (number in `working`) with the
+    words each answers quoted beneath.
+  - *Building*: "Plan round N · approved by you", the worker's line, each
+    change with ✓ and its main and branch stills side by side once filmed,
+    earlier reviews as chips (r1 ✕ in `failure`, PASS in `success`).
+  - *Review*: the verdict pill (PASS `success`, BLOCKED `failure`, REVISE
+    outlined), "review N · …"; passed: the films side by side and "Plan vs
+    actual" (✓, ≠ in `warning` with why, ✗ in `failure`); blocked: each
+    finding as a picture and planned / branch / fix.
+  - *Merged*: MERGED, the plan's first picture, "How it got here" (every
+    round in order), the plan folded.
+  - *No code*: ASKED or ANSWERED, the ask quoted, the answer in a
+    `receivedFill` bubble with its pictures, "Became work items" with their
+    bars; Close and Ask more….
+- **The foot**: Approve plan or Approve merge (`accent` capsule, 52 tall) and
+  Change… (white capsule) side by side, always in reach; Approve greys
+  (`codeFill`, tertiary words) when it can't be pressed, with the reason in
+  `failure` above for a blocked review ("Can't merge: review 4 says
+  BLOCKED"). Change… opens a field; the words go on the item. ⋯ holds Change…
+  and Drop.
+- **Waiting on you** on Home deals the same approvals as cards (Plan ready,
+  Review passed) with the first picture and the Approve button.
 
 ## Media and sending
 

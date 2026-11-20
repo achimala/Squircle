@@ -33,6 +33,28 @@ final class WaitingAnswers {
             }
             view.reply(placeholder: "Something else…", text: drafts[id].text, busy: busy,
                        edit: { [weak self] text in self?.drafts[id].text = text }) { [weak self] text in self?.send(question, text) }
+        case .approval(let approval):
+            let context = ([about ? app : nil, approval.gate == .plan ? "Plan ready" : "Review passed"]).compactMap { $0 }.joined(separator: " · ")
+            view.show(context: context, asker: .agent(.needsYou), question: approval.task,
+                      detail: approval.gate == .plan ? approval.summary : "Approve the merge of exactly what was reviewed (\(approval.detail)).")
+            let picture = approval.picture.map { AppTask.Media(id: $0, kind: "image", caption: "", name: nil, bytes: nil) }
+            view.media(picture.map { [$0] } ?? [], task: approval.taskID, documents: model.documents) { [weak model] media, height in
+                await model?.approvalPicture(path: media.id, height: height)
+            }
+            let title = approval.gate == .plan ? "Approve plan" : "Approve merge"
+            view.answers([WaitingItemView.Answer(title: title)], busy: busy) { [weak self] _ in
+                guard let self else { return }
+                Theme.checkHaptic()
+                Task {
+                    _ = await self.model.gate { client in
+                        switch approval.gate {
+                        case .plan: try await client.approvePlan(taskID: approval.taskID, round: approval.round, digest: approval.bind)
+                        case .merge: try await client.approveMerge(taskID: approval.taskID, round: approval.round, head: approval.bind)
+                        }
+                    }
+                }
+            }
+            view.reply(placeholder: nil, text: "", busy: busy, edit: { _ in }) { _ in }
         case .request(let request):
             let context = (about ? [app, request.title, request.task] : [request.worker ? request.title : "Your agent asks"])
                 .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")

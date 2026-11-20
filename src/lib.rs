@@ -15,6 +15,7 @@ pub mod buildlog;
 pub mod clock;
 pub mod dimensions;
 pub mod fsm;
+pub mod gates;
 pub mod git;
 pub mod guard;
 pub mod history;
