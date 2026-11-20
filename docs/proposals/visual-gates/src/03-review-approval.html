@@ -1,0 +1,86 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+.verdict { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
+.chip { font-size: 15px; font-weight: 700; color: #fff; border-radius: 14px; padding: 3px 12px; }
+.pass { background: var(--success); } .blocked { background: var(--failure); }
+.films { display: flex; gap: 10px; margin-top: 8px; }
+.film { flex: 1; position: relative; }
+.film .pic { height: 210px; } .film img { height: 100%; width: 100%; object-fit: cover; }
+.film .lbl { font-size: 13px; font-weight: 600; color: var(--secondary); margin-top: 4px; text-align: center; }
+.play { position: absolute; left: 50%; top: 105px; margin: -20px 0 0 -20px; width: 40px; height: 40px; border-radius: 20px; background: rgba(255,255,255,.85); display: grid; place-items: center; font-size: 15px; }
+.pva .row { grid-template-columns: 20px 1fr; }
+.why { font-size: 15px; color: var(--secondary); line-height: 20px; }
+.finding { display: grid; grid-template-columns: 96px 1fr; gap: 12px; padding: 10px 0; border-bottom: .5px solid var(--sep); }
+.finding .pic { height: 150px; } .finding img { height: 100%; width: 100%; object-fit: cover; object-position: top; }
+.three { font-size: 15px; line-height: 20px; margin-top: 4px; }
+.three b { display: inline-block; width: 74px; font-size: 13px; color: var(--secondary); }
+.reason { position: absolute; left: 0; right: 0; bottom: 104px; text-align: center; font-size: 15px; color: var(--failure); font-weight: 600; }
+</style>
+<div class="board">
+  <div class="title">Gate 2 · approve the merge</div>
+  <div class="line" style="margin-top:4px">The same page, at Review: the reviewer's verdict on top, the films side by side, then plan vs actual, one line per planned change. Approve merge is live only when the review passes for the branch as it is now.</div>
+  <div class="phones">
+    <div class="phonecol">
+      <div class="phone"><div class="island"></div>
+        <div class="status"><span>9:41</span><span>●●●</span></div>
+        <div class="bar"><div class="glassbtn">‹</div><div class="glassbtn">⋯</div></div>
+        <div class="scr">
+          <div class="track">
+            <span class="st done"><i class="dot"></i>Plan</span><i class="seg"></i>
+            <span class="st done"><i class="dot"></i>Build</span><i class="seg"></i>
+            <span class="st now"><i class="dot"></i>Review</span><i class="seg"></i>
+            <span class="st"><i class="dot"></i>Merge</span>
+          </div>
+          <div class="title">Keep the deck on the phone</div>
+          <div class="verdict"><span class="chip pass">PASS</span><span class="line">Astra, round 2 · nothing to fix</span></div>
+          <div class="films">
+            <div class="film"><div class="pic"><img src="before.jpg"></div><div class="play">▶</div><div class="lbl">main · 2.7 s “Loading cards…”</div></div>
+            <div class="film"><div class="pic"><img src="after.png"></div><div class="play">▶</div><div class="lbl">branch · opens at once, offline</div></div>
+          </div>
+          <div class="caption sec">PLAN VS ACTUAL</div>
+          <div class="pva">
+            <div class="row"><span class="g" style="color:var(--success)">✓</span><span class="body">Keep the whole deck on the phone</span></div>
+            <div class="row"><span class="g" style="color:var(--success)">✓</span><span class="body">Server sends only changed cards</span></div>
+            <div class="row"><span class="g" style="color:var(--warning)">≠</span><span><span class="body">A late grade is kept, not refused</span><div class="why">Planned: refuse it. Built: keep both, newest wins, because…</div></span></div>
+          </div>
+        </div>
+        <div class="dock"><div class="btn primary">Approve merge</div><div class="btn ghost">Change…</div></div>
+      </div>
+      <div class="callout"><b>Differences from the plan are listed, never hidden.</b> Each planned change is ✓ built, ≠ built differently (with why) or ✗ dropped (in red). The diagrams of what was built open like the plan's.</div>
+    </div>
+    <div class="phonecol">
+      <div class="phone"><div class="island"></div>
+        <div class="status"><span>9:41</span><span>●●●</span></div>
+        <div class="bar"><div class="glassbtn">‹</div><div class="glassbtn">⋯</div></div>
+        <div class="scr">
+          <div class="track">
+            <span class="st done"><i class="dot"></i>Plan</span><i class="seg"></i>
+            <span class="st done"><i class="dot"></i>Build</span><i class="seg"></i>
+            <span class="st now" style="color:var(--failure)"><i class="dot" style="background:var(--failure);box-shadow:none"></i>Review</span><i class="seg"></i>
+            <span class="st"><i class="dot"></i>Merge</span>
+          </div>
+          <div class="title">Keep the deck on the phone</div>
+          <div class="verdict"><span class="chip blocked">BLOCKED</span><span class="line">Astra, round 1 · 2 to fix</span></div>
+          <div class="finding">
+            <div class="pic"><img src="before.jpg"></div>
+            <div><div class="body">Offline, the deck still says “Loading cards…”</div>
+              <div class="three"><b>planned</b>opens from the phone</div>
+              <div class="three"><b>branch</b>waits on the server</div>
+              <div class="three"><b>fix</b>read Cards first</div></div>
+          </div>
+          <div class="finding">
+            <div class="pic"><img src="plan-01.png"></div>
+            <div><div class="body">The old deck read is still there</div>
+              <div class="three"><b>planned</b>removed in step 3</div>
+              <div class="three"><b>branch</b>both paths run</div>
+              <div class="three"><b>fix</b>delete deckPage</div></div>
+          </div>
+          <div class="line" style="margin-top:10px">A worker is fixing both · round 2 runs when it's done</div>
+        </div>
+        <div class="reason">Can't merge: the review says BLOCKED</div>
+        <div class="dock"><div class="btn off">Approve merge</div><div class="btn ghost">Change…</div></div>
+      </div>
+      <div class="callout"><b>A blocked review can't be approved.</b> Each finding is one picture and three short lines (planned / branch / fix). A new commit on the branch voids an earlier approval and starts the next review round.</div>
+    </div>
+  </div>
+</div>

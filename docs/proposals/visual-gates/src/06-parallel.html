@@ -1,0 +1,97 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+body { width: 1080px; padding: 28px 20px; }
+.grid { display: grid; grid-template-columns: 250px repeat(4, 1fr); column-gap: 6px; margin-top: 18px; }
+.hd { font-size: 13px; font-weight: 600; color: var(--secondary); padding: 0 10px 6px; letter-spacing: .02em; }
+.lane { display: contents; }
+.name { padding: 10px 10px 10px 0; border-top: .5px solid var(--sep); }
+.name .body { font-size: 17px; line-height: 21px; }
+.name .mono { margin-top: 2px; }
+.cell { border-top: .5px solid var(--sep); padding: 9px 8px; display: flex; flex-wrap: wrap; gap: 5px; align-content: flex-start; min-height: 64px; }
+.cell.now { background: rgba(208,138,0,.10); border-radius: 12px; box-shadow: inset 0 0 0 2px var(--warning); }
+.cell.work { background: rgba(110,86,240,.08); border-radius: 12px; box-shadow: inset 0 0 0 2px var(--working); }
+.c { font-size: 13px; font-weight: 600; line-height: 18px; border-radius: 9px; padding: 2px 8px; white-space: nowrap; }
+.r { background: var(--received); color: var(--label); }
+.you { background: var(--accent); color: #fff; }
+.ask { background: #fff; color: var(--warning); box-shadow: inset 0 0 0 1.5px var(--warning); }
+.pass { background: var(--success); color: #fff; }
+.blk { background: var(--failure); color: #fff; }
+.rev { background: #fff; color: var(--failure); box-shadow: inset 0 0 0 1.5px var(--failure); }
+.run { background: #fff; color: var(--working); box-shadow: inset 0 0 0 1.5px var(--working); }
+.w { font: 12px/18px ui-monospace, "SF Mono", monospace; color: var(--secondary); display: flex; gap: 5px; align-items: center; }
+.w em { width: 14px; height: 14px; border-radius: 7px 7px 5px 5px; background: var(--working); display: inline-block; }
+.w em.off { background: var(--idle); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 18px; font-size: 13px; color: var(--secondary); align-items: center; }
+.legend span { display: flex; gap: 5px; align-items: center; }
+.sw { width: 26px; height: 16px; border-radius: 6px; display: inline-block; }
+</style>
+<div class="title">Every work item is its own track</div>
+<div class="line" style="margin-top:4px">LanguageApp's open work today, redrawn with gates. One row = one work item = one plan, one branch, its own review rounds and your approvals. They run side by side; each stops only at its own gates.</div>
+
+<div class="grid">
+  <div></div><div class="hd">PLAN</div><div class="hd">BUILD</div><div class="hd">REVIEW</div><div class="hd">MERGE</div>
+
+  <div class="name"><div class="body">Never block cards on pictures</div></div>
+  <div class="cell"><span class="c r">r1</span><span class="c you">✓ you</span></div>
+  <div class="cell"><span class="w"><em class="off"></em>card-picture-never-blocks</span></div>
+  <div class="cell"><span class="c blk">r1 ✕</span><span class="c blk">r2 ✕</span><span class="c blk">r3 ✕</span><span class="c pass">r4 PASS</span></div>
+  <div class="cell now"><span class="c ask">Approve merge?</span></div>
+
+  <div class="name"><div class="body">Finish the two-step motions</div></div>
+  <div class="cell now"><span class="c r">r1</span><span class="c ask">Approve plan?</span></div>
+  <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+
+  <div class="name"><div class="body">Show when a used word earned credit</div></div>
+  <div class="cell now"><span class="c r">r1</span><span class="c you">you: option A</span><span class="c r">r2</span><span class="c ask">Approve plan?</span></div>
+  <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+
+  <div class="name"><div class="body">Tilt-driven depth on home screen</div></div>
+  <div class="cell work"><span class="c run">drawing r1</span></div>
+  <div class="cell"></div><div class="cell"></div><div class="cell"></div>
+
+  <div class="name"><div class="body">Rubber-band paging</div></div>
+  <div class="cell"><span class="c r">r1</span><span class="c you">✓ you</span></div>
+  <div class="cell work"><span class="w"><em></em>shelf-rubber-band</span></div>
+  <div class="cell"><span class="c blk">r1 ✕ no films</span></div>
+  <div class="cell"></div>
+
+  <div class="name"><div class="body">Revive the bow jiggle</div></div>
+  <div class="cell"><span class="c r">r1</span><span class="c you">✓ you</span></div>
+  <div class="cell"><span class="w"><em class="off"></em>bow-jiggle-2</span></div>
+  <div class="cell work"><span class="c run">r1 reviewing</span></div>
+  <div class="cell"></div>
+
+  <div class="name"><div class="body">Ribbon and cord jaggies</div></div>
+  <div class="cell"><span class="c r">r1</span><span class="c you">✓ you</span></div>
+  <div class="cell work"><span class="w"><em></em>mira-cords-fresh</span></div>
+  <div class="cell"><span class="c blk">r1 ✕</span><span class="c blk">r2 ✕</span><span class="c blk">r3 ✕</span><span class="c blk">r4 ✕</span></div>
+  <div class="cell"></div>
+
+  <div class="name"><div class="body">Land the folder-peek fold</div></div>
+  <div class="cell"><span class="c r">r1</span><span class="c you">✓ you</span></div>
+  <div class="cell"><span class="w"><em class="off"></em>folder-peeks-2</span></div>
+  <div class="cell work"><span class="c run">r1 reviewing</span></div>
+  <div class="cell"></div>
+
+  <div class="name"><div class="body">Card deck works offline</div></div>
+  <div class="cell"><span class="c rev">r1 REVISE</span><span class="c rev">r2 REVISE</span><span class="c r">r3</span><span class="c you">✓ you</span></div>
+  <div class="cell"><span class="w"><em class="off"></em>deck-offline</span></div>
+  <div class="cell"><span class="c blk">r1 ✕</span><span class="c blk">r2 ✕</span><span class="c pass">r3 PASS</span></div>
+  <div class="cell"><span class="c you">✓ you</span><span class="c pass">merged</span></div>
+
+  <div class="name"><div class="body">Paper sticking out of folder</div></div>
+  <div class="cell"><span class="c r">r1</span><span class="c you">✓ you</span></div>
+  <div class="cell"><span class="w"><em class="off"></em>fix-folder-peek-paper</span></div>
+  <div class="cell"><span class="c pass">r1 PASS</span></div>
+  <div class="cell"><span class="c you">✓ you</span><span class="c pass">merged</span></div>
+</div>
+
+<div class="legend">
+  <span><i class="sw" style="box-shadow: inset 0 0 0 2px var(--warning); background: rgba(208,138,0,.10)"></i>waits on you</span>
+  <span><i class="sw" style="box-shadow: inset 0 0 0 2px var(--working); background: rgba(110,86,240,.08)"></i>an agent is on it</span>
+  <span><span class="c you">✓ you</span>your approval, for that round only</span>
+  <span><span class="c blk">r2 ✕</span>review round blocked</span>
+  <span><span class="c rev">REVISE</span>plan reviewed before it reached you</span>
+  <span class="w"><em></em>worker on its branch</span>
+</div>
+<div class="line" style="margin-top:10px">10 of its 11 open items (the 64-ask backlog is on the last picture). Stages and review rounds are from each item's notes today; approvals are drawn where the gates would have asked for them.</div>

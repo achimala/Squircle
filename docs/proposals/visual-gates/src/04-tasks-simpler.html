@@ -1,0 +1,57 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+.today { width: 400px; border-radius: 52px; overflow: hidden; border: 10px solid #111; height: 866px; background: #f6f5f1; }
+.today img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.item { padding: 10px 0 11px; border-bottom: .5px solid var(--sep); }
+.item .body { margin-bottom: 4px; }
+.mini { display: flex; align-items: center; gap: 4px; }
+.mini i { width: 22px; height: 4px; border-radius: 2px; background: var(--sep); }
+.mini i.d { background: var(--success); } .mini i.n { background: var(--warning); } .mini i.w { background: var(--working); } .mini i.x { background: var(--failure); }
+.mini span { margin-left: 6px; font-size: 15px; color: var(--secondary); }
+.mini span b { font-weight: 600; }
+.amber { color: var(--warning); } .violet { color: var(--working); } .green { color: var(--success); }
+.sprout { display: flex; gap: 8px; align-items: center; margin: 6px 0 0 0; font-size: 15px; color: var(--secondary); }
+.sprout em { width: 20px; height: 20px; border-radius: 10px 10px 8px 8px; background: #b9aefb; display: inline-block; flex: none; }
+.fold { padding: 12px 0; display: flex; justify-content: space-between; font-size: 15px; color: var(--secondary); border-bottom: .5px solid var(--sep); }
+.cut { margin: 14px 4px 0; font-size: 15px; line-height: 21px; color: var(--secondary); }
+.cut b { color: var(--label); }
+.cut s { color: var(--tertiary); }
+</style>
+<div class="board">
+  <div class="title">Tasks: one stage per work item</div>
+  <div class="line" style="margin-top:4px">Today a row mixes six statuses, sub-task counts, threads and notes. With gates, each work item shows where it is in the four stages and the one thing it waits on.</div>
+  <div class="phones">
+    <div class="phonecol">
+      <div class="today"><img src="tasks-today.jpg"></div>
+      <div class="caption" style="margin:10px 4px 0">TODAY</div>
+      <div class="cut">Needs you · In progress · Ready to try · Queued · Done · Dropped, each item “56/106 · 1 thread · note”, then sub-tasks with their own statuses.</div>
+    </div>
+    <div class="phonecol">
+      <div class="phone"><div class="island"></div>
+        <div class="status"><span>9:41</span><span>●●●</span></div>
+        <div class="bar"><div class="glassbtn">‹</div><div class="glassbtn">⌕</div></div>
+        <div class="scr">
+          <div class="caption">LanguageApp</div>
+          <div class="title" style="margin-bottom:8px">Tasks</div>
+          <div class="caption sec">NEEDS YOU</div>
+          <div class="item"><div class="body">Keep the deck on the phone</div>
+            <div class="mini"><i class="d"></i><i class="d"></i><i class="n"></i><i></i><span><b class="amber">Approve merge</b> · review passed</span></div></div>
+          <div class="item"><div class="body">Fold the letter from the bottom</div>
+            <div class="mini"><i class="n"></i><i></i><i></i><i></i><span><b class="amber">Approve plan</b> · round 2</span></div></div>
+          <div class="caption sec">WORKING</div>
+          <div class="item"><div class="body">Accents always visible</div>
+            <div class="mini"><i class="d"></i><i class="w"></i><i></i><i></i><span><b class="violet">Building</b> · 2 of 4 changes filmed</span></div>
+            <div class="sprout"><em></em>Filming the grader on main and the branch</div></div>
+          <div class="item"><div class="body">Quote answers can't be misread</div>
+            <div class="mini"><i class="d"></i><i class="d"></i><i class="x"></i><i></i><span><b class="red">Review blocked</b> · worker fixing 2</span></div></div>
+          <div class="item"><div class="body">Card shadows when fanned</div>
+            <div class="mini"><i class="w"></i><i></i><i></i><i></i><span><b class="violet">Planning</b> · drawing pictures</span></div></div>
+          <div class="fold"><span>Merged this week</span><span>6 ›</span></div>
+          <div class="fold"><span>No code: questions and research</span><span>3 ›</span></div>
+        </div>
+      </div>
+      <div class="caption" style="margin:10px 4px 0">WITH GATES</div>
+      <div class="cut"><b>Cut:</b> <s>Ready to try</s> (it's the review now), <s>Queued</s>, <s>In progress</s> (the stage says it), <s>manual Done</s> (done = merged), sub-task rows on the overview (your asks live on the plan, each tied to a change), the counts strip above the field.</div>
+    </div>
+  </div>
+</div>

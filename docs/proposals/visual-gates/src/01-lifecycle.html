@@ -1,0 +1,115 @@
+<!doctype html><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<style>
+body { width: 430px; padding: 28px 20px 28px; }
+.head .caption { margin-top: 6px; }
+.step { position: relative; display: grid; grid-template-columns: 28px 1fr; column-gap: 12px; margin-top: 0; }
+.node { width: 28px; height: 28px; border-radius: 14px; color: #fff; font: 600 13px/28px -apple-system; text-align: center; z-index: 1; }
+.agent { background: var(--working); } .you { background: var(--warning); } .ink { background: var(--accent); }
+.rail { position: absolute; left: 13px; top: 28px; bottom: 0; width: 2px; background: var(--sep); }
+.content { padding-bottom: 22px; padding-right: 30px; }
+.who { font-size: 13px; font-weight: 600; line-height: 18px; }
+.stage { float: right; font-size: 13px; font-weight: 600; color: var(--tertiary); }
+.bubble { display: inline-block; background: var(--userGlass); border-radius: 18px; padding: 8px 14px; margin-top: 6px; font-size: 15px; line-height: 20px; }
+.thumbs { display: flex; gap: 8px; margin-top: 8px; align-items: flex-end; }
+.thumbs img { height: 112px; border-radius: 8px; border: 1px solid var(--sep); background: #fff; }
+.thumbs .lbl { font-size: 13px; color: var(--secondary); text-align: center; margin-top: 3px; }
+.gate { margin-top: 8px; background: #fff; border: 2px solid var(--warning); border-radius: 18px; padding: 12px 14px; }
+.gate .line { margin-top: 2px; }
+.btns { display: flex; gap: 8px; margin-top: 10px; }
+.btn { flex: 1; text-align: center; border-radius: 22px; padding: 10px 0; font-size: 15px; font-weight: 600; }
+.primary { background: var(--accent); color: var(--onAccent); }
+.ghost { background: var(--received); color: var(--label); }
+.loop { position: absolute; right: 0px; border: 2px dashed var(--warning); border-left: none; border-radius: 0 18px 18px 0; width: 22px; }
+.loop::after { content: ""; position: absolute; left: -6px; top: -7px; border: 6px solid transparent; border-right: 8px solid var(--warning); }
+.loopword { position: absolute; right: 18px; font-size: 13px; font-weight: 600; color: var(--warning); background: var(--paper); padding: 0 3px; }
+.verdict { display: inline-block; background: var(--success); color: #fff; font-size: 13px; font-weight: 600; border-radius: 10px; padding: 1px 8px; }
+.check { font-size: 15px; line-height: 21px; }
+.check i { font-style: normal; display: inline-block; width: 20px; font-weight: 700; }
+.ok { color: var(--success); } .chg { color: var(--warning); }
+.refuse { margin-top: 8px; border: 2px solid var(--failure); border-radius: 18px; padding: 10px 14px; background: #fdeeee; }
+.refuse .line { color: var(--label); }
+.binding { font-size: 13px; color: var(--secondary); margin-top: 6px; }
+.binding b { color: var(--label); font-weight: 600; }
+</style>
+<div class="head">
+  <div class="title">One work item, two gates</div>
+  <div class="line" style="margin-top:4px">Nothing reaches main unless you approved the plan, then approved the review of exactly what merges.</div>
+  <div class="caption">EXAMPLE · LANGUAGEAPP · THE CARD DECK</div>
+</div>
+
+<div style="height:18px"></div>
+<div style="position:relative">
+
+<div class="step"><div class="rail"></div><div class="node you">1</div><div class="content">
+  <div class="who">You ask <span class="stage">ASKED</span></div>
+  <div class="bubble">There's a pretty long load on the flash card deck. Does it work offline?</div>
+</div></div>
+
+<div class="step" id="s2"><div class="rail"></div><div class="node agent">2</div><div class="content">
+  <div class="who">The agent draws a plan <span class="stage">PLANNING</span></div>
+  <div class="line">How it works now, the change drawn on it, one picture per problem.</div>
+  <div class="thumbs">
+    <div><img src="plan-01.png"><div class="lbl">now</div></div>
+    <div><img src="plan-14.png"><div class="lbl">the change</div></div>
+    <div><img src="before.jpg"><div class="lbl">the problem</div></div>
+  </div>
+</div></div>
+
+<div class="step" id="g1"><div class="rail"></div><div class="node you">3</div><div class="content">
+  <div class="who">You approve the plan <span class="stage">GATE 1</span></div>
+  <div class="gate">
+    <div class="body">Keep the deck on the phone</div>
+    <div class="line">3 pictures · 5 changes · round 3</div>
+    <div class="btns"><div class="btn primary">Approve plan</div><div class="btn ghost">Change…</div></div>
+  </div>
+  <div class="binding">Approval is for <b>plan round 3</b>. Change… sends your words back for round 4, which needs a new yes.</div>
+</div></div>
+
+<div class="step" id="s4"><div class="rail"></div><div class="node agent">4</div><div class="content">
+  <div class="who">Workers build and film it <span class="stage">BUILDING</span></div>
+  <div class="line">Each change filmed on the simulator, main beside the branch.</div>
+  <div class="thumbs">
+    <div><img src="before.jpg"><div class="lbl">main</div></div>
+    <div><img src="after.png"><div class="lbl">branch</div></div>
+  </div>
+</div></div>
+
+<div class="step"><div class="rail"></div><div class="node agent">5</div><div class="content">
+  <div class="who">An independent review <span class="stage">REVIEW</span></div>
+  <div class="line" style="margin-bottom:6px">Astra checks the diff and the films against the plan. <span class="verdict">PASS</span></div>
+  <div class="check"><i class="ok">✓</i>Deck kept on the phone</div>
+  <div class="check"><i class="ok">✓</i>Only changed cards sent</div>
+  <div class="check"><i class="chg">≠</i>Late grade: kept, not refused <span class="line">(why: …)</span></div>
+</div></div>
+
+<div class="step" id="g2"><div class="rail"></div><div class="node you">6</div><div class="content">
+  <div class="who">You approve the merge <span class="stage">GATE 2</span></div>
+  <div class="gate">
+    <div class="body">Merge “Keep the deck on the phone”</div>
+    <div class="line">Review passed · 1 difference from the plan</div>
+    <div class="btns"><div class="btn primary">Approve merge</div><div class="btn ghost">Change…</div></div>
+  </div>
+  <div class="binding">Approval is for <b>commit 9f3c2a1</b> and <b>review round 2</b>. If the branch moves, it lapses. Change… sends your words back to the workers.</div>
+</div></div>
+
+<div class="step"><div class="node ink">7</div><div class="content" style="padding-bottom:0">
+  <div class="who">squircle merge <span class="stage">MERGED</span></div>
+  <div class="line">The only way onto main. The plan, pictures, films and review go with it.</div>
+  <div class="refuse">
+    <div class="caption red">REFUSES WHEN</div>
+    <div class="line">no approval · the branch moved after it · the review isn't PASS · a plan change has no film</div>
+  </div>
+</div></div>
+
+<!-- Change… loops -->
+<div class="loop" id="l1"></div>
+<div class="loop" id="l2"></div>
+</div>
+<script>
+function loop(from, to, l, w) {
+  const a = document.getElementById(from).offsetTop + 8, b = document.getElementById(to).offsetTop + 150;
+  const L = document.getElementById(l); L.style.top = a + "px"; L.style.height = (b - a) + "px";
+  
+}
+loop("s2", "g1", "l1", "w1"); loop("s4", "g2", "l2", "w2");
+</script>
