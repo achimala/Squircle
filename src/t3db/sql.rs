@@ -1,12 +1,11 @@
-//! T3's state schema (0.1.0, `statev2.sqlite`): static reads only. Values
+//! T3's state schema (0.1.9, `statev2.sqlite`): static reads only. Values
 //! are always bound. Current data is in the `orchestration_v2_*` projection
 //! tables (a thread's runs, messages and turn items, rows keeping their
-//! whole value in `payload_json`). The same file keeps the 0.0.45
-//! projection tables (`projection_threads`, `projection_thread_messages`,
-//! `projection_thread_activities`) as they stood when T3 migrated, which no
-//! longer change: history reads them for what is not in the V2 tables
-//! (tool calls, and messages T3 did not import). Projects are still in
-//! `projection_projects`, which T3 keeps current.
+//! whole value in `payload_json`). The same file keeps 0.0.45's
+//! `projection_threads` and `projection_thread_messages` as they stood when
+//! T3 migrated, which no longer change: history reads them for messages T3
+//! did not import (0.1.9 dropped 0.0.45's tool activities). Projects are
+//! still in `projection_projects`, which T3 keeps current.
 
 /// A V2 tool call's turn item as 0.0.45's tool activities read: Claude's
 /// tool name and input. T3 records shell commands, file edits and searches
@@ -95,23 +94,15 @@ pub(crate) const STEPS: &str = concat!(
      order by i.ordinal"
 );
 
-/// The images a tool call returned: a V2 item's, by call or item ID, else a
-/// 0.0.45 activity's.
+/// The images a tool call returned, by call or item ID.
 pub(crate) const IMAGES: &str = concat!(
-    "select * from (select coalesce(json_extract(b.value,'$.source.media_type'), json_extract(b.value,'$.mimeType')) as media_type,
+    "select coalesce(json_extract(b.value,'$.source.media_type'), json_extract(b.value,'$.mimeType')) as media_type,
             coalesce(json_extract(b.value,'$.source.data'), json_extract(b.value,'$.data')) as data
      from orchestration_v2_projection_turn_items i, ",
     output_blocks!(),
     " where i.thread_id=?1 and (i.turn_item_id=?2 or json_extract(i.payload_json,'$.nativeItemRef.nativeId')=?2)
        and (case when b.type='object' then json_extract(b.value,'$.type') end)='image'
-     order by b.key)
-     union all
-     select * from (select json_extract(value,'$.source.media_type') as media_type,
-            json_extract(value,'$.source.data') as data
-     from projection_thread_activities, json_each(case when json_type(payload_json,'$.data.result.content')='array' then json_extract(payload_json,'$.data.result.content') else '[]' end)
-     where thread_id=?1 and json_extract(payload_json,'$.toolCallId')=?2
-       and (case when type='object' then json_extract(value,'$.type') end)='image'
-     order by created_at desc, activity_id, json_each.key)"
+     order by b.key"
 );
 
 /// The image a Read call looked at, by call or item ID.
@@ -124,11 +115,10 @@ pub(crate) const VIEWED: &str = concat!(
        and i.type='dynamic_tool' limit 1"
 );
 
-/// T3's simulator screenshots in a project's threads, newest first: `src`
-/// says which table `item` is in, and `path` is the image block's JSON path
-/// in its `payload_json`.
+/// T3's simulator screenshots in a project's threads, newest first: `path`
+/// is the image block's JSON path in the turn item's `payload_json`.
 pub(crate) const PROJECT_SCREENSHOTS: &str = concat!(
-    "select * from (select 'v2' as src, i.turn_item_id as item, b.fullkey as path,
+    "select i.turn_item_id as item, b.fullkey as path,
             coalesce(json_extract(i.payload_json,'$.completedAt'), i.updated_at) as created_at,
             json_extract(i.payload_json,'$.toolName') as tool,
             coalesce(json_extract(b.value,'$.source.media_type'), json_extract(b.value,'$.mimeType')) as media_type,
@@ -139,40 +129,18 @@ pub(crate) const PROJECT_SCREENSHOTS: &str = concat!(
     " where t.project_id=?1 and t.deleted_at is null and i.type='dynamic_tool' and i.status='completed'
        and json_extract(i.payload_json,'$.toolName')='mcp__t3-code__device_screenshot'
        and (case when b.type='object' then json_extract(b.value,'$.type') end)='image'
-     order by created_at desc limit 40)
-     union all
-     select * from (select 'v1' as src, a.activity_id as item, j.fullkey as path, a.created_at as created_at,
-            json_extract(a.payload_json,'$.data.toolName') as tool,
-            json_extract(j.value,'$.source.media_type') as media_type,
-            substr(json_extract(j.value,'$.source.data'),1,87380) as head
-     from projection_threads t
-     join projection_thread_activities a on a.thread_id=t.thread_id,
-          json_each(a.payload_json, case when json_type(a.payload_json,'$.data.result.content')='array' then '$.data.result.content' end) j
-     where t.project_id=?1 and t.deleted_at is null and a.kind='tool.completed'
-       and json_extract(a.payload_json,'$.data.toolName')='mcp__t3-code__device_screenshot'
-       and (case when j.type='object' then json_extract(j.value,'$.type') end)='image'
-     order by a.created_at desc limit 40)"
+     order by created_at desc limit 40"
 );
 
 /// One screenshot's whole image, by `PROJECT_SCREENSHOTS`' item and path.
-pub(crate) const SCREENSHOT_DATA_V2: &str = "select coalesce(json_extract(payload_json, ?2 || '.source.data'), json_extract(payload_json, ?2 || '.data')) as data
+pub(crate) const SCREENSHOT_DATA: &str = "select coalesce(json_extract(payload_json, ?2 || '.source.data'), json_extract(payload_json, ?2 || '.data')) as data
              from orchestration_v2_projection_turn_items where turn_item_id=?1";
 
-pub(crate) const SCREENSHOT_DATA: &str =
-    "select json_extract(payload_json, ?2 || '.source.data') as data
-             from projection_thread_activities where activity_id=?1";
-
-/// Tool calls and errors: 0.0.45's activities and V2's turn items, with a
-/// one-line `summary`, its `detail` and its input, and `text` to search.
+/// Tool calls and errors (V2's turn items), with a one-line `summary`, its
+/// `detail` and its input, and `text` to search.
 macro_rules! activities {
     () => {
-        "(select activity_id as id, thread_id, kind, created_at as at, summary,
-                 coalesce(json_extract(payload_json,'$.detail'), json_extract(payload_json,'$.message'), '') as detail,
-                 coalesce(json_extract(payload_json,'$.data.input'),'') as input,
-                 summary || ': ' || coalesce(json_extract(payload_json,'$.detail'), json_extract(payload_json,'$.message'), '') as text
-          from projection_thread_activities where kind in ('tool.completed','tool.denied','runtime.error')
-          union all
-          select turn_item_id as id, thread_id,
+        "(select turn_item_id as id, thread_id,
                  case when type='error' then 'runtime.error' when status='failed' then 'tool.failed' else 'tool.completed' end as kind,
                  updated_at as at,
                  coalesce(json_extract(payload_json,'$.title'), json_extract(payload_json,'$.toolName'),
@@ -254,7 +222,7 @@ pub(crate) const PROJECT_PLACES: &str = concat!(
 );
 
 /// Messages, threads and tool calls or errors of a project matching every
-/// term. Tool calls are 0.0.45 activities and V2 turn items.
+/// term.
 pub(crate) const SEARCH: &str = concat!(
     "select * from (select 'msg' src, m.message_id id, m.thread_id thread, t.title title, m.role role, m.created_at at,
     substr(m.text,1,8000) text, m.marked marked
