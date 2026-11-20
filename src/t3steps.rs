@@ -388,11 +388,7 @@ pub async fn project_screenshot(project: &str) -> Result<Option<Value>> {
         if !valid(item, &['_', ':', '%', '.']) || !path.starts_with("$.") {
             continue;
         }
-        let read = match row["src"].as_str() {
-            Some("v2") => sql::SCREENSHOT_DATA_V2,
-            _ => sql::SCREENSHOT_DATA,
-        };
-        let full = query(read, params![item, path]).await?;
+        let full = query(sql::SCREENSHOT_DATA, params![item, path]).await?;
         let Some(data) = full.first().and_then(|r| r["data"].as_str()) else {
             continue;
         };

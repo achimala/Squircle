@@ -3110,6 +3110,15 @@ a different provider? Can we add this?" The agent keeps its one thread
   had stopped working for Claude too). Setup now takes a one-time pairing
   token on stdin (`t3 pair --scope orchestration:read --scope
   providers:manage --ttl 5m`) and never saves the session.
+- **T3 0.1.9 (2026-11-20).** `server.getSettings` is gone: setup reads
+  `providerInstances` from `server.getConfig`'s `settings` and still writes
+  with `server.updateSettings` (`providerInstanceMutation` upsert/remove).
+  0.1.9 also dropped 0.0.45's `projection_thread_activities` from
+  `statev2.sqlite`, so history, step images and project screenshots read
+  only V2 turn items (0.0.45 threads and messages are still read). Verified
+  end to end: setup added both instances and approved exactly the three
+  hooks; `history search`/`show` read the live database. From a linked
+  worktree, `t3 pair` needs `--base-dir ~/.t3` to find the running server.
 - **Switching.** `agent restart --thread ID --provider codex|claude [--model
   SLUG]` (and the phone) queue M14's restart with a switch: the command body
   is decided and saved when asked, sent under its saved identity once no turn

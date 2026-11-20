@@ -52,7 +52,7 @@ pub async fn setup(
     let session =
         crate::t3::exchange(&url, pairing_token, SETUP_SCOPES, "Squircle agent setup").await?;
     let client = T3::connect(session).await?;
-    let settings = client.call("server.getSettings", json!({})).await?;
+    let settings = client.call("server.getConfig", json!({})).await?["settings"].take();
     let instances = &settings["providerInstances"];
     ensure!(
         instances.is_object(),
