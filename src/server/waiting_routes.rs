@@ -203,6 +203,58 @@ pub(super) async fn list_waiting(State(state): State<AppState>) -> ApiResult<Jso
             }),
         ));
     }
+    // The user's approvals: a plan round or a passing review, with the
+    // first picture (a plan's, or the branch film's first still).
+    for item in all
+        .iter()
+        .filter(|t| t.parent_id.is_none() && t.approval_waits)
+    {
+        let Some(tasks::Track::Code(code)) = &item.track else {
+            continue;
+        };
+        let (gate, round, bind, picture, at) = match code.gate {
+            tasks::Gate::PlanWaiting => {
+                let plan = code.plan().expect("waiting on a plan");
+                let picture = plan
+                    .pictures
+                    .first()
+                    .map(|p| format!("/v1/tasks/{}/rounds/plan/{}/{}", item.id, plan.round, p));
+                (
+                    "plan",
+                    plan.round,
+                    json!({"digest": plan.digest}),
+                    picture,
+                    plan.at,
+                )
+            }
+            _ => {
+                let review = code.review().expect("waiting on a review");
+                let still = code
+                    .films
+                    .iter()
+                    .find(|f| f.side == tasks::Side::Branch)
+                    .and_then(|f| f.stills.first().or(Some(&f.media)))
+                    .map(|m| format!("/v1/tasks/{}/media/{}", item.id, m));
+                (
+                    "merge",
+                    review.round,
+                    json!({"head": review.head}),
+                    still,
+                    review.at,
+                )
+            }
+        };
+        let gate_view = super::gate_routes::gate_view(&state, item);
+        apps.entry(item.project_id.clone()).or_default().push((
+            at,
+            json!({
+                "kind": "approval", "gate": gate, "task_id": item.id, "task_title": item.name(),
+                "round": round, "bind": bind, "picture": picture,
+                "label": gate_view["label"], "detail": gate_view["detail"], "steps": gate_view["steps"],
+                "summary": gate_view["plan"]["summary"],
+            }),
+        ));
+    }
     let count: usize = apps.values().map(Vec::len).sum();
     let apps: Vec<Value> = apps
         .into_iter()

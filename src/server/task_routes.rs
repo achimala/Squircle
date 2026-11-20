@@ -126,6 +126,9 @@ pub(super) fn task_view(state: &AppState, task: &tasks::Task) -> Value {
     value["threads"] = json!(threads);
     value["builds"] = json!(builds);
     value["media"] = json!(media);
+    if task.parent_id.is_none() {
+        value["gate"] = super::gate_routes::gate_view(state, task);
+    }
     value
 }
 
@@ -337,6 +340,10 @@ pub(super) struct AddTask {
     pub(super) replaces: Vec<String>,
     #[serde(default)]
     pub(super) by_user: bool,
+    /// A work item's kind: code, no_code or not_planned (required for one).
+    pub(super) kind: Option<tasks::Kind>,
+    /// The No code item whose answer it came from.
+    pub(super) from: Option<String>,
 }
 
 pub(super) async fn add_task(
@@ -358,6 +365,26 @@ pub(super) async fn add_task(
     } else {
         tasks::By::Agent
     };
+    match (&r.parent, r.kind) {
+        (None, None) => {
+            return Err(ApiError::bad(
+                "Say what kind of work item it is with --kind: code (it changes code: \
+                 plan, approval, build, review, approval, merge), no-code (a question or research), or not-planned (a backlog of asks)",
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad(
+                "A sub-task is the user's words on its item and has no kind",
+            ));
+        }
+        (Some(_), None) if source.is_none() && !r.by_user => {
+            return Err(ApiError::bad(
+                "Sub-tasks are the user's words on a work item: pass --thread (your thread ID) so the message they came from is recorded. \
+                 Your own breakdown goes in the plan's numbered changes, not the tracker.",
+            ));
+        }
+        _ => {}
+    }
     let task = tasks
         .add(
             &project,
@@ -369,9 +396,23 @@ pub(super) async fn add_task(
             source,
             vec![],
             r.parent.as_deref(),
+            r.kind,
         )
         .await
         .map_err(task_error)?;
+    let task = match &r.from {
+        Some(from) => {
+            let update = tasks::Update {
+                from: Some(from.clone()),
+                ..Default::default()
+            };
+            tasks
+                .update(&task.id, update, by, None)
+                .await
+                .map_err(task_error)?
+        }
+        None => task,
+    };
     for old in &r.replaces {
         let current = tasks.get(old).map_err(ApiError::missing)?;
         let update = tasks::Update {
@@ -384,10 +425,17 @@ pub(super) async fn add_task(
             .await
             .map_err(task_error)?;
     }
-    let mut next = if r.parent.is_some() {
-        "Link its workers and builds as you start them; set its status when it changes (its work item follows).".to_string()
-    } else {
-        "Break it down with `task sub add` if it has parts; link workers and builds as you start them; set its status when it changes.".to_string()
+    let mut next = match (r.parent.is_some(), r.kind) {
+        (true, _) => "The item's plan must tie these words to a change before the user can approve it.".to_string(),
+        (false, Some(tasks::Kind::Code)) => format!(
+            "Draw its plan in docs/plans/<slug>/ (`squircle draw`, `squircle help gates`) and hand it in with `squircle plan {}`; no code before the user approves it.",
+            task.id
+        ),
+        (false, Some(tasks::Kind::NoCode)) => format!(
+            "Answer it with `squircle task answer {} --text \"...\" [--file PATH]`; the user closes it. Any fix it finds is its own code item (`task add --kind code --from {}`).",
+            task.id, task.id
+        ),
+        _ => "Its asks wait here until you take some on into a code item (`task update ASK --under ITEM`).".to_string(),
     };
     // A new ask of the user's beside open ones: the old ones it changes must
     // stop reaching workers as rules.

@@ -61,7 +61,57 @@ pub(super) enum Commands {
     Doctor,
     /// List implemented operations, output schema, and important limits.
     Capabilities,
-    /// Progressive help; use `help workflow` for the complete verification path.
+    /// Draw a plan or review picture (PNG, phone width, Pearl) from a short JSON spec: now, proposed (boxes marked added, moved, removed, odd) or problem (did / does / should).
+    #[command(
+        after_help = "Spec (JSON):\n  {\"kind\":\"now\"|\"proposed\", \"title\":\"01 · Today: every launch reads the whole deck\", \"text\":\"One or two sentences.\",\n   \"boxes\":[{\"id\":\"signal\",\"name\":\"deckSignal\",\"note\":\"the deck's version, live\",\"mark\":\"added|moved|removed|odd\"}, ...],\n   \"arrows\":[{\"from\":\"signal\",\"to\":\"pages\",\"label\":\"version past what's held\",\"mark\":\"odd\"}]}\n  {\"kind\":\"problem\", \"title\":\"...\", \"did\":\"what the user did\", \"does\":\"what the app does\", \"should\":\"what it should do\"}\nOne idea per picture; anything odd is marked odd (red). Boxes stack in order; arrows between neighbours run down, others along the right. Writes SPEC.png beside the spec unless --out."
+    )]
+    Draw {
+        /// The JSON spec.
+        spec: PathBuf,
+        #[arg(long, help = "The PNG to write (default: the spec's name with .png)")]
+        out: Option<PathBuf>,
+    },
+    /// Hand in a code work item's plan: plan.md and its pictures in docs/plans/<slug>/ (squircle help gates). Each of the user's open asks must be tied to a change; the round then waits on their Approve plan.
+    Plan {
+        /// The code work item.
+        item: String,
+        #[arg(long, help = "The plan's folder, holding plan.md (docs/plans/<slug>)")]
+        dir: PathBuf,
+    },
+    /// File one planned change's film (a simulator recording, or a picture where nothing moves) as evidence: measures abrupt jumps and keeps before/after stills. Every change needs one on the branch before review and merge.
+    Film {
+        /// The code work item.
+        item: String,
+        #[arg(long, help = "The plan's change number")]
+        change: u32,
+        #[arg(long, value_enum, help = "main (before) or branch (after)")]
+        side: squircle::tasks::Side,
+        #[arg(long, help = "The clip (mp4, mov, m4v) or picture")]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Instead of --file: this thread's newest simulator recording (squircle sim start/stop)"
+        )]
+        thread: Option<String>,
+        #[arg(long, help = "One line on what it shows")]
+        caption: Option<String>,
+    },
+    /// The independent review of a code work item's branch: start (the app agent) and submit (the reviewer).
+    Review {
+        #[command(subcommand)]
+        command: ReviewCommand,
+    },
+    /// Merge a code work item: exactly the commit whose PASS review the user approved, with its plan folder, into the base branch. The only way onto it; refused without that approval, if the branch moved, or if a change has no film.
+    Merge {
+        /// The code work item.
+        item: String,
+    },
+    /// Per-app settings for the gates (.squircle/gates.toml).
+    Gates {
+        #[command(subcommand)]
+        command: GatesCommand,
+    },
+    /// Progressive help; use `help workflow` for the complete verification path, `help gates` for plans, films, reviews and merges.
     Help { topic: Option<String> },
     /// Explicitly reveal a credential for configuring trusted clients.
     Auth {

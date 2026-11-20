@@ -101,6 +101,25 @@ impl Agents {
     /// leaves it owed and the next relay hands it over again; the outbox
     /// takes a message ID it already has as no change. Runs only from the
     /// service's task loop, so two relays never overlap.
+    /// Tells each app agent what the user decided at its gates (and a
+    /// reviewed branch moving), once each.
+    pub async fn relay_news(self: &Arc<Self>) -> Result<()> {
+        for (task, news) in self.tasks.news() {
+            if let Some(thread) = self.agent_thread(&task.project_id) {
+                self.notify(
+                    &thread,
+                    &news.id,
+                    news.text.clone(),
+                    Note::Gate,
+                    json!({"task": task.id}),
+                )
+                .await?;
+            }
+            self.tasks.told(&task.id, &news.id).await?;
+        }
+        Ok(())
+    }
+
     pub async fn relay_answers(self: &Arc<Self>) -> Result<()> {
         for (task, question) in self.tasks.owed() {
             let QuestionState::Answered { text, .. } = &question.state else {

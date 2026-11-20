@@ -209,13 +209,14 @@ pub(super) async fn spawn_worker(
             "Pass --task: the work item or sub-task this worker serves. Put the user's ask in the tracker first (squircle task --help).",
         )
     })?;
-    tasks_of(&state)?.get(task).map_err(ApiError::missing)?;
+    let linked = tasks_of(&state)?.get(task).map_err(ApiError::missing)?;
     let agents = agents(&state)?;
     agents
         .ensure_heard(&r.coordinator)
         .await
         .map_err(agent_error)?;
-    let prompt = format!("{}{}", r.prompt, agents.asks_for(Some(task), None));
+    let gates = gate_brief(&state, &linked)?;
+    let prompt = format!("{}{gates}{}", r.prompt, agents.asks_for(Some(task), None));
     let worker = agents
         .spawn(
             &r.coordinator,
@@ -329,4 +330,47 @@ pub(super) async fn cleanup_workers(
             .await
             .map_err(agent_error)?,
     )))
+}
+
+/// What a worker on a code work item must know of its gates: the approved
+/// plan and its changes, to film each, never to merge. Before the plan is
+/// approved it may only research and draw.
+fn gate_brief(state: &AppState, linked: &tasks::Task) -> ApiResult<String> {
+    use tasks::{Gate, Track};
+    let tasks = tasks_of(state)?;
+    let item = match &linked.parent_id {
+        Some(parent) => tasks.get(parent).map_err(ApiError::missing)?,
+        None => linked.clone(),
+    };
+    let Some(Track::Code(code)) = &item.track else {
+        return Ok(String::new());
+    };
+    let never = "Never merge, push or touch the base branch: the app agent merges with `squircle merge` once the user approves the review.";
+    let Some(plan) = code.approved() else {
+        return Ok(format!(
+            "\n\n---\nGates: “{}” has no approved plan yet. Research, measure and draw only (`squircle draw`, `squircle help gates`); change and commit no code. {never}",
+            item.name()
+        ));
+    };
+    if matches!(code.gate, Gate::Merged { .. }) {
+        return Err(ApiError::bad(
+            "That work item is merged; file new work as its own item",
+        ));
+    }
+    let dir = crate::gates::plan_dir(&tasks.dir(&item.id).map_err(ApiError::bad)?, &plan.digest);
+    let changes: String = plan
+        .changes
+        .iter()
+        .map(|c| format!("\n{}. {}", c.n, c.title))
+        .collect();
+    Ok(format!(
+        "\n\n---\nGates: you build plan round {} of “{}” (item {}), approved by the user; it is in {} (plan.md and its pictures). Build exactly it; anything you must do differently, say so in your reply with why. Its changes:{changes}\n\
+         Film each change you build: on the branch (`squircle film {} --change N --side branch --thread <your thread id>` after a `squircle sim start`/`sim stop` session that shows it, or `--file` for a clip or picture), \
+         and on main for the before where it moves. {never}",
+        plan.round,
+        item.name(),
+        item.id,
+        dir.display(),
+        item.id
+    ))
 }

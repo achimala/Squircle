@@ -69,6 +69,22 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/tasks/{id}/media", post(attach_task))
         .route("/v1/tasks/{id}/media/{media}", get(task_media_file))
         .route("/v1/tasks/{id}/questions", post(ask_task))
+        .route("/v1/tasks/{id}/plan", post(hand_in_plan))
+        .route("/v1/tasks/{id}/approve-plan", post(approve_plan))
+        .route("/v1/tasks/{id}/review", post(start_review))
+        .route("/v1/tasks/{id}/review/submit", post(submit_review))
+        .route("/v1/tasks/{id}/approve-merge", post(approve_merge))
+        .route("/v1/tasks/{id}/merge", post(merge_item))
+        .route("/v1/tasks/{id}/film", post(film_change))
+        .route("/v1/tasks/{id}/kind", post(set_kind))
+        .route("/v1/tasks/{id}/answer", post(answer_item))
+        .route("/v1/tasks/{id}/change", post(change_item))
+        .route("/v1/tasks/{id}/close", post(close_item))
+        .route(
+            "/v1/tasks/{id}/rounds/{kind}/{round}/{*path}",
+            get(round_file),
+        )
+        .route("/v1/gates/enable", post(enable_gates))
         .route("/v1/questions/{id}/answer", post(answer_question))
         .route("/v1/questions/{id}/withdraw", post(withdraw_question))
         .route("/v1/events", get(events))

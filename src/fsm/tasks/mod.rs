@@ -33,6 +33,12 @@ use crate::fsm::core::{BuildID, Disposition, Machine, Reduction, TaskID, ThreadI
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod gates;
+pub use gates::{
+    AgentNews, Answer, ChangeLine, Code, Film, Finding, Gate, GateEvent, Kind, Mark, PlanChange,
+    PlanDraft, PlanRound, ReviewDraft, ReviewRound, Side, Track, Verdict, short,
+};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 #[value(rename_all = "snake_case")]
@@ -224,6 +230,22 @@ pub struct Task {
     pub history: Vec<Change>,
     /// Questions to the user, oldest first, answered ones kept.
     pub questions: Vec<Question>,
+    /// A work item's kind and, for code, its gates (2026-11-20); none on
+    /// sub-tasks and on items closed before gates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track: Option<Track>,
+    /// The No code item whose answer it came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Open asks (the item's own and its sub-tasks') the latest plan round
+    /// doesn't tie to a change.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub uncovered: Vec<String>,
+    /// Whether one of the user's approvals waits on it now.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub approval_waits: bool,
+    /// Whether these are the user's own words (an ask), not the agent's breakdown.
+    pub users_words: bool,
 }
 
 impl Task {
@@ -529,6 +551,13 @@ struct Record {
     history: Vec<Change>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     questions: Vec<Question>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    track: Option<Track>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    from: Option<String>,
+    /// What the app agent still has to hear about it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    news: Vec<AgentNews>,
     /// Read from a file that kept needs you or in progress as its status,
     /// and not saved since.
     #[serde(skip)]
@@ -580,6 +609,12 @@ struct StoredRecord {
     seen: String,
     #[serde(default)]
     questions: Vec<Question>,
+    #[serde(default)]
+    track: Option<Track>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    news: Vec<AgentNews>,
 }
 
 impl From<StoredRecord> for Record {
@@ -635,6 +670,9 @@ impl From<StoredRecord> for Record {
             observed,
             history,
             questions: s.questions,
+            track: s.track,
+            from: s.from,
+            news: s.news,
             migrated,
             undated: s.active_at.is_none(),
         }
@@ -692,7 +730,25 @@ impl Record {
             revision: self.revision,
             history: self.history.clone(),
             questions: self.questions.clone(),
+            track: self.track.clone(),
+            from: self.from.clone(),
+            uncovered: vec![],
+            approval_waits: false,
+            users_words: self.users_words(),
         }
+    }
+
+    /// The user's own words: filed from their message or by them on the
+    /// phone. A work item's ask always is.
+    fn users_words(&self) -> bool {
+        self.parent.is_none()
+            || self.source.is_some()
+            || self.history.first().is_some_and(|c| c.by == By::User)
+    }
+
+    /// An open work item from before gates, given its kind once.
+    fn untracked(&self) -> bool {
+        self.parent.is_none() && self.track.is_none() && self.status.open()
     }
 
     /// Whether a question to the user is open on it.
@@ -877,7 +933,10 @@ impl Book {
 
     /// A task without its sub-tasks listed.
     fn flat(&self, record: &Record) -> Task {
-        record.publish(self.shown(record))
+        let mut task = record.publish(self.shown(record));
+        task.uncovered = gates::uncovered(self, record);
+        task.approval_waits = gates::waits(self, record);
+        task
     }
 
     /// The status a task shows: needs you while it or one of its sub-tasks
@@ -885,7 +944,10 @@ impl Book {
     /// open sub-task runs, otherwise its stage.
     fn shown(&self, record: &Record) -> Status {
         let open = record.status.open();
-        if record.waiting() || (open && self.children(&record.id).any(Record::waiting)) {
+        if record.waiting()
+            || gates::waits(self, record)
+            || (open && self.children(&record.id).any(Record::waiting))
+        {
             Status::NeedsYou
         } else if record.live() || (open && self.children(&record.id).any(Record::live)) {
             Status::InProgress
@@ -904,7 +966,17 @@ impl Book {
     /// Whether it was read with needs you or in progress kept as its status,
     /// or without `active_at`, and not saved since.
     pub fn migrated(&self) -> bool {
-        self.tasks.values().any(|t| t.migrated || t.undated)
+        self.tasks
+            .values()
+            .any(|t| t.migrated || t.undated || t.untracked())
+    }
+
+    /// News the app agents still have to hear, with the item it is about.
+    pub fn news(&self) -> Vec<(Task, AgentNews)> {
+        self.tasks
+            .values()
+            .flat_map(|t| t.news.iter().map(|n| (self.flat(t), n.clone())))
+            .collect()
     }
 
     fn children<'a>(&'a self, id: &'a str) -> impl Iterator<Item = &'a Record> + 'a {
@@ -1079,6 +1151,8 @@ pub struct Update {
     /// A later ask of the same app replaces this one: it is dropped and
     /// stays dropped. Reopening it (an open status) undoes that.
     pub replaced_by: Option<String>,
+    /// The No code item whose answer this work item came from.
+    pub from: Option<String>,
 }
 
 /// Everything that can happen to the task book. Time and new IDs come in
@@ -1099,6 +1173,8 @@ pub enum Event {
         threads: Vec<String>,
         /// The work item it is a sub-task of.
         parent: Option<String>,
+        /// A work item's kind; none only for sub-tasks (and old tests).
+        kind: Option<Kind>,
         now: u64,
     },
     /// An explicit change. A status set this way holds from `observed`, what
@@ -1157,6 +1233,8 @@ pub enum Event {
     /// progress as a status (`Book::migrated`), and rolls up the work items
     /// among or above them.
     Migrate { now: u64 },
+    /// Plans, reviews, approvals and merges (`gates`).
+    Gate(GateEvent),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1247,6 +1325,34 @@ fn close_question(
     changed(book)
 }
 
+/// Why `stage` can't be set on a work item with gates, if it can't: the
+/// stage a code item is at says where it is, done is merged, a No code item
+/// is closed by the user and a backlog is never done.
+fn gated_status(record: &Record, stage: Stage, by: By) -> Option<String> {
+    if record.parent.is_some() {
+        return None;
+    }
+    let reopening = !record.status.open() && stage.open();
+    match (&record.track, stage) {
+        (None, _) | (Some(_), Stage::Dropped) => None,
+        (Some(_), _) if reopening => None,
+        (Some(Track::Code(_)), Stage::Done) => Some(
+            "A code item is done when it is merged: `squircle merge ITEM` after the user approves its review".into(),
+        ),
+        (Some(Track::Code(_)), _) => Some(
+            "A code item's stage says where it is (Plan, Build, Review, Merge); set nothing, or drop it".into(),
+        ),
+        (Some(Track::NoCode { .. }), Stage::Done) if by == By::User => None,
+        (Some(Track::NoCode { .. }), Stage::Done) => Some(
+            "The user closes a No code item once your answer satisfies them; answer it with `task answer`".into(),
+        ),
+        (Some(Track::NoCode { .. }), _) => None,
+        (Some(Track::NotPlanned), _) => Some(
+            "Not planned yet holds asks until you take them on: move them into a work item (`task update ASK --under ITEM`), or drop it".into(),
+        ),
+    }
+}
+
 fn changed(book: Book) -> Reduction<Book, Effect> {
     Reduction::applied(book, vec![Effect::Commit])
 }
@@ -1273,9 +1379,18 @@ impl Machine for M17 {
                 source,
                 threads,
                 parent,
+                kind,
                 now,
             } => {
                 let ask = ask.trim();
+                if parent.is_some() && kind.is_some() {
+                    return Reduction::same(
+                        book,
+                        Disposition::Rejected(
+                            "A sub-task is the user's words on its item; it has no kind".into(),
+                        ),
+                    );
+                }
                 if ask.is_empty() {
                     return Reduction::same(
                         book,
@@ -1345,6 +1460,9 @@ impl Machine for M17 {
                         note: String::new(),
                     }],
                     questions: vec![],
+                    track: kind.map(Kind::track),
+                    from: None,
+                    news: vec![],
                     migrated: false,
                     undated: false,
                 };
@@ -1369,6 +1487,9 @@ impl Machine for M17 {
                         return Reduction::same(book, Disposition::Rejected(reason.into()));
                     }
                 };
+                if let Some(reason) = stage.and_then(|stage| gated_status(current, stage, by)) {
+                    return Reduction::same(book, Disposition::Rejected(reason));
+                }
                 let (project, old_parent, before) = (
                     current.project_id.clone(),
                     current.parent.clone(),
@@ -1407,6 +1528,29 @@ impl Machine for M17 {
                     if let Some(reason) = reason {
                         return Reduction::same(book, Disposition::Rejected(reason));
                     }
+                }
+                if let Some(from) = update
+                    .from
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|f| !f.is_empty())
+                {
+                    let reason = match book.tasks.get(from) {
+                        None => Some(format!("No task {from}")),
+                        Some(t) if !matches!(t.track, Some(Track::NoCode { .. })) => {
+                            Some(format!("{from} is not a No code item"))
+                        }
+                        Some(t) if t.project_id != project => {
+                            Some(format!("{from} belongs to another app"))
+                        }
+                        Some(_) => None,
+                    };
+                    if let Some(reason) = reason {
+                        return Reduction::same(book, Disposition::Rejected(reason));
+                    }
+                    let task = book.tasks.get_mut(&id).expect("checked above");
+                    task.from = Some(from.to_string());
+                    task.touch(now);
                 }
                 let task = book.tasks.get_mut(&id).expect("checked above");
                 if let Some(title) = update
@@ -1607,7 +1751,27 @@ impl Machine for M17 {
                     None => Reduction::same(book, Disposition::Unchanged),
                 }
             }
+            Event::Gate(event) => gates::reduce(book, event),
             Event::Migrate { now } => {
+                // Open work items from before gates (2026-11-20): a backlog
+                // is Not planned yet, anything else code at Planning, so the
+                // agent imports its plan as round 1. Nothing is approved from
+                // history.
+                let tracked: Vec<String> = book
+                    .tasks
+                    .values_mut()
+                    .filter(|t| t.untracked())
+                    .map(|t| {
+                        let backlog = t.title.to_lowercase().starts_with("backlog");
+                        t.track = Some(if backlog {
+                            Track::NotPlanned
+                        } else {
+                            Track::Code(Code::default())
+                        });
+                        t.revision += 1;
+                        t.id.clone()
+                    })
+                    .collect();
                 // From before `active_at`: a work item was last active when
                 // it or one of its sub-tasks was.
                 let undated: Vec<String> = book
@@ -1635,7 +1799,7 @@ impl Machine for M17 {
                         t.parent.clone().unwrap_or_else(|| t.id.clone())
                     })
                     .collect();
-                if migrated.is_empty() && undated.is_empty() {
+                if migrated.is_empty() && undated.is_empty() && tracked.is_empty() {
                     return Reduction::same(book, Disposition::Unchanged);
                 }
                 // The work items among them or above them roll up again.
@@ -1665,6 +1829,7 @@ impl Machine for M17 {
     fn violations(book: &Book) -> Vec<Violation> {
         let mut found = vec![];
         for (key, task) in &book.tasks {
+            found.extend(gates::violations(task).into_iter().map(Violation));
             if *key != task.id {
                 found.push(Violation(format!("task {} kept under {key}", task.id)));
             }
@@ -1733,6 +1898,7 @@ mod tests {
                 source: None,
                 threads: vec!["w".into()],
                 parent: None,
+                kind: None,
                 now: 0,
             },
         );
@@ -1872,6 +2038,7 @@ mod tests {
                 source: None,
                 threads: vec!["w".into()],
                 parent: None,
+                kind: None,
                 now: 1,
             },
         );
@@ -1993,6 +2160,7 @@ mod tests {
                 source: None,
                 threads: vec![],
                 parent: Some(id.clone()),
+                kind: None,
                 now: 2,
             },
         );
@@ -2109,6 +2277,7 @@ mod tests {
                     source: None,
                     threads: vec!["s".into()],
                     parent: Some(id.clone()),
+                    kind: None,
                     now,
                 },
             )

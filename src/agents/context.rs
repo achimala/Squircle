@@ -25,10 +25,13 @@ pub enum Note {
     /// The user's answer to a question in the tracker, or to a worker's
     /// question or approval they answered directly.
     Answer,
+    /// The user's approvals and Change… on a work item, and a reviewed
+    /// branch moving (visual gates).
+    Gate,
 }
 
 impl Note {
-    pub const ALL: [Note; 8] = [
+    pub const ALL: [Note; 9] = [
         Note::WorkerUpdate,
         Note::BuildUpdate,
         Note::Task,
@@ -37,6 +40,7 @@ impl Note {
         Note::Upkeep,
         Note::SimHealth,
         Note::Answer,
+        Note::Gate,
     ];
 
     pub(super) fn kind(self) -> &'static str {
@@ -49,6 +53,7 @@ impl Note {
             Note::Upkeep => "squircle-upkeep",
             Note::SimHealth => "squircle-sim-health",
             Note::Answer => "squircle-answer",
+            Note::Gate => "squircle-gate",
         }
     }
 
@@ -61,6 +66,7 @@ impl Note {
             Note::Upkeep => "Tidied up",
             Note::SimHealth => "Simulator trouble",
             Note::Answer => "Answered",
+            Note::Gate => "Gates",
         }
     }
 
