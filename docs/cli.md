@@ -55,6 +55,25 @@ plugins are optional adapters; neither belongs in the core dependency graph.
 | `diagnostics send --file PATH` | Upload one diagnostic JSON fixture |
 | `perf show PATH\|ID [--dsym PATH]` | A performance recording from the phone's overlay: frames that actually reached the screen (fps while moving, a check against display refreshes), late frames by cause (main thread, render thread, GPU, drawable wait, app pacing), CPU of every thread with heaviest functions and stacks, GPU time per frame and per pass, pacing and caps, per-second timeline; text, or `--json` |
 | `perf list` | Performance captures and screen recordings uploaded from the phone (`POST /v1/captures`: authenticated before the body is read, each streamed to its own private file) |
+| `task add --kind code\|no-code\|not-planned [--from ITEM]` | A work item and its kind (required); `--from` names the No code item whose answer found it |
+| `task kind ID KIND`, `task answer ID --text TEXT [--file PATH]…` | Refile an item before it has a plan round; answer a No code item (the user closes it) |
+| `draw SPEC.json [--out PNG]` | A plan or review picture (now, proposed, problem) from a short JSON spec, phone width in Pearl, rendered locally with headless Chrome |
+| `plan ITEM --dir docs/plans/<slug>` | Hand in plan.md and its pictures as the next plan round; refused unless every open ask is tied to a change; waits on the user's Approve plan |
+| `film ITEM --change N --side main\|branch (--file CLIP \| --thread ID) [--caption TEXT]` | File a change's film (or a picture) in the item's media, with before/after stills and measured jumps; a decoder error fails the call |
+| `review start ITEM --thread AGENT [--branch B]` | Start the independent reviewer (a T3 worker; Codex `gpt-6-astra` unless `.squircle/gates.toml` says otherwise) at the branch's head |
+| `review submit ITEM --head SHA --file review-N.md` | The reviewer's hand-in: PASS/REVISE/BLOCKED, a line per planned change, a picture per finding; refused if any is missing or a change has no film |
+| `merge ITEM` | Merge exactly the approved commit with its plan folder into the base branch, after the app's checks; the only way onto it |
+| `gates enable --thread ID [--base B] [--rule PATH]… [--check CMD]… [--provider P --model M --effort E]` | Write the app's `.squircle/gates.toml` |
+| `help gates` | The plan.md and review-N.md formats and the whole flow ([gates.md](gates.md)) |
+
+The phone approves through `POST /v1/tasks/{id}/approve-plan` (`round`,
+`digest`) and `/approve-merge` (`round`, `head`), says Change… through
+`/change`, closes a No code item through `/close`, and reads round files at
+`GET /v1/tasks/{id}/rounds/{plan|review}/{round}/{path}`. Each work item in
+`GET /v1/tasks` carries a `gate` object (kind, the four steps, label and
+detail, plan, review, films, the user's words with the change answering
+each, and what Approve would send or why it can't); `GET /v1/waiting` lists
+approvals as `kind: "approval"`. See [tasks](task-tracking.md#gates-2026-11-20-user-decision).
 
 `install-link` does not install or remotely launch an app. Its ticket records
 `download_started_at` when the service opens the IPA and `downloaded_at` once

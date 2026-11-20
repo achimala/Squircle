@@ -103,7 +103,14 @@ struct AppConfiguration: Decodable {
         }
     }
     private static func origin(_ text: String) throws -> URL {
-        guard let c = URLComponents(string: text), c.scheme == "https", c.host != nil,
+        // A simulator debug build may also reach a service on this Mac over
+        // plain HTTP (a scratch service for checking a change).
+        #if DEBUG && targetEnvironment(simulator)
+        let loopback = URLComponents(string: text).map { $0.scheme == "http" && $0.host == "127.0.0.1" } ?? false
+        #else
+        let loopback = false
+        #endif
+        guard let c = URLComponents(string: text), c.scheme == "https" || loopback, c.host != nil,
               c.user == nil, c.password == nil, c.query == nil, c.fragment == nil,
               c.path.isEmpty || c.path == "/", let url = c.url else { throw ClientError.configuration }
         return url

@@ -975,6 +975,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
                 case .question(let question): question.threadID == target.thread ? question.taskID : nil
                 case .request(let request): request.threadID == target.thread ? self.model.tasks(for: resolved.project).tasks
                     .first { $0.allThreads.contains { $0.id == request.threadID } }?.id : nil
+                case .approval: nil
                 }
             }.first
             showTasks(project: id, focus: task)
@@ -1014,7 +1015,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
             syncing = false
             renderSimulators()
             applyScene()
-            tasks?.inFront = route == .tasks(selectedID ?? "")
             onViewing?(route == .grid ? nil : front?.currentSessionID)
         }
         // The thread level only exists inside its app; it leaves first,
@@ -1170,7 +1170,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
     /// The conversation in front: a thread, Tasks' page in view, or the agent.
     private var front: ThreadViewController? {
         if route.thread != nil { return thread }
-        if route.withTasks { return tasks?.conversation }
+        if route.withTasks { return nil }
         return agent
     }
 
@@ -1181,7 +1181,7 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         let focus = tasksFocus
         tasksFocus = nil
         agent?.deactivate()
-        let controller = TasksViewController(model: model, project: project, embedsConversations: true, focus: focus?.focus, task: focus?.task)
+        let controller = TasksViewController(model: model, project: project, focus: focus?.focus, task: focus?.task)
         controller.host = self
         controller.onBack = { [weak self] in self?.closeTasks() }
         controller.onOpen = { [weak self] id in self?.openThread(id, overTasks: true) }
@@ -1680,7 +1680,6 @@ final class StudioViewController: UIViewController, UIScrollViewDelegate, UIGest
         agent?.outOfSight = agentCovered
         agent?.view.update(\.isHidden, to: agentCovered)
         tasks?.view.update(\.isHidden, to: tasksCovered)
-        tasks?.inSight = a > 0.001 && k > 0.001 && !tasksCovered
 
         // Touches go to the screen the route names, from the first frame of its
         // transition. A conversation on its way out still covers the one

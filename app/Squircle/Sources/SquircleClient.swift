@@ -268,6 +268,35 @@ final class SquircleClient {
         try await send(request(["v1", "waiting", "respond"], method: "POST", body: JSONEncoder().encode(JSONValue.object(body))))
     }
 
+    /// Your Approve plan: names the round and digest you were shown.
+    func approvePlan(taskID: String, round: Int, digest: String) async throws {
+        try await send(request(["v1", "tasks", taskID, "approve-plan"], method: "POST",
+                               body: JSONSerialization.data(withJSONObject: ["round": round, "digest": digest])))
+    }
+
+    /// Your Approve merge: names the review round and commit you were shown.
+    func approveMerge(taskID: String, round: Int, head: String) async throws {
+        try await send(request(["v1", "tasks", taskID, "approve-merge"], method: "POST",
+                               body: JSONSerialization.data(withJSONObject: ["round": round, "head": head])))
+    }
+
+    /// Your Change… (or Ask more…): your words on the item, for its agent.
+    func changeTask(taskID: String, text: String) async throws {
+        try await send(request(["v1", "tasks", taskID, "change"], method: "POST",
+                               body: JSONSerialization.data(withJSONObject: ["text": text])))
+    }
+
+    /// Closes a No code item.
+    func closeTask(taskID: String) async throws {
+        try await send(request(["v1", "tasks", taskID, "close"], method: "POST", body: Data("{}".utf8)))
+    }
+
+    /// A file of a plan or review round as it was handed in (`kind` plan or review).
+    func roundFile(taskID: String, kind: String, round: Int, path: String) async throws -> Data {
+        let parts = path.split(separator: "/").map(String.init)
+        return try await bytes(request(["v1", "tasks", taskID, "rounds", kind, String(round)] + parts))
+    }
+
     func taskMediaFile(taskID: String, id: String) async throws -> Data {
         try await bytes(request(["v1", "tasks", taskID, "media", id]))
     }

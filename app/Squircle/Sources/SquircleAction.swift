@@ -37,6 +37,9 @@ struct SquircleAction: Equatable {
         case taskAdd, taskReplace, taskStatus(String), taskRename, taskReword, taskMove, taskNote
         case taskAsk, taskWithdraw, taskAttach(video: Bool), taskLink(build: Bool, remove: Bool), taskLookup, taskHeard
         case noteAdd, noteEdit, noteRemove, notesLookup
+        /// Visual gates on a work item (`task`): a plan round handed in, a
+        /// review started or handed in, a change filmed, the merge.
+        case planReady, reviewStart, reviewReady, film(Int?), merged
     }
     /// What Squircle's reply says happened.
     enum Outcome: Equatable {
@@ -82,7 +85,7 @@ struct SquircleAction: Equatable {
     var isTracker: Bool {
         switch kind {
         case .taskAdd, .taskReplace, .taskStatus, .taskRename, .taskReword, .taskMove, .taskNote, .taskAsk, .taskWithdraw, .taskAttach,
-             .taskLink, .noteAdd, .noteEdit, .noteRemove: true
+             .taskLink, .noteAdd, .noteEdit, .noteRemove, .planReady, .reviewStart, .reviewReady, .film, .merged: true
         default: false
         }
     }
@@ -120,6 +123,10 @@ struct SquircleAction: Equatable {
              .taskLink:
             return "checklist"
         case .noteAdd, .noteEdit, .noteRemove, .notesLookup: return "note.text"
+        case .planReady: return "photo.on.rectangle"
+        case .reviewStart, .reviewReady: return "checkmark.seal"
+        case .film: return "video"
+        case .merged: return "arrow.triangle.merge"
         }
     }
 
@@ -194,6 +201,11 @@ struct SquircleAction: Equatable {
         case .noteAdd: return [.verb("Added note:"), .subject(Self.clip(text) ?? "a note")]
         case .noteEdit: return [.verb("Edited note:"), .subject(Self.clip(text) ?? "a note")]
         case .noteRemove: return [.verb("Removed a note")]
+        case .planReady: return [.verb("Plan ready:"), .subject(quoted(task.flatMap(name)) ?? "open it to approve")]
+        case .reviewStart: return [.verb("Started the review of"), .subject(subject)]
+        case .reviewReady: return [.verb("Review ready:"), .subject(subject)]
+        case .film(let n): return [.verb(n.map { "Filmed change \($0) of" } ?? "Filmed"), .subject(subject)]
+        case .merged: return [.verb("Merged"), .subject(subject)]
         default: return [.verb(verb)]
         }
     }
@@ -246,6 +258,11 @@ struct SquircleAction: Equatable {
         case .taskLookup, .taskHeard: return "Checking tasks"
         case .noteAdd, .noteEdit, .noteRemove: return "Updating notes"
         case .notesLookup: return "Reading notes"
+        case .planReady: return "Handing in the plan"
+        case .reviewStart: return "Starting the review"
+        case .reviewReady: return "Handing in the review"
+        case .film: return "Filming a change"
+        case .merged: return "Merging"
         case .agentOther, .help, .other: return "Running Squircle"
         }
     }
@@ -434,6 +451,11 @@ struct SquircleAction: Equatable {
         case ("perf", _): action = SquircleAction(kind: .perf)
         case ("media", _): action = SquircleAction(kind: .media)
         case ("task", _): action = task(sub, sub == "sub" ? Array(positional.dropFirst(2)) : args, options)
+        case ("plan", _): action = SquircleAction(kind: .planReady); action.task = uuid(sub)
+        case ("film", _): action = SquircleAction(kind: .film(options["--change"].flatMap { Int($0) })); action.task = uuid(sub)
+        case ("merge", _): action = SquircleAction(kind: .merged); action.task = uuid(sub)
+        case ("review", "start"): action = SquircleAction(kind: .reviewStart); action.task = args.first.flatMap(uuid)
+        case ("review", "submit"): action = SquircleAction(kind: .reviewReady); action.task = args.first.flatMap(uuid)
         case ("notes", "add"): action = SquircleAction(kind: .noteAdd, text: args.first)
         case ("notes", "edit"): action = SquircleAction(kind: .noteEdit, text: args.dropFirst().first)
         case ("notes", "remove"): action = SquircleAction(kind: .noteRemove)
